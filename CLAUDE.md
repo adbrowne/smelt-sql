@@ -143,10 +143,11 @@ The project uses concrete examples to discover the right optimizer API:
 ## Key Differentiators from dbt
 
 1. **Logical/Physical Separation**: Users specify logic, optimizer decides execution strategy
-2. **Cross-Model Optimization**: Can fuse or split queries across model boundaries
-3. **Multi-Backend**: Automatically distribute work across engines (e.g., DuckDB for small data, Databricks for large)
-4. **Proper Language**: No Jinja templates, proper compilation with type checking
-5. **First-Class Editor Support**: LSP with incremental compilation via Salsa
+2. **Engineer controls optimizations**: Optimizer is not a black box - the API will allow data engineers to refactor specific logical plans to optimize - the framework should make it easy to do these and know that correctness is preserved - or where not - what has been lost.
+3. **Cross-Model Optimization**: Can fuse or split queries across model boundaries
+4. **Multi-Backend**: Automatically distribute work across engines (e.g., DuckDB for small data, Databricks for large)
+5. **Proper Language**: No Jinja templates, proper compilation with type checking
+6. **First-Class Editor Support**: LSP with incremental compilation via Salsa
    - Real-time diagnostics and completions
    - Error-recovery parser handles partial/invalid code
    - Incremental recompilation for fast feedback
