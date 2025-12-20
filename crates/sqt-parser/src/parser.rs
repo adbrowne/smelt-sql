@@ -110,6 +110,11 @@ impl<'a> Parser<'a> {
         self.builder.start_node(kind.into());
     }
 
+    /// Start a composite node at a checkpoint (for lookahead/backtracking)
+    fn start_node_at(&mut self, checkpoint: rowan::Checkpoint, kind: SyntaxKind) {
+        self.builder.start_node_at(checkpoint, kind.into());
+    }
+
     /// Finish current node
     fn finish_node(&mut self) {
         self.builder.finish_node();
@@ -261,17 +266,16 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
 
         if self.at(IDENT) {
-            // Check if this is a function call (like ref('model')) or identifier
-            let checkpoint_pos = self.pos;
-            let checkpoint_offset = self.offset;
-            self.advance();
+            // Use builder checkpoint for proper lookahead
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // Consume IDENT
             self.skip_trivia();
 
             if self.at(LPAREN) {
-                // It's a function call - backtrack and parse as function
-                self.pos = checkpoint_pos;
-                self.offset = checkpoint_offset;
-                self.parse_function_call();
+                // It's a function call - wrap in FUNCTION_CALL node using checkpoint
+                self.start_node_at(checkpoint, FUNCTION_CALL);
+                self.parse_arg_list();
+                self.finish_node(); // Close FUNCTION_CALL
             } else if self.at(DOT) {
                 // Qualified identifier: schema.table
                 self.advance();
@@ -290,18 +294,6 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.expect(IDENT);
         }
-
-        self.finish_node();
-    }
-
-    fn parse_function_call(&mut self) {
-        self.start_node(FUNCTION_CALL);
-
-        // Function name
-        self.expect(IDENT);
-
-        // Arguments
-        self.parse_arg_list();
 
         self.finish_node();
     }

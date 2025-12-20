@@ -518,4 +518,125 @@ mod tests {
         assert!(column_names.contains(&"event_id"));
         assert!(column_names.contains(&"event_time"));
     }
+
+    #[test]
+    fn test_undefined_ref_diagnostic_position() {
+        let mut db = Database::default();
+
+        // Create a model with an undefined ref
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(
+            path.clone(),
+            Arc::new("SELECT * FROM ref('nonexistent_model')".to_string()),
+        );
+
+        // Register the file (no other files, so ref won't resolve)
+        db.set_all_files(Arc::new(vec![path.clone()]));
+
+        // Get diagnostics
+        let diagnostics = db.file_diagnostics(path);
+
+        // Should have exactly one diagnostic for undefined ref
+        assert_eq!(diagnostics.len(), 1);
+        let diag = &diagnostics[0];
+
+        // Check severity and message
+        assert_eq!(diag.severity, DiagnosticSeverity::Error);
+        assert!(diag.message.contains("Undefined model reference: 'nonexistent_model'"));
+
+        // Check position - should point to the string parameter 'nonexistent_model'
+        // In "SELECT * FROM ref('nonexistent_model')", the STRING token (including quotes)
+        // starts at position 18 and ends at position 37 (exclusive)
+        assert_eq!(diag.range.start.line, 0);
+        assert_eq!(diag.range.start.column, 18);  // Opening quote ' (0-indexed)
+        assert_eq!(diag.range.end.line, 0);
+        assert_eq!(diag.range.end.column, 37);    // One past closing quote ' (exclusive)
+    }
+
+    #[test]
+    fn test_undefined_ref_diagnostic_position_multiline() {
+        let mut db = Database::default();
+
+        // Create a model matching broken_model.sql structure
+        let path = PathBuf::from("broken_model.sql");
+        let content = "-- This model has an undefined reference - should show diagnostic\nSELECT *\nFROM ref('nonexistent_model')\n";
+        db.set_file_text(path.clone(), Arc::new(content.to_string()));
+
+        // Debug: Check what the parser extracts
+        let parse = db.parse_file(path.clone());
+        let text = db.file_text(path.clone());
+        use sqt_parser::ast::File as AstFile;
+        if let Some(file) = AstFile::cast(parse.syntax()) {
+            for ref_call in file.refs() {
+                println!("Found ref call");
+                if let Some(name) = ref_call.model_name() {
+                    println!("  Model name: {:?}", name);
+                }
+                if let Some(text_range) = ref_call.name_range() {
+                    println!("  TextRange: {:?}", text_range);
+                    println!("  Start offset: {}, End offset: {}", usize::from(text_range.start()), usize::from(text_range.end()));
+
+                    // Check content length
+                    println!("  Content length: {}", text.len());
+
+                    // Extract the actual text at this range (if valid)
+                    let start = usize::from(text_range.start());
+                    let end = usize::from(text_range.end());
+                    if end <= text.len() {
+                        let extracted = &text[start..end];
+                        println!("  Extracted text: {:?}", extracted);
+                    } else {
+                        println!("  ERROR: Range {} out of bounds (content length is {})", end, text.len());
+                    }
+                }
+            }
+        }
+
+        // Register the file (no other files, so ref won't resolve)
+        db.set_all_files(Arc::new(vec![path.clone()]));
+
+        // Get diagnostics
+        let diagnostics = db.file_diagnostics(path);
+
+        // Debug output
+        println!("\nContent: {:?}", content);
+        println!("Content length: {}", content.len());
+        println!("Number of diagnostics: {}", diagnostics.len());
+        if !diagnostics.is_empty() {
+            let diag = &diagnostics[0];
+            println!("Diagnostic range: line {} col {} to line {} col {}",
+                     diag.range.start.line, diag.range.start.column,
+                     diag.range.end.line, diag.range.end.column);
+        }
+
+        // Should have exactly one diagnostic
+        assert_eq!(diagnostics.len(), 1);
+        let diag = &diagnostics[0];
+
+        // Check it's on line 2 (0-indexed)
+        assert_eq!(diag.range.start.line, 2);
+        assert_eq!(diag.range.end.line, 2);
+
+        // In "FROM ref('nonexistent_model')", the model name should be highlighted
+        // Expected: 'nonexistent_model' without quotes at columns 10-27
+        println!("Expected to highlight 'nonexistent_model' on line 2, cols 10-27");
+    }
+
+    #[test]
+    fn test_lexer_positions() {
+        use sqt_parser::lexer::tokenize;
+
+        let content = "-- This model has an undefined reference - should show diagnostic\nSELECT *\nFROM ref('nonexistent_model')\n";
+        let tokens = tokenize(content);
+
+        println!("Total content length: {}", content.len());
+        println!("\nTokens:");
+        let mut offset = 0;
+        for token in &tokens {
+            let text = &content[offset..offset + token.len];
+            println!("  {:?} @ {}..{}: {:?}", token.kind, offset, offset + token.len, text);
+            offset += token.len;
+        }
+        println!("Final offset: {}", offset);
+    }
 }
