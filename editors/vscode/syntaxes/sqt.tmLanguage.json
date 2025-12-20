@@ -1,0 +1,131 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "sqt",
+  "scopeName": "source.sql.sqt",
+  "patterns": [
+    {
+      "include": "#template-expressions"
+    },
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#sql-keywords"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    }
+  ],
+  "repository": {
+    "template-expressions": {
+      "patterns": [
+        {
+          "name": "meta.template.sqt",
+          "begin": "\\{\\{",
+          "end": "\\}\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.template.begin.sqt" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.template.end.sqt" }
+          },
+          "patterns": [
+            {
+              "name": "keyword.control.sqt",
+              "match": "\\b(ref|config)\\b"
+            },
+            {
+              "name": "string.quoted.single.sqt",
+              "begin": "'",
+              "end": "'",
+              "patterns": [
+                {
+                  "name": "constant.character.escape.sqt",
+                  "match": "\\\\."
+                }
+              ]
+            },
+            {
+              "name": "variable.parameter.sqt",
+              "match": "\\b\\w+\\b"
+            }
+          ]
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-dash.sql",
+          "match": "--.*$"
+        },
+        {
+          "name": "comment.block.sql",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "sql-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.other.sql",
+          "match": "(?i)\\b(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP BY|ORDER BY|HAVING|UNION|INTERSECT|EXCEPT|AS|DISTINCT|ALL|AND|OR|NOT|IN|EXISTS|BETWEEN|LIKE|IS|NULL|TRUE|FALSE|CASE|WHEN|THEN|ELSE|END|WITH|RECURSIVE)\\b"
+        },
+        {
+          "name": "keyword.other.DML.sql",
+          "match": "(?i)\\b(INSERT|UPDATE|DELETE|MERGE|INTO|VALUES|SET)\\b"
+        },
+        {
+          "name": "keyword.other.DDL.sql",
+          "match": "(?i)\\b(CREATE|ALTER|DROP|TABLE|VIEW|INDEX|DATABASE|SCHEMA|FUNCTION|PROCEDURE)\\b"
+        },
+        {
+          "name": "storage.type.sql",
+          "match": "(?i)\\b(INT|INTEGER|BIGINT|SMALLINT|DECIMAL|NUMERIC|FLOAT|REAL|DOUBLE|VARCHAR|CHAR|TEXT|DATE|TIME|TIMESTAMP|BOOLEAN|BOOL|ARRAY|JSON)\\b"
+        },
+        {
+          "name": "support.function.aggregate.sql",
+          "match": "(?i)\\b(COUNT|SUM|AVG|MIN|MAX|STDDEV|VARIANCE|FIRST|LAST|ARRAY_AGG|STRING_AGG)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.sql",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.sql",
+              "match": "''|\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.sql",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.sql",
+              "match": "\"\"|\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.sql",
+          "match": "\\b\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    }
+  }
+}

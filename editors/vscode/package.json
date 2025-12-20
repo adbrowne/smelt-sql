@@ -1,0 +1,87 @@
+{
+  "name": "sqt",
+  "displayName": "sqt - Semantic Query Tool",
+  "description": "Language support for sqt data pipeline models",
+  "version": "0.1.0",
+  "publisher": "sqt",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andrewbrowne/sqt"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "sql",
+    "data",
+    "pipeline",
+    "analytics",
+    "dbt"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/models/*.sql"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "sqt",
+        "aliases": [
+          "sqt",
+          "SQT"
+        ],
+        "extensions": [
+          ".sql"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sqt",
+        "scopeName": "source.sql.sqt",
+        "path": "./syntaxes/sqt.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "sqt",
+      "properties": {
+        "sqt.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the sqt language server."
+        },
+        "sqt.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the sqt-lsp server binary. If empty, will use 'cargo run -p sqt-lsp'."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
