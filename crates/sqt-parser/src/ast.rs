@@ -82,6 +82,47 @@ impl SelectItem {
             None
         }
     }
+
+    /// Get the expression node for this select item
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Get the explicit alias if present (the identifier after AS keyword)
+    pub fn alias(&self) -> Option<String> {
+        let mut found_as = false;
+
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if token.kind() == AS_KW {
+                    found_as = true;
+                } else if found_as && token.kind() == IDENT {
+                    return Some(token.text().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the effective column name (alias if present, otherwise inferred from expression)
+    pub fn column_name(&self) -> Option<String> {
+        // If there's an alias, use it
+        if let Some(alias) = self.alias() {
+            return Some(alias);
+        }
+
+        // Otherwise, try to infer from expression
+        if let Some(expr) = self.expression() {
+            expr.infer_name()
+        } else {
+            None
+        }
+    }
+
+    /// Get the text range of this select item
+    pub fn range(&self) -> TextRange {
+        self.0.text_range()
+    }
 }
 
 /// FROM clause
@@ -143,6 +184,158 @@ impl WhereClause {
         } else {
             None
         }
+    }
+}
+
+/// Expression node (represents any SQL expression)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Expr(SyntaxNode);
+
+impl Expr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        // Accept any node that looks like an expression
+        match node.kind() {
+            EXPRESSION | BINARY_EXPR | FUNCTION_CALL => Some(Self(node)),
+            _ => {
+                // Also try to wrap the node if it contains expression-like children
+                if node.children().any(|n| matches!(n.kind(), EXPRESSION | BINARY_EXPR | FUNCTION_CALL)) {
+                    Some(Self(node))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Try to infer a column name from this expression
+    /// Used when there's no explicit alias
+    pub fn infer_name(&self) -> Option<String> {
+        // Check for wildcard (*)
+        if self.text().trim() == "*" {
+            return Some("*".to_string());
+        }
+
+        // Check if this is a function call
+        if let Some(func) = self.as_function_call() {
+            // For function calls without alias, use the full function text
+            return Some(self.text());
+        }
+
+        // Check if this is a simple column reference
+        if let Some(col_ref) = self.as_column_ref() {
+            // For qualified names (table.column), use just the column part
+            return Some(col_ref.name().to_string());
+        }
+
+        // For other complex expressions, try to find the first identifier
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if token.kind() == IDENT {
+                    return Some(token.text().to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get the full text of this expression
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
+    }
+
+    /// Check if this is a simple column reference (identifier possibly qualified)
+    pub fn as_column_ref(&self) -> Option<ColumnRef> {
+        ColumnRef::from_expr(self)
+    }
+
+    /// Check if this is a function call
+    pub fn as_function_call(&self) -> Option<FunctionCall> {
+        self.0.children().find_map(FunctionCall::cast)
+            .or_else(|| {
+                // Check if this node itself is a function call
+                FunctionCall::cast(self.0.clone())
+            })
+    }
+}
+
+/// Column reference (identifier, possibly qualified like "table.column")
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnRef {
+    qualifier: Option<String>,
+    name: String,
+}
+
+impl ColumnRef {
+    /// Try to parse a column reference from an expression
+    pub fn from_expr(expr: &Expr) -> Option<Self> {
+        let tokens: Vec<_> = expr.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+            .collect();
+
+        if tokens.is_empty() {
+            return None;
+        }
+
+        // Simple identifier
+        if tokens.len() == 1 && tokens[0].kind() == IDENT {
+            return Some(ColumnRef {
+                qualifier: None,
+                name: tokens[0].text().to_string(),
+            });
+        }
+
+        // Qualified identifier: table.column
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            return Some(ColumnRef {
+                qualifier: Some(tokens[0].text().to_string()),
+                name: tokens[2].text().to_string(),
+            });
+        }
+
+        None
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn qualifier(&self) -> Option<&str> {
+        self.qualifier.as_deref()
+    }
+}
+
+/// Function call expression
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionCall(SyntaxNode);
+
+impl FunctionCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == FUNCTION_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the function name (e.g., "COUNT", "SUM")
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// Get the text of the full function call
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
     }
 }
 

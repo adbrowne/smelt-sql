@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 salsa.workspace = true
 anyhow.workspace = true
+rowan.workspace = true
 sqt-parser = { path = "../sqt-parser" }
