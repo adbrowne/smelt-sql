@@ -449,13 +449,13 @@ fn determine_completion_context(text: &str, offset: usize) -> CompletionContext 
     let before_cursor = &text[..offset.min(text.len())];
 
     // Check if we're inside ref('')
-    // Simple heuristic: look for {{ ref(' before cursor and no closing )}}
-    if let Some(ref_start) = before_cursor.rfind("{{ ref(") {
+    // Simple heuristic: look for ref(' before cursor and no closing )
+    if let Some(ref_start) = before_cursor.rfind("ref(") {
         let after_ref = &before_cursor[ref_start..];
         // Check if we're inside the quotes
         let quote_count = after_ref.chars().filter(|&c| c == '\'' || c == '"').count();
-        if quote_count == 1 {
-            // Odd number of quotes means we're inside a string
+        if quote_count == 1 && !after_ref.contains(')') {
+            // Odd number of quotes means we're inside a string, and no closing paren yet
             return CompletionContext::InsideRef;
         }
     }

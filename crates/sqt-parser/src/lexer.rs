@@ -50,18 +50,6 @@ impl<'a> Lexer<'a> {
             // Comments
             '-' if self.peek_char() == Some('-') => self.consume_comment(),
 
-            // Template markers
-            '{' if self.peek_char() == Some('{') => {
-                self.advance();
-                self.advance();
-                TEMPLATE_START
-            }
-            '}' if self.peek_char() == Some('}') => {
-                self.advance();
-                self.advance();
-                TEMPLATE_END
-            }
-
             // Operators & punctuation
             '(' => {
                 self.advance();
@@ -239,8 +227,6 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "AND" => AND_KW,
         "OR" => OR_KW,
         "NOT" => NOT_KW,
-        "REF" => REF_KW,
-        "CONFIG" => CONFIG_KW,
         _ => IDENT,
     }
 }
@@ -264,18 +250,14 @@ mod tests {
     }
 
     #[test]
-    fn test_template_ref() {
-        let input = "{{ ref('raw_events') }}";
+    fn test_ref_function() {
+        let input = "ref('raw_events')";
         let tokens = tokenize(input);
 
-        assert_eq!(tokens[0].kind, TEMPLATE_START);
-        assert_eq!(tokens[1].kind, WHITESPACE);
-        assert_eq!(tokens[2].kind, REF_KW);
-        assert_eq!(tokens[3].kind, LPAREN);
-        assert_eq!(tokens[4].kind, STRING);
-        assert_eq!(tokens[5].kind, RPAREN);
-        assert_eq!(tokens[6].kind, WHITESPACE);
-        assert_eq!(tokens[7].kind, TEMPLATE_END);
+        assert_eq!(tokens[0].kind, IDENT); // ref
+        assert_eq!(tokens[1].kind, LPAREN);
+        assert_eq!(tokens[2].kind, STRING);
+        assert_eq!(tokens[3].kind, RPAREN);
     }
 
     #[test]

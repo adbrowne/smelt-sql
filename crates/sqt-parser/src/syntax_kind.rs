@@ -14,12 +14,6 @@ pub enum SyntaxKind {
     OR_KW,
     NOT_KW,
 
-    // Template tokens
-    TEMPLATE_START, // {{
-    TEMPLATE_END,   // }}
-    REF_KW,         // ref
-    CONFIG_KW,      // config
-
     // Operators & punctuation
     LPAREN,   // (
     RPAREN,   // )
@@ -49,17 +43,14 @@ pub enum SyntaxKind {
     SELECT_STMT,     // SELECT ... FROM ... WHERE ...
     SELECT_LIST,     // column1, column2, *
     SELECT_ITEM,     // column or expression with optional alias
-    FROM_CLAUSE,     // FROM table or {{ ref() }}
-    TABLE_REF,       // Table reference (identifier or template)
+    FROM_CLAUSE,     // FROM table or ref() function
+    TABLE_REF,       // Table reference (identifier or function call)
     WHERE_CLAUSE,    // WHERE expression
     GROUP_BY_CLAUSE, // GROUP BY column1, column2
     EXPRESSION,      // Generic expression
     BINARY_EXPR,     // left op right
-    FUNCTION_CALL,   // COUNT(*), SUM(col)
+    FUNCTION_CALL,   // COUNT(*), SUM(col), ref('model')
     ARG_LIST,        // (arg1, arg2)
-    TEMPLATE_EXPR,   // {{ ... }}
-    REF_CALL,        // ref('model_name')
-    CONFIG_CALL,     // config(key='value')
 
     // Error handling
     ERROR, // Invalid syntax

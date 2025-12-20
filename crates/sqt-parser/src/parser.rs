@@ -260,17 +260,25 @@ impl<'a> Parser<'a> {
         self.start_node(TABLE_REF);
         self.skip_trivia();
 
-        if self.at(TEMPLATE_START) {
-            self.parse_template_expr();
-        } else if self.at(IDENT) {
-            // Parse qualified identifier (schema.table)
+        if self.at(IDENT) {
+            // Check if this is a function call (like ref('model')) or identifier
+            let checkpoint_pos = self.pos;
+            let checkpoint_offset = self.offset;
             self.advance();
             self.skip_trivia();
-            if self.at(DOT) {
+
+            if self.at(LPAREN) {
+                // It's a function call - backtrack and parse as function
+                self.pos = checkpoint_pos;
+                self.offset = checkpoint_offset;
+                self.parse_function_call();
+            } else if self.at(DOT) {
+                // Qualified identifier: schema.table
                 self.advance();
                 self.skip_trivia();
                 self.expect(IDENT);
             }
+            // else: simple identifier, already consumed
         } else {
             self.error("Expected table reference".to_string());
         }
@@ -286,76 +294,15 @@ impl<'a> Parser<'a> {
         self.finish_node();
     }
 
-    fn parse_template_expr(&mut self) {
-        self.start_node(TEMPLATE_EXPR);
+    fn parse_function_call(&mut self) {
+        self.start_node(FUNCTION_CALL);
 
-        if !self.expect(TEMPLATE_START) {
-            self.finish_node();
-            return;
-        }
+        // Function name
+        self.expect(IDENT);
 
-        self.skip_trivia();
+        // Arguments
+        self.parse_arg_list();
 
-        // Parse template body (ref or config)
-        if self.at(REF_KW) {
-            self.parse_ref_call();
-        } else if self.at(CONFIG_KW) {
-            self.parse_config_call();
-        } else {
-            self.error("Expected 'ref' or 'config'".to_string());
-        }
-
-        self.skip_trivia();
-
-        if !self.expect(TEMPLATE_END) {
-            // Error recovery: sync to }} or EOF
-            self.sync_to(&[TEMPLATE_END, EOF]);
-            if self.at(TEMPLATE_END) {
-                self.advance();
-            }
-        }
-
-        self.finish_node();
-    }
-
-    fn parse_ref_call(&mut self) {
-        self.start_node(REF_CALL);
-
-        self.expect(REF_KW);
-        self.skip_trivia();
-
-        if !self.expect(LPAREN) {
-            self.finish_node();
-            return;
-        }
-
-        self.skip_trivia();
-
-        if !self.at(STRING) {
-            self.error("Expected model name string".to_string());
-        } else {
-            self.advance();
-        }
-
-        self.skip_trivia();
-        self.expect(RPAREN);
-
-        self.finish_node();
-    }
-
-    fn parse_config_call(&mut self) {
-        self.start_node(CONFIG_CALL);
-
-        self.expect(CONFIG_KW);
-        self.skip_trivia();
-        self.expect(LPAREN);
-
-        // Parse config arguments (simplified for now)
-        while !self.at(RPAREN) && !self.at(EOF) {
-            self.advance();
-        }
-
-        self.expect(RPAREN);
         self.finish_node();
     }
 

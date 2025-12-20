@@ -21,8 +21,12 @@ impl File {
         self.0.children().find_map(SelectStmt::cast)
     }
 
+    /// Find all ref('model') function calls in the file
     pub fn refs(&self) -> impl Iterator<Item = RefCall> + '_ {
-        self.0.descendants().filter_map(RefCall::cast)
+        self.0
+            .descendants()
+            .filter_map(FunctionCall::cast)
+            .filter_map(RefCall::from_function_call)
     }
 }
 
@@ -156,12 +160,14 @@ impl TableRef {
         }
     }
 
-    pub fn is_template(&self) -> bool {
-        self.0.children().any(|n| n.kind() == TEMPLATE_EXPR)
+    /// Check if this is a function call reference (like ref('model'))
+    pub fn is_function_call(&self) -> bool {
+        self.0.children().any(|n| n.kind() == FUNCTION_CALL)
     }
 
-    pub fn template_expr(&self) -> Option<TemplateExpr> {
-        self.0.children().find_map(TemplateExpr::cast)
+    /// Get the function call if this table ref is a function (like ref('model'))
+    pub fn function_call(&self) -> Option<FunctionCall> {
+        self.0.children().find_map(FunctionCall::cast)
     }
 
     pub fn identifier(&self) -> Option<String> {
@@ -339,41 +345,31 @@ impl FunctionCall {
     }
 }
 
-/// Template expression {{ ... }}
+/// ref('model_name') function call wrapper
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TemplateExpr(SyntaxNode);
-
-impl TemplateExpr {
-    pub fn cast(node: SyntaxNode) -> Option<Self> {
-        if node.kind() == TEMPLATE_EXPR {
-            Some(Self(node))
-        } else {
-            None
-        }
-    }
-
-    pub fn ref_call(&self) -> Option<RefCall> {
-        self.0.children().find_map(RefCall::cast)
-    }
-}
-
-/// ref('model_name') call
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RefCall(SyntaxNode);
+pub struct RefCall(FunctionCall);
 
 impl RefCall {
-    pub fn cast(node: SyntaxNode) -> Option<Self> {
-        if node.kind() == REF_CALL {
-            Some(Self(node))
+    /// Create a RefCall from a FunctionCall if it's a ref() call
+    pub fn from_function_call(func: FunctionCall) -> Option<Self> {
+        if func.name()?.to_lowercase() == "ref" {
+            Some(Self(func))
         } else {
             None
         }
     }
 
-    /// Get the model name from the ref call
+    /// Get the underlying FunctionCall
+    pub fn function_call(&self) -> &FunctionCall {
+        &self.0
+    }
+
+    /// Get the model name from the ref call (first argument)
     pub fn model_name(&self) -> Option<String> {
+        // Look for the first STRING token in the function call arguments
         self.0
-            .children_with_tokens()
+             .0
+            .descendants_with_tokens()
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == STRING)
             .map(|t| {
@@ -387,15 +383,16 @@ impl RefCall {
             })
     }
 
-    /// Get the text range of the model name (for diagnostics)
+    /// Get the text range of the entire ref call
     pub fn range(&self) -> TextRange {
-        self.0.text_range()
+        self.0.0.text_range()
     }
 
     /// Get the text range of just the model name string (inside quotes)
     pub fn name_range(&self) -> Option<TextRange> {
         self.0
-            .children_with_tokens()
+            .0
+            .descendants_with_tokens()
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == STRING)
             .map(|t| t.text_range())

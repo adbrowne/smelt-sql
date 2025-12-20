@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sqt_parser::{self, File as AstFile};
+use sqt_parser::{self, File as AstFile, RefCall};
 
 pub mod schema;
 pub use schema::{Column, ColumnSource, ModelSchema};
@@ -260,8 +260,8 @@ fn model_schema(db: &dyn Schema, path: PathBuf) -> Arc<ModelSchema> {
             .table_refs()
             .filter_map(|table_ref| {
                 table_ref
-                    .template_expr()
-                    .and_then(|t| t.ref_call())
+                    .function_call()
+                    .and_then(|f| RefCall::from_function_call(f))
                     .and_then(|r| r.model_name())
             })
             .collect()
@@ -365,8 +365,8 @@ fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
         if let Some(select_stmt) = file.select_stmt() {
             if let Some(from_clause) = select_stmt.from_clause() {
                 for table_ref in from_clause.table_refs() {
-                    if let Some(template) = table_ref.template_expr() {
-                        if let Some(ref_call) = template.ref_call() {
+                    if let Some(func) = table_ref.function_call() {
+                        if let Some(ref_call) = RefCall::from_function_call(func) {
                             if let Some(model_name) = ref_call.model_name() {
                                 // Resolve upstream model schema
                                 if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
@@ -459,7 +459,7 @@ mod tests {
         let sessions_path = PathBuf::from("models/user_sessions.sql");
         db.set_file_text(
             sessions_path.clone(),
-            Arc::new("SELECT\n  user_id,\n  COUNT(*) as session_count\nFROM {{ ref('raw_events') }}\nGROUP BY user_id".to_string()),
+            Arc::new("SELECT\n  user_id,\n  COUNT(*) as session_count\nFROM ref('raw_events')\nGROUP BY user_id".to_string()),
         );
 
         // Set up all_files for model resolution
@@ -503,7 +503,7 @@ mod tests {
         let sessions_path = PathBuf::from("models/user_sessions.sql");
         db.set_file_text(
             sessions_path.clone(),
-            Arc::new("SELECT\n  user_id\nFROM {{ ref('raw_events') }}".to_string()),
+            Arc::new("SELECT\n  user_id\nFROM ref('raw_events')".to_string()),
         );
 
         db.set_all_files(Arc::new(vec![raw_events_path.clone(), sessions_path.clone()]));
