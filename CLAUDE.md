@@ -29,6 +29,12 @@ cargo run --example example2_optimized   # Split large GROUP BY (optimized)
 
 # Build with bundled DuckDB (no system dependency required)
 cargo build  # bundled is default
+
+# Run the LSP server
+cargo run -p sqt-lsp
+
+# Test with sample workspace
+# (Configure your editor to use the LSP server, then open test-workspace/)
 ```
 
 ## Architecture
@@ -74,6 +80,14 @@ The project uses concrete examples to discover the right optimizer API:
 - `sqt-examples`: Concrete optimization examples used to drive API design
   - `src/utils.rs`: Shared utilities for DuckDB execution and pretty printing
   - `examples/`: Runnable examples comparing naive vs optimized approaches
+- `sqt-db`: Salsa database with incremental queries
+  - Input queries: `file_text()`, `all_files()`
+  - Syntax queries: `parse_model()`, `model_refs()`
+  - Semantic queries: `resolve_ref()`, `file_diagnostics()`
+- `sqt-lsp`: Language Server Protocol implementation
+  - Diagnostics for undefined refs
+  - Go-to-definition for `{{ ref() }}`
+  - Full Salsa integration for incremental updates
 
 ## Key Differentiators from dbt
 

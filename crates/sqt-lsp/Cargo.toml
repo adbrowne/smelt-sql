@@ -1,0 +1,21 @@
+[package]
+name = "sqt-lsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sqt-lsp"
+path = "src/main.rs"
+
+[dependencies]
+sqt-db = { path = "../sqt-db" }
+
+tower-lsp.workspace = true
+lsp-types.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
