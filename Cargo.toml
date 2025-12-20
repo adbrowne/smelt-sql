@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrew Browne"]
+license = "MIT"
+
+[workspace.dependencies]
+# DataFusion for SQL parsing and logical plans
+datafusion = "43"
+# DuckDB for testing and execution (bundled to avoid system dependency)
+duckdb = { version = "1.1", features = ["bundled"] }
+# Arrow for data interchange - must match duckdb's arrow version
+arrow = "54"
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+# Async runtime
+tokio = { version = "1", features = ["full"] }

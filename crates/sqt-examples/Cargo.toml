@@ -1,0 +1,13 @@
+[package]
+name = "sqt-examples"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+datafusion.workspace = true
+duckdb.workspace = true
+arrow.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
