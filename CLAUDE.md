@@ -27,7 +27,7 @@ A next-generation data pipeline tool designed to improve upon dbt by:
   - Incrementalization and optimization strategy
 
 - **ROADMAP.md**: Implementation status and next steps
-  - Track completed phases with commit hashes
+  - Track completed phases with completion dates
   - Document deferred work with rationale
   - Propose concrete next-step options
   - **Update after completing phases or making architectural decisions**
@@ -194,8 +194,8 @@ The project uses concrete examples to discover the right optimizer API:
 5. Test with test-workspace models
 6. **Run `cargo clippy --all-targets` and fix all warnings**
 7. Run `cargo build` and `cargo test` to ensure everything compiles and passes
-8. Update ROADMAP.md with completion status and commit hash
-9. Commit with descriptive message
+8. Update ROADMAP.md with completion status and date
+9. Commit with descriptive message (includes ROADMAP.md update)
 
 ### For Optimizer Features (Future)
 
@@ -208,7 +208,7 @@ The project uses concrete examples to discover the right optimizer API:
 ## Maintaining ROADMAP.md
 
 **When to update:**
-- After completing a phase (mark as ✅ with commit hash)
+- After completing a phase (mark as ✅ with completion date)
 - When deferring work (mark as ⏸️ with rationale)
 - When proposing new next steps (add as Option)
 - When making architectural decisions (document reasoning)
@@ -218,8 +218,10 @@ The project uses concrete examples to discover the right optimizer API:
 - Use ⏸️ for deferred work
 - Use 🔄 for in-progress work
 - Use 🔮 for future/speculative work
-- Always include commit hashes for completed work
+- Always include completion dates for finished work (e.g., "December 26, 2024")
 - Always explain why work is deferred
+
+**Note:** Use dates instead of commit hashes to avoid requiring a follow-up commit just to document the hash.
 
 ## License
 

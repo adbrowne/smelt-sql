@@ -25,7 +25,7 @@ sqt run --dry-run                 # Validate without executing
 
 ## ✅ Phase 1: Basic sqt.ref() Support (COMPLETED)
 
-**Commit**: `084ef71` - "Implement sqt.ref() namespaced syntax per new spec"
+**Completed**: December 20, 2024
 
 ### What Was Implemented
 
@@ -46,7 +46,7 @@ sqt run --dry-run                 # Validate without executing
 
 ## ✅ Phase 2: Named Parameters Support (COMPLETED)
 
-**Commit**: `290f39b` - "Implement named parameters with => syntax (Phase 2)"
+**Completed**: December 20, 2024
 
 ### What Was Implemented
 
@@ -69,7 +69,7 @@ sqt run --dry-run                 # Validate without executing
 
 ## ✅ Phase 3: CLI and DuckDB Execution (COMPLETED)
 
-**Commit**: `4402476` - "Implement sqt run CLI with DuckDB execution (Phase 3)"
+**Completed**: December 26, 2024
 
 ### What Was Implemented
 
