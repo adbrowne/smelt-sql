@@ -330,13 +330,47 @@ impl FunctionCall {
         }
     }
 
-    /// Get the function name (e.g., "COUNT", "SUM")
+    /// Get the function name (e.g., "COUNT", "SUM", "ref")
+    /// For namespaced calls like sqt.ref(), returns just "ref"
     pub fn name(&self) -> Option<String> {
-        self.0
+        let tokens: Vec<_> = self.0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
+            .collect();
+
+        // Check for namespaced call: IDENT DOT IDENT
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            return Some(tokens[2].text().to_string());
+        }
+
+        // Simple call: just IDENT
+        tokens
+            .iter()
             .find(|t| t.kind() == IDENT)
             .map(|t| t.text().to_string())
+    }
+
+    /// Get the namespace prefix if this is a namespaced call (e.g., "sqt" from sqt.ref())
+    pub fn namespace(&self) -> Option<String> {
+        let tokens: Vec<_> = self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .collect();
+
+        // Check for namespaced call: IDENT DOT IDENT
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            Some(tokens[0].text().to_string())
+        } else {
+            None
+        }
     }
 
     /// Get the text of the full function call
@@ -350,9 +384,13 @@ impl FunctionCall {
 pub struct RefCall(FunctionCall);
 
 impl RefCall {
-    /// Create a RefCall from a FunctionCall if it's a ref() call
+    /// Create a RefCall from a FunctionCall if it's a sqt.ref() call
     pub fn from_function_call(func: FunctionCall) -> Option<Self> {
-        if func.name()?.to_lowercase() == "ref" {
+        let name = func.name()?.to_lowercase();
+        let namespace = func.namespace()?; // Require namespace
+
+        // Only accept sqt.ref() - namespace is required
+        if name == "ref" && namespace.to_lowercase() == "sqt" {
             Some(Self(func))
         } else {
             None

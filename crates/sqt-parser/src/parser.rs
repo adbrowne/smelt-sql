@@ -272,15 +272,24 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
 
             if self.at(LPAREN) {
-                // It's a function call - wrap in FUNCTION_CALL node using checkpoint
+                // It's a simple function call - wrap in FUNCTION_CALL node using checkpoint
                 self.start_node_at(checkpoint, FUNCTION_CALL);
                 self.parse_arg_list();
                 self.finish_node(); // Close FUNCTION_CALL
             } else if self.at(DOT) {
-                // Qualified identifier: schema.table
-                self.advance();
+                // Could be schema.table or namespace.func()
+                self.advance(); // Consume DOT
                 self.skip_trivia();
-                self.expect(IDENT);
+                self.expect(IDENT); // Consume second IDENT
+                self.skip_trivia();
+
+                if self.at(LPAREN) {
+                    // Namespaced function call: sqt.ref()
+                    self.start_node_at(checkpoint, FUNCTION_CALL);
+                    self.parse_arg_list();
+                    self.finish_node(); // Close FUNCTION_CALL
+                }
+                // else: just a qualified table name (schema.table), already consumed
             }
             // else: simple identifier, already consumed
         } else {
@@ -409,21 +418,32 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.expect(RPAREN);
         } else if self.at(IDENT) {
-            // Could be column reference or function call
-            self.advance();
+            // Could be column reference, qualified name, or function call
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // consume first IDENT
             self.skip_trivia();
 
             if self.at(LPAREN) {
-                // Function call
-                self.start_node(FUNCTION_CALL);
+                // Simple function call: func()
+                self.start_node_at(checkpoint, FUNCTION_CALL);
                 self.parse_arg_list();
                 self.finish_node();
             } else if self.at(DOT) {
-                // Qualified name (table.column)
-                self.advance();
+                // Could be table.column or namespace.func()
+                self.advance(); // consume DOT
                 self.skip_trivia();
-                self.expect(IDENT);
+                self.expect(IDENT); // consume second IDENT
+                self.skip_trivia();
+
+                if self.at(LPAREN) {
+                    // Namespaced function call: sqt.ref()
+                    self.start_node_at(checkpoint, FUNCTION_CALL);
+                    self.parse_arg_list();
+                    self.finish_node();
+                }
+                // else: just a qualified name (table.column), no extra node needed
             }
+            // else: just an identifier, no extra node needed
         } else if self.current().is_literal() {
             self.advance();
         } else if self.at(STAR) {
