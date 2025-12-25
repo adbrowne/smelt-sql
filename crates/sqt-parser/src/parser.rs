@@ -460,11 +460,12 @@ impl<'a> Parser<'a> {
 
         if !self.at(RPAREN) {
             loop {
-                self.parse_expression();
+                self.parse_argument();
 
                 self.skip_trivia();
                 if self.at(COMMA) {
                     self.advance();
+                    self.skip_trivia();
                 } else {
                     break;
                 }
@@ -473,5 +474,55 @@ impl<'a> Parser<'a> {
 
         self.expect(RPAREN);
         self.finish_node();
+    }
+
+    fn parse_argument(&mut self) {
+        self.skip_trivia();
+
+        // Check for named parameter: IDENT => expression
+        if self.at(IDENT) {
+            // Look ahead to check for ARROW
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // consume IDENT
+            self.skip_trivia();
+
+            if self.at(ARROW) {
+                // It's a named parameter
+                self.start_node_at(checkpoint, NAMED_PARAM);
+                self.advance(); // consume ARROW
+                self.skip_trivia();
+                self.parse_expression();
+                self.finish_node();
+            } else {
+                // Not a named parameter, need to parse the rest as expression
+                // The IDENT is already consumed, continue parsing expression from here
+                self.skip_trivia();
+
+                // Handle cases where IDENT might be followed by operators or function calls
+                if self.at(LPAREN) {
+                    // Function call - wrap in FUNCTION_CALL
+                    self.start_node_at(checkpoint, FUNCTION_CALL);
+                    self.parse_arg_list();
+                    self.finish_node();
+                } else if self.at(DOT) {
+                    // Qualified name or namespaced function
+                    self.advance();
+                    self.skip_trivia();
+                    self.expect(IDENT);
+                    self.skip_trivia();
+
+                    if self.at(LPAREN) {
+                        // Namespaced function call
+                        self.start_node_at(checkpoint, FUNCTION_CALL);
+                        self.parse_arg_list();
+                        self.finish_node();
+                    }
+                }
+                // Otherwise, the IDENT alone is the expression (already consumed)
+            }
+        } else {
+            // Not starting with IDENT, parse as regular expression
+            self.parse_expression();
+        }
     }
 }

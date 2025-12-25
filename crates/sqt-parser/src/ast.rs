@@ -377,6 +377,49 @@ impl FunctionCall {
     pub fn text(&self) -> String {
         self.0.text().to_string()
     }
+
+    /// Get all named parameters from this function call
+    pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
+        self.0
+            .descendants()
+            .filter_map(NamedParam::cast)
+    }
+}
+
+/// Named parameter in a function call (e.g., filter => expr)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedParam(SyntaxNode);
+
+impl NamedParam {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == NAMED_PARAM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the parameter name (the identifier before =>)
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// Get the parameter value as text (everything after =>)
+    pub fn value_text(&self) -> String {
+        // Get the full text and extract everything after the =>
+        let full_text = self.0.text().to_string();
+
+        // Find the => and return everything after it, trimmed
+        if let Some(arrow_pos) = full_text.find("=>") {
+            full_text[arrow_pos + 2..].trim().to_string()
+        } else {
+            String::new()
+        }
+    }
 }
 
 /// ref('model_name') function call wrapper
@@ -434,6 +477,11 @@ impl RefCall {
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == STRING)
             .map(|t| t.text_range())
+    }
+
+    /// Get all named parameters from this ref call
+    pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
+        self.0.named_params()
     }
 }
 

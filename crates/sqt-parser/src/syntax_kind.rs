@@ -30,6 +30,7 @@ pub enum SyntaxKind {
     MINUS,    // -
     MULTIPLY, // * (same as STAR, but in expression context)
     DIVIDE,   // /
+    ARROW,    // => (named parameter)
 
     // Literals & identifiers
     STRING,     // 'value' or "value"
@@ -51,6 +52,7 @@ pub enum SyntaxKind {
     BINARY_EXPR,     // left op right
     FUNCTION_CALL,   // COUNT(*), SUM(col), ref('model')
     ARG_LIST,        // (arg1, arg2)
+    NAMED_PARAM,     // param_name => value
 
     // Error handling
     ERROR, // Invalid syntax

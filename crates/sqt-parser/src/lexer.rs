@@ -79,6 +79,11 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 DIVIDE
             }
+            '=' if self.peek_char() == Some('>') => {
+                self.advance();
+                self.advance();
+                ARROW
+            }
             '=' => {
                 self.advance();
                 EQ
