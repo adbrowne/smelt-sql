@@ -456,7 +456,7 @@ mod tests {
         let sessions_path = PathBuf::from("models/user_sessions.sql");
         db.set_file_text(
             sessions_path.clone(),
-            Arc::new("SELECT\n  user_id,\n  COUNT(*) as session_count\nFROM ref('raw_events')\nGROUP BY user_id".to_string()),
+            Arc::new("SELECT\n  user_id,\n  COUNT(*) as session_count\nFROM smelt.ref('raw_events')\nGROUP BY user_id".to_string()),
         );
 
         // Set up all_files for model resolution
@@ -500,7 +500,7 @@ mod tests {
         let sessions_path = PathBuf::from("models/user_sessions.sql");
         db.set_file_text(
             sessions_path.clone(),
-            Arc::new("SELECT\n  user_id\nFROM ref('raw_events')".to_string()),
+            Arc::new("SELECT\n  user_id\nFROM smelt.ref('raw_events')".to_string()),
         );
 
         db.set_all_files(Arc::new(vec![raw_events_path.clone(), sessions_path.clone()]));
@@ -524,7 +524,7 @@ mod tests {
         let path = PathBuf::from("test_model.sql");
         db.set_file_text(
             path.clone(),
-            Arc::new("SELECT * FROM ref('nonexistent_model')".to_string()),
+            Arc::new("SELECT * FROM smelt.ref('nonexistent_model')".to_string()),
         );
 
         // Register the file (no other files, so ref won't resolve)
@@ -542,12 +542,12 @@ mod tests {
         assert!(diag.message.contains("Undefined model reference: 'nonexistent_model'"));
 
         // Check position - should point to the string parameter 'nonexistent_model'
-        // In "SELECT * FROM ref('nonexistent_model')", the STRING token (including quotes)
-        // starts at position 18 and ends at position 37 (exclusive)
+        // In "SELECT * FROM smelt.ref('nonexistent_model')", the STRING token (including quotes)
+        // starts at position 24 and ends at position 43 (exclusive)
         assert_eq!(diag.range.start.line, 0);
-        assert_eq!(diag.range.start.column, 18);  // Opening quote ' (0-indexed)
+        assert_eq!(diag.range.start.column, 24);  // Opening quote ' (0-indexed)
         assert_eq!(diag.range.end.line, 0);
-        assert_eq!(diag.range.end.column, 37);    // One past closing quote ' (exclusive)
+        assert_eq!(diag.range.end.column, 43);    // One past closing quote ' (exclusive)
     }
 
     #[test]
@@ -556,7 +556,7 @@ mod tests {
 
         // Create a model matching broken_model.sql structure
         let path = PathBuf::from("broken_model.sql");
-        let content = "-- This model has an undefined reference - should show diagnostic\nSELECT *\nFROM ref('nonexistent_model')\n";
+        let content = "-- This model has an undefined reference - should show diagnostic\nSELECT *\nFROM smelt.ref('nonexistent_model')\n";
         db.set_file_text(path.clone(), Arc::new(content.to_string()));
 
         // Debug: Check what the parser extracts
@@ -614,16 +614,16 @@ mod tests {
         assert_eq!(diag.range.start.line, 2);
         assert_eq!(diag.range.end.line, 2);
 
-        // In "FROM ref('nonexistent_model')", the model name should be highlighted
-        // Expected: 'nonexistent_model' without quotes at columns 10-27
-        println!("Expected to highlight 'nonexistent_model' on line 2, cols 10-27");
+        // In "FROM smelt.ref('nonexistent_model')", the model name should be highlighted
+        // Expected: 'nonexistent_model' with quotes starting at column 16
+        println!("Expected to highlight 'nonexistent_model' on line 2");
     }
 
     #[test]
     fn test_lexer_positions() {
         use smelt_parser::lexer::tokenize;
 
-        let content = "-- This model has an undefined reference - should show diagnostic\nSELECT *\nFROM ref('nonexistent_model')\n";
+        let content = "-- This model has an undefined reference - should show diagnostic\nSELECT *\nFROM smelt.ref('nonexistent_model')\n";
         let tokens = tokenize(content);
 
         println!("Total content length: {}", content.len());

@@ -138,6 +138,12 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Check if current token is a keyword that would end a table reference
+    fn at_keyword_that_ends_table_ref(&self) -> bool {
+        // Keywords that can follow a table reference in the FROM clause
+        self.at_any(&[WHERE_KW, GROUP_KW])
+    }
+
     // ===== Parsing rules =====
 
     fn parse_file(&mut self) {
@@ -295,12 +301,16 @@ impl<'a> Parser<'a> {
             self.error("Expected table reference".to_string());
         }
 
-        // Optional AS alias
+        // Optional AS alias (explicit with AS keyword or implicit)
         self.skip_trivia();
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
             self.expect(IDENT);
+        } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
+            // Implicit alias (no AS keyword)
+            // Only consume if it's not a keyword that would end the table ref
+            self.advance();
         }
 
         self.finish_node();

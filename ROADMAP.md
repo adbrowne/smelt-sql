@@ -135,6 +135,10 @@ smelt run --dry-run                 # Validate without executing
 - Named parameters in `smelt.ref()` are detected but not yet compiled
   - Gives clear error: "named parameters which are not yet supported"
   - Can be implemented in future phase
+- JOIN syntax not yet supported in parser
+  - Parser currently only handles comma-separated table references
+  - Use `FROM table1, table2 WHERE ...` instead of `FROM table1 JOIN table2 ON ...`
+  - Can be implemented in future phase
 - No incremental materialization (always full refresh)
 - Single-threaded execution (no parallel model execution)
 - DuckDB only (multi-backend support deferred)
@@ -227,7 +231,26 @@ Can follow similar pattern to RefCall implementation:
 
 ---
 
-### Option C: Testing Framework
+### Option C: JOIN Syntax Support
+
+**Value**: Enable standard SQL JOIN syntax for improved readability
+
+**Work**:
+1. Add JOIN keywords to lexer (JOIN, LEFT, RIGHT, INNER, OUTER, CROSS, ON)
+2. Update `parse_from_clause()` to handle JOIN clauses
+3. Add JOIN_CLAUSE node type and AST support
+4. Parse ON conditions (join predicates)
+5. Update tests to use JOIN syntax where appropriate
+
+**Effort**: Medium (requires parser changes and new node types)
+
+**Files**: `crates/smelt-parser/src/lexer.rs`, `crates/smelt-parser/src/parser.rs`, `crates/smelt-parser/src/syntax_kind.rs`, `crates/smelt-parser/src/ast.rs`
+
+**Note**: Currently the parser only supports comma-separated table references (e.g., `FROM table1, table2 WHERE ...`). Adding JOIN support would allow standard syntax like `FROM table1 JOIN table2 ON ...`.
+
+---
+
+### Option D: Testing Framework
 
 **Value**: Confidence in parser/AST correctness
 
@@ -243,7 +266,7 @@ Can follow similar pattern to RefCall implementation:
 
 ---
 
-### Option D: VSCode Extension Improvements
+### Option E: VSCode Extension Improvements
 
 **Value**: Better developer experience
 
@@ -259,7 +282,7 @@ Can follow similar pattern to RefCall implementation:
 
 ---
 
-### Option E: Documentation & Examples
+### Option F: Documentation & Examples
 
 **Value**: Help future users/contributors
 
