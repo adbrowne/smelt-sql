@@ -14,6 +14,7 @@ path = "src/main.rs"
 smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
 smelt-backend = { path = "../smelt-backend" }
+smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 
 # Parser dependencies (for TextRange, etc.)
 rowan.workspace = true
@@ -22,7 +23,6 @@ rowan.workspace = true
 tokio.workspace = true
 
 # Execution
-duckdb.workspace = true
 arrow.workspace = true
 
 # CLI

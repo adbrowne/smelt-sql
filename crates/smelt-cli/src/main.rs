@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use arrow::util::pretty;
 use clap::{Parser, Subcommand};
 use smelt_cli::{
-    find_project_root, Config, DependencyGraph, DuckDbExecutor, ModelDiscovery, SourceConfig,
+    executor, find_project_root, Config, DependencyGraph, ModelDiscovery, SourceConfig,
     SqlCompiler,
 };
+use smelt_backend_duckdb::DuckDbBackend;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -147,13 +148,14 @@ async fn run(args: RunArgs) -> Result<()> {
 
     println!("\nDatabase: {}", db_path.display());
 
-    let executor = DuckDbExecutor::new(&db_path, &target_schema)
+    let backend = DuckDbBackend::new(&db_path, &target_schema)
+        .await
         .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?;
 
     // 7. Validate sources exist (if sources.yml present)
     if let Some(ref source_config) = sources {
-        executor
-            .validate_sources(source_config)
+        executor::validate_sources(&backend, source_config)
+            .await
             .with_context(|| "Source validation failed")?;
     }
 
@@ -186,8 +188,8 @@ async fn run(args: RunArgs) -> Result<()> {
         }
 
         // Execute
-        let result = executor
-            .execute_model(&compiled, args.show_results)
+        let result = executor::execute_model(&backend, &compiled, &target_schema, args.show_results)
+            .await
             .with_context(|| format!("Failed to execute model: {}", model_name))?;
 
         println!(
