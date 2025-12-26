@@ -2980,6 +2980,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-backend-duckdb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow 54.2.1",
+ "async-trait",
+ "duckdb",
+ "smelt-backend",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "smelt-cli"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,26 @@
+[package]
+name = "smelt-backend-duckdb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "DuckDB backend implementation for smelt"
+
+[dependencies]
+# Backend trait
+smelt-backend = { path = "../smelt-backend" }
+
+# DuckDB
+duckdb.workspace = true
+arrow.workspace = true
+
+# Async runtime
+tokio.workspace = true
+async-trait = "0.1"
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.8"
