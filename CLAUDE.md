@@ -26,7 +26,7 @@ A next-generation data pipeline tool designed to improve upon dbt by:
   - Backend capabilities and rewrite rules
   - Incrementalization and optimization strategy
 
-- **ROADMAP.md**: Implementation status and next steps
+- **docs/ROADMAP.md**: Implementation status and next steps
   - Track completed phases with completion dates
   - Document deferred work with rationale
   - Propose concrete next-step options
@@ -194,7 +194,7 @@ The project uses concrete examples to discover the right optimizer API:
 5. Test with test-workspace models
 6. **Run `cargo clippy --all-targets` and fix all warnings**
 7. Run `cargo build` and `cargo test` to ensure everything compiles and passes
-8. Update ROADMAP.md with completion status and date
+8. Update docs/ROADMAP.md with completion status and date
 9. Commit with descriptive message (includes ROADMAP.md update)
 
 ### For Optimizer Features (Future)
@@ -205,7 +205,7 @@ The project uses concrete examples to discover the right optimizer API:
 4. Extract API patterns from successful optimizations
 5. Generalize into optimizer framework
 
-## Maintaining ROADMAP.md
+## Maintaining docs/ROADMAP.md
 
 **When to update:**
 - After completing a phase (mark as ✅ with completion date)

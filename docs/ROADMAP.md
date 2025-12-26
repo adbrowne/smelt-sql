@@ -1,6 +1,6 @@
 # smelt Development Roadmap
 
-This document tracks the implementation status of the smelt parser and LSP, aligned with the spec in [README.md](README.md).
+This document tracks the implementation status of the smelt parser and LSP, aligned with the spec in [README.md](../README.md).
 
 ## Current Status
 
@@ -345,10 +345,10 @@ These features require significant architectural work and are deferred:
 
 When working on the next phase:
 
-1. **Before starting**: Review the spec in [README.md](README.md) for requirements
+1. **Before starting**: Review the spec in [README.md](../README.md) for requirements
 2. **During development**: Update this roadmap with progress
 3. **After completion**: Mark phase as complete with commit hash
 4. **Add tests**: Ensure new features have test coverage
 5. **Update docs**: Keep CLAUDE.md and comments up to date
 
-See [CLAUDE.md](CLAUDE.md) for development workflow and architecture notes.
+See [CLAUDE.md](../CLAUDE.md) for development workflow and architecture notes.
