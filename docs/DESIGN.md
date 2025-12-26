@@ -953,6 +953,237 @@ smelt can:
 
 ---
 
+## Schema Evolution
+
+When model definitions change, smelt can efficiently update existing materialized tables instead of requiring full rebuilds.
+
+### The Problem
+
+In dbt, any schema change requires a full refresh:
+```sql
+-- Before: SELECT a, b FROM source
+-- After:  SELECT a, b, c FROM source
+
+-- dbt approach: DROP TABLE and rebuild from scratch
+-- Even if the table has 10 billion rows and 'c' is cheap to compute
+```
+
+### smelt's Approach
+
+Because smelt tracks schemas and understands SQL semantics, it can generate efficient migrations:
+
+```sql
+-- Adding a column
+ALTER TABLE daily_revenue ADD COLUMN new_metric DECIMAL;
+UPDATE daily_revenue SET new_metric = (
+  SELECT SUM(amount) FROM orders WHERE orders.date = daily_revenue.date
+);
+
+-- Or for additive columns with defaults
+ALTER TABLE daily_revenue ADD COLUMN region VARCHAR DEFAULT 'unknown';
+```
+
+### Change Detection
+
+smelt compares the current model definition against the last-deployed schema:
+
+```
+$ smelt run
+
+Schema changes detected:
+
+daily_revenue:
+  + new_metric DECIMAL     (added column)
+  ~ amount DECIMAL(10,2)   (was: DECIMAL - precision change)
+  - old_column             (removed column)
+
+Migration strategy:
+  • new_metric: ALTER TABLE ADD COLUMN + backfill query
+  • amount: Safe widening, no action needed
+  • old_column: Will be dropped (data loss)
+
+Proceed? [Y/n]
+```
+
+### Evolution Strategies
+
+| Change Type | Strategy | Data Preserved? |
+|-------------|----------|-----------------|
+| Add column (computable) | ALTER + UPDATE | ✅ Yes |
+| Add column (with default) | ALTER + DEFAULT | ✅ Yes |
+| Add column (needs source) | Full refresh | ✅ Yes |
+| Remove column | ALTER DROP | ⚠️ Column lost |
+| Widen type (INT→BIGINT) | No action | ✅ Yes |
+| Narrow type (BIGINT→INT) | Validate + ALTER | ⚠️ May fail |
+| Change type (incompatible) | Full refresh | ✅ Yes |
+| Rename column | ALTER RENAME | ✅ Yes |
+
+### Efficient Backfill for New Columns
+
+When adding a column, smelt analyzes whether it can be computed from existing data:
+
+**Case 1: Column derived from existing columns**
+```sql
+-- Model adds: total_with_tax AS amount * 1.1
+-- smelt generates:
+ALTER TABLE orders ADD COLUMN total_with_tax DECIMAL;
+UPDATE orders SET total_with_tax = amount * 1.1;
+```
+
+**Case 2: Column from upstream model (already materialized)**
+```sql
+-- Model adds: customer_name from smelt.ref('customers')
+-- smelt generates:
+ALTER TABLE orders ADD COLUMN customer_name VARCHAR;
+UPDATE orders o SET customer_name = (
+  SELECT c.name FROM customers c WHERE c.id = o.customer_id
+);
+```
+
+**Case 3: Column requires source data**
+```sql
+-- Model adds: new_field from smelt.ref('raw_events')
+-- If raw_events is a source (not materialized), full refresh needed
+-- smelt warns and offers options:
+--   1. Full refresh (safe, slow)
+--   2. Set to NULL/default for existing rows (fast, incomplete)
+--   3. Incremental backfill over time windows
+```
+
+### Cross-Model Evolution
+
+When a model's schema changes, smelt analyzes downstream impact:
+
+```
+$ smelt run
+
+Schema change in 'orders':
+  + shipping_cost DECIMAL
+
+Downstream impact analysis:
+
+  daily_revenue (depends on orders):
+    • No impact - doesn't select shipping_cost
+
+  order_summary (depends on orders):
+    • Uses SELECT * - will automatically include new column
+    • Downstream schema will change
+    • Cascade: customer_report also uses SELECT *
+
+Options:
+  1. Update all downstream models (recommended)
+  2. Update only direct dependents
+  3. Update orders only (downstream will fail on next run)
+```
+
+### Configuration
+
+Control evolution behavior per-model or globally:
+
+```yaml
+# smelt.yml
+schema_evolution:
+  strategy: prompt           # prompt, auto, strict
+  allow_column_removal: true
+  allow_type_narrowing: false
+
+models:
+  critical_table:
+    schema_evolution:
+      strategy: strict       # Never auto-migrate, always prompt
+      allow_column_removal: false
+```
+
+Or via annotations:
+```sql
+-- @schema_evolution: strict
+-- @schema_evolution.allow_column_removal: false
+
+SELECT ...
+```
+
+### CLI Commands
+
+```bash
+# Show pending schema changes without applying
+smelt diff
+
+# Apply schema migrations
+smelt run --migrate
+
+# Force full refresh even when migration is possible
+smelt run --full-refresh
+
+# Generate migration SQL without executing
+smelt migrate --dry-run --output migrations/
+
+# Validate that schema changes are safe
+smelt validate
+```
+
+### State Tracking
+
+smelt tracks deployed schemas:
+
+```yaml
+# .smelt/state/daily_revenue.state.yaml
+model: daily_revenue
+schema:
+  version: 3
+  deployed_at: 2024-01-18T06:00:00Z
+  columns:
+    - name: order_date
+      type: DATE
+      nullable: false
+    - name: customer_id
+      type: INTEGER
+      nullable: false
+    - name: total
+      type: DECIMAL(10,2)
+      nullable: true
+  history:
+    - version: 2
+      deployed_at: 2024-01-10T06:00:00Z
+      changes: ["added column: total"]
+    - version: 1
+      deployed_at: 2024-01-01T06:00:00Z
+      changes: ["initial deployment"]
+```
+
+### Integration with Incremental
+
+Schema evolution works with incremental builds:
+
+```
+Scenario: Add new column to incremental model
+
+1. smelt detects schema change (new column added)
+2. For existing rows: ALTER TABLE + backfill UPDATE
+3. For new rows: Normal incremental INSERT includes new column
+4. Result: Complete data, minimal recomputation
+```
+
+```sql
+-- Combined migration + incremental
+BEGIN TRANSACTION;
+
+-- Schema migration
+ALTER TABLE daily_revenue ADD COLUMN new_metric DECIMAL;
+UPDATE daily_revenue SET new_metric = compute_metric(...)
+WHERE TRUE;  -- All existing rows
+
+-- Incremental update (new data)
+DELETE FROM daily_revenue WHERE order_date >= '2024-01-18';
+INSERT INTO daily_revenue
+SELECT order_date, customer_id, total, compute_metric(...) as new_metric
+FROM orders
+WHERE order_date >= '2024-01-18';
+
+COMMIT;
+```
+
+---
+
 ## Implementation Phases
 
 ### Phase 1: Core Parser and Single Backend
