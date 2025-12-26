@@ -45,8 +45,7 @@ smelt is a data transformation framework that separates **logical transformation
 | Logical/physical separation | Mixed in templates | Strict separation via rewrite rules |
 | Type checking | None (runtime errors) | Static analysis with LSP support |
 | Cross-engine | One target per project | Split work across engines |
-| Incrementalization | Macros in models | Rewrite rules generate backend SQL |
-| State management | dbt tracks state | Backends own state |
+| Incrementalization | Macros in models query state | Rewrite rules query backend state |
 | Optimization | Manual | Rule-based with semantic analysis |
 
 ---
