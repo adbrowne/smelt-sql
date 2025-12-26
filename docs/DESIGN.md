@@ -10,15 +10,43 @@ smelt is a data transformation framework that separates **logical transformation
 2. **Engineers define how** - Rewrite rules and execution configuration
 3. **Framework mediates** - Validates, optimizes, and deploys to target engines
 
+### Design Principles
+
+#### ✅ Keep Logical Models Pure
+
+- **DO**: Write SQL that expresses business logic
+- **DO**: Use `smelt.ref()` and `smelt.metric()` extensions
+- **DO**: Add configuration annotations (`@materialize`, `@partition_by`)
+- **DON'T**: Add macros, conditionals, or templating to logical models
+- **DON'T**: Mix execution strategy with business logic
+
+#### ✅ Backends Own Computational State
+
+- **DO**: Let Delta Lake, Flink, DuckDB manage watermarks and checkpoints
+- **DO**: Query backends for current table state when needed
+- **DO**: Trust backend transaction logs and state management
+- **DON'T**: Store watermarks, stream offsets, or batch boundaries in smelt
+- **DON'T**: Duplicate state that backends already manage
+- **Exception**: smelt MAY store operational metadata (schema lineage, DAG, run history)
+
+#### ✅ Rewrite Rules Transform Logical → Physical
+
+- **DO**: Write rewrite rules that are backend-specific
+- **DO**: Make rules explicit, testable, and version-controlled
+- **DO**: Generate multiple statements from single logical model when needed
+- **DON'T**: Put transformation logic in model templates
+- **DON'T**: Make analysts think about incrementalization strategies
+
 ### Key Differentiators from dbt
 
 | Aspect | dbt | smelt |
 |--------|-----|-----|
-| Model definition | Jinja templates | Parsed semantic models |
+| Model definition | Jinja templates + SQL | Pure SQL with extensions |
+| Logical/physical separation | Mixed in templates | Strict separation via rewrite rules |
 | Type checking | None (runtime errors) | Static analysis with LSP support |
 | Cross-engine | One target per project | Split work across engines |
-| Optimization | Manual | Rule-based with learning |
-| Incrementalization | Manual `is_incremental()` | Semantic analysis of what's safe |
+| Incrementalization | Macros in models query state | Rewrite rules query backend state |
+| Optimization | Manual | Rule-based with semantic analysis |
 
 ---
 
@@ -573,54 +601,205 @@ Calcite is a query optimizer framework. smelt differs:
 
 ## Incremental Table Builds
 
-This section describes smelt's approach to incremental materialization, inspired by dbt's microbatch but leveraging smelt's semantic understanding to do more.
+### Philosophy: Separation of Logical and Physical
 
-### Core Advantage: Multi-Statement Generation
+Incremental table builds are implemented through **rewrite rules**, not macros or framework magic.
 
-**This is smelt's key differentiator.** Because smelt parses and understands SQL semantics (not just templates), one logical model definition can generate multiple physical SQL statements:
+**Three clear layers:**
 
-```sql
--- Logical model (what the user writes)
-SELECT order_date, customer_id, SUM(amount) as total
-FROM smelt.ref('orders')
-GROUP BY order_date, customer_id
-```
+1. **Logical Model** (Analyst writes)
+   - Pure SQL expressing business intent
+   - No conditionals, no templating, no physical concerns
+   - Just `SELECT` with `smelt.ref()` and `smelt.metric()`
 
-```sql
--- Generated physical statements (DELETE + INSERT strategy)
--- Statement 1: Delete affected time range
-DELETE FROM daily_revenue
-WHERE order_date >= '2024-01-15'
-  AND order_date < '2024-01-18';
+2. **Rewrite Rules** (Engineer writes)
+   - Transform logical model → backend-specific physical SQL
+   - Handle incrementalization strategies per backend
+   - Explicit, testable, version-controlled transformations
 
--- Statement 2: Insert fresh data
-INSERT INTO daily_revenue
-SELECT order_date, customer_id, SUM(amount) as total
-FROM orders
-WHERE order_date >= '2024-01-15'
-  AND order_date < '2024-01-18'
-GROUP BY order_date, customer_id;
-```
+3. **Backend Execution** (Engine manages)
+   - Delta Lake: Transaction log tracks partitions
+   - Flink: Checkpoints track stream position
+   - DuckDB: Table state and transaction history
+   - **Backends own computational state** (watermarks, offsets)
 
-dbt cannot do this because it treats SQL as opaque text. smelt can because it understands the query structure.
-
-### User-Facing Configuration
-
-Users declare **what** they want, not **how** to compute it incrementally:
+Analyst writes pure business logic:
 
 ```sql
 -- models/daily_revenue.sql
--- @incremental: enabled
--- @incremental.time_column: order_date
--- @incremental.batch_size: 1 day
--- @incremental.lookback: 3 days
+-- @materialize: incremental
+-- @partition_by: order_date
 
 SELECT
   order_date,
   customer_id,
   SUM(amount) as total
 FROM smelt.ref('orders')
-GROUP BY 1, 2
+GROUP BY order_date, customer_id
+```
+
+**No conditionals. No templating. Just what to compute.**
+
+### Example: Rewrite Rules for Different Backends
+
+Engineers write transformation rules that generate backend-specific physical SQL:
+
+#### Databricks/Delta Lake
+
+```python
+@rule
+def incremental_merge_delta(model: LogicalModel, backend: DeltaBackend, config: Config):
+    """Transform logical model into Delta MERGE for incrementalization"""
+
+    if not config.incremental_enabled:
+        return None  # Use default CREATE OR REPLACE
+
+    partition_col = config.partition_by
+
+    return f"""
+    MERGE INTO {model.table_name} AS target
+    USING (
+        {model.select_sql}
+        WHERE {partition_col} >= current_date - INTERVAL {config.lookback_days} DAY
+    ) AS source
+    ON target.order_date = source.order_date
+       AND target.customer_id = source.customer_id
+    WHEN MATCHED THEN UPDATE SET *
+    WHEN NOT MATCHED THEN INSERT *
+    """
+```
+
+**Generated SQL** (Databricks):
+```sql
+MERGE INTO daily_revenue AS target
+USING (
+    SELECT order_date, customer_id, SUM(amount) as total
+    FROM orders
+    WHERE order_date >= current_date - INTERVAL 3 DAY
+    GROUP BY order_date, customer_id
+) AS source
+ON target.order_date = source.order_date
+   AND target.customer_id = source.customer_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *
+```
+
+**State management**: Delta Lake's transaction log tracks what partitions exist and their versions.
+
+#### Apache Flink (Streaming)
+
+```python
+@rule
+def streaming_upsert_flink(model: LogicalModel, backend: FlinkBackend, config: Config):
+    """Transform logical model into Flink streaming job"""
+
+    return f"""
+    CREATE TABLE {model.table_name} (
+        {model.schema_ddl}
+        PRIMARY KEY ({', '.join(config.unique_keys)}) NOT ENFORCED
+    ) WITH (
+        'connector' = 'upsert-kafka',
+        'topic' = '{model.table_name}',
+        'properties.bootstrap.servers' = '{backend.kafka_servers}'
+    );
+
+    INSERT INTO {model.table_name}
+    {model.select_sql}  -- Continuous query
+    """
+```
+
+**Generated SQL** (Flink):
+```sql
+CREATE TABLE daily_revenue (
+    order_date DATE,
+    customer_id INT,
+    total DECIMAL(10,2),
+    PRIMARY KEY (order_date, customer_id) NOT ENFORCED
+) WITH (
+    'connector' = 'upsert-kafka',
+    'topic' = 'daily_revenue'
+);
+
+INSERT INTO daily_revenue
+SELECT order_date, customer_id, SUM(amount) as total
+FROM orders
+GROUP BY order_date, customer_id;
+```
+
+**State management**: Flink checkpoints track stream position and aggregation state.
+
+#### DuckDB (Batch)
+
+```python
+@rule
+def batch_delete_insert_duckdb(model: LogicalModel, backend: DuckDBBackend, config: Config):
+    """Transform logical model into DELETE + INSERT for batch processing"""
+
+    if not config.incremental_enabled:
+        return None
+
+    partition_col = config.partition_by
+    lookback = config.lookback_days
+
+    return [
+        # Statement 1: Delete affected partitions
+        f"""
+        DELETE FROM {model.table_name}
+        WHERE {partition_col} >= current_date - INTERVAL {lookback} DAY
+        """,
+
+        # Statement 2: Insert fresh data
+        f"""
+        INSERT INTO {model.table_name}
+        {model.select_sql}
+        WHERE {partition_col} >= current_date - INTERVAL {lookback} DAY
+        """
+    ]
+```
+
+**Generated SQL** (DuckDB):
+```sql
+-- Statement 1
+DELETE FROM daily_revenue
+WHERE order_date >= current_date - INTERVAL 3 DAY;
+
+-- Statement 2
+INSERT INTO daily_revenue
+SELECT order_date, customer_id, SUM(amount) as total
+FROM orders
+WHERE order_date >= current_date - INTERVAL 3 DAY
+GROUP BY order_date, customer_id;
+```
+
+**State management**: DuckDB table state tracks what data exists. smelt queries the table to determine what's already processed.
+
+### What Each Layer Owns
+
+| Responsibility | Owner | Examples |
+|----------------|-------|----------|
+| **Business logic** | Logical model | What aggregations, joins, filters |
+| **Incrementalization strategy** | Rewrite rules | MERGE vs DELETE+INSERT vs streaming |
+| **Computational state** | Backend engine | Watermarks, stream offsets, transaction logs |
+| **Schema lineage** | smelt metadata | How table was derived, what changed |
+| **Execution orchestration** | smelt framework | DAG order, parallelization, retries |
+| **Semantic analysis** | smelt framework | Detect unsafe patterns, suggest optimizations |
+
+### Configuration
+
+Models declare metadata through annotations:
+
+```sql
+-- models/daily_revenue.sql
+-- @materialize: incremental
+-- @partition_by: order_date
+-- @lookback_days: 3
+
+SELECT
+  order_date,
+  customer_id,
+  SUM(amount) as total
+FROM smelt.ref('orders')
+GROUP BY order_date, customer_id
 ```
 
 Or in YAML config:
@@ -628,328 +807,251 @@ Or in YAML config:
 # smelt.yml
 models:
   daily_revenue:
-    incremental:
-      enabled: true
-      time_column: order_date
-      batch_size: 1 day
-      lookback: 3 days
-      strategy: auto  # auto, merge, insert_overwrite, delete_insert
+    materialize: incremental
+    partition_by: order_date
+    lookback_days: 3
 ```
 
-The framework:
-1. Analyzes the model semantics
-2. Determines the safest incremental strategy
-3. Generates appropriate physical SQL
-4. Handles edge cases (late arrivals, updates, deletes)
+**Configuration tells rewrite rules HOW to transform, but doesn't change WHAT is computed.**
 
-### Incremental Strategies
+### What NOT to Do
 
-#### Strategy 1: INSERT (Append-Only)
+#### ❌ NO MACROS in Logical Models
 
-**When**: Model only appends new rows, never updates existing.
-
+**Don't do this** (dbt-style macros):
 ```sql
-INSERT INTO model_table
-SELECT ... FROM source WHERE time_column > :last_watermark;
+-- ❌ WRONG - Macros pollute logical models
+{% if is_incremental() %}
+  DELETE FROM {{ this }} WHERE date >= {{ var('start_date') }}
+{% endif %}
+
+SELECT * FROM source
 ```
 
-#### Strategy 2: MERGE/UPSERT
-
-**When**: Model has a unique key, rows may be updated.
-
+**Do this instead**:
 ```sql
--- @incremental.unique_key: order_id
-
-MERGE INTO orders_processed AS target
-USING (SELECT * FROM orders WHERE updated_at > :last_run) AS source
-ON target.order_id = source.order_id
-WHEN MATCHED THEN UPDATE SET ...
-WHEN NOT MATCHED THEN INSERT ...;
+-- ✅ CORRECT - Pure logical model
+SELECT * FROM smelt.ref('source')
 ```
 
-#### Strategy 3: DELETE + INSERT (Time Range)
+```python
+# ✅ CORRECT - Rewrite rule handles incrementalization
+@rule
+def make_incremental(model, backend, config):
+    if config.incremental:
+        return generate_delete_insert(model, config)
+```
 
-**When**: Aggregations over time-partitioned data.
+**Why**:
+- Logical models should express business logic, not execution strategy
+- Macros make models harder to analyze, optimize, and understand
+- Rewrite rules are explicit, testable, and backend-specific
 
+#### ❌ NO COMPUTATIONAL STATE in smelt
+
+**Don't do this**:
+```python
+# ❌ WRONG - smelt tracking watermarks
+smelt_state = {
+    'daily_revenue': {
+        'watermark': '2024-01-17',
+        'last_offset': 12345
+    }
+}
+```
+
+**Do this instead**:
 ```sql
-BEGIN TRANSACTION;
-DELETE FROM model_table WHERE time_col >= :batch_start AND time_col < :batch_end;
-INSERT INTO model_table SELECT ... WHERE time_col >= :batch_start AND time_col < :batch_end;
-COMMIT;
+-- ✅ CORRECT - Delta Lake tracks state
+MERGE INTO daily_revenue ...
+-- Delta's transaction log knows what's been written
+
+-- ✅ CORRECT - Flink tracks state
+INSERT INTO daily_revenue ...
+-- Flink checkpoints track stream position
+
+-- ✅ CORRECT - Query backend for state
+SELECT MAX(order_date) FROM daily_revenue
+-- Let DuckDB tell us what exists
 ```
 
-#### Strategy 4: Partition Overwrite
+**Why**:
+- Backends are designed to manage computational state (checkpoints, transaction logs)
+- Duplicating state creates consistency problems
+- smelt is a compiler/orchestrator, not a runtime execution engine
 
-**When**: Backend supports partition-level operations (Databricks, BigQuery).
+**smelt MAY store operational metadata** (not computational state):
+- ✅ Schema lineage: How was this table derived?
+- ✅ DAG dependencies: What models depend on what?
+- ✅ Run history: Performance metrics, row counts, timestamps
+- ✅ Deployed versions: What version of model is running?
 
-```sql
--- Databricks
-INSERT OVERWRITE daily_revenue PARTITION (order_date)
-SELECT ... WHERE order_date >= :batch_start;
+But NOT:
+- ❌ Watermarks (what data has been processed)
+- ❌ Stream offsets (where in the stream we are)
+- ❌ Batch boundaries (what batches are pending)
+
+### Semantic Analysis
+
+smelt analyzes logical models to detect unsafe patterns:
+
 ```
+$ smelt run --backend delta
 
-### Semantic Safety Analysis
+Analyzing daily_revenue...
+  ✓  Model is partition-independent (safe for incremental)
+  ✓  Time column 'order_date' found in GROUP BY
+  ✓  No cross-partition window functions
 
-smelt analyzes SQL to determine what's safe for incrementalization:
+Applying rewrite rule: incremental_merge_delta
+Generated MERGE statement for Delta Lake
 
-| Pattern | Increment-Safe? | Strategy |
-|---------|-----------------|----------|
-| Append-only (no updates) | ✅ Yes | INSERT |
-| Has unique key | ✅ Yes | MERGE/UPSERT |
-| Window functions over time | ⚠️ Depends | INSERT + lookback |
-| Window functions over entity | ❌ No | Full refresh |
-| Aggregations with time key | ✅ Yes | DELETE + INSERT by time |
-| Aggregations without time | ❌ No | Full refresh |
+user_sessions:
+  ⚠️  Warning: Window function ROW_NUMBER() OVER (PARTITION BY user_id ...)
+      crosses batch boundaries. Incremental may produce incorrect results.
 
-**Safe patterns** (can increment):
-```sql
--- ✅ Filter on source's time column
-SELECT * FROM smelt.ref('events') WHERE event_time > :watermark
+      Options:
+        1. Add user_id to partition_by (make it batch-local)
+        2. Force full refresh for this model
+        3. Use lookback to capture all user history
 
--- ✅ Aggregation with time key in GROUP BY
-SELECT date, SUM(amount) FROM orders GROUP BY date
-
--- ✅ Window function partitioned by time
-SELECT date, user_id, ROW_NUMBER() OVER (PARTITION BY date ORDER BY ts)
-FROM events
-```
-
-**Unsafe patterns** (require full refresh):
-```sql
--- ❌ Global aggregation (no time boundary)
-SELECT COUNT(*) FROM events
-
--- ❌ Window over full history
-SELECT user_id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts)
-FROM events  -- Each new row changes numbering of ALL user's rows
-
--- ❌ Self-join without time bounds
-SELECT a.*, b.related FROM orders a JOIN orders b ON a.related_id = b.id
-```
-
-### State Management
-
-Track watermarks and batch state:
-
-```yaml
-# .smelt/state/daily_revenue.state.yaml
-model: daily_revenue
-watermark:
-  column: order_date
-  value: 2024-01-17
-  updated_at: 2024-01-18T06:00:00Z
-last_run:
-  started_at: 2024-01-18T06:00:00Z
-  completed_at: 2024-01-18T06:02:34Z
-  rows_affected: 15234
-  strategy: delete_insert
-```
-
-For microbatch execution with lookback:
-```
-batch_size: 1 day
-lookback: 3 days
-
-# Processing 2024-01-18:
-# Batch 1: 2024-01-15 (lookback - handles late arrivals)
-# Batch 2: 2024-01-16 (lookback)
-# Batch 3: 2024-01-17 (lookback)
-# Batch 4: 2024-01-18 (current)
+Proceed? [Y/n]
 ```
 
 ### CLI Interface
 
 ```bash
-# Full refresh (existing behavior)
-smelt run
+# Deploy models (uses backend's incremental strategy)
+smelt run --backend delta
 
-# Incremental run
-smelt run --incremental
+# Full refresh specific model
+smelt run --backend delta --full-refresh --select daily_revenue
 
-# Run specific date range
-smelt run --incremental --start-date 2024-01-15 --end-date 2024-01-18
+# Dry run (show generated SQL without executing)
+smelt run --backend delta --dry-run
 
-# Force full refresh for specific model
-smelt run --full-refresh --select daily_revenue
-
-# Show what would be processed
-smelt run --incremental --dry-run
-
-# Show watermark state
-smelt state show
-smelt state show daily_revenue
-
-# Reset watermark (force reprocessing)
-smelt state reset daily_revenue --from 2024-01-01
+# Show what rewrite rules will be applied
+smelt explain daily_revenue --backend delta
 ```
 
-### Comparison with dbt Microbatch
+### Comparison with dbt
 
-**dbt approach** (user writes incremental logic):
+**dbt approach** (macros in logical models):
 ```sql
-{{ config(
-    materialized='incremental',
-    incremental_strategy='microbatch',
-    event_time='order_date',
-    batch_size='day'
-) }}
+{{ config(materialized='incremental') }}
 
 SELECT order_date, customer_id, SUM(amount)
 FROM {{ source('raw', 'orders') }}
 {% if is_incremental() %}
 WHERE order_date >= '{{ var("start_date") }}'
-  AND order_date < '{{ var("end_date") }}'
 {% endif %}
 GROUP BY 1, 2
 ```
 
-**smelt approach** (framework generates incremental logic):
+**smelt approach** (rewrite rules separate from logic):
 ```sql
--- @incremental: enabled
--- @incremental.time_column: order_date
-
+-- Logical model (pure)
 SELECT order_date, customer_id, SUM(amount)
 FROM smelt.ref('orders')
-GROUP BY 1, 2
+GROUP BY order_date, customer_id
 ```
 
-Key differences:
-- smelt infers the time filter from configuration (no manual `{% if is_incremental() %}`)
-- smelt validates that GROUP BY includes time column (safe for delete+insert)
-- smelt generates multi-statement transactions when needed
-- smelt can optimize batch boundaries across models in the DAG
-- Single smelt invocation processes all batches (dbt runs once per batch)
-- **Dynamic batch sizing** - smelt chooses optimal batch grouping at runtime (see below)
+```python
+# Rewrite rule (separate)
+@rule
+def make_incremental(model, backend, config):
+    # Generate backend-specific incremental SQL
+    return generate_merge(model, backend)
+```
 
-### Dynamic Batch Sizing
+**Key differences:**
 
-**dbt's limitation**: Microbatch always runs one query per batch period. A 90-day backfill with `batch_size: day` means 90 separate queries, even when running them together would be faster.
+| Aspect | dbt | smelt |
+|--------|-----|-------|
+| **Logical models** | Mixed with execution logic | Pure business logic |
+| **Incrementalization** | User writes conditionals | Rewrite rules generate |
+| **Backend-specific** | Manual per backend | Rules per backend |
+| **Analysis** | Limited (opaque templates) | Full (parsed semantics) |
+| **Transparency** | Hidden in macros | Explicit in rules |
+| **Customization** | Edit model templates | Write custom rules |
 
-**smelt's approach**: The `batch_size` in configuration defines the *logical grain* (how data is partitioned), but smelt chooses the *physical batch grouping* at runtime based on context:
+smelt separates "what to compute" from "how to execute" more strictly than dbt.
+
+### Schema Lineage Tracking
+
+**Problem**: When a model changes, we need to know how to efficiently migrate the table.
+
+**smelt tracks schema lineage** - not just current schema, but how it was derived:
 
 ```yaml
-# Configuration defines logical grain
-incremental:
-  time_column: order_date
-  batch_size: 1 day      # Logical: data is day-partitioned
-  lookback: 3 days
+# .smelt/lineage/daily_revenue.yaml
+model: daily_revenue
+current_version: 3
+deployed_schema:
+  columns:
+    - name: order_date
+      type: DATE
+      derived_from: source.orders.order_date
+    - name: customer_id
+      type: INTEGER
+      derived_from: source.orders.customer_id
+    - name: total
+      type: DECIMAL(10,2)
+      expression: SUM(amount)
+      depends_on: [source.orders.amount]
+
+history:
+  - version: 2
+    deployed_at: 2024-01-10
+    changes:
+      - added column 'total'
+      - expression: SUM(amount)
+      - backfill: computed from existing orders table
 ```
 
-```bash
-# Daily run: process today + 3 day lookback = 4 day-batches
-# smelt might run as 1 query covering 4 days (if safe)
-smelt run --incremental
+**Why track lineage**:
 
-# Backfill 90 days: smelt can group into larger physical batches
-smelt run --incremental --start-date 2024-01-01 --end-date 2024-03-31
-# Instead of 90 queries, might run 12-13 weekly batches
-```
+1. **Efficient schema evolution**
+   ```sql
+   -- Model adds: revenue_per_customer = total / customer_count
 
-#### Batch Grouping Strategies
+   -- smelt knows 'total' is already in the table
+   -- Can compute new column without re-reading source:
+   ALTER TABLE daily_revenue ADD COLUMN revenue_per_customer DECIMAL(10,2);
+   UPDATE daily_revenue
+   SET revenue_per_customer = total / customer_count;
+   ```
 
-smelt can dynamically choose batch grouping based on:
+2. **Incremental column backfill**
+   ```sql
+   -- Model adds column from upstream model
+   -- smelt knows customers table is already materialized
+   -- Can join to backfill:
+   ALTER TABLE daily_revenue ADD COLUMN customer_tier VARCHAR;
+   UPDATE daily_revenue d
+   SET customer_tier = (
+     SELECT tier FROM customers c WHERE c.id = d.customer_id
+   );
+   ```
 
-| Context | Strategy | Example |
-|---------|----------|---------|
-| Daily run | Small batches | 1-4 days per query |
-| Backfill | Large batches | 1 week or 1 month per query |
-| After failure | Resume from checkpoint | Only pending batches |
-| Resource-constrained | Smaller batches | Fit in memory |
+3. **Optimization suggestions**
+   ```
+   $ smelt run
 
-#### When Batches Can Be Merged
+   Schema change detected in daily_revenue:
+     + shipping_cost (from orders.shipping_cost)
 
-smelt analyzes the model to determine if multiple logical batches can be combined into one physical query:
+   Options:
+     1. Full refresh (safe, slow: recompute all 10B rows)
+     2. Incremental backfill (fast: only recent partitions from source)
+     3. Compute from existing data (fastest: if computable from 'total')
 
-**Can merge** (partition-independent):
-```sql
--- ✅ Aggregation with time key - each day is independent
-SELECT order_date, SUM(amount) FROM orders GROUP BY order_date
+   Recommendation: Option 2 (incremental backfill last 90 days)
+   ```
 
--- ✅ Window partitioned by time - each day is independent
-SELECT order_date, user_id,
-       ROW_NUMBER() OVER (PARTITION BY order_date, user_id ORDER BY ts)
-FROM events
-```
-
-**Cannot merge** (batches affect each other):
-```sql
--- ❌ Running total across days - day N depends on day N-1
-SELECT order_date, SUM(amount) OVER (ORDER BY order_date) as running_total
-FROM daily_totals
-
--- ❌ Cross-day deduplication
-SELECT DISTINCT user_id, MIN(first_seen_date) FROM events GROUP BY user_id
-```
-
-#### CLI Control
-
-Users can override batch grouping when needed:
-
-```bash
-# Let smelt choose optimal grouping (default)
-smelt run --incremental --start-date 2024-01-01 --end-date 2024-03-31
-
-# Force weekly batches
-smelt run --incremental --start-date 2024-01-01 --end-date 2024-03-31 \
-  --batch-group "1 week"
-
-# Force one query for entire range (if model supports it)
-smelt run --incremental --start-date 2024-01-01 --end-date 2024-03-31 \
-  --batch-group all
-
-# Force per-day execution (dbt-style, for debugging)
-smelt run --incremental --start-date 2024-01-01 --end-date 2024-03-31 \
-  --batch-group "1 day"
-```
-
-#### Automatic Optimization
-
-For large backfills, smelt can automatically determine optimal batch grouping:
-
-```
-$ smelt run --incremental --start-date 2024-01-01 --end-date 2024-03-31
-
-Analyzing models for batch optimization...
-
-daily_revenue:
-  Logical batches: 90 days
-  Model is partition-independent ✓
-  Optimal grouping: 7 days (13 physical batches)
-  Estimated speedup: ~6x vs per-day execution
-
-user_sessions:
-  Logical batches: 90 days
-  Model has cross-partition window functions ✗
-  Required grouping: 1 day (90 physical batches)
-  Note: Cannot merge due to LAG() over user_id
-
-Proceed? [Y/n]
-```
-
-### Cross-Model Optimization
-
-When downstream models filter on time, smelt can optimize upstream:
-
-```sql
--- downstream filters on date
-SELECT * FROM smelt.ref('upstream') WHERE event_date = '2024-01-18'
-
--- smelt can:
--- 1. Only compute upstream for 2024-01-18
--- 2. Skip upstream entirely if that partition exists and is fresh
-```
-
-For models sharing a dependency:
-```
-orders (source)
-  ├── daily_revenue   (batch by order_date)
-  └── daily_orders    (batch by order_date)
-```
-
-smelt can:
-1. Compute shared batches together
-2. Parallelize independent batches
-3. Skip batches where all downstream models are up-to-date
+**Schema lineage is metadata, not computational state**:
+- ✅ Tracks: How was this derived? What depends on what?
+- ❌ Does NOT track: What data has been processed? (that's backend state)
 
 ---
 
