@@ -67,6 +67,20 @@ impl Backend {
             .publish_diagnostics(uri, lsp_diagnostics, None)
             .await;
     }
+
+    /// Publish diagnostics for all known model files
+    async fn publish_all_diagnostics(&self) {
+        let db = self.db.lock().await;
+        let files = db.all_files();
+        let files = files.clone();
+        drop(db);
+
+        for path in files.iter() {
+            if let Ok(uri) = Url::from_file_path(path) {
+                self.publish_diagnostics(uri).await;
+            }
+        }
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -147,13 +161,21 @@ impl LanguageServer for Backend {
             Err(_) => return,
         };
 
-        // Update file content in database
-        let mut db = self.db.lock().await;
-        db.set_file_text(path, Arc::new(params.text_document.text));
-        drop(db);
-
-        // Publish diagnostics
-        self.publish_diagnostics(uri).await;
+        // Check if this is sources.yml - update sources config and refresh all diagnostics
+        if path.file_name().is_some_and(|n| n == "sources.yml") {
+            let mut db = self.db.lock().await;
+            db.set_sources_yaml(Arc::new(params.text_document.text));
+            drop(db);
+            // Refresh diagnostics on all model files since source resolution may have changed
+            self.publish_all_diagnostics().await;
+        } else {
+            // Update file content in database
+            let mut db = self.db.lock().await;
+            db.set_file_text(path, Arc::new(params.text_document.text));
+            drop(db);
+            // Publish diagnostics
+            self.publish_diagnostics(uri).await;
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -165,13 +187,21 @@ impl LanguageServer for Backend {
 
         // Get new text (we use FULL sync, so there's only one change)
         if let Some(change) = params.content_changes.into_iter().next() {
-            // Update in database - Salsa will handle incremental recomputation
-            let mut db = self.db.lock().await;
-            db.set_file_text(path, Arc::new(change.text));
-            drop(db);
-
-            // Publish diagnostics
-            self.publish_diagnostics(uri).await;
+            // Check if this is sources.yml - update sources config and refresh all diagnostics
+            if path.file_name().is_some_and(|n| n == "sources.yml") {
+                let mut db = self.db.lock().await;
+                db.set_sources_yaml(Arc::new(change.text));
+                drop(db);
+                // Refresh diagnostics on all model files since source resolution may have changed
+                self.publish_all_diagnostics().await;
+            } else {
+                // Update in database - Salsa will handle incremental recomputation
+                let mut db = self.db.lock().await;
+                db.set_file_text(path, Arc::new(change.text));
+                drop(db);
+                // Publish diagnostics
+                self.publish_diagnostics(uri).await;
+            }
         }
     }
 
