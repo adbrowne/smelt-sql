@@ -343,6 +343,63 @@ impl TableRef {
             .map(|t| t.text().to_string())
     }
 
+    /// Get the alias if present (explicit AS alias or implicit alias after table ref)
+    pub fn alias(&self) -> Option<String> {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .collect();
+
+        // Look for AS keyword followed by IDENT
+        let mut found_as = false;
+        let mut last_ident: Option<String> = None;
+        let mut ident_count = 0;
+
+        for token in &tokens {
+            match token.kind() {
+                AS_KW => found_as = true,
+                IDENT => {
+                    ident_count += 1;
+                    if found_as {
+                        // This is the explicit alias after AS
+                        return Some(token.text().to_string());
+                    }
+                    last_ident = Some(token.text().to_string());
+                }
+                _ => {}
+            }
+        }
+
+        // If we have more than one IDENT and no AS keyword, the last IDENT is an implicit alias
+        // But we need to be careful: for function calls like smelt.source('raw.users'),
+        // we don't want to return 'smelt' or 'source' as aliases
+        if !found_as && ident_count > 1 && !self.is_function_call() {
+            return last_ident;
+        }
+
+        // For function calls with implicit alias (smelt.source('raw.users') t),
+        // check if the last token is an IDENT that's not part of the function call
+        if self.is_function_call() {
+            // Get the function call's text range
+            if let Some(func) = self.function_call() {
+                let func_range = func.syntax().text_range();
+                // Check if last_ident is after the function call
+                for token in tokens.iter().rev() {
+                    if token.kind() == IDENT {
+                        let token_start = token.text_range().start();
+                        if token_start >= func_range.end() {
+                            return Some(token.text().to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     /// Get the underlying syntax node (for printer)
     #[allow(dead_code)] // Used by printer module
     pub(crate) fn syntax(&self) -> &SyntaxNode {
@@ -637,6 +694,11 @@ impl FunctionCall {
     /// Get all named parameters from this function call
     pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
         self.0.descendants().filter_map(NamedParam::cast)
+    }
+
+    /// Get the underlying syntax node
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 }
 

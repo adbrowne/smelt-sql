@@ -242,7 +242,11 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec!["'".to_string(), "(".to_string()]),
+                    trigger_characters: Some(vec![
+                        "'".to_string(),
+                        "(".to_string(),
+                        ".".to_string(),
+                    ]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -745,6 +749,100 @@ impl LanguageServer for Backend {
                     })
                     .collect()
             }
+            CompletionContext::QualifiedColumn(alias) => {
+                // Complete columns for the specified table alias
+                // Parse the file to find what the alias refers to
+                let parse = db.parse_file(path.clone());
+                let syntax = parse.syntax();
+
+                if let Some(file) = smelt_parser::ast::File::cast(syntax) {
+                    if let Some(select_stmt) = file.select_stmt() {
+                        // Extract alias mappings from FROM clause
+                        let alias_map = extract_from_aliases(&select_stmt, &db);
+
+                        // Look up what this alias refers to
+                        if let Some(target) = alias_map.get(&alias) {
+                            match target {
+                                AliasTarget::Source {
+                                    source_name,
+                                    table_name,
+                                } => {
+                                    // Get columns from sources.yml
+                                    let config = db.sources_config();
+                                    for source in &config.sources {
+                                        if source.name == *source_name {
+                                            for table in &source.tables {
+                                                if table.name == *table_name {
+                                                    return Ok(Some(CompletionResponse::Array(
+                                                        table
+                                                            .columns
+                                                            .iter()
+                                                            .map(|col| {
+                                                                let type_str = col
+                                                                    .data_type
+                                                                    .as_ref()
+                                                                    .map(|t| t.to_string())
+                                                                    .unwrap_or_else(|| {
+                                                                        "unknown".to_string()
+                                                                    });
+                                                                CompletionItem {
+                                                                    label: col.name.clone(),
+                                                                    kind: Some(
+                                                                        CompletionItemKind::FIELD,
+                                                                    ),
+                                                                    detail: Some(format!(
+                                                                        "{}: {}",
+                                                                        col.name, type_str
+                                                                    )),
+                                                                    documentation: col
+                                                                        .description
+                                                                        .as_ref()
+                                                                        .map(|d| {
+                                                                            Documentation::String(
+                                                                                d.clone(),
+                                                                            )
+                                                                        }),
+                                                                    ..Default::default()
+                                                                }
+                                                            })
+                                                            .collect(),
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                AliasTarget::Model { model_name } => {
+                                    // Get columns from the model schema
+                                    let models = db.all_models();
+                                    if let Some(model) =
+                                        models.values().find(|m| m.name == *model_name)
+                                    {
+                                        let schema = db.model_schema(model.path.clone());
+                                        return Ok(Some(CompletionResponse::Array(
+                                            schema
+                                                .columns
+                                                .iter()
+                                                .filter(|col| col.name != "*")
+                                                .map(|col| CompletionItem {
+                                                    label: col.name.clone(),
+                                                    kind: Some(CompletionItemKind::FIELD),
+                                                    detail: Some(format!(
+                                                        "Column from {}",
+                                                        model_name
+                                                    )),
+                                                    ..Default::default()
+                                                })
+                                                .collect(),
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            }
             CompletionContext::None => Vec::new(),
         };
 
@@ -759,9 +857,10 @@ impl LanguageServer for Backend {
 /// Completion context types
 #[derive(Debug)]
 enum CompletionContext {
-    InsideRef,    // Cursor inside ref('|')
-    InsideSource, // Cursor inside source('|')
-    ColumnName,   // Cursor in a position where column name is expected
+    InsideRef,               // Cursor inside ref('|')
+    InsideSource,            // Cursor inside source('|')
+    ColumnName,              // Cursor in a position where column name is expected
+    QualifiedColumn(String), // Cursor after alias. (e.g., "t." for table alias t)
     None,
 }
 
@@ -797,6 +896,12 @@ fn determine_completion_context(text: &str, offset: usize) -> CompletionContext 
         }
     }
 
+    // Check if we're after alias. (e.g., "t." for qualified column completion)
+    // Look for pattern: identifier followed by dot at or just before cursor
+    if let Some(alias) = extract_alias_before_dot(before_cursor) {
+        return CompletionContext::QualifiedColumn(alias);
+    }
+
     // Check if we're in a column context (after SELECT, comma in SELECT list)
     let before_trimmed = before_cursor.trim_end();
 
@@ -811,6 +916,146 @@ fn determine_completion_context(text: &str, offset: usize) -> CompletionContext 
     }
 
     CompletionContext::None
+}
+
+/// Extract the alias/identifier before a dot at the end of the text
+/// Returns Some(alias) if text ends with "identifier." or "identifier.partial"
+fn extract_alias_before_dot(text: &str) -> Option<String> {
+    // Find the last dot
+    let dot_pos = text.rfind('.')?;
+
+    // Check what's after the dot - should be empty or partial identifier
+    let after_dot = &text[dot_pos + 1..];
+    if !after_dot.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    // Find the identifier before the dot
+    let before_dot = &text[..dot_pos];
+    let before_dot_trimmed = before_dot.trim_end();
+
+    // Walk backward to find the start of the identifier
+    let mut ident_start = before_dot_trimmed.len();
+    for (i, c) in before_dot_trimmed.char_indices().rev() {
+        if c.is_alphanumeric() || c == '_' {
+            ident_start = i;
+        } else {
+            break;
+        }
+    }
+
+    let alias = &before_dot_trimmed[ident_start..];
+
+    // Must be a valid identifier (not empty, starts with letter or underscore)
+    if alias.is_empty() {
+        return None;
+    }
+    let first_char = alias.chars().next()?;
+    if !first_char.is_alphabetic() && first_char != '_' {
+        return None;
+    }
+
+    // Avoid triggering on smelt.source() or smelt.ref() - these have dot but aren't aliases
+    // Check if the identifier is "smelt" and followed by source or ref
+    if alias.eq_ignore_ascii_case("smelt") {
+        let after_dot_lower = after_dot.to_lowercase();
+        if after_dot_lower.starts_with("source") || after_dot_lower.starts_with("ref") {
+            return None;
+        }
+    }
+
+    Some(alias.to_string())
+}
+
+/// Target of a table alias in FROM clause
+#[derive(Debug, Clone)]
+enum AliasTarget {
+    Source {
+        source_name: String,
+        table_name: String,
+    },
+    Model {
+        model_name: String,
+    },
+}
+
+/// Extract alias mappings from a SELECT statement's FROM clause
+fn extract_from_aliases(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    db: &smelt_db::Database,
+) -> std::collections::HashMap<String, AliasTarget> {
+    use smelt_parser::ast::{RefCall, SourceCall};
+
+    let mut aliases = std::collections::HashMap::new();
+
+    if let Some(from_clause) = select_stmt.from_clause() {
+        // Process main table refs in FROM clause
+        for table_ref in from_clause.table_refs() {
+            if let Some(func) = table_ref.function_call() {
+                // Check for smelt.source()
+                if let Some(source_call) = SourceCall::from_function_call(func.clone()) {
+                    if let (Some(source_name), Some(table_name)) =
+                        (source_call.source_name(), source_call.table_name())
+                    {
+                        // Use explicit alias if present, otherwise use table name
+                        let alias_name = table_ref.alias().unwrap_or_else(|| table_name.clone());
+                        aliases.insert(
+                            alias_name,
+                            AliasTarget::Source {
+                                source_name,
+                                table_name,
+                            },
+                        );
+                    }
+                }
+                // Check for smelt.ref()
+                else if let Some(ref_call) = RefCall::from_function_call(func) {
+                    if let Some(model_name) = ref_call.model_name() {
+                        // Use explicit alias if present, otherwise use model name
+                        let alias_name = table_ref.alias().unwrap_or_else(|| model_name.clone());
+                        aliases.insert(alias_name, AliasTarget::Model { model_name });
+                    }
+                }
+            }
+        }
+
+        // Process JOINed table refs
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                if let Some(func) = table_ref.function_call() {
+                    // Check for smelt.source()
+                    if let Some(source_call) = SourceCall::from_function_call(func.clone()) {
+                        if let (Some(source_name), Some(table_name)) =
+                            (source_call.source_name(), source_call.table_name())
+                        {
+                            let alias_name =
+                                table_ref.alias().unwrap_or_else(|| table_name.clone());
+                            aliases.insert(
+                                alias_name,
+                                AliasTarget::Source {
+                                    source_name,
+                                    table_name,
+                                },
+                            );
+                        }
+                    }
+                    // Check for smelt.ref()
+                    else if let Some(ref_call) = RefCall::from_function_call(func) {
+                        if let Some(model_name) = ref_call.model_name() {
+                            let alias_name =
+                                table_ref.alias().unwrap_or_else(|| model_name.clone());
+                            aliases.insert(alias_name, AliasTarget::Model { model_name });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Note: db parameter reserved for future use (e.g., resolving model schemas)
+    let _ = db;
+
+    aliases
 }
 
 #[tokio::main]
