@@ -79,6 +79,23 @@ impl<'a> Parser<'a> {
         if self.pos < self.tokens.len() {
             let token = self.tokens[self.pos];
             let text = &self.input[self.offset..self.offset + token.len];
+
+            // Report lexer errors with the actual invalid character
+            if token.kind == ERROR {
+                let display_text = if text.len() <= 10 {
+                    text.to_string()
+                } else {
+                    format!("{}...", &text[..10])
+                };
+                let message = format!("Unexpected character: '{}'", display_text);
+                let start = self.offset as u32;
+                let end = (self.offset + token.len) as u32;
+                self.errors.push(ParseError {
+                    message,
+                    range: TextRange::new(start.into(), end.into()),
+                });
+            }
+
             self.builder.token(token.kind.into(), text);
             self.offset += token.len;
             self.pos += 1;
