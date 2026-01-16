@@ -55,6 +55,9 @@ pub trait Syntax: Inputs {
     /// Get any parse error from sources.yml
     fn sources_yaml_error(&self) -> Option<YamlParseError>;
 
+    /// Get invalid type errors from sources.yml column definitions
+    fn sources_type_errors(&self) -> Arc<Vec<SourceTypeError>>;
+
     /// Get all models in the project
     fn all_models(&self) -> Arc<HashMap<PathBuf, Model>>;
 }
@@ -224,6 +227,67 @@ fn sources_yaml_error(db: &dyn Syntax) -> Option<YamlParseError> {
     }
 }
 
+fn sources_type_errors(db: &dyn Syntax) -> Arc<Vec<SourceTypeError>> {
+    let yaml = db.sources_yaml();
+    if yaml.is_empty() {
+        return Arc::new(Vec::new());
+    }
+
+    // Parse with a raw structure that preserves type strings
+    #[derive(Deserialize)]
+    struct RawSourcesConfig {
+        #[serde(default)]
+        sources: Vec<RawSource>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawSource {
+        name: String,
+        #[serde(default)]
+        tables: Vec<RawTable>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawTable {
+        name: String,
+        #[serde(default)]
+        columns: Vec<RawColumn>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawColumn {
+        name: String,
+        #[serde(default, rename = "type")]
+        type_str: Option<String>,
+    }
+
+    let config: RawSourcesConfig = match serde_yaml::from_str(&yaml) {
+        Ok(c) => c,
+        Err(_) => return Arc::new(Vec::new()), // YAML parse error handled elsewhere
+    };
+
+    let mut errors = Vec::new();
+
+    for source in &config.sources {
+        for table in &source.tables {
+            for column in &table.columns {
+                if let Some(type_str) = &column.type_str {
+                    if parse_type(type_str).is_err() {
+                        errors.push(SourceTypeError {
+                            source_name: source.name.clone(),
+                            table_name: table.name.clone(),
+                            column_name: column.name.clone(),
+                            invalid_type: type_str.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Arc::new(errors)
+}
+
 fn all_models(db: &dyn Syntax) -> Arc<HashMap<PathBuf, Model>> {
     let files = db.all_files();
     let mut models = HashMap::new();
@@ -339,6 +403,26 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                 },
             });
         }
+
+        // Check for invalid type definitions in sources.yml
+        let type_errors = db.sources_type_errors();
+        for error in type_errors.iter() {
+            // Only report if this model uses this source
+            let source_qualified = format!("{}.{}", error.source_name, error.table_name);
+            if sources.iter().any(|s| s.qualified_name == source_qualified) {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: format!(
+                        "Unknown type '{}' for column '{}' in source '{}'. Type information unavailable.",
+                        error.invalid_type, error.column_name, source_qualified
+                    ),
+                    range: Range {
+                        start: Position { line: 0, column: 0 },
+                        end: Position { line: 0, column: 0 },
+                    },
+                });
+            }
+        }
     }
 
     // Check for malformed source calls (missing dot separator like 'foo' instead of 'raw.users')
@@ -363,9 +447,160 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                 }
             }
         }
+
+        // Check for invalid CAST types and unknown functions in SELECT list
+        if let Some(select_stmt) = file.select_stmt() {
+            if let Some(select_list) = select_stmt.select_list() {
+                for item in select_list.items() {
+                    if let Some(expr) = item.expression() {
+                        check_expression_types(&expr, &mut diagnostics);
+                    }
+                }
+            }
+
+            // Check for ambiguous unqualified columns when there are multiple FROM sources
+            let from_sources = count_from_sources(&select_stmt);
+            if from_sources > 1 {
+                if let Some(select_list) = select_stmt.select_list() {
+                    for item in select_list.items() {
+                        if let Some(expr) = item.expression() {
+                            if let Some(col_ref) = expr.as_column_ref() {
+                                // Warn if column reference has no qualifier
+                                if col_ref.qualifier().is_none() {
+                                    let col_name = col_ref.name();
+                                    // Skip wildcards
+                                    if col_name != "*" {
+                                        diagnostics.push(Diagnostic {
+                                            severity: DiagnosticSeverity::Warning,
+                                            message: format!(
+                                                "Column '{}' is ambiguous - multiple sources in FROM clause. Consider using a qualified name (e.g., table.{}).",
+                                                col_name, col_name
+                                            ),
+                                            range: Range {
+                                                start: Position { line: 0, column: 0 },
+                                                end: Position { line: 0, column: 0 },
+                                            },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Arc::new(diagnostics)
+}
+
+/// Count the number of sources in a FROM clause (refs, sources, tables, joins)
+fn count_from_sources(select_stmt: &smelt_parser::ast::SelectStmt) -> usize {
+    let mut count = 0;
+
+    if let Some(from_clause) = select_stmt.from_clause() {
+        // Count table references (refs, sources, plain tables)
+        count += from_clause.table_refs().count();
+
+        // Count JOIN clauses
+        count += from_clause.joins().count();
+    }
+
+    count
+}
+
+/// Known SQL functions for type inference
+const KNOWN_FUNCTIONS: &[&str] = &[
+    // Aggregate functions
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    // Null handling
+    "COALESCE",
+    "NULLIF",
+    // Date functions
+    "NOW",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_DATE",
+    "DATE",
+    "DATE_TRUNC",
+    // String functions
+    "CONCAT",
+    "UPPER",
+    "LOWER",
+    "TRIM",
+    "LTRIM",
+    "RTRIM",
+    "SUBSTRING",
+    "SUBSTR",
+    "LENGTH",
+    "CHAR_LENGTH",
+    "CHARACTER_LENGTH",
+    "TO_CHAR",
+    // Boolean functions
+    "BOOL_AND",
+    "BOOL_OR",
+    "EVERY",
+    // Window functions
+    "ROW_NUMBER",
+    "RANK",
+    "DENSE_RANK",
+    "NTILE",
+    "LAG",
+    "LEAD",
+    "FIRST_VALUE",
+    "LAST_VALUE",
+    "NTH_VALUE",
+];
+
+/// Check an expression for invalid CAST types and unknown functions
+fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<Diagnostic>) {
+    // Default range for diagnostics (position tracking would require more AST work)
+    let default_range = Range {
+        start: Position { line: 0, column: 0 },
+        end: Position { line: 0, column: 0 },
+    };
+
+    // Check for CAST with invalid type
+    if let Some(cast_expr) = expr.as_cast() {
+        if let Some(type_spec) = cast_expr.type_spec() {
+            let type_text = type_spec.full_text();
+            if parse_type(&type_text).is_err() {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: format!(
+                        "Unknown type '{}' in CAST expression. Type inference unavailable.",
+                        type_text
+                    ),
+                    range: default_range,
+                });
+            }
+        }
+        // Recursively check the inner expression
+        if let Some(inner) = cast_expr.expression() {
+            check_expression_types(&inner, diagnostics);
+        }
+    }
+
+    // Check for unknown function calls (but not smelt.ref/smelt.source which are special)
+    if let Some(func) = expr.as_function_call() {
+        if let Some(name) = func.name() {
+            let upper_name = name.to_uppercase();
+            // Skip smelt.ref and smelt.source - they're handled separately
+            if func.namespace().is_none() && !KNOWN_FUNCTIONS.contains(&upper_name.as_str()) {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Info,
+                    message: format!(
+                        "Function '{}' is not a recognized SQL function. Type inference unavailable.",
+                        name
+                    ),
+                    range: default_range,
+                });
+            }
+        }
+    }
 }
 
 /// Represents a model (SQL file in models/ directory)
@@ -551,6 +786,15 @@ pub struct YamlParseError {
     pub message: String,
     pub line: Option<usize>,
     pub column: Option<usize>,
+}
+
+/// Invalid type in sources.yml column definition
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTypeError {
+    pub source_name: String,
+    pub table_name: String,
+    pub column_name: String,
+    pub invalid_type: String,
 }
 
 // Schema query implementations
