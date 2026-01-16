@@ -502,4 +502,19 @@ sources:
         assert!(qualified_names.contains(&"raw.users"));
         assert!(qualified_names.contains(&"raw.events"));
     }
+
+    #[test]
+    fn test_malformed_source_without_dot_produces_diagnostic() {
+        let mut ws = TestWorkspace::new();
+        // Source call without dot separator (e.g., 'foo' instead of 'raw.users')
+        ws.add_model("model", "SELECT * FROM smelt.source('foo')");
+
+        let diags = ws.db.file_diagnostics(ws.model_path("model"));
+
+        // Should produce an error for malformed/undefined source
+        assert!(
+            !diags.is_empty(),
+            "Expected diagnostic for malformed source 'foo' without dot separator"
+        );
+    }
 }
