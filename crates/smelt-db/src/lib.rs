@@ -52,6 +52,9 @@ pub trait Syntax: Inputs {
     /// Parse sources.yml into structured config
     fn sources_config(&self) -> Arc<SourcesConfig>;
 
+    /// Get any parse error from sources.yml
+    fn sources_yaml_error(&self) -> Option<YamlParseError>;
+
     /// Get all models in the project
     fn all_models(&self) -> Arc<HashMap<PathBuf, Model>>;
 }
@@ -198,6 +201,29 @@ fn sources_config(db: &dyn Syntax) -> Arc<SourcesConfig> {
     }
 }
 
+fn sources_yaml_error(db: &dyn Syntax) -> Option<YamlParseError> {
+    let yaml = db.sources_yaml();
+    if yaml.is_empty() {
+        return None;
+    }
+
+    match serde_yaml::from_str::<SourcesConfig>(&yaml) {
+        Ok(_) => None,
+        Err(e) => {
+            let (line, column) = e
+                .location()
+                .map(|loc| (Some(loc.line()), Some(loc.column())))
+                .unwrap_or((None, None));
+
+            Some(YamlParseError {
+                message: e.to_string(),
+                line,
+                column,
+            })
+        }
+    }
+}
+
 fn all_models(db: &dyn Syntax) -> Arc<HashMap<PathBuf, Model>> {
     let files = db.all_files();
     let mut models = HashMap::new();
@@ -297,6 +323,20 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Undefined source: '{}'", source_loc.qualified_name),
                 range: source_loc.range,
+            });
+        }
+    }
+
+    // If model references sources and there's a YAML parse error, report it
+    if !sources.is_empty() {
+        if let Some(yaml_error) = db.sources_yaml_error() {
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!("sources.yml parse error: {}", yaml_error.message),
+                range: Range {
+                    start: Position { line: 0, column: 0 },
+                    end: Position { line: 0, column: 0 },
+                },
             });
         }
     }
@@ -503,6 +543,14 @@ pub enum DiagnosticSeverity {
     Error,
     Warning,
     Info,
+}
+
+/// YAML parse error with location information
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YamlParseError {
+    pub message: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 
 // Schema query implementations

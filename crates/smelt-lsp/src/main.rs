@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -12,6 +13,26 @@ use smelt_db::{
 use smelt_parser::ast::File as AstFile;
 use smelt_types::TypedColumn;
 
+/// Tracks errors that occurred during workspace initialization
+#[derive(Default)]
+struct InitErrors {
+    workspace_errors: Vec<String>,
+    source_errors: Vec<String>,
+    model_errors: Vec<String>,
+}
+
+impl InitErrors {
+    fn has_errors(&self) -> bool {
+        !self.workspace_errors.is_empty()
+            || !self.source_errors.is_empty()
+            || !self.model_errors.is_empty()
+    }
+
+    fn total_count(&self) -> usize {
+        self.workspace_errors.len() + self.source_errors.len() + self.model_errors.len()
+    }
+}
+
 /// Format a TypedColumn for display in hover/completion
 fn format_type(typed_col: &TypedColumn) -> String {
     let nullable_suffix = if typed_col.nullable { "?" } else { "" };
@@ -21,6 +42,8 @@ fn format_type(typed_col: &TypedColumn) -> String {
 struct Backend {
     client: Client,
     db: Arc<Mutex<Database>>,
+    /// Errors collected during initialization, reported after `initialized` notification
+    init_errors: Arc<Mutex<Option<InitErrors>>>,
 }
 
 impl Backend {
@@ -28,6 +51,24 @@ impl Backend {
         Self {
             client,
             db: Arc::new(Mutex::new(Database::default())),
+            init_errors: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Convert URI to file path, logging a warning if conversion fails.
+    /// Returns None for non-file URIs (e.g., untitled:, git:).
+    async fn uri_to_path(&self, uri: &Url) -> Option<PathBuf> {
+        match uri.to_file_path() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Cannot process non-file URI: {}", uri),
+                    )
+                    .await;
+                None
+            }
         }
     }
 
@@ -57,9 +98,9 @@ impl Backend {
 
     /// Publish diagnostics for a file
     async fn publish_diagnostics(&self, uri: Url) {
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return,
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return,
         };
 
         let db = self.db.lock().await;
@@ -93,6 +134,8 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let mut init_errors = InitErrors::default();
+
         // Initialize all_files and sources_yaml to empty first - ensures Salsa queries are always set
         // even if workspace folders aren't provided or models/ doesn't exist
         {
@@ -107,32 +150,89 @@ impl LanguageServer for Backend {
 
             // Scan for .sql files in models/ directory at workspace root
             for folder in workspace_folders {
-                if let Ok(path) = folder.uri.to_file_path() {
-                    // Load sources.yml from workspace root (same location as smelt.yml)
-                    let sources_path = path.join("sources.yml");
-                    if let Ok(sources_content) = std::fs::read_to_string(&sources_path) {
+                let path = match folder.uri.to_file_path() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        init_errors.workspace_errors.push(format!(
+                            "Cannot process workspace folder URI: {}",
+                            folder.uri
+                        ));
+                        continue;
+                    }
+                };
+
+                // Load sources.yml from workspace root (same location as smelt.yml)
+                let sources_path = path.join("sources.yml");
+                match std::fs::read_to_string(&sources_path) {
+                    Ok(sources_content) => {
                         db.set_sources_yaml(Arc::new(sources_content));
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Not an error - sources.yml is optional
+                    }
+                    Err(e) => {
+                        init_errors
+                            .source_errors
+                            .push(format!("Failed to read sources.yml: {}", e));
+                    }
+                }
 
-                    // Scan models/ directory
-                    if let Ok(entries) = std::fs::read_dir(path.join("models")) {
+                // Scan models/ directory
+                let models_path = path.join("models");
+                match std::fs::read_dir(&models_path) {
+                    Ok(entries) => {
                         let mut files = Vec::new();
 
-                        for entry in entries.flatten() {
-                            let entry_path = entry.path();
-                            if entry_path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                                if let Ok(content) = std::fs::read_to_string(&entry_path) {
-                                    db.set_file_text(entry_path.clone(), Arc::new(content));
-                                    files.push(entry_path);
+                        for entry_result in entries {
+                            match entry_result {
+                                Ok(entry) => {
+                                    let entry_path = entry.path();
+                                    if entry_path.extension().and_then(|s| s.to_str())
+                                        == Some("sql")
+                                    {
+                                        match std::fs::read_to_string(&entry_path) {
+                                            Ok(content) => {
+                                                db.set_file_text(
+                                                    entry_path.clone(),
+                                                    Arc::new(content),
+                                                );
+                                                files.push(entry_path);
+                                            }
+                                            Err(e) => {
+                                                init_errors.model_errors.push(format!(
+                                                    "Failed to read {}: {}",
+                                                    entry_path.display(),
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    init_errors.model_errors.push(format!(
+                                        "Failed to read directory entry in models/: {}",
+                                        e
+                                    ));
                                 }
                             }
                         }
 
                         db.set_all_files(Arc::new(files));
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Not an error - models/ directory is optional
+                    }
+                    Err(e) => {
+                        init_errors
+                            .workspace_errors
+                            .push(format!("Failed to read models/ directory: {}", e));
+                    }
                 }
             }
         }
+
+        // Store errors for reporting after initialized notification
+        *self.init_errors.lock().await = Some(init_errors);
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -155,6 +255,33 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "smelt language server initialized")
             .await;
+
+        // Report any initialization errors
+        if let Some(errors) = self.init_errors.lock().await.take() {
+            if errors.has_errors() {
+                // Log each error
+                for err in &errors.workspace_errors {
+                    self.client.log_message(MessageType::ERROR, err).await;
+                }
+                for err in &errors.source_errors {
+                    self.client.log_message(MessageType::WARNING, err).await;
+                }
+                for err in &errors.model_errors {
+                    self.client.log_message(MessageType::WARNING, err).await;
+                }
+
+                // Show summary notification to user
+                self.client
+                    .show_message(
+                        MessageType::WARNING,
+                        format!(
+                            "smelt: {} file(s) failed to load. Check Output for details.",
+                            errors.total_count()
+                        ),
+                    )
+                    .await;
+            }
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -163,9 +290,9 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return,
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return,
         };
 
         // Check if this is sources.yml - update sources config and refresh all diagnostics
@@ -187,9 +314,9 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return,
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return,
         };
 
         // Get new text (we use FULL sync, so there's only one change)
@@ -219,9 +346,9 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
         };
 
         let db = self.db.lock().await;
@@ -286,9 +413,9 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
         };
 
         let db = self.db.lock().await;
@@ -475,9 +602,9 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
         };
 
         let db = self.db.lock().await;
