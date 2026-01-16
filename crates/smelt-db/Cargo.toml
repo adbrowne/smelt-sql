@@ -12,3 +12,4 @@ rowan.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }

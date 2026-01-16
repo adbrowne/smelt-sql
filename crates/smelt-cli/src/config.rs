@@ -210,9 +210,30 @@ pub struct SourceTable {
 pub struct SourceColumn {
     pub name: String,
     #[serde(rename = "type")]
-    pub column_type: String,
+    column_type_str: String,
     #[serde(default)]
     pub description: String,
+}
+
+impl SourceColumn {
+    /// Create a new SourceColumn
+    pub fn new(name: String, column_type: String, description: String) -> Self {
+        Self {
+            name,
+            column_type_str: column_type,
+            description,
+        }
+    }
+
+    /// Get the column type as a string (for backwards compatibility)
+    pub fn column_type_str(&self) -> &str {
+        &self.column_type_str
+    }
+
+    /// Get the parsed DataType
+    pub fn data_type(&self) -> Option<smelt_types::DataType> {
+        smelt_types::parse_type(&self.column_type_str).ok()
+    }
 }
 
 impl SourceConfig {

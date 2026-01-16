@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 smelt-db = { path = "../smelt-db" }
 smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }
 
 tower-lsp.workspace = true
 lsp-types.workspace = true

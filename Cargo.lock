@@ -2234,6 +2234,7 @@ dependencies = [
  "smelt-backend-spark",
  "smelt-db",
  "smelt-parser",
+ "smelt-types",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2267,6 +2268,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "smelt-parser",
+ "smelt-types",
 ]
 
 [[package]]
@@ -2279,6 +2281,7 @@ dependencies = [
  "serde_json",
  "smelt-db",
  "smelt-parser",
+ "smelt-types",
  "tokio",
  "tower-lsp",
 ]
@@ -2289,6 +2292,13 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "rowan",
+]
+
+[[package]]
+name = "smelt-types"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

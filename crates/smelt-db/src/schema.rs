@@ -5,6 +5,7 @@
 /// - LSP features (hover, autocomplete)
 /// - Future refactoring API
 use rowan::TextRange;
+use smelt_types::TypedColumn;
 
 /// Represents a column in a model's output schema
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,9 @@ pub struct Column {
 
     /// Text range in the source file (for LSP navigation)
     pub range: TextRange,
+
+    /// The inferred or declared type of this column (None if unknown)
+    pub data_type: Option<TypedColumn>,
 }
 
 /// Tracks where a column comes from (lineage)
@@ -97,6 +101,7 @@ mod tests {
                     source: ColumnSource::Computed,
                     expression: "user_id".to_string(),
                     range: TextRange::new(0.into(), 7.into()),
+                    data_type: None,
                 },
                 Column {
                     name: "total".to_string(),
@@ -104,6 +109,7 @@ mod tests {
                     source: ColumnSource::Computed,
                     expression: "COUNT(*)".to_string(),
                     range: TextRange::new(9.into(), 24.into()),
+                    data_type: None,
                 },
             ],
         };
@@ -123,6 +129,7 @@ mod tests {
                     source: ColumnSource::Computed,
                     expression: "a".to_string(),
                     range: TextRange::new(0.into(), 1.into()),
+                    data_type: None,
                 },
                 Column {
                     name: "b".to_string(),
@@ -130,6 +137,7 @@ mod tests {
                     source: ColumnSource::Computed,
                     expression: "b".to_string(),
                     range: TextRange::new(3.into(), 4.into()),
+                    data_type: None,
                 },
             ],
         };

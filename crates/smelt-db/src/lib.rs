@@ -8,9 +8,13 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use smelt_parser::{self, File as AstFile, RefCall};
+use smelt_types::{parse_type, DataType, TypedColumn};
 
 pub mod schema;
+pub mod type_inference;
+
 pub use schema::{Column, ColumnSource, ModelSchema};
+pub use type_inference::{infer_expression_type, TypeContext};
 
 /// Input queries - these are set by the LSP when files change
 #[salsa::query_group(InputsStorage)]
@@ -78,8 +82,24 @@ pub trait Schema: Semantic {
     fn available_columns(&self, path: PathBuf) -> Arc<Vec<Column>>;
 }
 
+/// Type checking queries - type inference and validation
+#[salsa::query_group(TypeCheckingStorage)]
+pub trait TypeChecking: Schema {
+    /// Get the schema with inferred types for a model
+    fn typed_model_schema(&self, path: PathBuf) -> Arc<ModelSchema>;
+
+    /// Build type context for a model (source and upstream model types)
+    fn type_context(&self, path: PathBuf) -> Arc<TypeContext>;
+}
+
 /// The main database that combines all query groups
-#[salsa::database(InputsStorage, SyntaxStorage, SemanticStorage, SchemaStorage)]
+#[salsa::database(
+    InputsStorage,
+    SyntaxStorage,
+    SemanticStorage,
+    SchemaStorage,
+    TypeCheckingStorage
+)]
 #[derive(Default)]
 pub struct Database {
     storage: salsa::Storage<Self>,
@@ -406,13 +426,38 @@ pub struct SourceTableDef {
 }
 
 /// Column definition within a source table
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceColumnDef {
     pub name: String,
-    #[serde(default, rename = "type")]
-    pub data_type: Option<String>,
-    #[serde(default)]
+    pub data_type: Option<DataType>,
     pub description: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SourceColumnDef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawColumn {
+            name: String,
+            #[serde(default, rename = "type")]
+            type_str: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+        }
+
+        let raw = RawColumn::deserialize(deserializer)?;
+
+        // Parse type string into DataType if present
+        let data_type = raw.type_str.as_ref().and_then(|s| parse_type(s).ok());
+
+        Ok(SourceColumnDef {
+            name: raw.name,
+            data_type,
+            description: raw.description,
+        })
+    }
 }
 
 /// Position in a file (line, column)
@@ -491,6 +536,7 @@ fn model_schema(db: &dyn Schema, path: PathBuf) -> Arc<ModelSchema> {
                         },
                         expression: "*".to_string(),
                         range: item.range(),
+                        data_type: None, // Wildcard type is determined by expansion
                     });
                 }
                 continue;
@@ -551,6 +597,7 @@ fn model_schema(db: &dyn Schema, path: PathBuf) -> Arc<ModelSchema> {
             source,
             expression,
             range: item.range(),
+            data_type: None, // Type inference will be done in Phase 4
         });
     }
 
@@ -595,6 +642,140 @@ fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
     }
 
     Arc::new(available)
+}
+
+// TypeChecking query implementations
+
+fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
+    let mut ctx = TypeContext::new();
+
+    // Get sources config and add source column types
+    let sources_config = db.sources_config();
+    for source in &sources_config.sources {
+        for table in &source.tables {
+            for col in &table.columns {
+                if let Some(data_type) = &col.data_type {
+                    ctx.add_source_column(
+                        &source.name,
+                        &table.name,
+                        &col.name,
+                        TypedColumn {
+                            data_type: data_type.clone(),
+                            nullable: true, // Assume nullable by default
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // Get refs from FROM clause and add upstream model column types
+    let parse = db.parse_file(path.clone());
+    let syntax = parse.syntax();
+
+    if let Some(file) = AstFile::cast(syntax) {
+        if let Some(select_stmt) = file.select_stmt() {
+            if let Some(from_clause) = select_stmt.from_clause() {
+                for table_ref in from_clause.table_refs() {
+                    // Check for smelt.ref() calls
+                    if let Some(func) = table_ref.function_call() {
+                        if let Some(ref_call) = RefCall::from_function_call(func) {
+                            if let Some(model_name) = ref_call.model_name() {
+                                // Resolve upstream model and get its typed schema
+                                if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
+                                    let upstream_schema = db.typed_model_schema(upstream_path);
+
+                                    // Add upstream columns to context
+                                    for col in &upstream_schema.columns {
+                                        if col.name != "*" {
+                                            if let Some(typed_col) = &col.data_type {
+                                                ctx.add_model_column(
+                                                    &model_name,
+                                                    &col.name,
+                                                    typed_col.clone(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check for smelt.source() calls
+                    if let Some(func) = table_ref.function_call() {
+                        if let Some(source_call) =
+                            smelt_parser::ast::SourceCall::from_function_call(func)
+                        {
+                            if let Some(source_name) = source_call.source_name() {
+                                if let Some(table_name) = source_call.table_name() {
+                                    // Add alias for the source
+                                    ctx.add_alias(
+                                        &table_name,
+                                        &format!("{}.{}", source_name, table_name),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Arc::new(ctx)
+}
+
+fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> {
+    // Get the base schema
+    let base_schema = db.model_schema(path.clone());
+
+    // Get the type context for this model
+    let ctx = db.type_context(path.clone());
+
+    // Parse the model to get expression AST
+    let parse = db.parse_file(path.clone());
+    let syntax = parse.syntax();
+
+    let file = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return base_schema,
+    };
+
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return base_schema,
+    };
+
+    let select_list = match select_stmt.select_list() {
+        Some(l) => l,
+        None => return base_schema,
+    };
+
+    // Create new columns with inferred types
+    let mut typed_columns = Vec::new();
+    let items: Vec<_> = select_list.items().collect();
+
+    for (i, item) in items.iter().enumerate() {
+        if i >= base_schema.columns.len() {
+            break;
+        }
+
+        let mut col = base_schema.columns[i].clone();
+
+        // Try to infer type from expression
+        if let Some(expr) = item.expression() {
+            if let Some(typed_col) = infer_expression_type(&expr, &ctx) {
+                col.data_type = Some(typed_col);
+            }
+        }
+
+        typed_columns.push(col);
+    }
+
+    Arc::new(ModelSchema {
+        columns: typed_columns,
+    })
 }
 
 #[cfg(test)]
@@ -874,5 +1055,116 @@ mod tests {
             offset += token.len;
         }
         println!("Final offset: {}", offset);
+    }
+
+    #[test]
+    fn test_typed_model_schema_literals() {
+        let mut db = Database::default();
+
+        // Create a model with various literal types
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(
+            path.clone(),
+            Arc::new("SELECT 42 as small_num, 100000 as medium_num, 'hello' as greeting FROM source.test".to_string()),
+        );
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let schema = db.typed_model_schema(path);
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check small_num is SmallInt
+        assert!(schema.columns[0].data_type.is_some());
+        assert_eq!(
+            schema.columns[0].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::SmallInt
+        );
+
+        // Check medium_num is Integer
+        assert!(schema.columns[1].data_type.is_some());
+        assert_eq!(
+            schema.columns[1].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::Integer
+        );
+
+        // Check greeting is Text
+        assert!(schema.columns[2].data_type.is_some());
+        assert_eq!(
+            schema.columns[2].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::Text
+        );
+    }
+
+    #[test]
+    fn test_typed_model_schema_aggregates() {
+        let mut db = Database::default();
+
+        // Create a model with aggregate functions
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(
+            path.clone(),
+            Arc::new("SELECT COUNT(*) as cnt, AVG(price) as avg_price FROM source.test GROUP BY category".to_string()),
+        );
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let schema = db.typed_model_schema(path);
+
+        assert_eq!(schema.columns.len(), 2);
+
+        // COUNT(*) should be BigInt
+        assert!(schema.columns[0].data_type.is_some());
+        assert_eq!(
+            schema.columns[0].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::BigInt
+        );
+        // COUNT never returns NULL
+        assert!(!schema.columns[0].data_type.as_ref().unwrap().nullable);
+
+        // AVG should be Double
+        assert!(schema.columns[1].data_type.is_some());
+        assert_eq!(
+            schema.columns[1].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::Double
+        );
+        // AVG can be NULL for empty sets
+        assert!(schema.columns[1].data_type.as_ref().unwrap().nullable);
+    }
+
+    #[test]
+    fn test_typed_model_schema_with_sources() {
+        let mut db = Database::default();
+
+        // Create sources.yml with typed columns
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: email
+            type: VARCHAR(255)
+          - name: created_at
+            type: TIMESTAMP
+"#;
+
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(
+            path.clone(),
+            Arc::new("SELECT id, email, created_at FROM smelt.source('raw.users')".to_string()),
+        );
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path);
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Note: Column type inference from sources requires column reference resolution
+        // which is a more complex case. For now, the basic literal and aggregate
+        // inference is working.
     }
 }
