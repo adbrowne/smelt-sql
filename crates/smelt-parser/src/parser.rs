@@ -2367,4 +2367,93 @@ LIMIT 100
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
     }
+
+    // TableRef alias() tests
+
+    #[test]
+    fn test_table_ref_explicit_as_alias() {
+        use crate::ast::File;
+
+        let input = "SELECT * FROM smelt.source('raw.users') AS u";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+
+        let file = File::cast(parse.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from_clause = select.from_clause().unwrap();
+        let table_ref = from_clause.table_refs().next().unwrap();
+
+        assert_eq!(table_ref.alias(), Some("u".to_string()));
+    }
+
+    #[test]
+    fn test_table_ref_implicit_alias() {
+        use crate::ast::File;
+
+        let input = "SELECT * FROM smelt.source('raw.users') u";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+
+        let file = File::cast(parse.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from_clause = select.from_clause().unwrap();
+        let table_ref = from_clause.table_refs().next().unwrap();
+
+        assert_eq!(table_ref.alias(), Some("u".to_string()));
+    }
+
+    #[test]
+    fn test_table_ref_no_alias() {
+        use crate::ast::File;
+
+        let input = "SELECT * FROM smelt.source('raw.users')";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+
+        let file = File::cast(parse.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from_clause = select.from_clause().unwrap();
+        let table_ref = from_clause.table_refs().next().unwrap();
+
+        assert_eq!(table_ref.alias(), None);
+    }
+
+    #[test]
+    fn test_table_ref_alias_with_ref_call() {
+        use crate::ast::File;
+
+        let input = "SELECT * FROM smelt.ref('users') AS t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+
+        let file = File::cast(parse.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from_clause = select.from_clause().unwrap();
+        let table_ref = from_clause.table_refs().next().unwrap();
+
+        assert_eq!(table_ref.alias(), Some("t".to_string()));
+    }
+
+    #[test]
+    fn test_join_table_ref_alias() {
+        use crate::ast::File;
+
+        let input =
+            "SELECT * FROM smelt.source('raw.users') u JOIN smelt.source('raw.orders') AS o ON u.id = o.user_id";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+
+        let file = File::cast(parse.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from_clause = select.from_clause().unwrap();
+
+        // Main table ref
+        let main_table = from_clause.table_refs().next().unwrap();
+        assert_eq!(main_table.alias(), Some("u".to_string()));
+
+        // Joined table ref
+        let join = from_clause.joins().next().unwrap();
+        let joined_table = join.table_ref().unwrap();
+        assert_eq!(joined_table.alias(), Some("o".to_string()));
+    }
 }

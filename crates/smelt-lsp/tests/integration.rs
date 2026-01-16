@@ -518,3 +518,179 @@ sources:
         );
     }
 }
+
+// =============================================================================
+// Completion Tests (Alias Autocomplete)
+// =============================================================================
+
+mod completion {
+    use super::*;
+
+    #[test]
+    fn test_type_context_registers_explicit_source_alias() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: email
+            type: VARCHAR
+"#,
+        );
+        ws.add_model("model", "SELECT t.id FROM smelt.source('raw.users') AS t");
+
+        // The type context should register the alias 't' -> 'raw.users'
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // Verify the alias is registered by looking up a column through it
+        let col = ctx.lookup_column(Some("t"), "id");
+        assert!(col.is_some(), "Should find column 'id' via alias 't'");
+    }
+
+    #[test]
+    fn test_type_context_registers_implicit_source_alias() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model("model", "SELECT t.id FROM smelt.source('raw.users') t");
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // Should find column via implicit alias
+        let col = ctx.lookup_column(Some("t"), "id");
+        assert!(
+            col.is_some(),
+            "Should find column 'id' via implicit alias 't'"
+        );
+    }
+
+    #[test]
+    fn test_type_context_registers_table_name_as_fallback_alias() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        // Using table name 'users' as qualifier (implicit alias by table name)
+        ws.add_model("model", "SELECT users.id FROM smelt.source('raw.users')");
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // Should find column via table name
+        let col = ctx.lookup_column(Some("users"), "id");
+        assert!(
+            col.is_some(),
+            "Should find column 'id' via table name 'users'"
+        );
+    }
+
+    #[test]
+    fn test_source_columns_available_for_completion() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: email
+            type: VARCHAR
+          - name: created_at
+            type: TIMESTAMP
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT t.id, t.email FROM smelt.source('raw.users') AS t",
+        );
+
+        // Get sources config and verify columns are available
+        let config = ws.db.sources_config();
+        let raw = config.sources.iter().find(|s| s.name == "raw").unwrap();
+        let users = raw.tables.iter().find(|t| t.name == "users").unwrap();
+
+        assert_eq!(users.columns.len(), 3);
+        let col_names: Vec<&str> = users.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(col_names.contains(&"id"));
+        assert!(col_names.contains(&"email"));
+        assert!(col_names.contains(&"created_at"));
+    }
+
+    #[test]
+    fn test_model_columns_available_for_ref_alias() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT id, name, email FROM raw_users");
+        ws.add_model(
+            "downstream",
+            "SELECT u.id, u.name FROM smelt.ref('users') AS u",
+        );
+
+        // The upstream model schema should have the columns
+        let schema = ws.db.model_schema(ws.model_path("users"));
+        assert_eq!(schema.columns.len(), 3);
+
+        let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(col_names.contains(&"id"));
+        assert!(col_names.contains(&"name"));
+        assert!(col_names.contains(&"email"));
+    }
+
+    #[test]
+    fn test_join_aliases_both_registered() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+      orders:
+        columns:
+          - name: order_id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT u.id, o.order_id FROM smelt.source('raw.users') u JOIN smelt.source('raw.orders') o ON u.id = o.user_id",
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // Both aliases should be registered
+        let user_col = ctx.lookup_column(Some("u"), "id");
+        assert!(user_col.is_some(), "Should find 'id' via alias 'u'");
+
+        let order_col = ctx.lookup_column(Some("o"), "order_id");
+        assert!(order_col.is_some(), "Should find 'order_id' via alias 'o'");
+    }
+}
