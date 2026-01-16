@@ -13,6 +13,7 @@ path = "src/main.rs"
 # Core smelt dependencies
 smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
+smelt-types = { path = "../smelt-types" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }

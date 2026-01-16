@@ -7,9 +7,16 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use smelt_db::{
     Database, Diagnostic as DbDiagnostic, DiagnosticSeverity as DbSeverity, Inputs, Schema,
-    Semantic, Syntax,
+    Semantic, Syntax, TypeChecking,
 };
 use smelt_parser::ast::File as AstFile;
+use smelt_types::TypedColumn;
+
+/// Format a TypedColumn for display in hover/completion
+fn format_type(typed_col: &TypedColumn) -> String {
+    let nullable_suffix = if typed_col.nullable { "?" } else { "" };
+    format!("{}{}", typed_col.data_type, nullable_suffix)
+}
 
 struct Backend {
     client: Client,
@@ -323,13 +330,15 @@ impl LanguageServer for Backend {
                 // Check if cursor is within this ref call
                 if cursor_offset >= start && cursor_offset <= end {
                     if let Some(model_name) = ref_call.model_name() {
-                        // Resolve upstream model and show its schema
+                        // Resolve upstream model and show its typed schema
                         if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                            let schema = db.model_schema(upstream_path);
+                            // Use typed_model_schema to get type information
+                            let schema = db.typed_model_schema(upstream_path);
 
                             // Format schema as markdown
                             let mut content = format!("**Model: {}**\n\n", model_name);
-                            content.push_str("Columns:\n");
+                            content.push_str("| Column | Type | Source |\n");
+                            content.push_str("|--------|------|--------|\n");
 
                             for col in schema.columns.iter() {
                                 // Skip wildcards
@@ -337,29 +346,48 @@ impl LanguageServer for Backend {
                                     continue;
                                 }
 
-                                content.push_str(&format!("- `{}`", col.name));
+                                // Column name
+                                content.push_str(&format!("| `{}` | ", col.name));
 
-                                // Show source if available
+                                // Type (if known)
+                                if let Some(ref typed_col) = col.data_type {
+                                    content.push_str(&format!("`{}`", format_type(typed_col)));
+                                } else {
+                                    content.push_str("*unknown*");
+                                }
+                                content.push_str(" | ");
+
+                                // Source info
                                 match &col.source {
                                     smelt_db::ColumnSource::FromModel {
                                         model_name,
                                         column_name,
                                     } => {
                                         content.push_str(&format!(
-                                            " (from `{}`.`{}`)",
+                                            "from `{}.{}`",
                                             model_name, column_name
                                         ));
                                     }
                                     smelt_db::ColumnSource::Computed => {
                                         if !col.expression.is_empty() && col.expression != col.name
                                         {
-                                            content.push_str(&format!(" = `{}`", col.expression));
+                                            content.push_str(&format!("`{}`", col.expression));
+                                        } else {
+                                            content.push_str("computed");
                                         }
                                     }
-                                    _ => {}
+                                    smelt_db::ColumnSource::Wildcard { model_name } => {
+                                        content.push_str(&format!("* from `{}`", model_name));
+                                    }
+                                    smelt_db::ColumnSource::ExternalTable { table_name } => {
+                                        content.push_str(&format!("from `{}`", table_name));
+                                    }
+                                    smelt_db::ColumnSource::Unknown => {
+                                        content.push('-');
+                                    }
                                 }
 
-                                content.push('\n');
+                                content.push_str(" |\n");
                             }
 
                             return Ok(Some(Hover {
@@ -530,32 +558,60 @@ impl LanguageServer for Backend {
             }
             CompletionContext::ColumnName => {
                 // Complete column names from available columns
+                // Use typed schema for type information
+                let typed_schema = db.typed_model_schema(path.clone());
                 let available = db.available_columns(path);
+
+                // Build a map of column names to types from the typed schema
+                let type_map: std::collections::HashMap<&str, &TypedColumn> = typed_schema
+                    .columns
+                    .iter()
+                    .filter_map(|col| col.data_type.as_ref().map(|t| (col.name.as_str(), t)))
+                    .collect();
+
                 available
                     .iter()
                     .filter(|col| col.name != "*")
                     .map(|col| {
-                        let mut detail = col.expression.clone();
-                        if let Some(alias) = &col.alias {
-                            detail = format!("{} AS {}", detail, alias);
+                        // Build detail with type info
+                        let type_str = col
+                            .data_type
+                            .as_ref()
+                            .or_else(|| type_map.get(col.name.as_str()).copied())
+                            .map(format_type)
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        let detail = format!("{}: {}", col.name, type_str);
+
+                        // Build documentation with expression and source info
+                        let mut doc_parts = Vec::new();
+                        if !col.expression.is_empty() && col.expression != col.name {
+                            doc_parts.push(format!("Expression: `{}`", col.expression));
+                        }
+                        match &col.source {
+                            smelt_db::ColumnSource::FromModel {
+                                model_name,
+                                column_name,
+                            } => {
+                                doc_parts.push(format!(
+                                    "From model '{}', column '{}'",
+                                    model_name, column_name
+                                ));
+                            }
+                            smelt_db::ColumnSource::Computed => {
+                                doc_parts.push("Computed column".to_string());
+                            }
+                            _ => {}
                         }
 
                         CompletionItem {
                             label: col.name.clone(),
                             kind: Some(CompletionItemKind::FIELD),
                             detail: Some(detail),
-                            documentation: match &col.source {
-                                smelt_db::ColumnSource::FromModel {
-                                    model_name,
-                                    column_name,
-                                } => Some(Documentation::String(format!(
-                                    "From model '{}', column '{}'",
-                                    model_name, column_name
-                                ))),
-                                smelt_db::ColumnSource::Computed => {
-                                    Some(Documentation::String("Computed column".to_string()))
-                                }
-                                _ => None,
+                            documentation: if doc_parts.is_empty() {
+                                None
+                            } else {
+                                Some(Documentation::String(doc_parts.join("\n")))
                             },
                             ..Default::default()
                         }

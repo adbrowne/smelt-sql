@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Type System Complete (January 16, 2026)**: Full type system implementation with smelt-types crate, TypeChecking Salsa queries, and LSP integration showing types in hover and completion.
+
 **Source Support Complete (January 3, 2026)**: Full `smelt.source()` support for external source tables defined in sources.yml, with LSP diagnostics, hover, and completion.
 
 **YAML Frontmatter Metadata Support Complete (December 31, 2025)**: Models can now specify configuration inline using YAML frontmatter, with SQL metadata taking precedence over smelt.yml.
@@ -304,6 +306,149 @@ Cargo clippy passes with no warnings.
 - Rich descriptions in sources.yml
 - LSP hover shows documentation
 - Markdown support for column descriptions
+
+---
+
+## ✅ Phase 18: Type System (COMPLETED)
+
+**Started**: January 16, 2026
+
+### Goal
+
+Add a type system to smelt that models tables and columns with SQL types, enabling:
+- Output schema inference for CREATE TABLE statements
+- Type-aware LSP feedback (diagnostics, hover, completion with types)
+- Source types from `sources.yml` treated as authoritative
+
+### Design Decisions (Confirmed)
+
+1. **Nullability tracking**: Yes - track nullable vs non-nullable for DDL generation
+2. **Type inference depth**: Basic - source types, column refs, CAST, literals, common aggregates
+3. **Crate structure**: New `smelt-types` crate for clean separation
+
+### Implementation Progress
+
+#### ✅ Phase 1: Type Infrastructure (COMPLETED)
+
+**New crate**: `crates/smelt-types/`
+
+- **DataType enum** - SQL types with full precision:
+  - Numeric: Boolean, SmallInt, Integer, BigInt, Float, Double, Decimal(precision, scale)
+  - String: Varchar(max_length), Char(length), Text
+  - Binary: Blob
+  - Date/Time: Date, Time, Timestamp(with_timezone), Interval
+  - Complex: Array(inner_type)
+  - Special: Null, Unknown
+
+- **TypedColumn struct** - Column with type and nullability
+
+- **Type parsing** - Parses SQL type strings:
+  - Parameterized types: `VARCHAR(255)`, `DECIMAL(10,2)`
+  - Type aliases: `INT` → Integer, `FLOAT8` → Double
+  - Case-insensitive, whitespace-tolerant
+  - Comprehensive test coverage
+
+**Files**:
+- `crates/smelt-types/Cargo.toml`
+- `crates/smelt-types/src/lib.rs` - DataType enum, TypedColumn
+- `crates/smelt-types/src/parse.rs` - Type string parsing
+
+#### ✅ Phase 2: Database Integration (COMPLETED)
+
+**Updated**: `crates/smelt-db/`
+
+- `SourceColumnDef.data_type` now uses `Option<DataType>` instead of `Option<String>`
+- Custom deserializer parses type strings from sources.yml into structured types
+- `Column` struct gains `data_type: Option<TypedColumn>` field
+- Re-exports `DataType` and `TypedColumn` from smelt-types
+
+**Files**:
+- `crates/smelt-db/Cargo.toml` - Added smelt-types dependency
+- `crates/smelt-db/src/lib.rs` - Updated SourceColumnDef, imports
+- `crates/smelt-db/src/schema.rs` - Added data_type to Column
+
+#### ✅ Phase 3: CLI Unification (COMPLETED)
+
+**Updated**: `crates/smelt-cli/`
+
+- `SourceColumn` retains string storage for serialization compatibility
+- New methods: `column_type_str()` for raw string, `data_type()` for parsed type
+- Constructor: `SourceColumn::new(name, column_type, description)`
+- CLI can access both raw string (for YAML output) and parsed type (for validation)
+
+**Files**:
+- `crates/smelt-cli/Cargo.toml` - Added smelt-types dependency
+- `crates/smelt-cli/src/config.rs` - Updated SourceColumn with methods
+
+#### ✅ Phase 4: Type Inference Queries (COMPLETED)
+
+**Completed**: January 16, 2026
+
+**New module**: `crates/smelt-db/src/type_inference.rs`
+
+- **TypeContext** - Context for type inference with source and model column types
+  - `add_source_column()` - Register source columns from sources.yml
+  - `add_model_column()` - Register upstream model columns
+  - `add_alias()` - Track table aliases for qualified lookups
+  - `lookup_column()` - Look up column type by name with qualifier resolution
+
+- **Expression type inference**:
+  - Literal types: integers (SmallInt/Integer/BigInt based on value), decimals, strings, booleans, NULL
+  - CAST expressions: Parses target type from TypeSpec AST
+  - Function calls: Known return types for common aggregates
+
+- **Aggregate function types**:
+  - `COUNT(*)` → BigInt (non-nullable)
+  - `SUM(numeric)` → Decimal(38, 10) (nullable)
+  - `AVG(numeric)` → Double (nullable)
+  - `MIN/MAX(any)` → Unknown type (preserves argument type conceptually)
+  - Date functions: NOW → Timestamp, CURRENT_DATE → Date
+  - String functions: CONCAT, UPPER, etc. → Text
+
+- **TypeChecking Salsa query group**:
+  - `type_context(path)` - Builds TypeContext with source and upstream model types
+  - `typed_model_schema(path)` - Returns ModelSchema with inferred column types
+
+**Files**:
+- `crates/smelt-db/src/type_inference.rs` - New module (~300 lines)
+- `crates/smelt-db/src/lib.rs` - TypeChecking query group and implementations
+
+#### ✅ Phase 5: LSP Integration (COMPLETED)
+
+**Completed**: January 16, 2026
+
+**What was implemented**:
+- **Hover for ref() calls** - Shows typed schema with columns in a table format:
+  - Column names with types (e.g., `user_id: INTEGER`, `count: BIGINT`)
+  - Nullability indicator (`?` suffix for nullable columns)
+  - Source information (from model, computed, etc.)
+- **Completion with types** - Column completions include type information:
+  - Detail shows `column_name: type_str`
+  - Documentation shows expression and source lineage
+- **Helper function** - `format_type()` for consistent type display with nullability
+
+**Files modified**:
+- `crates/smelt-lsp/Cargo.toml` - Added smelt-types dependency
+- `crates/smelt-lsp/src/main.rs` - Integrated TypeChecking queries, updated hover and completion
+
+### Test Results
+
+- `smelt-types`: 13 tests passing
+- `smelt-db`: 16 tests passing (including 3 type inference tests, 3 typed schema tests)
+- `smelt-cli`: 37 tests passing
+- `smelt-parser`: 115 tests passing
+- `smelt-backend-duckdb`: 5 tests passing
+- `smelt-backend-spark`: 2 tests passing
+- Property-based tests: 20 tests passing
+- Total workspace: 216+ tests passing
+- Cargo clippy passes with no warnings
+
+### Future Work (Deferred)
+
+- Type coercion warnings
+- Backend-specific types (HUGEINT for DuckDB, Spark types)
+- Comprehensive inference (CASE, subqueries, all functions)
+- LSP quick-fixes for type errors
 
 ---
 
@@ -1437,11 +1582,8 @@ These features require significant architectural work and are not prioritized:
 - Temporal semantics (trailing windows, decomposability)
 - Parameter validation
 
-### Type System (Spec lines 183-230)
-- Strict type checking
-- NULL tracking in types
-- LSP quick-fixes for type errors
-- Inference within models, explicit at boundaries
+### Type System
+🔄 **IN PROGRESS** - See Phase 18 below for current implementation status
 
 ### Configuration Annotations (Spec lines 437-464)
 - Parse `@materialize`, `@partition_by` annotations

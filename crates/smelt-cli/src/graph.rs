@@ -264,11 +264,11 @@ mod tests {
             "events".to_string(),
             SourceTable {
                 description: String::new(),
-                columns: vec![SourceColumn {
-                    name: "id".to_string(),
-                    column_type: "INTEGER".to_string(),
-                    description: String::new(),
-                }],
+                columns: vec![SourceColumn::new(
+                    "id".to_string(),
+                    "INTEGER".to_string(),
+                    String::new(),
+                )],
             },
         );
         sources.insert("source".to_string(), SourceSchema { tables });
