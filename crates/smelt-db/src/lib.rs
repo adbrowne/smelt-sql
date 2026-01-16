@@ -301,6 +301,30 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
         }
     }
 
+    // Check for malformed source calls (missing dot separator like 'foo' instead of 'raw.users')
+    // These are filtered out by model_sources() so we need to check them separately
+    let text = db.file_text(path.clone());
+    let syntax = parse.syntax();
+    if let Some(file) = AstFile::cast(syntax) {
+        for source_call in file.sources() {
+            if let Some(qualified_name) = source_call.qualified_name() {
+                // Check if the qualified name has a dot separator
+                if !qualified_name.contains('.') {
+                    let text_range = source_call.name_range().unwrap_or(source_call.range());
+                    let range = smelt_parser::ast::text_range_to_range(&text, text_range);
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Malformed source reference: '{}'. Expected format: 'source_name.table_name'",
+                            qualified_name
+                        ),
+                        range,
+                    });
+                }
+            }
+        }
+    }
+
     Arc::new(diagnostics)
 }
 
