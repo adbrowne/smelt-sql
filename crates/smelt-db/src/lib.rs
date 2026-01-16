@@ -1025,11 +1025,15 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
                         {
                             if let Some(source_name) = source_call.source_name() {
                                 if let Some(table_name) = source_call.table_name() {
-                                    // Add alias for the source
-                                    ctx.add_alias(
-                                        &table_name,
-                                        &format!("{}.{}", source_name, table_name),
-                                    );
+                                    let qualified_name = format!("{}.{}", source_name, table_name);
+
+                                    // Add explicit alias if present (e.g., "t" from "smelt.source('raw.users') t")
+                                    if let Some(explicit_alias) = table_ref.alias() {
+                                        ctx.add_alias(&explicit_alias, &qualified_name);
+                                    }
+
+                                    // Also add implicit alias using the table name
+                                    ctx.add_alias(&table_name, &qualified_name);
                                 }
                             }
                         }
