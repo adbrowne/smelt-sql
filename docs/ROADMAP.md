@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Table Alias Autocomplete (January 17, 2026)**: LSP now provides column completions when typing `t.` where `t` is a table alias (e.g., `FROM smelt.source('raw.users') t`).
+
 **Type System Complete (January 16, 2026)**: Full type system implementation with smelt-types crate, TypeChecking Salsa queries, and LSP integration showing types in hover and completion.
 
 **Source Support Complete (January 3, 2026)**: Full `smelt.source()` support for external source tables defined in sources.yml, with LSP diagnostics, hover, and completion.
@@ -449,6 +451,89 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 - Backend-specific types (HUGEINT for DuckDB, Spark types)
 - Comprehensive inference (CASE, subqueries, all functions)
 - LSP quick-fixes for type errors
+
+---
+
+## ✅ Phase 19: Table Alias Autocomplete (COMPLETED)
+
+**Completed**: January 17, 2026
+
+### Goal
+
+Enable column autocompletion when typing `alias.` after a table reference alias, improving the developer experience when writing SQL with aliased tables.
+
+### What Was Implemented
+
+- **Parser: `alias()` method for `TableRef`**
+  - Extracts explicit AS aliases: `FROM smelt.source('raw.users') AS u` → "u"
+  - Extracts implicit aliases: `FROM smelt.source('raw.users') u` → "u"
+  - Returns `None` when no alias present
+  - Works for both main table refs and JOINed tables
+
+- **LSP: Dot trigger character**
+  - Added `.` to completion trigger characters (alongside `'` and `(`)
+  - Enables autocompletion immediately after typing `t.`
+
+- **LSP: `QualifiedColumn` completion context**
+  - New `CompletionContext::QualifiedColumn(alias)` variant
+  - Detects when cursor is after `identifier.` pattern
+  - Filters out `smelt.source()` and `smelt.ref()` namespace patterns
+
+- **LSP: Alias-to-source/model resolution**
+  - `extract_from_aliases()` parses FROM clause to map aliases to targets
+  - Supports both `smelt.source()` (columns from sources.yml) and `smelt.ref()` (columns from model schema)
+  - Handles JOINed tables in addition to main table ref
+
+- **Type context: Explicit alias registration**
+  - Type context now registers explicit AS aliases in addition to implicit table name aliases
+  - Enables `t.column` lookups when `t` is an alias for a source/model
+
+### Implementation Details
+
+**Parser** (`crates/smelt-parser/src/ast.rs`):
+- `TableRef::alias()` method walks CST tokens looking for:
+  - AS keyword followed by IDENT → explicit alias
+  - IDENT after function call but before any other keyword → implicit alias
+- Added `FunctionCall::syntax()` method for range comparison
+
+**LSP** (`crates/smelt-lsp/src/main.rs`):
+- `extract_alias_before_dot()` helper for detecting `alias.` pattern
+- `AliasTarget` enum: `Source { source_name, table_name }` or `Model { model_name }`
+- `extract_from_aliases()` parses SELECT statement's FROM clause
+- Completion handler returns columns with type information for matched alias
+
+**Database** (`crates/smelt-db/src/lib.rs`):
+- `type_context()` now calls `table_ref.alias()` and registers explicit aliases
+- Both explicit alias and table name work for column lookups
+
+### Test Coverage
+
+**Parser tests** (`crates/smelt-parser/src/parser.rs`):
+- `test_table_ref_explicit_as_alias` - explicit `AS u` alias
+- `test_table_ref_implicit_alias` - implicit `u` alias
+- `test_table_ref_no_alias` - no alias present
+- `test_table_ref_alias_with_ref_call` - alias with `smelt.ref()`
+- `test_join_table_ref_alias` - aliases on both main and joined tables
+
+**LSP integration tests** (`crates/smelt-lsp/tests/integration.rs`):
+- `test_type_context_registers_explicit_source_alias`
+- `test_type_context_registers_implicit_source_alias`
+- `test_type_context_registers_table_name_as_fallback_alias`
+- `test_source_columns_available_for_completion`
+- `test_model_columns_available_for_ref_alias`
+- `test_join_aliases_both_registered`
+
+### Test Results
+
+All 261 tests passing:
+- 120 smelt-parser tests (including 5 new alias tests)
+- 29 smelt-lsp integration tests (including 6 new completion tests)
+- 16 smelt-db tests
+- 37 smelt-cli tests
+- 20 property-based tests
+- Others (backend, datagen, types)
+
+Cargo clippy passes with no warnings.
 
 ---
 
