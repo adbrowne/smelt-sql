@@ -2456,4 +2456,22 @@ LIMIT 100
         let joined_table = join.table_ref().unwrap();
         assert_eq!(joined_table.alias(), Some("o".to_string()));
     }
+
+    // PostgreSQL compatibility tests
+
+    #[test]
+    fn test_not_equal_operator_postgres() {
+        // PostgreSQL uses <> for not-equal
+        let input = "SELECT * FROM t WHERE a <> b";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_not_equal_operator_sql() {
+        // Standard SQL also uses != for not-equal
+        let input = "SELECT * FROM t WHERE a != b";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
 }

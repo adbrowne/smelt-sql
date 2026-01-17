@@ -120,14 +120,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         severity: "high",
         planned_fix: true,
     },
-    KnownGap {
-        id: "not_equal_operator",
-        description: "<> operator not supported by smelt",
-        category: "smelt_fails",
-        patterns: &[r"<>"],
-        severity: "high",
-        planned_fix: true,
-    },
+    // not_equal_operator gap removed - <> is now supported (January 2026)
     // ===== Printer limitations =====
     // These are issues with smelt-parser's printer, not parsing capability
     KnownGap {
@@ -313,12 +306,6 @@ mod tests {
     fn test_is_known_gap_trailing_comma() {
         // Trailing comma is a pg_fails gap (smelt accepts, pg rejects)
         assert!(is_known_gap("SELECT a, b, FROM t", "pg_fails"));
-    }
-
-    #[test]
-    fn test_is_known_gap_not_equal() {
-        // <> operator is not supported by smelt
-        assert!(is_known_gap("SELECT * FROM t WHERE a <> b", "smelt_fails"));
     }
 
     #[test]
