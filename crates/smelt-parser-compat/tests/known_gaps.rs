@@ -118,11 +118,12 @@ fn test_gap_pattern_match_operators() {
     );
 }
 
+// test_gap_string_concat_operator removed - || is now supported (January 2026)
 #[test]
-fn test_gap_string_concat_operator() {
-    // String concatenation operator
-    assert_smelt_fails_pg_succeeds("SELECT 'a' || 'b'", "string_concat_operator");
-    assert_smelt_fails_pg_succeeds(
+fn test_string_concat_operator_fixed() {
+    // String concatenation operator is now supported
+    assert_both_succeed("SELECT 'a' || 'b'", "string_concat_operator");
+    assert_both_succeed(
         "SELECT first_name || ' ' || last_name FROM users",
         "string_concat_operator",
     );
@@ -335,7 +336,7 @@ fn test_gap_pattern_detection() {
         "SELECT data->>'name' FROM t",
         "smelt_fails"
     ));
-    assert!(gaps::is_known_gap("SELECT 'a' || 'b'", "smelt_fails"));
+    // string_concat_operator gap removed - || is now supported (January 2026)
     assert!(gaps::is_known_gap("SELECT a, b, FROM t", "pg_fails"));
 }
 

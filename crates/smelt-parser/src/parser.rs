@@ -855,11 +855,13 @@ impl<'a> Parser<'a> {
     fn parse_additive_expr(&mut self) {
         self.parse_multiplicative_expr();
 
+        self.skip_trivia();
         while self.at_any(&[PLUS, MINUS]) {
             self.start_node(BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_multiplicative_expr();
+            self.skip_trivia();
             self.finish_node();
         }
     }
@@ -867,11 +869,13 @@ impl<'a> Parser<'a> {
     fn parse_multiplicative_expr(&mut self) {
         self.parse_unary_expr();
 
+        self.skip_trivia();
         while self.at_any(&[STAR, DIVIDE]) {
             self.start_node(BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_unary_expr();
+            self.skip_trivia();
             self.finish_node();
         }
     }
@@ -1193,53 +1197,44 @@ impl<'a> Parser<'a> {
         }
 
         // Check for named parameter: IDENT => expression
-        // Allow keywords to be used as parameter names (e.g., filter => ...)
-        if self.at(IDENT) || self.current().is_keyword() {
-            // Look ahead to check for ARROW
-            let checkpoint = self.builder.checkpoint();
+        // Use lookahead to check without consuming the identifier first
+        if (self.at(IDENT) || self.current().is_keyword()) && self.is_named_parameter() {
+            // It's a named parameter
+            self.start_node(NAMED_PARAM);
             self.advance(); // consume IDENT or keyword
             self.skip_trivia();
-
-            if self.at(ARROW) {
-                // It's a named parameter
-                self.start_node_at(checkpoint, NAMED_PARAM);
-                self.advance(); // consume ARROW
-                self.skip_trivia();
-                self.parse_expression();
-                self.finish_node();
-            } else {
-                // Not a named parameter, need to parse the rest as expression
-                // The IDENT is already consumed, continue parsing expression from here
-                self.skip_trivia();
-
-                // Handle cases where IDENT might be followed by operators or function calls
-                if self.at(LPAREN) {
-                    // Function call - wrap in FUNCTION_CALL
-                    self.start_node_at(checkpoint, FUNCTION_CALL);
-                    self.parse_arg_list();
-                    self.parse_filter_clause_if_present(); // PostgreSQL FILTER clause
-                    self.finish_node();
-                } else if self.at(DOT) {
-                    // Qualified name or namespaced function
-                    self.advance();
-                    self.skip_trivia();
-                    self.expect(IDENT);
-                    self.skip_trivia();
-
-                    if self.at(LPAREN) {
-                        // Namespaced function call
-                        self.start_node_at(checkpoint, FUNCTION_CALL);
-                        self.parse_arg_list();
-                        self.parse_filter_clause_if_present(); // PostgreSQL FILTER clause
-                        self.finish_node();
-                    }
-                }
-                // Otherwise, the IDENT alone is the expression (already consumed)
-            }
+            self.advance(); // consume ARROW
+            self.skip_trivia();
+            self.parse_expression();
+            self.finish_node();
         } else {
-            // Not starting with IDENT, parse as regular expression
+            // Regular expression argument - parse as full expression
+            // This handles: identifiers, literals, function calls, binary expressions, etc.
             self.parse_expression();
         }
+    }
+
+    /// Check if current position starts a named parameter (IDENT => ...)
+    /// Uses lookahead without consuming tokens
+    fn is_named_parameter(&self) -> bool {
+        // We know we're at IDENT or keyword, check what comes after
+        // Need to skip ahead past the current token and any whitespace to find ARROW
+        let mut lookahead = 1; // Skip current token
+
+        // Skip whitespace tokens
+        while let Some(token) = self.tokens.get(self.pos + lookahead) {
+            if token.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Check if next non-trivia token is ARROW
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == ARROW)
+            .unwrap_or(false)
     }
 
     // ===== Phase 12: Window Function Support =====
@@ -2509,5 +2504,60 @@ LIMIT 100
         let input = "SELECT prefix || name || suffix FROM t";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
+    }
+
+    // Expression in function argument tests
+
+    #[test]
+    fn test_expr_in_function_add() {
+        // Binary expression inside function call
+        let input = "SELECT func(a + b) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_expr_in_function_subtract() {
+        let input = "SELECT func(a - b) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_expr_in_function_multiply() {
+        let input = "SELECT COUNT(id * 2) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_expr_in_function_coalesce() {
+        let input = "SELECT COALESCE(a, b + c) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_expr_in_function_complex() {
+        // Multiple expressions in function call
+        let input = "SELECT func(a + b, c * d, e - f) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_expr_in_function_with_named_param() {
+        // Mix of expressions and named parameters
+        let input = "SELECT smelt.ref('table', filter => a + b > 10) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_expr_in_function_number_plus_ident() {
+        // Binary expression starting with number in function call
+        let input = "SELECT COUNT(0 + a) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
     }
 }

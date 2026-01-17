@@ -15,3 +15,7 @@ cc ba8700fee779cfc041b9873363f51c4be2a02a697197ef9eabe2b97f8b81ee1a # shrinks to
 cc 06ffe0177960637f0e92b634d788279d93ed8b7ed2cfac5def2cfb95dae14fa7 # shrinks to sql = "WITH a AS (SELECT a FROM do) SELECT * FROM a"
 cc cc59bb65805b15b8f4a221f2fc28af30fa466f1655360976be8ba4d325b17807 # shrinks to sql = "SELECT a, ROW_NUMBER() OVER (PARTITION BY to ORDER BY a) FROM a"
 cc eba451144187eaee721bf52288c0896d0467eaf23c00b79b257d450a302334df # shrinks to sql = "SELECT a FROM a WHERE a = a AND a <> a"
+cc 9022dca9863f5ad9ff12c0e7b6f495e5c166badc954b559e1996111914292880 # shrinks to sql = "SELECT COUNT(0 + a) AS a FROM a"
+cc 8156d5c4ac2b892ba5af85f58f9af2f2552b7e3c3ba61956da238aa5ca594d2b # shrinks to sql = "SELECT COUNT(0 + a) FROM a"
+cc c1480d21a745fc9966c44e030be1bd8fb7ec97d708f0396085f9afbeed8f079b # shrinks to sql = "SELECT CASE WHEN a = a THEN a ELSE * END AS a FROM a"
+cc d91bff1f787866328334ae24f39a8974e679a746d77ddcd93e933d8604d38878 # shrinks to sql = "SELECT a * * AS a FROM a"

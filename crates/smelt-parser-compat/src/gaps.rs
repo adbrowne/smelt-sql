@@ -105,14 +105,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         planned_fix: false,
     },
     // ===== Parser limitations =====
-    KnownGap {
-        id: "expr_in_function",
-        description: "Expressions inside function calls: func(a + b)",
-        category: "smelt_fails",
-        patterns: &[r"\w+\s*\([^)]*[+\-*/][^)]*\)"],
-        severity: "high",
-        planned_fix: true,
-    },
+    // expr_in_function gap removed - expressions in function args now supported (January 2026)
     // not_equal_operator gap removed - <> is now supported (January 2026)
     // ===== Printer limitations =====
     // These are issues with smelt-parser's printer, not parsing capability
@@ -313,10 +306,18 @@ mod tests {
 
     #[test]
     fn test_gaps_by_severity() {
+        // Check that get_gaps_by_severity filters correctly
+        // Note: All high-severity gaps have been fixed (January 2026)
         let high = get_gaps_by_severity("high");
-        assert!(!high.is_empty());
         for gap in high {
             assert_eq!(gap.severity, "high");
+        }
+
+        // Medium severity gaps should still exist
+        let medium = get_gaps_by_severity("medium");
+        assert!(!medium.is_empty());
+        for gap in medium {
+            assert_eq!(gap.severity, "medium");
         }
     }
 }
