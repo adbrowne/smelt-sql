@@ -117,14 +117,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // ===== Printer limitations =====
     // These are issues with smelt-parser's printer, not parsing capability
     // union_all_printing gap removed - UNION ALL printing fixed (January 2026)
-    KnownGap {
-        id: "nulls_ordering_printing",
-        description: "Printer drops NULLS FIRST/LAST from ORDER BY",
-        category: "fingerprint_mismatch",
-        patterns: &[r"(?i)\bNULLS\s+(FIRST|LAST)\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // nulls_ordering_printing gap removed - NULLS FIRST/LAST printing fixed (January 2026)
     KnownGap {
         id: "star_in_expression",
         description: "smelt accepts * in expressions/comparisons which PostgreSQL rejects",

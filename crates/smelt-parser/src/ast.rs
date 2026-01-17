@@ -1223,13 +1223,17 @@ impl OrderByItem {
             .filter_map(|e| e.into_token())
             .collect();
 
-        for i in 0..tokens.len() {
-            if tokens[i].kind() == NULLS_KW && i + 1 < tokens.len() {
-                return match tokens[i + 1].kind() {
-                    FIRST_KW => Some(NullOrdering::First),
-                    LAST_KW => Some(NullOrdering::Last),
-                    _ => None,
-                };
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind() == NULLS_KW {
+                // Skip whitespace to find FIRST or LAST
+                for next_token in &tokens[i + 1..] {
+                    match next_token.kind() {
+                        WHITESPACE | COMMENT => continue,
+                        FIRST_KW => return Some(NullOrdering::First),
+                        LAST_KW => return Some(NullOrdering::Last),
+                        _ => break,
+                    }
+                }
             }
         }
         None

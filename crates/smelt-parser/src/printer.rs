@@ -723,4 +723,15 @@ mod tests {
     fn test_union_round_trip() {
         assert_round_trip("SELECT id FROM a UNION SELECT id FROM b");
     }
+
+    // NULLS FIRST/LAST printing tests
+    #[test]
+    fn test_nulls_first_round_trip() {
+        assert_round_trip("SELECT * FROM t ORDER BY name NULLS FIRST");
+    }
+
+    #[test]
+    fn test_nulls_last_round_trip() {
+        assert_round_trip("SELECT * FROM t ORDER BY name DESC NULLS LAST");
+    }
 }
