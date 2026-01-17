@@ -72,6 +72,12 @@ fn is_keyword(s: &str) -> bool {
         "exists",
         "using",
         "lateral",
+        // PostgreSQL reserved words that are short identifiers
+        "do",
+        "to",
+        "if",
+        "no",
+        "of",
     ];
     KEYWORDS.contains(&s.to_lowercase().as_str())
 }
@@ -106,12 +112,9 @@ pub fn string_literal() -> impl Strategy<Value = String> {
 
 /// Generate a simple expression (column or literal)
 pub fn simple_expr() -> impl Strategy<Value = String> {
-    prop_oneof![
-        column_name(),
-        numeric_literal(),
-        string_literal(),
-        Just("*".to_string()),
-    ]
+    // Note: Don't include "*" here as it's only valid in SELECT list or COUNT(*)
+    // PostgreSQL rejects * in expressions like "a + *" or "* = a"
+    prop_oneof![column_name(), numeric_literal(), string_literal(),]
 }
 
 /// Generate a comparison operator

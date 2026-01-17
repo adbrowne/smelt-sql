@@ -117,11 +117,51 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         category: "smelt_accepts_invalid",
         patterns: &[
             r"(?i)\bCAST\s*\(\s*\*",
-            r"\*\s*[=<>!+\-]",
+            r"\*\s+[+\-/]", // * followed by space then operator
+            r"\*\s*[=<>!]", // * followed by comparison operator
             r"[=<>!+\-]\s*\*",
             r"\(\s*\*\s*[+\-*/]",
+            r"\*\s*\*",                     // a * * - star followed by star
+            r"[+\-/]\s*\*",                 // a + * or a / * - operator followed by star
+            r"(?i)COALESCE\s*\(\s*\*\s*\)", // COALESCE(*) - star in non-count function
+            r"(?i)NULLIF\s*\(\s*\*",        // NULLIF(*) - star in function
+            r"\*\s+AS\s+",                  // * AS alias - can't alias star directly
+            r"(?i)\bELSE\s+\*",             // ELSE * in CASE
+            r"(?i)\bTHEN\s+\*",             // THEN * in CASE
+            r"(?i)\bWHEN\s+\*",             // WHEN * in CASE
         ],
         severity: "low",
+        planned_fix: true,
+    },
+    KnownGap {
+        id: "reserved_keyword_as_identifier",
+        description: "smelt accepts PostgreSQL reserved keywords as identifiers",
+        category: "smelt_accepts_invalid",
+        patterns: &[
+            // PostgreSQL reserved words: do, to, in, end, etc.
+            // Match these when used as identifiers (not part of valid SQL syntax)
+            // Note: These patterns are broad - they catch places where these keywords
+            // appear in identifier positions
+            r"(?i)SELECT\s+do\b",
+            r"(?i)SELECT\s+to\b",
+            r"(?i),\s*do\b",
+            r"(?i),\s*to\b",
+            r"(?i)\bFROM\s+do\b",
+            r"(?i)\bFROM\s+to\b",
+            r"(?i)\bJOIN\s+do\b",
+            r"(?i)\bJOIN\s+to\b",
+            r"(?i)\bBY\s+do\b",
+            r"(?i)\bBY\s+to\b",
+            r"(?i)=\s*do\b",
+            r"(?i)=\s*to\b",
+            r"(?i)\bAS\s+do\b",
+            r"(?i)\bAS\s+to\b",
+            r"(?i)\bAND\s+do\b",
+            r"(?i)\bAND\s+to\b",
+            r"(?i)\bOR\s+do\b",
+            r"(?i)\bOR\s+to\b",
+        ],
+        severity: "medium",
         planned_fix: true,
     },
     KnownGap {
@@ -278,6 +318,27 @@ mod tests {
     fn test_is_known_gap_trailing_comma() {
         // Trailing comma is a pg_fails gap (smelt accepts, pg rejects)
         assert!(is_known_gap("SELECT a, b, FROM t", "pg_fails"));
+    }
+
+    #[test]
+    fn test_star_in_expression_patterns() {
+        // Test that star_in_expression patterns work
+        assert!(is_known_gap("SELECT * + a FROM t", "smelt_accepts_invalid"));
+        assert!(is_known_gap("SELECT * / a FROM t", "smelt_accepts_invalid"));
+        assert!(is_known_gap("SELECT * - a FROM t", "smelt_accepts_invalid"));
+        assert!(is_known_gap("SELECT a * * FROM t", "smelt_accepts_invalid"));
+        assert!(is_known_gap(
+            "SELECT COUNT(a + *) AS a FROM a",
+            "smelt_accepts_invalid"
+        ));
+        assert!(is_known_gap(
+            "SELECT a FROM a WHERE * = a",
+            "smelt_accepts_invalid"
+        ));
+        assert!(is_known_gap(
+            "SELECT a FROM a WHERE a = *",
+            "smelt_accepts_invalid"
+        ));
     }
 
     #[test]
