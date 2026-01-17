@@ -96,6 +96,11 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 NE
             }
+            '<' if self.peek_char() == Some('>') => {
+                self.advance();
+                self.advance();
+                NE // <> is not-equal, same as !=
+            }
             '<' if self.peek_char() == Some('=') => {
                 self.advance();
                 self.advance();
@@ -118,6 +123,11 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 self.advance();
                 DOUBLE_COLON
+            }
+            '|' if self.peek_char() == Some('|') => {
+                self.advance();
+                self.advance();
+                CONCAT
             }
 
             // Strings
@@ -306,6 +316,24 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_not_equal_operators() {
+        // Test != operator
+        let tokens = tokenize("a != b");
+        assert_eq!(tokens[2].kind, NE);
+
+        // Test <> operator (PostgreSQL-style)
+        let tokens = tokenize("a <> b");
+        assert_eq!(tokens[2].kind, NE);
+    }
+
+    #[test]
+    fn test_concat_operator() {
+        // Test || string concatenation operator
+        let tokens = tokenize("'a' || 'b'");
+        assert_eq!(tokens[2].kind, CONCAT);
+    }
 
     #[test]
     fn test_basic_sql() {

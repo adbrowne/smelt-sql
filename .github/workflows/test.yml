@@ -55,6 +55,11 @@ jobs:
         env:
           PROPTEST_CASES: 100
 
+      - name: Run PostgreSQL compatibility tests (quick)
+        run: cargo test -p smelt-parser-compat --test parse_equivalence -- --test-threads=1
+        env:
+          PROPTEST_CASES: 100
+
   fuzz-build:
     name: Fuzz Targets Build Check
     runs-on: ubuntu-latest
