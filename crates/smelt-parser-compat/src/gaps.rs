@@ -116,14 +116,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // not_equal_operator gap removed - <> is now supported (January 2026)
     // ===== Printer limitations =====
     // These are issues with smelt-parser's printer, not parsing capability
-    KnownGap {
-        id: "union_all_printing",
-        description: "Printer drops ALL from UNION ALL",
-        category: "fingerprint_mismatch",
-        patterns: &[r"(?i)\bUNION\s+ALL\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // union_all_printing gap removed - UNION ALL printing fixed (January 2026)
     KnownGap {
         id: "nulls_ordering_printing",
         description: "Printer drops NULLS FIRST/LAST from ORDER BY",

@@ -500,9 +500,16 @@ fn has_union_all(node: &SyntaxNode) -> bool {
         .filter_map(|e| e.into_token())
         .collect();
 
-    for i in 0..tokens.len() {
-        if tokens[i].kind() == UNION_KW && i + 1 < tokens.len() && tokens[i + 1].kind() == ALL_KW {
-            return true;
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() == UNION_KW {
+            // Skip whitespace to find next meaningful token
+            for next_token in &tokens[i + 1..] {
+                match next_token.kind() {
+                    WHITESPACE | COMMENT => continue,
+                    ALL_KW => return true,
+                    _ => break,
+                }
+            }
         }
     }
     false
@@ -704,5 +711,16 @@ mod tests {
     #[test]
     fn test_mixed_case_and_or() {
         assert_round_trip("SELECT * FROM users WHERE a = 1 AnD b = 2 oR c = 3");
+    }
+
+    // UNION ALL printing test
+    #[test]
+    fn test_union_all_round_trip() {
+        assert_round_trip("SELECT id FROM a UNION ALL SELECT id FROM b");
+    }
+
+    #[test]
+    fn test_union_round_trip() {
+        assert_round_trip("SELECT id FROM a UNION SELECT id FROM b");
     }
 }
