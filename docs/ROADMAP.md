@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**PostgreSQL Compatibility Testing (January 17, 2026)**: Property-based testing infrastructure added to verify parser compatibility with PostgreSQL. New `smelt-parser-compat` crate with pg_query integration, gap tracking, and CI workflows.
+
 **Table Alias Autocomplete (January 17, 2026)**: LSP now provides column completions when typing `t.` where `t` is a table alias (e.g., `FROM smelt.source('raw.users') t`).
 
 **Type System Complete (January 16, 2026)**: Full type system implementation with smelt-types crate, TypeChecking Salsa queries, and LSP integration showing types in hover and completion.
@@ -534,6 +536,116 @@ All 261 tests passing:
 - Others (backend, datagen, types)
 
 Cargo clippy passes with no warnings.
+
+---
+
+## ✅ Phase 20: PostgreSQL Compatibility Testing (COMPLETED)
+
+**Completed**: January 17, 2026
+
+### Goal
+
+Add property-based testing infrastructure to ensure smelt's SQL dialect can handle PostgreSQL SELECT queries correctly, with:
+- Parse tree matching: Generate SQL, parse with both smelt and pg_query, verify equivalence
+- Type checking: Verify smelt's (future) type inference matches PostgreSQL's actual types
+- Known gap tracking: Document and track intentional divergences from PostgreSQL
+
+### What Was Implemented
+
+- **New crate**: `crates/smelt-parser-compat/`
+  - `pg_query` integration for PostgreSQL parser comparison (vendored libpg_query)
+  - Fingerprint-based semantic equivalence checking
+  - Gap tracking infrastructure with regex patterns
+
+- **PostgreSQL grammar generators** (`src/pg_generators.rs`)
+  - 30+ proptest strategies for generating valid PostgreSQL SELECT queries
+  - Generators for simple SELECT, JOIN, GROUP BY, CTE, window functions, etc.
+  - Gap-triggering generators for known unsupported syntax
+
+- **Gap tracking system** (`src/gaps.rs`)
+  - `KnownGap` struct with id, description, category, patterns, severity, planned_fix
+  - 20+ documented gaps organized by category:
+    - `smelt_fails`: PostgreSQL features not yet in smelt (array subscripts, JSON operators, LIKE, etc.)
+    - `pg_fails`: smelt extensions not in PostgreSQL (smelt.ref, smelt.source, named parameters)
+    - `fingerprint_mismatch`: Semantic differences (intentional divergences)
+  - Pattern matching with compiled regex for efficient gap detection
+  - `GapSummary` for high-level statistics
+
+- **Parse equivalence tests** (`tests/parse_equivalence.rs`)
+  - Property tests with 500+ cases by default
+  - Properties: smelt_valid_implies_pg_valid, pg_valid_implies_smelt_valid, semantic_equivalence
+  - Tests for all query types: simple SELECT, JOIN, CTE, window functions, CASE, CAST, etc.
+  - Explicit unit tests for common SQL patterns
+
+- **Type checking tests** (`tests/type_checking.rs`)
+  - testcontainers-based PostgreSQL integration
+  - Tests for aggregate types, CAST types, expression types, window function types
+  - Placeholder for future smelt type inference comparison
+  - Tests are `#[ignore]` by default (require Docker)
+
+- **Known gaps tests** (`tests/known_gaps.rs`)
+  - Explicit tests for each documented gap category
+  - Tests verifying gap pattern detection
+  - Tests confirming which syntax works in both parsers
+
+- **CI integration**
+  - Updated `test.yml` to include pg-compat tests (100 cases for quick feedback)
+  - New `pg-compat.yml` workflow:
+    - Parse equivalence tests (500 cases on every push/PR)
+    - Extended tests (2000 cases nightly)
+    - Type checking tests (when labeled `run-docker-tests`)
+    - Gap report generation on main branch pushes
+
+### Known Parser Gaps (Documented)
+
+**High severity (planned fix):**
+- String concatenation operator (`||`)
+- LIKE/ILIKE/SIMILAR TO operators
+
+**Medium severity (planned fix):**
+- Array subscripts (`arr[1]`)
+- JSON operators (`->`, `->>`, etc.)
+- Array literals (`ARRAY[1, 2, 3]`)
+- INTERSECT/EXCEPT set operations
+- Interval literals (`INTERVAL '1 day'`)
+- Type-qualified literals (`DATE '2024-01-01'`)
+- VALUES clause
+- ANY/ALL/SOME array comparisons
+
+**Low severity:**
+- GROUPING SETS, CUBE, ROLLUP
+- Pattern matching operators (`~`, `~*`, etc.)
+- ROW constructor
+- NATURAL JOIN
+- AT TIME ZONE
+- FETCH FIRST/NEXT
+- FOR UPDATE/SHARE
+
+**Intentional divergences (smelt extensions):**
+- `smelt.ref()` function
+- `smelt.source()` function
+- Named parameters with `=>` syntax
+- Trailing commas (DuckDB-friendly)
+
+### Files Created
+
+- `crates/smelt-parser-compat/Cargo.toml`
+- `crates/smelt-parser-compat/src/lib.rs`
+- `crates/smelt-parser-compat/src/gaps.rs`
+- `crates/smelt-parser-compat/src/normalize.rs`
+- `crates/smelt-parser-compat/src/pg_generators.rs`
+- `crates/smelt-parser-compat/tests/parse_equivalence.rs`
+- `crates/smelt-parser-compat/tests/type_checking.rs`
+- `crates/smelt-parser-compat/tests/known_gaps.rs`
+- `.github/workflows/pg-compat.yml`
+
+### Files Modified
+
+- `.github/workflows/test.yml` - Added pg-compat test step
+
+### Test Results
+
+The test suite establishes baseline compatibility and documents known gaps. Property tests run 500 cases by default, with 2000 cases in nightly extended runs.
 
 ---
 

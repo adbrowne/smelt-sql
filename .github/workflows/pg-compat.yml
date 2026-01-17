@@ -1,0 +1,163 @@
+name: PostgreSQL Compatibility
+
+on:
+  push:
+    branches: [main, feature/*]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run nightly at 3am UTC for extended tests
+    - cron: "0 3 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  parse-equivalence:
+    name: Parse Equivalence Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pg-compat-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build smelt-parser-compat
+        run: cargo build -p smelt-parser-compat
+
+      - name: Run parse equivalence tests (500 cases)
+        run: cargo test -p smelt-parser-compat --test parse_equivalence
+        env:
+          PROPTEST_CASES: 500
+
+      - name: Run known gaps tests
+        run: cargo test -p smelt-parser-compat --test known_gaps
+
+  parse-equivalence-extended:
+    name: Extended Parse Equivalence (Nightly)
+    runs-on: ubuntu-latest
+    # Only run on schedule (nightly) or when explicitly labeled
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-extended-tests')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pg-compat-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build smelt-parser-compat
+        run: cargo build -p smelt-parser-compat
+
+      - name: Run extended parse equivalence tests (2000 cases)
+        run: cargo test -p smelt-parser-compat --test parse_equivalence
+        env:
+          PROPTEST_CASES: 2000
+
+  type-checking:
+    name: Type Checking Tests
+    runs-on: ubuntu-latest
+    # Only run when specifically requested or on schedule
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pg-compat-docker-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build smelt-parser-compat
+        run: cargo build -p smelt-parser-compat
+
+      - name: Run type checking tests
+        run: cargo test -p smelt-parser-compat --test type_checking -- --ignored
+        env:
+          # Use the service container
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+
+  gap-report:
+    name: Generate Gap Report
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pg-compat-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build smelt-parser-compat
+        run: cargo build -p smelt-parser-compat
+
+      - name: Run gap summary test
+        run: cargo test -p smelt-parser-compat --test known_gaps test_gap_summary -- --nocapture
+
+      - name: Run gap tests and capture output
+        run: |
+          echo "## Parser Gap Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Generated on $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cargo test -p smelt-parser-compat --test known_gaps test_gap_summary -- --nocapture 2>&1 | tee gap_output.txt
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat gap_output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
