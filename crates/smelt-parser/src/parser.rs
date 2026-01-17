@@ -745,7 +745,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison_expr(&mut self) {
-        self.parse_additive_expr();
+        self.parse_concat_expr();
 
         loop {
             self.skip_trivia();
@@ -753,7 +753,7 @@ impl<'a> Parser<'a> {
                 self.start_node(BINARY_EXPR);
                 self.advance();
                 self.skip_trivia();
-                self.parse_additive_expr();
+                self.parse_concat_expr();
                 self.finish_node();
             } else if self.at(IS_KW) {
                 // IS [NOT] NULL
@@ -838,6 +838,18 @@ impl<'a> Parser<'a> {
 
         self.expect(RPAREN);
         self.finish_node();
+    }
+
+    fn parse_concat_expr(&mut self) {
+        self.parse_additive_expr();
+
+        while self.at(CONCAT) {
+            self.start_node(BINARY_EXPR);
+            self.advance();
+            self.skip_trivia();
+            self.parse_additive_expr();
+            self.finish_node();
+        }
     }
 
     fn parse_additive_expr(&mut self) {
@@ -2471,6 +2483,30 @@ LIMIT 100
     fn test_not_equal_operator_sql() {
         // Standard SQL also uses != for not-equal
         let input = "SELECT * FROM t WHERE a != b";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_string_concat_simple() {
+        // Basic string concatenation
+        let input = "SELECT 'a' || 'b' FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_string_concat_multiple() {
+        // Multiple concatenations
+        let input = "SELECT first_name || ' ' || last_name FROM users";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0);
+    }
+
+    #[test]
+    fn test_string_concat_with_column() {
+        // Concatenation with column references
+        let input = "SELECT prefix || name || suffix FROM t";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
     }

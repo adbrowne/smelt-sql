@@ -91,6 +91,7 @@ pub enum SyntaxKind {
     DIVIDE,       // /
     ARROW,        // => (named parameter)
     DOUBLE_COLON, // :: (PostgreSQL cast operator)
+    CONCAT,       // || (string concatenation)
 
     // Literals & identifiers
     STRING,     // 'value' or "value"

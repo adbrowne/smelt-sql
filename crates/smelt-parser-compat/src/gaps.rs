@@ -83,14 +83,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         severity: "low",
         planned_fix: true,
     },
-    KnownGap {
-        id: "string_concat_operator",
-        description: "String concatenation operator: ||",
-        category: "smelt_fails",
-        patterns: &[r"\|\|"],
-        severity: "high",
-        planned_fix: true,
-    },
+    // string_concat_operator gap removed - || is now supported (January 2026)
     KnownGap {
         id: "any_all_some",
         description: "ANY/ALL/SOME array comparisons",
@@ -306,14 +299,6 @@ mod tests {
     fn test_is_known_gap_trailing_comma() {
         // Trailing comma is a pg_fails gap (smelt accepts, pg rejects)
         assert!(is_known_gap("SELECT a, b, FROM t", "pg_fails"));
-    }
-
-    #[test]
-    fn test_is_known_gap_string_concat() {
-        assert!(is_known_gap(
-            "SELECT 'hello' || ' ' || 'world'",
-            "smelt_fails"
-        ));
     }
 
     #[test]

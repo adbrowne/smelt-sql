@@ -124,6 +124,11 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 DOUBLE_COLON
             }
+            '|' if self.peek_char() == Some('|') => {
+                self.advance();
+                self.advance();
+                CONCAT
+            }
 
             // Strings
             '\'' | '"' => self.consume_string(c),
@@ -321,6 +326,13 @@ mod tests {
         // Test <> operator (PostgreSQL-style)
         let tokens = tokenize("a <> b");
         assert_eq!(tokens[2].kind, NE);
+    }
+
+    #[test]
+    fn test_concat_operator() {
+        // Test || string concatenation operator
+        let tokens = tokenize("'a' || 'b'");
+        assert_eq!(tokens[2].kind, CONCAT);
     }
 
     #[test]
