@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# temporary cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc de9a7f49cbb66b57796b69ba0d573a8487c4d43c5aa7eee8c6ab9aa5b3834775 # shrinks to sql = "SELECT for FROM a"
