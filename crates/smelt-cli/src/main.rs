@@ -8,7 +8,9 @@ use smelt_cli::{
     executor, find_project_root, inject_time_filter, BackendType, Config, DependencyGraph,
     ModelDiscovery, SourceConfig, SqlCompiler, TimeRange,
 };
+use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[cfg(feature = "spark")]
 use smelt_backend_spark::SparkBackend;
@@ -25,6 +27,8 @@ struct Cli {
 enum Commands {
     /// Run models and materialize them in the target database
     Run(RunArgs),
+    /// Show column types for a model
+    Table(TableArgs),
 }
 
 #[derive(Parser)]
@@ -62,12 +66,27 @@ struct RunArgs {
     event_time_end: Option<String>,
 }
 
+#[derive(Parser)]
+struct TableArgs {
+    /// Name of the model to inspect
+    model_name: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Output format: table (default), json
+    #[arg(long, default_value = "table")]
+    format: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Run(args) => run(args).await,
+        Commands::Table(args) => table(args).await,
     }
 }
 
@@ -403,4 +422,130 @@ fn generate_partition_dates(start: &str, end: &str) -> Result<Vec<String>> {
     }
 
     Ok(dates)
+}
+
+async fn table(args: TableArgs) -> Result<()> {
+    // 1. Find project root
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    // 2. Load configuration and discover models
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    // 3. Initialize Salsa database (same pattern as LSP)
+    let mut db = smelt_db::Database::default();
+
+    // Load sources.yml
+    let sources_path = project_dir.join("sources.yml");
+    let sources_yaml = std::fs::read_to_string(&sources_path).unwrap_or_default();
+    db.set_sources_yaml(Arc::new(sources_yaml));
+
+    // Register all model files
+    let mut file_paths = Vec::new();
+    for model in &models {
+        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+        file_paths.push(model.path.clone());
+    }
+    db.set_all_files(Arc::new(file_paths));
+
+    // 4. Find the model path
+    let model = models
+        .iter()
+        .find(|m| m.name == args.model_name)
+        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", args.model_name))?;
+
+    // 5. Get typed schema
+    let schema = db.typed_model_schema(model.path.clone());
+
+    // 6. Output
+    match args.format.as_str() {
+        "json" => print_json(&schema, &args.model_name),
+        _ => print_table(&schema, &args.model_name),
+    }
+
+    Ok(())
+}
+
+fn print_table(schema: &ModelSchema, model_name: &str) {
+    println!("Model: {}\n", model_name);
+    println!("{:<30} {:<20} Nullable", "Column", "Type");
+    println!("{}", "-".repeat(60));
+
+    for col in &schema.columns {
+        // Skip wildcards
+        if col.name == "*" {
+            continue;
+        }
+
+        let (type_str, nullable) = match &col.data_type {
+            Some(t) => (
+                t.data_type.to_string(),
+                if t.nullable { "yes" } else { "no" },
+            ),
+            None => ("UNKNOWN".to_string(), "?"),
+        };
+
+        println!("{:<30} {:<20} {}", col.name, type_str, nullable);
+    }
+}
+
+fn print_json(schema: &ModelSchema, model_name: &str) {
+    use serde_json::{json, to_string_pretty};
+
+    let columns: Vec<_> = schema
+        .columns
+        .iter()
+        .filter(|col| col.name != "*")
+        .map(|col| {
+            let (data_type, nullable) = match &col.data_type {
+                Some(t) => (t.data_type.to_string(), t.nullable),
+                None => ("UNKNOWN".to_string(), true),
+            };
+
+            let source = match &col.source {
+                ColumnSource::FromModel {
+                    model_name,
+                    column_name,
+                } => json!({
+                    "type": "from_model",
+                    "model": model_name,
+                    "column": column_name
+                }),
+                ColumnSource::Computed => json!({
+                    "type": "computed",
+                    "expression": col.expression
+                }),
+                ColumnSource::Wildcard { model_name } => json!({
+                    "type": "wildcard",
+                    "model": model_name
+                }),
+                ColumnSource::ExternalTable { table_name } => json!({
+                    "type": "external_table",
+                    "table": table_name
+                }),
+                ColumnSource::Unknown => json!({ "type": "unknown" }),
+            };
+
+            json!({
+                "name": col.name,
+                "data_type": data_type,
+                "nullable": nullable,
+                "expression": col.expression,
+                "source": source
+            })
+        })
+        .collect();
+
+    let output = json!({
+        "model": model_name,
+        "columns": columns
+    });
+
+    println!("{}", to_string_pretty(&output).unwrap());
 }

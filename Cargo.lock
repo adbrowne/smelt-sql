@@ -3149,6 +3149,7 @@ dependencies = [
  "clap",
  "rowan",
  "serde",
+ "serde_json",
  "serde_yaml",
  "smelt-backend",
  "smelt-backend-duckdb",
