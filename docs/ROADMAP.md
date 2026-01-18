@@ -4,7 +4,7 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
-**Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.
+**Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, CASE expressions, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.
 
 **Parser Gap Fixes (January 18, 2026)**: Fixed 5 high/medium severity parser gaps discovered by PostgreSQL compatibility testing: `<>` operator, `||` string concatenation, UNION ALL printing, NULLS FIRST/LAST printing, and expressions in function arguments.
 
@@ -459,7 +459,6 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 
 - Type coercion warnings
 - Backend-specific types (HUGEINT for DuckDB, Spark types)
-- CASE expression type inference (union of THEN/ELSE types)
 - Subquery type inference
 - LSP quick-fixes for type errors
 
@@ -473,6 +472,7 @@ Added recursive type inference for functions that preserve argument types:
 - `Expr::as_binary()` method for binary expression detection
 
 **Type inference improvements** (`crates/smelt-db/src/type_inference.rs`):
+- **CASE expressions**: Infers type from first THEN expression (falls back to ELSE)
 - **MIN/MAX**: Now recursively infers argument type instead of returning Unknown
 - **COALESCE**: Infers type from first argument
 - **NULLIF**: Infers type from first argument (always nullable)
