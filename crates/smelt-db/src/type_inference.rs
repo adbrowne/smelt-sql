@@ -2,7 +2,7 @@
 ///
 /// This module provides type inference capabilities for SQL expressions,
 /// including literals, column references, CAST expressions, and aggregates.
-use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Expr, FunctionCall};
+use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Expr, FunctionCall, Subquery};
 use smelt_types::{parse_type, DataType, TypedColumn};
 use std::collections::HashMap;
 
@@ -116,6 +116,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_case_expr_type(&case_expr, ctx);
     }
 
+    // Try subquery (scalar subquery)
+    if let Some(subquery) = expr.as_subquery() {
+        return infer_subquery_type(&subquery, ctx);
+    }
+
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
@@ -175,6 +180,28 @@ fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<Typed
                 data_type: else_type.data_type,
                 nullable: true,
             });
+        }
+    }
+
+    None
+}
+
+/// Infer the type of a scalar subquery
+/// The result type is the type of the first column in the SELECT list
+fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedColumn> {
+    let select_stmt = subquery.select_stmt()?;
+    let select_list = select_stmt.select_list()?;
+
+    // Get the first select item and infer its type
+    if let Some(first_item) = select_list.items().next() {
+        if let Some(expr) = first_item.expression() {
+            if let Some(expr_type) = infer_expression_type(&expr, ctx) {
+                return Some(TypedColumn {
+                    data_type: expr_type.data_type,
+                    // Scalar subqueries are always nullable (could return no rows)
+                    nullable: true,
+                });
+            }
         }
     }
 
