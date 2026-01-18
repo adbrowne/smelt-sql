@@ -458,6 +458,185 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             nullable: true,
         }),
 
+        // Math functions - preserve numeric type or return specific type
+        "ABS" | "SIGN" => {
+            // Preserve argument type
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: arg_type.nullable,
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        "ROUND" | "TRUNC" | "TRUNCATE" => {
+            // Preserve argument type (might become Integer if precision is 0)
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: arg_type.nullable,
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        "CEIL" | "CEILING" | "FLOOR" => {
+            // These return the same numeric type (might be Integer for integer input)
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: arg_type.nullable,
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        "POWER" | "POW" | "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+
+        "MOD" => {
+            // MOD preserves integer types, returns Double for floats
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: true,
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Integer,
+                nullable: true,
+            })
+        }
+
+        // Trigonometric functions - always return Double
+        "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "SINH" | "COSH" | "TANH" => {
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        "PI" | "RANDOM" => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: false,
+        }),
+
+        // Date/time extraction - EXTRACT returns numeric
+        "EXTRACT" | "DATE_PART" => Some(TypedColumn {
+            data_type: DataType::Double, // PostgreSQL returns double precision
+            nullable: true,
+        }),
+
+        "MAKE_DATE" => Some(TypedColumn {
+            data_type: DataType::Date,
+            nullable: true,
+        }),
+
+        "MAKE_TIME" => Some(TypedColumn {
+            data_type: DataType::Time,
+            nullable: true,
+        }),
+
+        "MAKE_TIMESTAMP" | "MAKE_TIMESTAMPTZ" => Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: false,
+            },
+            nullable: true,
+        }),
+
+        "AGE" => Some(TypedColumn {
+            data_type: DataType::Interval,
+            nullable: true,
+        }),
+
+        // Additional string functions
+        "REPLACE" | "TRANSLATE" | "REVERSE" | "REPEAT" | "LPAD" | "RPAD" | "INITCAP"
+        | "QUOTE_IDENT" | "QUOTE_LITERAL" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        "LEFT" | "RIGHT" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        "POSITION" | "STRPOS" => Some(TypedColumn {
+            data_type: DataType::Integer,
+            nullable: true,
+        }),
+
+        "SPLIT_PART" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        // GREATEST/LEAST - type of first argument (all args should be same type)
+        "GREATEST" | "LEAST" => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: true, // Could be NULL if any arg is NULL
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            })
+        }
+
+        // Array aggregate
+        "ARRAY_AGG" => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: DataType::Array(Box::new(arg_type.data_type)),
+                        nullable: true,
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Array(Box::new(DataType::Unknown)),
+                nullable: true,
+            })
+        }
+
+        // String aggregates
+        "STRING_AGG" | "LISTAGG" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        // JSON functions (basic support)
+        "JSON_BUILD_OBJECT" | "JSON_BUILD_ARRAY" | "TO_JSON" | "TO_JSONB" | "ROW_TO_JSON" => {
+            Some(TypedColumn {
+                data_type: DataType::Text, // JSON stored as text
+                nullable: true,
+            })
+        }
+
         // Default - unknown function type
         _ => None,
     }
@@ -1059,9 +1238,10 @@ mod tests {
         assert!(matches!(sum_type.data_type, DataType::Decimal { .. }));
     }
 
-    // Helper for testing aggregate functions without AST
+    // Helper for testing function types without AST
     fn infer_function_type_by_name(name: &str, _ctx: &TypeContext) -> Option<TypedColumn> {
         match name.to_uppercase().as_str() {
+            // Aggregate functions
             "COUNT" => Some(TypedColumn {
                 data_type: DataType::BigInt,
                 nullable: false,
@@ -1075,6 +1255,47 @@ mod tests {
                     precision: 38,
                     scale: 10,
                 },
+                nullable: true,
+            }),
+            // Math functions
+            "SQRT" | "POWER" | "POW" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" => {
+                Some(TypedColumn {
+                    data_type: DataType::Double,
+                    nullable: true,
+                })
+            }
+            "PI" | "RANDOM" => Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: false,
+            }),
+            "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" => Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            }),
+            // Date/time functions
+            "EXTRACT" | "DATE_PART" => Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            }),
+            "MAKE_DATE" => Some(TypedColumn {
+                data_type: DataType::Date,
+                nullable: true,
+            }),
+            "AGE" => Some(TypedColumn {
+                data_type: DataType::Interval,
+                nullable: true,
+            }),
+            // String functions
+            "REPLACE" | "SPLIT_PART" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" => Some(TypedColumn {
+                data_type: DataType::Text,
+                nullable: true,
+            }),
+            "POSITION" | "STRPOS" => Some(TypedColumn {
+                data_type: DataType::Integer,
+                nullable: true,
+            }),
+            "STRING_AGG" | "LISTAGG" => Some(TypedColumn {
+                data_type: DataType::Text,
                 nullable: true,
             }),
             _ => None,
@@ -1159,5 +1380,48 @@ mod tests {
         let result = ctx.lookup_column(None, "amount");
         assert!(result.is_some());
         assert_eq!(result.unwrap().data_type, DataType::BigInt);
+    }
+
+    #[test]
+    fn test_extended_function_types() {
+        let ctx = TypeContext::new();
+
+        // Math functions
+        let sqrt = infer_function_type_by_name("SQRT", &ctx).unwrap();
+        assert_eq!(sqrt.data_type, DataType::Double);
+
+        let power = infer_function_type_by_name("POWER", &ctx).unwrap();
+        assert_eq!(power.data_type, DataType::Double);
+
+        let pi = infer_function_type_by_name("PI", &ctx).unwrap();
+        assert_eq!(pi.data_type, DataType::Double);
+        assert!(!pi.nullable); // PI is never null
+
+        let sin = infer_function_type_by_name("SIN", &ctx).unwrap();
+        assert_eq!(sin.data_type, DataType::Double);
+
+        // Date/time functions
+        let extract = infer_function_type_by_name("EXTRACT", &ctx).unwrap();
+        assert_eq!(extract.data_type, DataType::Double);
+
+        let make_date = infer_function_type_by_name("MAKE_DATE", &ctx).unwrap();
+        assert_eq!(make_date.data_type, DataType::Date);
+
+        let age = infer_function_type_by_name("AGE", &ctx).unwrap();
+        assert_eq!(age.data_type, DataType::Interval);
+
+        // String functions
+        let replace = infer_function_type_by_name("REPLACE", &ctx).unwrap();
+        assert_eq!(replace.data_type, DataType::Text);
+
+        let position = infer_function_type_by_name("POSITION", &ctx).unwrap();
+        assert_eq!(position.data_type, DataType::Integer);
+
+        let split_part = infer_function_type_by_name("SPLIT_PART", &ctx).unwrap();
+        assert_eq!(split_part.data_type, DataType::Text);
+
+        // String aggregate
+        let string_agg = infer_function_type_by_name("STRING_AGG", &ctx).unwrap();
+        assert_eq!(string_agg.data_type, DataType::Text);
     }
 }

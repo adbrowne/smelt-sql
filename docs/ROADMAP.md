@@ -480,6 +480,31 @@ The following SQL features are supported by the parser but not yet handled by th
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
 
+### ✅ Phase 18j: Extended Function Type Inference (January 18, 2026)
+
+Added type inference for 50+ additional SQL functions across math, date/time, string, and aggregate categories.
+
+**Math functions** (`crates/smelt-db/src/type_inference.rs`):
+- Preserve argument type: `ABS`, `SIGN`, `ROUND`, `TRUNC`, `CEIL`, `FLOOR`, `MOD`
+- Return Double: `POWER`, `SQRT`, `EXP`, `LN`, `LOG`, `LOG10`, `LOG2`
+- Trigonometric: `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`, `SINH`, `COSH`, `TANH`
+- Constants: `PI`, `RANDOM` (non-nullable)
+
+**Date/time functions**:
+- `EXTRACT`, `DATE_PART` → Double
+- `MAKE_DATE` → Date, `MAKE_TIME` → Time, `MAKE_TIMESTAMP` → Timestamp
+- `AGE` → Interval
+
+**String functions**:
+- Text output: `REPLACE`, `TRANSLATE`, `REVERSE`, `REPEAT`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `SPLIT_PART`, `INITCAP`, `QUOTE_IDENT`, `QUOTE_LITERAL`
+- Integer output: `POSITION`, `STRPOS`
+
+**Aggregate/special functions**:
+- `GREATEST`, `LEAST` → preserve first argument type
+- `ARRAY_AGG` → Array of argument type
+- `STRING_AGG`, `LISTAGG` → Text
+- JSON functions (basic): `JSON_BUILD_OBJECT`, `TO_JSON`, etc. → Text
+
 ### ✅ Phase 18i: FILTER Clause Awareness (January 18, 2026)
 
 Aggregate functions with FILTER clauses now have proper AST support and type inference works correctly.
