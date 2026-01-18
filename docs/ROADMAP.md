@@ -468,7 +468,7 @@ The following SQL features are supported by the parser but not yet handled by th
 **High Priority:**
 - ✅ **BETWEEN/IN/EXISTS type inference** - Returns Boolean (January 18, 2026)
 - ✅ **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type) (January 18, 2026)
-- **UNION type inference** - Combined result type from multiple SELECT statements
+- ✅ **UNION type inference** - Combined result type from multiple SELECT statements (January 18, 2026)
 
 **Medium Priority:**
 - **JOIN column tracking** - Columns from joined tables not fully available
@@ -479,6 +479,36 @@ The following SQL features are supported by the parser but not yet handled by th
 - ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18f: UNION Type Inference (January 18, 2026)
+
+Added type inference for UNION and UNION ALL queries. Types from all branches are combined using type promotion.
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `SelectStmt::has_union()` - Check if SELECT has a UNION clause
+- `SelectStmt::is_union_all()` - Check if UNION is UNION ALL
+- `SelectStmt::union_select()` - Get the SELECT statement after UNION
+
+**Type inference** (`crates/smelt-db/src/type_inference.rs`):
+- `promote_types()` - Combine two types to the widest compatible type
+  - Numeric promotion: SmallInt < Integer < BigInt < Decimal < Double
+  - String types unify to Text
+  - Timestamp types prefer timezone-aware if either has it
+  - Unknown is dominated by any known type
+- `infer_select_column_types()` - Infer types for SELECT, recursively handling UNION
+  - Combines types from all UNION branches using promotion
+  - Supports chained UNIONs (A UNION B UNION C)
+
+**Example:**
+```sql
+SELECT CAST(1 AS INTEGER) as n
+UNION
+SELECT CAST(2 AS BIGINT) as n
+-- n → BIGINT (promoted from INTEGER + BIGINT)
+```
+
+**Limitations:**
+- Column resolution in UNION branches with different sources can be ambiguous if unqualified column names conflict
 
 ### ✅ Phase 18e: Unary Operator Type Inference (January 18, 2026)
 

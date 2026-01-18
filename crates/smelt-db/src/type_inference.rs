@@ -778,6 +778,154 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
     None
 }
 
+/// Promote two types to their widest compatible type for UNION operations.
+///
+/// The result type is the type that can hold values from both input types.
+/// For example:
+/// - INTEGER + BIGINT → BIGINT
+/// - VARCHAR(10) + VARCHAR(20) → Text (we don't track length)
+/// - INTEGER + DOUBLE → DOUBLE
+/// - Unknown + T → T (Unknown is dominated by any known type)
+pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
+    // If either is Unknown, prefer the other
+    if matches!(t1.data_type, DataType::Unknown) {
+        return TypedColumn {
+            data_type: t2.data_type.clone(),
+            nullable: t1.nullable || t2.nullable,
+        };
+    }
+    if matches!(t2.data_type, DataType::Unknown) {
+        return TypedColumn {
+            data_type: t1.data_type.clone(),
+            nullable: t1.nullable || t2.nullable,
+        };
+    }
+
+    // If same type, return it
+    if std::mem::discriminant(&t1.data_type) == std::mem::discriminant(&t2.data_type) {
+        // For decimals, take the larger precision/scale
+        if let (
+            DataType::Decimal {
+                precision: p1,
+                scale: s1,
+            },
+            DataType::Decimal {
+                precision: p2,
+                scale: s2,
+            },
+        ) = (&t1.data_type, &t2.data_type)
+        {
+            return TypedColumn {
+                data_type: DataType::Decimal {
+                    precision: (*p1).max(*p2),
+                    scale: (*s1).max(*s2),
+                },
+                nullable: t1.nullable || t2.nullable,
+            };
+        }
+        return TypedColumn {
+            data_type: t1.data_type.clone(),
+            nullable: t1.nullable || t2.nullable,
+        };
+    }
+
+    // Numeric type promotion hierarchy: SmallInt < Integer < BigInt < Decimal < Double
+    let promoted_type = match (&t1.data_type, &t2.data_type) {
+        // Double dominates all numerics
+        (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
+
+        // Decimal dominates integers
+        (DataType::Decimal { precision, scale }, _)
+        | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
+            precision: *precision,
+            scale: *scale,
+        },
+
+        // BigInt dominates smaller integers
+        (DataType::BigInt, DataType::SmallInt | DataType::Integer)
+        | (DataType::SmallInt | DataType::Integer, DataType::BigInt) => DataType::BigInt,
+
+        // Integer dominates SmallInt
+        (DataType::Integer, DataType::SmallInt) | (DataType::SmallInt, DataType::Integer) => {
+            DataType::Integer
+        }
+
+        // Text is a catch-all for string types
+        (DataType::Text, _) | (_, DataType::Text) => DataType::Text,
+        (DataType::Varchar { .. }, _) | (_, DataType::Varchar { .. }) => DataType::Text,
+        (DataType::Char { .. }, _) | (_, DataType::Char { .. }) => DataType::Text,
+
+        // Timestamp types - prefer timezone-aware if either has it
+        (
+            DataType::Timestamp { with_timezone: tz1 },
+            DataType::Timestamp { with_timezone: tz2 },
+        ) => DataType::Timestamp {
+            with_timezone: *tz1 || *tz2,
+        },
+        (DataType::Timestamp { with_timezone }, _) | (_, DataType::Timestamp { with_timezone }) => {
+            DataType::Timestamp {
+                with_timezone: *with_timezone,
+            }
+        }
+        (DataType::Date, DataType::Time) | (DataType::Time, DataType::Date) => {
+            DataType::Timestamp {
+                with_timezone: false,
+            }
+        }
+
+        // For incompatible types, return Unknown (could be an error in strict mode)
+        _ => DataType::Unknown,
+    };
+
+    TypedColumn {
+        data_type: promoted_type,
+        nullable: t1.nullable || t2.nullable,
+    }
+}
+
+/// Infer column types for a SELECT statement, handling UNION if present.
+///
+/// For a simple SELECT, returns the types of each column in the select list.
+/// For a UNION, combines types from all branches using type promotion.
+pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) -> Vec<TypedColumn> {
+    let mut column_types = Vec::new();
+
+    // Get types from the first SELECT's select list
+    if let Some(select_list) = select_stmt.select_list() {
+        for item in select_list.items() {
+            let typed_col = if let Some(expr) = item.expression() {
+                infer_expression_type(&expr, ctx).unwrap_or(TypedColumn {
+                    data_type: DataType::Unknown,
+                    nullable: true,
+                })
+            } else {
+                TypedColumn {
+                    data_type: DataType::Unknown,
+                    nullable: true,
+                }
+            };
+            column_types.push(typed_col);
+        }
+    }
+
+    // If there's a UNION, recursively get types from the second SELECT and combine
+    if select_stmt.has_union() {
+        if let Some(union_select) = select_stmt.union_select() {
+            let union_types = infer_select_column_types(&union_select, ctx);
+
+            // Combine types - use the wider type for each column position
+            for (i, union_type) in union_types.into_iter().enumerate() {
+                if i < column_types.len() {
+                    column_types[i] = promote_types(&column_types[i], &union_type);
+                }
+                // If union has more columns, they're ignored (SQL requires same column count)
+            }
+        }
+    }
+
+    column_types
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

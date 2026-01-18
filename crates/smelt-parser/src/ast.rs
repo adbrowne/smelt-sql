@@ -96,6 +96,57 @@ impl SelectStmt {
     pub(crate) fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
+
+    /// Check if this SELECT has a UNION clause
+    pub fn has_union(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == UNION_KW)
+    }
+
+    /// Check if the UNION is UNION ALL (vs regular UNION which removes duplicates)
+    pub fn is_union_all(&self) -> bool {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .collect();
+
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind() == UNION_KW {
+                // Skip whitespace to find next meaningful token
+                for next_token in &tokens[i + 1..] {
+                    match next_token.kind() {
+                        WHITESPACE | COMMENT => continue,
+                        ALL_KW => return true,
+                        _ => break,
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the SELECT statement after UNION (if any)
+    pub fn union_select(&self) -> Option<SelectStmt> {
+        let mut found_union = false;
+
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if token.kind() == UNION_KW {
+                    found_union = true;
+                }
+            } else if found_union {
+                if let Some(n) = child.as_node() {
+                    if n.kind() == SELECT_STMT {
+                        return SelectStmt::cast(n.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// SELECT list (columns)

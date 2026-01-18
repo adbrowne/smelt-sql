@@ -14,7 +14,9 @@ pub mod schema;
 pub mod type_inference;
 
 pub use schema::{Column, ColumnSource, ModelSchema};
-pub use type_inference::{infer_cte_columns, infer_expression_type, TypeContext};
+pub use type_inference::{
+    infer_cte_columns, infer_expression_type, infer_select_column_types, TypeContext,
+};
 
 /// Input queries - these are set by the LSP when files change
 #[salsa::query_group(InputsStorage)]
@@ -1113,27 +1115,18 @@ fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> 
         None => return base_schema,
     };
 
-    let select_list = match select_stmt.select_list() {
-        Some(l) => l,
-        None => return base_schema,
-    };
+    // Use infer_select_column_types which handles UNION by combining types
+    let inferred_types = infer_select_column_types(&select_stmt, &ctx);
 
     // Create new columns with inferred types
     let mut typed_columns = Vec::new();
-    let items: Vec<_> = select_list.items().collect();
 
-    for (i, item) in items.iter().enumerate() {
-        if i >= base_schema.columns.len() {
-            break;
-        }
+    for (i, col) in base_schema.columns.iter().enumerate() {
+        let mut col = col.clone();
 
-        let mut col = base_schema.columns[i].clone();
-
-        // Try to infer type from expression
-        if let Some(expr) = item.expression() {
-            if let Some(typed_col) = infer_expression_type(&expr, &ctx) {
-                col.data_type = Some(typed_col);
-            }
+        // Use inferred type if available
+        if let Some(typed_col) = inferred_types.get(i) {
+            col.data_type = Some(typed_col.clone());
         }
 
         typed_columns.push(col);
@@ -2055,6 +2048,167 @@ FROM smelt.source('raw.orders')
             neg_col.unwrap().data_type.as_ref().unwrap().data_type,
             DataType::Integer,
             "Unary negation should preserve numeric type (INTEGER)"
+        );
+    }
+
+    #[test]
+    fn test_union_same_types() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+      returns:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // UNION with same types should preserve those types
+        let sql = r#"
+SELECT id, amount FROM smelt.source('raw.orders')
+UNION
+SELECT id, amount FROM smelt.source('raw.returns')
+"#;
+
+        let path = PathBuf::from("models/test_union_same.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 2);
+
+        // id should be INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "UNION with same types should preserve INTEGER"
+        );
+
+        // amount should be DECIMAL
+        let amount_col = schema.columns.iter().find(|c| c.name == "amount");
+        assert!(amount_col.is_some(), "Column 'amount' not found");
+        assert!(
+            matches!(
+                amount_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "UNION with same types should preserve DECIMAL"
+        );
+    }
+
+    #[test]
+    fn test_union_type_promotion() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // UNION with INTEGER literal and BIGINT literal should promote to BIGINT
+        // Using CAST to ensure we get specific types
+        let sql = r#"
+SELECT CAST(1 AS INTEGER) as n
+UNION
+SELECT CAST(2 AS BIGINT) as n
+"#;
+
+        let path = PathBuf::from("models/test_union_promote.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let n_col = schema.columns.iter().find(|c| c.name == "n");
+        assert!(n_col.is_some(), "Column 'n' not found");
+        assert_eq!(
+            n_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "UNION of INTEGER and BIGINT should promote to BIGINT"
+        );
+    }
+
+    #[test]
+    fn test_union_all_type_promotion() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // UNION ALL with INTEGER and DOUBLE should promote to DOUBLE
+        let sql = r#"
+SELECT CAST(1 AS INTEGER) as value
+UNION ALL
+SELECT CAST(2.5 AS DOUBLE) as value
+"#;
+
+        let path = PathBuf::from("models/test_union_all.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let value_col = schema.columns.iter().find(|c| c.name == "value");
+        assert!(value_col.is_some(), "Column 'value' not found");
+        assert_eq!(
+            value_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "UNION ALL of INTEGER and DOUBLE should promote to DOUBLE"
+        );
+    }
+
+    #[test]
+    fn test_union_chained() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // Chained UNION: SMALLINT UNION INTEGER UNION BIGINT should be BIGINT
+        let sql = r#"
+SELECT CAST(1 AS SMALLINT) as n
+UNION
+SELECT CAST(2 AS INTEGER) as n
+UNION
+SELECT CAST(3 AS BIGINT) as n
+"#;
+
+        let path = PathBuf::from("models/test_union_chained.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let n_col = schema.columns.iter().find(|c| c.name == "n");
+        assert!(n_col.is_some(), "Column 'n' not found");
+        assert_eq!(
+            n_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "Chained UNION of SMALLINT, INTEGER, BIGINT should be BIGINT"
         );
     }
 }
