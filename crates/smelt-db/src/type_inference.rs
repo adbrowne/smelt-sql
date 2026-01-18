@@ -163,6 +163,30 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_binary_expr_type(&binary, ctx);
     }
 
+    // Try BETWEEN expression - always returns Boolean
+    if expr.as_between().is_some() {
+        return Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: true, // Could be NULL if any operand is NULL
+        });
+    }
+
+    // Try IN expression - always returns Boolean
+    if expr.as_in().is_some() {
+        return Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: true, // Could be NULL if expr or any value is NULL
+        });
+    }
+
+    // Try EXISTS expression - always returns Boolean (never NULL)
+    if expr.as_exists().is_some() {
+        return Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: false, // EXISTS always returns TRUE or FALSE, never NULL
+        });
+    }
+
     // Try column reference
     if let Some(col_ref) = expr.as_column_ref() {
         return ctx

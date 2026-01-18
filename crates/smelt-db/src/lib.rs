@@ -1833,4 +1833,139 @@ SELECT n FROM nums
             "Expected SmallInt for 'n' (from literal 1)"
         );
     }
+
+    #[test]
+    fn test_between_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // BETWEEN expression should return Boolean
+        let sql = r#"
+SELECT amount BETWEEN 10 AND 100 as in_range
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_between.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let in_range_col = schema.columns.iter().find(|c| c.name == "in_range");
+        assert!(in_range_col.is_some(), "Column 'in_range' not found");
+        assert!(
+            in_range_col.unwrap().data_type.is_some(),
+            "Column 'in_range' should have a type"
+        );
+        assert_eq!(
+            in_range_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Boolean,
+            "BETWEEN should return Boolean"
+        );
+    }
+
+    #[test]
+    fn test_in_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: status
+            type: VARCHAR(50)
+"#;
+
+        // IN expression should return Boolean
+        let sql = r#"
+SELECT status IN ('pending', 'processing', 'shipped') as is_active
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_in.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let is_active_col = schema.columns.iter().find(|c| c.name == "is_active");
+        assert!(is_active_col.is_some(), "Column 'is_active' not found");
+        assert!(
+            is_active_col.unwrap().data_type.is_some(),
+            "Column 'is_active' should have a type"
+        );
+        assert_eq!(
+            is_active_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Boolean,
+            "IN should return Boolean"
+        );
+    }
+
+    #[test]
+    fn test_exists_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: user_id
+            type: INTEGER
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#;
+
+        // EXISTS expression should return Boolean (never NULL)
+        let sql = r#"
+SELECT EXISTS (SELECT 1 FROM smelt.source('raw.users') WHERE id = user_id) as has_user
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_exists.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let has_user_col = schema.columns.iter().find(|c| c.name == "has_user");
+        assert!(has_user_col.is_some(), "Column 'has_user' not found");
+        assert!(
+            has_user_col.unwrap().data_type.is_some(),
+            "Column 'has_user' should have a type"
+        );
+        let typed_col = has_user_col.unwrap().data_type.as_ref().unwrap();
+        assert_eq!(
+            typed_col.data_type,
+            DataType::Boolean,
+            "EXISTS should return Boolean"
+        );
+        assert!(
+            !typed_col.nullable,
+            "EXISTS should never be NULL (always TRUE or FALSE)"
+        );
+    }
 }

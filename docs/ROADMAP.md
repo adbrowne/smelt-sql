@@ -466,7 +466,7 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 The following SQL features are supported by the parser but not yet handled by the type checker:
 
 **High Priority:**
-- **BETWEEN/IN/EXISTS type inference** - Should return Boolean
+- ✅ **BETWEEN/IN/EXISTS type inference** - Returns Boolean (January 18, 2026)
 - **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type)
 - **UNION type inference** - Combined result type from multiple SELECT statements
 
@@ -479,6 +479,15 @@ The following SQL features are supported by the parser but not yet handled by th
 - ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18d: BETWEEN/IN/EXISTS Type Inference (January 18, 2026)
+
+Added type inference for BETWEEN, IN, and EXISTS expressions. All three return Boolean type.
+
+**Changes** (`crates/smelt-db/src/type_inference.rs`):
+- BETWEEN expressions → Boolean (nullable, could be NULL if any operand is NULL)
+- IN expressions → Boolean (nullable, could be NULL if expr or values contain NULL)
+- EXISTS expressions → Boolean (non-nullable, always returns TRUE or FALSE)
 
 ### ✅ Phase 18c: CTE Type Inference (January 18, 2026)
 
