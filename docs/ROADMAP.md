@@ -4,7 +4,7 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
-**Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, CASE expressions, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.
+**Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, CASE expressions, scalar subqueries, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.
 
 **Parser Gap Fixes (January 18, 2026)**: Fixed 5 high/medium severity parser gaps discovered by PostgreSQL compatibility testing: `<>` operator, `||` string concatenation, UNION ALL printing, NULLS FIRST/LAST printing, and expressions in function arguments.
 
@@ -459,7 +459,6 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 
 - Type coercion warnings
 - Backend-specific types (HUGEINT for DuckDB, Spark types)
-- Subquery type inference
 - LSP quick-fixes for type errors
 
 ### ✅ Phase 18b: Comprehensive Type Inference (January 18, 2026)
@@ -473,6 +472,7 @@ Added recursive type inference for functions that preserve argument types:
 
 **Type inference improvements** (`crates/smelt-db/src/type_inference.rs`):
 - **CASE expressions**: Infers type from first THEN expression (falls back to ELSE)
+- **Scalar subqueries**: Infers type from first column in SELECT list (always nullable)
 - **MIN/MAX**: Now recursively infers argument type instead of returning Unknown
 - **COALESCE**: Infers type from first argument
 - **NULLIF**: Infers type from first argument (always nullable)
