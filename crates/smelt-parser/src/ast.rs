@@ -902,6 +902,30 @@ impl FunctionCall {
             .flat_map(|arg_list| arg_list.children().filter_map(Expr::cast))
             .collect()
     }
+
+    /// Get the FILTER clause if present (PostgreSQL aggregate filter)
+    pub fn filter_clause(&self) -> Option<FilterClause> {
+        self.0.children().find_map(FilterClause::cast)
+    }
+}
+
+/// FILTER clause for aggregate functions (e.g., FILTER (WHERE status = 'active'))
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FilterClause(SyntaxNode);
+
+impl FilterClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == FILTER_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the filter condition expression
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
 }
 
 /// Named parameter in a function call (e.g., filter => expr)

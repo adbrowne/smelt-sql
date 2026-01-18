@@ -2596,4 +2596,100 @@ LEFT JOIN LATERAL (
             "total_amount should be DECIMAL from SUM in LATERAL subquery"
         );
     }
+
+    #[test]
+    fn test_filter_clause_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: status
+            type: VARCHAR(50)
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // Aggregates with FILTER clauses - types should match unfiltered versions
+        let sql = r#"
+SELECT
+    COUNT(*) as total_count,
+    COUNT(*) FILTER (WHERE status = 'completed') as completed_count,
+    SUM(amount) as total_sum,
+    SUM(amount) FILTER (WHERE status = 'completed') as completed_sum,
+    AVG(amount) FILTER (WHERE status = 'pending') as pending_avg
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_filter.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 5);
+
+        // COUNT without FILTER should be BIGINT
+        let total_count = schema.columns.iter().find(|c| c.name == "total_count");
+        assert!(total_count.is_some(), "Column 'total_count' not found");
+        assert_eq!(
+            total_count.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "COUNT should return BIGINT"
+        );
+
+        // COUNT with FILTER should also be BIGINT (FILTER doesn't change return type)
+        let completed_count = schema.columns.iter().find(|c| c.name == "completed_count");
+        assert!(
+            completed_count.is_some(),
+            "Column 'completed_count' not found"
+        );
+        assert_eq!(
+            completed_count
+                .unwrap()
+                .data_type
+                .as_ref()
+                .unwrap()
+                .data_type,
+            DataType::BigInt,
+            "COUNT with FILTER should return BIGINT"
+        );
+
+        // SUM without FILTER should be DECIMAL
+        let total_sum = schema.columns.iter().find(|c| c.name == "total_sum");
+        assert!(total_sum.is_some(), "Column 'total_sum' not found");
+        assert!(
+            matches!(
+                total_sum.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM should return DECIMAL"
+        );
+
+        // SUM with FILTER should also be DECIMAL
+        let completed_sum = schema.columns.iter().find(|c| c.name == "completed_sum");
+        assert!(completed_sum.is_some(), "Column 'completed_sum' not found");
+        assert!(
+            matches!(
+                completed_sum.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM with FILTER should return DECIMAL"
+        );
+
+        // AVG with FILTER should be DOUBLE
+        let pending_avg = schema.columns.iter().find(|c| c.name == "pending_avg");
+        assert!(pending_avg.is_some(), "Column 'pending_avg' not found");
+        assert_eq!(
+            pending_avg.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "AVG with FILTER should return DOUBLE"
+        );
+    }
 }

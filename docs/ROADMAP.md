@@ -473,12 +473,36 @@ The following SQL features are supported by the parser but not yet handled by th
 **Medium Priority:**
 - ✅ **JOIN column tracking** - Columns from joined tables fully available (January 18, 2026)
 - ✅ **LATERAL correlation** - Correlated column references in lateral subqueries (January 18, 2026)
-- **FILTER clause awareness** - Currently ignored in aggregate type inference
+- ✅ **FILTER clause awareness** - Aggregate types preserved with FILTER clauses (January 18, 2026)
 
 **CTE Type Inference Status:**
 - ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18i: FILTER Clause Awareness (January 18, 2026)
+
+Aggregate functions with FILTER clauses now have proper AST support and type inference works correctly.
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `FilterClause` AST wrapper with `expression()` method to get the filter condition
+- `FunctionCall::filter_clause()` method to access the optional FILTER clause
+
+**Type inference behavior**:
+- FILTER clause does not change the return type of aggregates
+- `COUNT(*) FILTER (WHERE ...)` → BigInt (same as COUNT without FILTER)
+- `SUM(x) FILTER (WHERE ...)` → Decimal (same as SUM without FILTER)
+- `AVG(x) FILTER (WHERE ...)` → Double (same as AVG without FILTER)
+
+**Example:**
+```sql
+SELECT
+    COUNT(*) as total,
+    COUNT(*) FILTER (WHERE status = 'completed') as completed,
+    SUM(amount) FILTER (WHERE status = 'pending') as pending_sum
+FROM smelt.source('raw.orders')
+-- total → BIGINT, completed → BIGINT, pending_sum → DECIMAL(38,10)
+```
 
 ### ✅ Phase 18h: LATERAL Correlation (January 18, 2026)
 
