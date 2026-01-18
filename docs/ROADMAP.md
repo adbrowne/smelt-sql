@@ -467,7 +467,7 @@ The following SQL features are supported by the parser but not yet handled by th
 
 **High Priority:**
 - ✅ **BETWEEN/IN/EXISTS type inference** - Returns Boolean (January 18, 2026)
-- **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type)
+- ✅ **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type) (January 18, 2026)
 - **UNION type inference** - Combined result type from multiple SELECT statements
 
 **Medium Priority:**
@@ -479,6 +479,29 @@ The following SQL features are supported by the parser but not yet handled by th
 - ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18e: Unary Operator Type Inference (January 18, 2026)
+
+Added type inference for unary operators (NOT and negation).
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `BinaryExpr::is_unary()` - Check if expression is unary (no right operand)
+- `BinaryExpr::unary_operand_column()` - Extract column reference from unary operand
+  - Handles bare identifier tokens not wrapped in expression nodes
+  - Supports qualified names (table.column)
+
+**Type inference** (`crates/smelt-db/src/type_inference.rs`):
+- **NOT operator** → Boolean (nullable, NOT NULL = NULL)
+- **Unary negation** (`-expr`) → Preserves numeric type of operand
+  - Works with column references, expressions, and nested unary ops
+
+**Example:**
+```sql
+SELECT -amount as negative_amount, NOT is_active as inactive
+FROM smelt.source('raw.orders')
+-- negative_amount → INTEGER (preserves source column type)
+-- inactive → Boolean
+```
 
 ### ✅ Phase 18d: BETWEEN/IN/EXISTS Type Inference (January 18, 2026)
 

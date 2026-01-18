@@ -558,6 +558,12 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             nullable: true,
         }),
 
+        // NOT operator (unary) - always returns Boolean
+        "NOT" => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: true, // NOT NULL = NULL
+        }),
+
         // Comparison operators - always return Boolean
         "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "IS" => Some(TypedColumn {
             data_type: DataType::Boolean,
@@ -571,7 +577,7 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
         }),
 
         // Arithmetic operators - promote to widest numeric type
-        "+" | "-" | "*" | "/" => {
+        "+" | "*" | "/" => {
             let left = binary.left().and_then(|e| infer_expression_type(&e, ctx));
             let right = binary.right().and_then(|e| infer_expression_type(&e, ctx));
 
@@ -609,6 +615,81 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
                     nullable: true,
                 }),
                 _ => None,
+            }
+        }
+
+        // Minus can be binary (a - b) or unary (-a)
+        "-" => {
+            if binary.is_unary() {
+                // Unary minus: -expr preserves the numeric type
+                // First try to get operand type from expression
+                if let Some(operand_type) =
+                    binary.left().and_then(|e| infer_expression_type(&e, ctx))
+                {
+                    return Some(TypedColumn {
+                        data_type: operand_type.data_type,
+                        nullable: operand_type.nullable,
+                    });
+                }
+
+                // For unary expressions with bare identifier operands, look up the column
+                if let Some(col_ref) = binary.unary_operand_column() {
+                    if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name())
+                    {
+                        return Some(TypedColumn {
+                            data_type: typed_col.data_type.clone(),
+                            nullable: typed_col.nullable,
+                        });
+                    }
+                }
+
+                None
+            } else {
+                // Binary minus: a - b
+                let left = binary.left().and_then(|e| infer_expression_type(&e, ctx));
+                let right = binary.right().and_then(|e| infer_expression_type(&e, ctx));
+
+                // Promote to widest numeric type
+                match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
+                    (Some(DataType::Double), _) | (_, Some(DataType::Double)) => {
+                        Some(TypedColumn {
+                            data_type: DataType::Double,
+                            nullable: true,
+                        })
+                    }
+                    (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
+                        Some(TypedColumn {
+                            data_type: DataType::Decimal {
+                                precision: 38,
+                                scale: 10,
+                            },
+                            nullable: true,
+                        })
+                    }
+                    (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => {
+                        Some(TypedColumn {
+                            data_type: DataType::BigInt,
+                            nullable: true,
+                        })
+                    }
+                    (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => {
+                        Some(TypedColumn {
+                            data_type: DataType::Integer,
+                            nullable: true,
+                        })
+                    }
+                    (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => {
+                        Some(TypedColumn {
+                            data_type: DataType::SmallInt,
+                            nullable: true,
+                        })
+                    }
+                    (Some(l), _) => Some(TypedColumn {
+                        data_type: l,
+                        nullable: true,
+                    }),
+                    _ => None,
+                }
             }
         }
 

@@ -678,10 +678,62 @@ impl BinaryExpr {
                     AND_KW => return Some("AND".to_string()),
                     OR_KW => return Some("OR".to_string()),
                     IS_KW => return Some("IS".to_string()),
+                    NOT_KW => return Some("NOT".to_string()),
                     _ => {}
                 }
             }
         }
+        None
+    }
+
+    /// Check if this is a unary expression (e.g., -x, NOT y)
+    /// Unary expressions have no right operand
+    pub fn is_unary(&self) -> bool {
+        self.right().is_none()
+    }
+
+    /// Get the unary operand as a column reference
+    /// For unary expressions where the operand is a simple identifier (not wrapped in a node),
+    /// this extracts the column reference from tokens.
+    pub fn unary_operand_column(&self) -> Option<ColumnRef> {
+        // First try getting as a normal expression
+        if let Some(expr) = self.left() {
+            return expr.as_column_ref();
+        }
+
+        // For unary expressions, the operand might be a bare identifier token
+        // not wrapped in an expression node. Extract column ref from tokens.
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+            .collect();
+
+        if tokens.is_empty() {
+            return None;
+        }
+
+        // Simple identifier
+        if tokens.len() == 1 && tokens[0].kind() == IDENT {
+            return Some(ColumnRef {
+                qualifier: None,
+                name: tokens[0].text().to_string(),
+            });
+        }
+
+        // Qualified identifier: table.column
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            return Some(ColumnRef {
+                qualifier: Some(tokens[0].text().to_string()),
+                name: tokens[2].text().to_string(),
+            });
+        }
+
         None
     }
 }

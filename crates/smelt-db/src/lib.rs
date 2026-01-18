@@ -1968,4 +1968,93 @@ FROM smelt.source('raw.orders')
             "EXISTS should never be NULL (always TRUE or FALSE)"
         );
     }
+
+    #[test]
+    fn test_not_operator_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: is_completed
+            type: BOOLEAN
+"#;
+
+        // NOT operator should return Boolean
+        let sql = r#"
+SELECT NOT is_completed as is_pending
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_not.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let is_pending_col = schema.columns.iter().find(|c| c.name == "is_pending");
+        assert!(is_pending_col.is_some(), "Column 'is_pending' not found");
+        assert!(
+            is_pending_col.unwrap().data_type.is_some(),
+            "Column 'is_pending' should have a type"
+        );
+        assert_eq!(
+            is_pending_col
+                .unwrap()
+                .data_type
+                .as_ref()
+                .unwrap()
+                .data_type,
+            DataType::Boolean,
+            "NOT should return Boolean"
+        );
+    }
+
+    #[test]
+    fn test_unary_negation_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // Unary negation should preserve numeric type
+        let sql = r#"
+SELECT -amount as negative_amount
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_negation.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let neg_col = schema.columns.iter().find(|c| c.name == "negative_amount");
+        assert!(neg_col.is_some(), "Column 'negative_amount' not found");
+        assert!(
+            neg_col.unwrap().data_type.is_some(),
+            "Column 'negative_amount' should have a type"
+        );
+        assert_eq!(
+            neg_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "Unary negation should preserve numeric type (INTEGER)"
+        );
+    }
 }
