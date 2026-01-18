@@ -448,6 +448,24 @@ impl TableRef {
             }
         }
 
+        // For subqueries with implicit alias (LATERAL (...) alias_name),
+        // check if the last token is an IDENT that's after the subquery
+        if self.subquery().is_some() {
+            if let Some(subquery) = self.subquery() {
+                let subquery_range = subquery.0.text_range();
+                // Check if last_ident is after the subquery
+                for token in tokens.iter().rev() {
+                    if token.kind() == IDENT {
+                        let token_start = token.text_range().start();
+                        if token_start > subquery_range.end() {
+                            return Some(token.text().to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -455,6 +473,19 @@ impl TableRef {
     #[allow(dead_code)] // Used by printer module
     pub(crate) fn syntax(&self) -> &SyntaxNode {
         &self.0
+    }
+
+    /// Check if this table reference is LATERAL (allows correlated subquery)
+    pub fn is_lateral(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == LATERAL_KW)
+    }
+
+    /// Get the subquery if this table reference contains one
+    pub fn subquery(&self) -> Option<Subquery> {
+        self.0.children().find_map(Subquery::cast)
     }
 }
 

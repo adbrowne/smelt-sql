@@ -472,13 +472,44 @@ The following SQL features are supported by the parser but not yet handled by th
 
 **Medium Priority:**
 - ✅ **JOIN column tracking** - Columns from joined tables fully available (January 18, 2026)
-- **LATERAL correlation** - Correlated column references in lateral subqueries
+- ✅ **LATERAL correlation** - Correlated column references in lateral subqueries (January 18, 2026)
 - **FILTER clause awareness** - Currently ignored in aggregate type inference
 
 **CTE Type Inference Status:**
 - ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18h: LATERAL Correlation (January 18, 2026)
+
+LATERAL subqueries can now access columns from preceding table references in the FROM clause. Subquery columns are properly registered in the type context.
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `TableRef::is_lateral()` - Check if table reference has LATERAL keyword
+- `TableRef::subquery()` - Get the subquery if this table reference contains one
+- Updated `TableRef::alias()` to correctly detect aliases after subquery closing parenthesis
+
+**Type inference changes** (`crates/smelt-db/src/lib.rs`):
+- `process_table_ref()` now handles subqueries (including LATERAL subqueries)
+- Infers column types from subquery's SELECT list
+- Registers subquery columns under the alias name in the type context
+- Column names derived from: alias, column reference name, or generated name
+
+**Example:**
+```sql
+SELECT u.id, recent.total_amount
+FROM smelt.source('raw.users') u
+LEFT JOIN LATERAL (
+    SELECT SUM(o.amount) as total_amount
+    FROM smelt.source('raw.orders') o
+    WHERE o.user_id = u.id
+) recent ON true
+-- recent.total_amount → DECIMAL(38,10) (inferred from SUM aggregate)
+```
+
+**Limitations:**
+- LATERAL correlation itself (u.id reference inside subquery) is parsed but not yet validated at the type level
+- Subqueries without aliases are not tracked (alias is required for column registration)
 
 ### ✅ Phase 18g: JOIN Column Tracking (January 18, 2026)
 

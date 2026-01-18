@@ -1045,7 +1045,7 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
 }
 
 /// Process a single table reference and add its columns/aliases to the context.
-/// This handles smelt.ref(), smelt.source(), and CTE references.
+/// This handles smelt.ref(), smelt.source(), CTE references, and subqueries (including LATERAL).
 fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut TypeContext) {
     // Check for smelt.ref() calls
     if let Some(func) = table_ref.function_call() {
@@ -1095,12 +1095,57 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
     // Check for CTE references with aliases (e.g., "FROM daily_totals dt")
     // When a table_ref is just an identifier (not a function call), and that
     // identifier is a known CTE, register any alias
-    if table_ref.function_call().is_none() {
+    if table_ref.function_call().is_none() && table_ref.subquery().is_none() {
         if let Some(table_name) = table_ref.identifier() {
             if ctx.is_cte(&table_name) {
                 // Add explicit alias if present (e.g., "dt" from "daily_totals dt")
                 if let Some(explicit_alias) = table_ref.alias() {
                     ctx.add_alias(&explicit_alias, &table_name);
+                }
+            }
+        }
+    }
+
+    // Check for subqueries (including LATERAL subqueries)
+    // These create derived tables whose columns should be available via the alias
+    if let Some(subquery) = table_ref.subquery() {
+        if let Some(alias) = table_ref.alias() {
+            // Get the SELECT statement from the subquery
+            if let Some(select_stmt) = subquery.select_stmt() {
+                // Get the column names from the SELECT list
+                if let Some(select_list) = select_stmt.select_list() {
+                    // Infer column types using the current context
+                    // For LATERAL subqueries, this allows referencing preceding table columns
+                    let column_types = infer_select_column_types(&select_stmt, ctx);
+
+                    // Register each column under the subquery's alias
+                    for (i, item) in select_list.items().enumerate() {
+                        // Get column name from alias or expression
+                        let col_name = if let Some(item_alias) = item.alias() {
+                            item_alias
+                        } else if let Some(expr) = item.expression() {
+                            // Try to get name from column reference
+                            if let Some(col_ref) = expr.as_column_ref() {
+                                col_ref.name().to_string()
+                            } else {
+                                format!("col{}", i + 1)
+                            }
+                        } else {
+                            format!("col{}", i + 1)
+                        };
+
+                        // Get type from inferred types
+                        let typed_col = column_types.get(i).cloned().unwrap_or(TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        });
+
+                        // Add column under the subquery alias (like a CTE)
+                        ctx.add_cte_column(&alias, &col_name, typed_col);
+                    }
+
+                    // Register the alias as a known "CTE" for lookup purposes
+                    ctx.add_alias(&alias, &alias);
                 }
             }
         }
@@ -2421,6 +2466,134 @@ LEFT JOIN smelt.source('raw.users') u ON o.user_id = u.id
             matches!(email_type, DataType::Text | DataType::Varchar { .. }),
             "email should be TEXT/VARCHAR from LEFT JOINed users table, got {:?}",
             email_type
+        );
+    }
+
+    #[test]
+    fn test_lateral_parsing_debug() {
+        // First, verify the AST structure
+        let sql = r#"
+SELECT u.id, recent.total_amount
+FROM smelt.source('raw.users') u
+LEFT JOIN LATERAL (
+    SELECT SUM(o.amount) as total_amount
+    FROM smelt.source('raw.orders') o
+) recent ON true
+"#;
+
+        let parsed = smelt_parser::parse(sql);
+        assert!(
+            parsed.errors.is_empty(),
+            "Parse errors: {:?}",
+            parsed.errors
+        );
+
+        let file = smelt_parser::ast::File::cast(parsed.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from = select.from_clause().unwrap();
+
+        // Check main table ref
+        let main_refs: Vec<_> = from.table_refs().collect();
+        assert_eq!(main_refs.len(), 1, "Should have 1 main table ref");
+        assert_eq!(main_refs[0].alias(), Some("u".to_string()));
+
+        // Check JOIN
+        let joins: Vec<_> = from.joins().collect();
+        assert_eq!(joins.len(), 1, "Should have 1 JOIN");
+
+        let join = &joins[0];
+        let join_table_ref = join.table_ref().expect("JOIN should have table_ref");
+
+        // Check LATERAL and subquery
+        assert!(
+            join_table_ref.is_lateral(),
+            "JOIN table ref should be LATERAL"
+        );
+        assert!(
+            join_table_ref.subquery().is_some(),
+            "JOIN table ref should have subquery"
+        );
+        assert_eq!(
+            join_table_ref.alias(),
+            Some("recent".to_string()),
+            "JOIN table ref should have alias 'recent'"
+        );
+    }
+
+    #[test]
+    fn test_lateral_correlation_basic() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR(100)
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // LATERAL subquery that references columns from the preceding table
+        // Using LEFT JOIN LATERAL since comma syntax was removed
+        let sql = r#"
+SELECT u.id, u.name, recent.total_amount
+FROM smelt.source('raw.users') u
+LEFT JOIN LATERAL (
+    SELECT SUM(o.amount) as total_amount
+    FROM smelt.source('raw.orders') o
+    WHERE o.user_id = u.id
+) recent ON true
+"#;
+
+        let path = PathBuf::from("models/test_lateral.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check that id from users is INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER from users"
+        );
+
+        // Check that name from users is VARCHAR
+        let name_col = schema.columns.iter().find(|c| c.name == "name");
+        assert!(name_col.is_some(), "Column 'name' not found");
+        assert!(
+            matches!(
+                name_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Varchar { .. }
+            ),
+            "name should be VARCHAR from users"
+        );
+
+        // Check that total_amount from LATERAL subquery is DECIMAL (from SUM)
+        let total_col = schema.columns.iter().find(|c| c.name == "total_amount");
+        assert!(total_col.is_some(), "Column 'total_amount' not found");
+        assert!(
+            matches!(
+                total_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "total_amount should be DECIMAL from SUM in LATERAL subquery"
         );
     }
 }
