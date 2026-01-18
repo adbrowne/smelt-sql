@@ -2,7 +2,9 @@
 ///
 /// This module provides type inference capabilities for SQL expressions,
 /// including literals, column references, CAST expressions, and aggregates.
-use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, Subquery};
+use smelt_parser::ast::{
+    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, SelectStmt, Subquery,
+};
 use smelt_types::{parse_type, DataType, TypedColumn};
 use std::collections::HashMap;
 
@@ -220,12 +222,16 @@ fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<Typed
 /// The result type is the type of the first column in the SELECT list
 fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedColumn> {
     let select_stmt = subquery.select_stmt()?;
+
+    // Build a new context that includes any CTEs defined in this subquery
+    let subquery_ctx = build_subquery_context(&select_stmt, ctx);
+
     let select_list = select_stmt.select_list()?;
 
     // Get the first select item and infer its type
     if let Some(first_item) = select_list.items().next() {
         if let Some(expr) = first_item.expression() {
-            if let Some(expr_type) = infer_expression_type(&expr, ctx) {
+            if let Some(expr_type) = infer_expression_type(&expr, &subquery_ctx) {
                 return Some(TypedColumn {
                     data_type: expr_type.data_type,
                     // Scalar subqueries are always nullable (could return no rows)
@@ -236,6 +242,46 @@ fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedCo
     }
 
     None
+}
+
+/// Build a TypeContext for a subquery that includes any nested CTEs
+///
+/// This creates a new context that inherits from the parent context
+/// and adds any CTEs defined in the subquery's WITH clause.
+fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
+    let mut ctx = parent_ctx.clone();
+
+    // Process any WITH clause in this subquery
+    if let Some(with_clause) = select_stmt.with_clause() {
+        for cte in with_clause.ctes() {
+            if let Some(cte_name) = cte.name() {
+                // For recursive CTEs with explicit column list, bootstrap with Unknown types
+                if with_clause.is_recursive() {
+                    for col_name in cte.column_names() {
+                        ctx.add_cte_column(
+                            &cte_name,
+                            &col_name,
+                            TypedColumn {
+                                data_type: DataType::Unknown,
+                                nullable: true,
+                            },
+                        );
+                    }
+                }
+
+                // Infer columns from CTE query
+                let columns = infer_cte_columns(&cte, &ctx);
+                for (col_name, typed_col) in columns {
+                    ctx.add_cte_column(&cte_name, &col_name, typed_col);
+                }
+
+                // Register CTE name as alias
+                ctx.add_alias(&cte_name, &cte_name);
+            }
+        }
+    }
+
+    ctx
 }
 
 /// Infer the type of a function call (aggregates, etc.)
@@ -562,6 +608,9 @@ pub fn infer_cte_columns(cte: &Cte, ctx: &TypeContext) -> Vec<(String, TypedColu
         None => return columns,
     };
 
+    // Build a context that includes any nested CTEs in this CTE's query
+    let cte_ctx = build_subquery_context(&select_stmt, ctx);
+
     let select_list = match select_stmt.select_list() {
         Some(l) => l,
         None => return columns,
@@ -585,9 +634,9 @@ pub fn infer_cte_columns(cte: &Cte, ctx: &TypeContext) -> Vec<(String, TypedColu
             format!("col{}", i + 1)
         };
 
-        // Infer type from expression
+        // Infer type from expression using the CTE's context (includes nested CTEs)
         let typed_col = if let Some(expr) = item.expression() {
-            infer_expression_type(&expr, ctx).unwrap_or(TypedColumn {
+            infer_expression_type(&expr, &cte_ctx).unwrap_or(TypedColumn {
                 data_type: DataType::Unknown,
                 nullable: true,
             })

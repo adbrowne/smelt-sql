@@ -1679,4 +1679,52 @@ SELECT order_sum, order_count FROM order_stats
             "Column 'order_count' not found - explicit column list should override inferred names"
         );
     }
+
+    #[test]
+    fn test_nested_cte_in_cte() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // Nested CTE: outer_cte contains inner_cte in its definition
+        let sql = r#"
+WITH outer_cte AS (
+    WITH inner_cte AS (
+        SELECT SUM(amount) as inner_total
+        FROM smelt.source('raw.orders')
+    )
+    SELECT inner_total FROM inner_cte
+)
+SELECT inner_total FROM outer_cte
+"#;
+
+        let path = PathBuf::from("models/test_nested_cte.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 1 column: inner_total
+        assert_eq!(schema.columns.len(), 1);
+
+        // Check that inner_total has Decimal type (from SUM() in nested CTE)
+        let result_col = schema.columns.iter().find(|c| c.name == "inner_total");
+        assert!(result_col.is_some(), "Column 'inner_total' not found");
+        if let Some(typed_col) = &result_col.unwrap().data_type {
+            assert!(
+                matches!(typed_col.data_type, DataType::Decimal { .. }),
+                "Expected Decimal type for 'inner_total' (from SUM in nested CTE), got {:?}",
+                typed_col.data_type
+            );
+        }
+    }
 }

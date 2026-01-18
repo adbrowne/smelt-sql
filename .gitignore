@@ -3,3 +3,4 @@ target/
 .claude/
 !.claude/settings.json
 datagen.duckdb
+output/
