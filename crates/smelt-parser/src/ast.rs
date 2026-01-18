@@ -569,6 +569,14 @@ impl Expr {
             .or_else(|| ExistsExpr::cast(self.0.clone()))
     }
 
+    /// Check if this is a binary expression
+    pub fn as_binary(&self) -> Option<BinaryExpr> {
+        self.0
+            .children()
+            .find_map(BinaryExpr::cast)
+            .or_else(|| BinaryExpr::cast(self.0.clone()))
+    }
+
     /// Check if this expression has a window specification (OVER clause)
     pub fn window_spec(&self) -> Option<WindowSpec> {
         self.0.children().find_map(WindowSpec::cast)
@@ -625,6 +633,56 @@ impl ColumnRef {
 
     pub fn qualifier(&self) -> Option<&str> {
         self.qualifier.as_deref()
+    }
+}
+
+/// Binary expression (e.g., a + b, x AND y, col = 'value')
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BinaryExpr(SyntaxNode);
+
+impl BinaryExpr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == BINARY_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the left operand expression
+    pub fn left(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Get the right operand expression
+    pub fn right(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+
+    /// Get the operator as a string
+    pub fn operator(&self) -> Option<String> {
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                match token.kind() {
+                    PLUS => return Some("+".to_string()),
+                    MINUS => return Some("-".to_string()),
+                    STAR | MULTIPLY => return Some("*".to_string()),
+                    DIVIDE => return Some("/".to_string()),
+                    EQ => return Some("=".to_string()),
+                    NE => return Some("<>".to_string()),
+                    LT => return Some("<".to_string()),
+                    GT => return Some(">".to_string()),
+                    LE => return Some("<=".to_string()),
+                    GE => return Some(">=".to_string()),
+                    CONCAT => return Some("||".to_string()),
+                    AND_KW => return Some("AND".to_string()),
+                    OR_KW => return Some("OR".to_string()),
+                    IS_KW => return Some("IS".to_string()),
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 }
 
@@ -699,6 +757,16 @@ impl FunctionCall {
     /// Get the underlying syntax node
     pub fn syntax(&self) -> &SyntaxNode {
         &self.0
+    }
+
+    /// Get the arguments from this function call
+    pub fn arguments(&self) -> Vec<Expr> {
+        // Find ARG_LIST child and return EXPRESSION children
+        self.0
+            .children()
+            .filter(|n| n.kind() == ARG_LIST)
+            .flat_map(|arg_list| arg_list.children().filter_map(Expr::cast))
+            .collect()
     }
 }
 

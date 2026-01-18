@@ -2,7 +2,7 @@
 ///
 /// This module provides type inference capabilities for SQL expressions,
 /// including literals, column references, CAST expressions, and aggregates.
-use smelt_parser::ast::{CastExpr, Expr, FunctionCall};
+use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Expr, FunctionCall, Subquery};
 use smelt_types::{parse_type, DataType, TypedColumn};
 use std::collections::HashMap;
 
@@ -111,9 +111,24 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_cast_type(&cast_expr);
     }
 
+    // Try CASE expression
+    if let Some(case_expr) = expr.as_case() {
+        return infer_case_expr_type(&case_expr, ctx);
+    }
+
+    // Try subquery (scalar subquery)
+    if let Some(subquery) = expr.as_subquery() {
+        return infer_subquery_type(&subquery, ctx);
+    }
+
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
+    }
+
+    // Try binary expression
+    if let Some(binary) = expr.as_binary() {
+        return infer_binary_expr_type(&binary, ctx);
     }
 
     // Try column reference
@@ -142,8 +157,59 @@ fn infer_cast_type(cast_expr: &CastExpr) -> Option<TypedColumn> {
     })
 }
 
+/// Infer the type of a CASE expression
+/// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses)
+fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<TypedColumn> {
+    // Try to get the type from the first WHEN clause's THEN expression
+    for when_clause in case_expr.when_clauses() {
+        if let Some(result_expr) = when_clause.result() {
+            if let Some(result_type) = infer_expression_type(&result_expr, ctx) {
+                return Some(TypedColumn {
+                    data_type: result_type.data_type,
+                    // CASE is always nullable (could return NULL if no conditions match without ELSE)
+                    nullable: true,
+                });
+            }
+        }
+    }
+
+    // Fall back to ELSE expression if no WHEN clauses have inferable types
+    if let Some(else_expr) = case_expr.else_expr() {
+        if let Some(else_type) = infer_expression_type(&else_expr, ctx) {
+            return Some(TypedColumn {
+                data_type: else_type.data_type,
+                nullable: true,
+            });
+        }
+    }
+
+    None
+}
+
+/// Infer the type of a scalar subquery
+/// The result type is the type of the first column in the SELECT list
+fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedColumn> {
+    let select_stmt = subquery.select_stmt()?;
+    let select_list = select_stmt.select_list()?;
+
+    // Get the first select item and infer its type
+    if let Some(first_item) = select_list.items().next() {
+        if let Some(expr) = first_item.expression() {
+            if let Some(expr_type) = infer_expression_type(&expr, ctx) {
+                return Some(TypedColumn {
+                    data_type: expr_type.data_type,
+                    // Scalar subqueries are always nullable (could return no rows)
+                    nullable: true,
+                });
+            }
+        }
+    }
+
+    None
+}
+
 /// Infer the type of a function call (aggregates, etc.)
-fn infer_function_type(func: &FunctionCall, _ctx: &TypeContext) -> Option<TypedColumn> {
+fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedColumn> {
     let name = func.name()?.to_uppercase();
 
     match name.as_str() {
@@ -174,25 +240,80 @@ fn infer_function_type(func: &FunctionCall, _ctx: &TypeContext) -> Option<TypedC
 
         // MIN/MAX preserve the argument type
         "MIN" | "MAX" => {
-            // Try to infer from the argument
-            // For simplicity, default to Unknown type
+            // Try to infer from the first argument
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: true, // MIN/MAX of empty set is NULL
+                    });
+                }
+            }
             Some(TypedColumn {
                 data_type: DataType::Unknown,
                 nullable: true,
             })
         }
 
-        // COALESCE - returns first non-null, type is union of args
-        "COALESCE" => Some(TypedColumn {
-            data_type: DataType::Unknown,
-            nullable: true, // Could be null if all args are null
-        }),
+        // COALESCE - returns first non-null, type is type of first argument
+        "COALESCE" => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: true, // Could be null if all args are null
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            })
+        }
 
         // NULLIF - returns first arg type, always nullable
-        "NULLIF" => Some(TypedColumn {
-            data_type: DataType::Unknown,
-            nullable: true,
+        "NULLIF" => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: true, // NULLIF can always return null
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            })
+        }
+
+        // Window ranking functions - return BigInt
+        "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "NTILE" => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: false,
         }),
+
+        // Window distribution functions - return Double (0.0 to 1.0)
+        "CUME_DIST" | "PERCENT_RANK" => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: false,
+        }),
+
+        // Window navigation functions - preserve argument type
+        "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "NTH_VALUE" => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(TypedColumn {
+                        data_type: arg_type.data_type,
+                        nullable: true, // Window functions can return NULL at boundaries
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            })
+        }
 
         // Date functions
         "NOW" | "CURRENT_TIMESTAMP" => Some(TypedColumn {
@@ -326,16 +447,73 @@ fn infer_numeric_literal_type(text: &str) -> Option<DataType> {
     None
 }
 
-/// Infer the result type of a binary operation
-#[allow(dead_code)]
-pub fn infer_binary_op_type(
-    _left: &TypedColumn,
-    _op: &str,
-    _right: &TypedColumn,
-) -> Option<TypedColumn> {
-    // TODO: Implement proper type coercion rules
-    // For now, this is a placeholder for future work
-    None
+/// Infer the result type of a binary expression
+fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<TypedColumn> {
+    let op = binary.operator()?;
+
+    match op.to_uppercase().as_str() {
+        // Logical operators - always return Boolean
+        "AND" | "OR" => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: true,
+        }),
+
+        // Comparison operators - always return Boolean
+        "=" | "<>" | "!=" | "<" | ">" | "<=" | ">=" | "IS" => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: false, // Comparisons always return true/false
+        }),
+
+        // String concatenation - always returns Text
+        "||" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        // Arithmetic operators - promote to widest numeric type
+        "+" | "-" | "*" | "/" => {
+            let left = binary.left().and_then(|e| infer_expression_type(&e, ctx));
+            let right = binary.right().and_then(|e| infer_expression_type(&e, ctx));
+
+            // Promote to widest numeric type
+            match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
+                (Some(DataType::Double), _) | (_, Some(DataType::Double)) => Some(TypedColumn {
+                    data_type: DataType::Double,
+                    nullable: true,
+                }),
+                (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
+                    Some(TypedColumn {
+                        data_type: DataType::Decimal {
+                            precision: 38,
+                            scale: 10,
+                        },
+                        nullable: true,
+                    })
+                }
+                (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
+                    data_type: DataType::BigInt,
+                    nullable: true,
+                }),
+                (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => Some(TypedColumn {
+                    data_type: DataType::Integer,
+                    nullable: true,
+                }),
+                (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => {
+                    Some(TypedColumn {
+                        data_type: DataType::SmallInt,
+                        nullable: true,
+                    })
+                }
+                (Some(l), _) => Some(TypedColumn {
+                    data_type: l,
+                    nullable: true,
+                }),
+                _ => None,
+            }
+        }
+
+        _ => None,
+    }
 }
 
 #[cfg(test)]

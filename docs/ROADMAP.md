@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, CASE expressions, scalar subqueries, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.
+
 **Parser Gap Fixes (January 18, 2026)**: Fixed 5 high/medium severity parser gaps discovered by PostgreSQL compatibility testing: `<>` operator, `||` string concatenation, UNION ALL printing, NULLS FIRST/LAST printing, and expressions in function arguments.
 
 **PostgreSQL Compatibility Testing (January 17, 2026)**: Property-based testing infrastructure added to verify parser compatibility with PostgreSQL. New `smelt-parser-compat` crate with pg_query integration, gap tracking, and CI workflows.
@@ -407,9 +409,13 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
   - `COUNT(*)` → BigInt (non-nullable)
   - `SUM(numeric)` → Decimal(38, 10) (nullable)
   - `AVG(numeric)` → Double (nullable)
-  - `MIN/MAX(any)` → Unknown type (preserves argument type conceptually)
+  - `MIN/MAX(any)` → Preserves argument type (e.g., MIN(timestamp) → Timestamp)
+  - `COALESCE(args)` → Type of first argument
+  - `NULLIF(a, b)` → Type of first argument (always nullable)
   - Date functions: NOW → Timestamp, CURRENT_DATE → Date
   - String functions: CONCAT, UPPER, etc. → Text
+  - Window ranking: ROW_NUMBER, RANK, DENSE_RANK → BigInt
+  - Window navigation: LAG, LEAD, FIRST_VALUE, LAST_VALUE → Preserves argument type
 
 - **TypeChecking Salsa query group**:
   - `type_context(path)` - Builds TypeContext with source and upstream model types
@@ -453,8 +459,31 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 
 - Type coercion warnings
 - Backend-specific types (HUGEINT for DuckDB, Spark types)
-- Comprehensive inference (CASE, subqueries, all functions)
 - LSP quick-fixes for type errors
+
+### ✅ Phase 18b: Comprehensive Type Inference (January 18, 2026)
+
+Added recursive type inference for functions that preserve argument types:
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `FunctionCall::arguments()` method to extract argument expressions from function calls
+- `BinaryExpr` AST type with `left()`, `right()`, and `operator()` methods
+- `Expr::as_binary()` method for binary expression detection
+
+**Type inference improvements** (`crates/smelt-db/src/type_inference.rs`):
+- **CASE expressions**: Infers type from first THEN expression (falls back to ELSE)
+- **Scalar subqueries**: Infers type from first column in SELECT list (always nullable)
+- **MIN/MAX**: Now recursively infers argument type instead of returning Unknown
+- **COALESCE**: Infers type from first argument
+- **NULLIF**: Infers type from first argument (always nullable)
+- **Window ranking functions**: ROW_NUMBER, RANK, DENSE_RANK, NTILE → BigInt
+- **Window distribution functions**: CUME_DIST, PERCENT_RANK → Double
+- **Window navigation functions**: LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE → Preserves argument type
+- **Binary operators**:
+  - Logical (AND, OR) → Boolean
+  - Comparison (=, <>, <, >, etc.) → Boolean
+  - String concatenation (||) → Text
+  - Arithmetic (+, -, *, /) → Promotes to widest numeric type
 
 ---
 
