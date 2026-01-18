@@ -14,7 +14,7 @@ pub mod schema;
 pub mod type_inference;
 
 pub use schema::{Column, ColumnSource, ModelSchema};
-pub use type_inference::{infer_expression_type, TypeContext};
+pub use type_inference::{infer_cte_columns, infer_expression_type, TypeContext};
 
 /// Input queries - these are set by the LSP when files change
 #[salsa::query_group(InputsStorage)]
@@ -991,6 +991,38 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
 
     if let Some(file) = AstFile::cast(syntax) {
         if let Some(select_stmt) = file.select_stmt() {
+            // Process WITH clause CTEs (in order for forward references)
+            // CTEs must be processed before FROM clause so they're available for column lookup
+            if let Some(with_clause) = select_stmt.with_clause() {
+                for cte in with_clause.ctes() {
+                    if let Some(cte_name) = cte.name() {
+                        // For recursive CTEs with explicit column list, bootstrap with Unknown types first
+                        // This allows the recursive reference to find the columns
+                        if with_clause.is_recursive() {
+                            for col_name in cte.column_names() {
+                                ctx.add_cte_column(
+                                    &cte_name,
+                                    &col_name,
+                                    TypedColumn {
+                                        data_type: DataType::Unknown,
+                                        nullable: true,
+                                    },
+                                );
+                            }
+                        }
+
+                        // Infer columns from CTE query
+                        let columns = infer_cte_columns(&cte, &ctx);
+                        for (col_name, typed_col) in columns {
+                            ctx.add_cte_column(&cte_name, &col_name, typed_col);
+                        }
+
+                        // Register CTE name as alias to itself (for qualified lookups like cte_name.col)
+                        ctx.add_alias(&cte_name, &cte_name);
+                    }
+                }
+            }
+
             if let Some(from_clause) = select_stmt.from_clause() {
                 for table_ref in from_clause.table_refs() {
                     // Check for smelt.ref() calls
@@ -1034,6 +1066,20 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
 
                                     // Also add implicit alias using the table name
                                     ctx.add_alias(&table_name, &qualified_name);
+                                }
+                            }
+                        }
+                    }
+
+                    // Check for CTE references with aliases (e.g., "FROM daily_totals dt")
+                    // When a table_ref is just an identifier (not a function call), and that
+                    // identifier is a known CTE, register any alias
+                    if table_ref.function_call().is_none() {
+                        if let Some(table_name) = table_ref.identifier() {
+                            if ctx.is_cte(&table_name) {
+                                // Add explicit alias if present (e.g., "dt" from "daily_totals dt")
+                                if let Some(explicit_alias) = table_ref.alias() {
+                                    ctx.add_alias(&explicit_alias, &table_name);
                                 }
                             }
                         }
@@ -1486,5 +1532,151 @@ sources:
         // Note: Column type inference from sources requires column reference resolution
         // which is a more complex case. For now, the basic literal and aggregate
         // inference is working.
+    }
+
+    #[test]
+    fn test_simple_cte_type_inference() {
+        let mut db = Database::default();
+
+        // Create sources.yml with typed columns
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: created_at
+            type: TIMESTAMP
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // SQL with CTE using DATE() and SUM()
+        let sql = r#"
+WITH daily_totals AS (
+    SELECT DATE(created_at) as day, SUM(amount) as total
+    FROM smelt.source('raw.orders')
+    GROUP BY DATE(created_at)
+)
+SELECT day, total FROM daily_totals WHERE total > 1000
+"#;
+
+        let path = PathBuf::from("models/test_cte.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 2 columns: day and total
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that day has DATE type (from DATE() function)
+        let day_col = schema.columns.iter().find(|c| c.name == "day");
+        assert!(day_col.is_some(), "Column 'day' not found");
+        if let Some(typed_col) = &day_col.unwrap().data_type {
+            assert_eq!(typed_col.data_type, DataType::Date);
+        }
+
+        // Check that total has Decimal type (from SUM())
+        let total_col = schema.columns.iter().find(|c| c.name == "total");
+        assert!(total_col.is_some(), "Column 'total' not found");
+        if let Some(typed_col) = &total_col.unwrap().data_type {
+            assert!(
+                matches!(typed_col.data_type, DataType::Decimal { .. }),
+                "Expected Decimal type for 'total', got {:?}",
+                typed_col.data_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_ctes_forward_reference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // Multiple CTEs where cte2 references cte1
+        let sql = r#"
+WITH cte1 AS (
+    SELECT SUM(amount) as total
+    FROM smelt.source('raw.orders')
+),
+cte2 AS (
+    SELECT total * 2 as doubled
+    FROM cte1
+)
+SELECT doubled FROM cte2
+"#;
+
+        let path = PathBuf::from("models/test_multi_cte.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 1 column: doubled
+        assert_eq!(schema.columns.len(), 1);
+
+        // Check that doubled has inferred type from the multiplication expression
+        let doubled_col = schema.columns.iter().find(|c| c.name == "doubled");
+        assert!(doubled_col.is_some(), "Column 'doubled' not found");
+    }
+
+    #[test]
+    fn test_cte_explicit_column_list() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // CTE with explicit column list - names should override inferred names
+        let sql = r#"
+WITH order_stats(order_sum, order_count) AS (
+    SELECT SUM(amount), COUNT(*)
+    FROM smelt.source('raw.orders')
+)
+SELECT order_sum, order_count FROM order_stats
+"#;
+
+        let path = PathBuf::from("models/test_explicit_cols.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 2 columns with explicit names
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that order_sum exists (explicit name, not SUM)
+        let order_sum_col = schema.columns.iter().find(|c| c.name == "order_sum");
+        assert!(
+            order_sum_col.is_some(),
+            "Column 'order_sum' not found - explicit column list should override inferred names"
+        );
+
+        // Check that order_count exists (explicit name, not COUNT)
+        let order_count_col = schema.columns.iter().find(|c| c.name == "order_count");
+        assert!(
+            order_count_col.is_some(),
+            "Column 'order_count' not found - explicit column list should override inferred names"
+        );
     }
 }

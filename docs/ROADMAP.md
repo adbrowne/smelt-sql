@@ -466,7 +466,6 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 The following SQL features are supported by the parser but not yet handled by the type checker:
 
 **High Priority:**
-- **CTE column resolution** - WITH clause columns not registered in TypeContext
 - **BETWEEN/IN/EXISTS type inference** - Should return Boolean
 - **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type)
 - **UNION type inference** - Combined result type from multiple SELECT statements
@@ -475,6 +474,44 @@ The following SQL features are supported by the parser but not yet handled by th
 - **JOIN column tracking** - Columns from joined tables not fully available
 - **LATERAL correlation** - Correlated column references in lateral subqueries
 - **FILTER clause awareness** - Currently ignored in aggregate type inference
+
+**CTE Type Inference Limitations (MVP):**
+- Nested CTEs (WITH inside subqueries) - CTE columns in nested scopes not resolved
+- Recursive CTEs without explicit column lists - types remain Unknown
+- UNION type reconciliation in recursive CTEs - uses anchor term types only
+
+### ✅ Phase 18c: CTE Type Inference (January 18, 2026)
+
+Added type inference for Common Table Expressions (CTEs). CTE columns are now registered in `TypeContext` and can be resolved in the main query.
+
+**TypeContext changes** (`crates/smelt-db/src/type_inference.rs`):
+- `cte_columns: HashMap<String, TypedColumn>` - CTE column storage
+- `cte_names: HashSet<String>` - Known CTE names for shadowing checks
+- `add_cte_column()` - Register CTE columns with their inferred types
+- `is_cte()` - Check if a name is a known CTE
+- Updated `lookup_column()` to check CTEs first (CTEs shadow outer scope)
+
+**CTE column inference** (`crates/smelt-db/src/type_inference.rs`):
+- `infer_cte_columns()` - Infer column names and types from CTE query
+- Handles explicit column lists (e.g., `WITH cte(a, b) AS ...`)
+- Falls back to alias names, then column references, then generated names
+
+**Integration** (`crates/smelt-db/src/lib.rs`):
+- Process WITH clause before FROM clause in `type_context()`
+- CTEs processed in order for forward references between CTEs
+- Bootstrap recursive CTEs with Unknown types before inference
+- CTE aliases registered for qualified lookups (e.g., `cte_name.column`)
+
+**Example that now works:**
+```sql
+WITH daily_totals AS (
+    SELECT DATE(created_at) as day, SUM(amount) as total
+    FROM smelt.source('raw.orders')
+    GROUP BY DATE(created_at)
+)
+SELECT day, total FROM daily_totals WHERE total > 1000
+-- day → DATE, total → DECIMAL(38,10)
+```
 
 ### ✅ Phase 18b: Comprehensive Type Inference (January 18, 2026)
 

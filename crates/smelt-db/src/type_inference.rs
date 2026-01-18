@@ -2,7 +2,7 @@
 ///
 /// This module provides type inference capabilities for SQL expressions,
 /// including literals, column references, CAST expressions, and aggregates.
-use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Expr, FunctionCall, Subquery};
+use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, Subquery};
 use smelt_types::{parse_type, DataType, TypedColumn};
 use std::collections::HashMap;
 
@@ -13,6 +13,10 @@ pub struct TypeContext {
     source_columns: HashMap<String, TypedColumn>,
     /// Model columns: model_name.column_name -> type
     model_columns: HashMap<String, TypedColumn>,
+    /// CTE columns: cte_name.column_name -> type
+    cte_columns: HashMap<String, TypedColumn>,
+    /// Known CTE names (for checking if a qualifier is a CTE)
+    cte_names: std::collections::HashSet<String>,
     /// Aliases in scope: alias -> qualified name
     aliases: HashMap<String, String>,
 }
@@ -57,14 +61,33 @@ impl TypeContext {
             .insert(alias.to_string(), qualified_name.to_string());
     }
 
+    /// Add a CTE column to the context
+    pub fn add_cte_column(&mut self, cte_name: &str, column_name: &str, typed_column: TypedColumn) {
+        let key = format!("{}.{}", cte_name, column_name);
+        self.cte_columns.insert(key, typed_column);
+        self.cte_names.insert(cte_name.to_string());
+    }
+
+    /// Check if a name is a known CTE
+    pub fn is_cte(&self, name: &str) -> bool {
+        self.cte_names.contains(name)
+    }
+
     /// Look up a column type by name (with optional qualifier)
+    /// CTEs shadow outer scope, so we check them first.
     pub fn lookup_column(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
         // If we have a qualifier, use it directly
         if let Some(q) = qualifier {
             // Check if qualifier is an alias
             let resolved_qualifier = self.aliases.get(q).map(|s| s.as_str()).unwrap_or(q);
 
-            // Try model columns first
+            // Try CTE columns first (CTEs shadow outer scope)
+            let cte_key = format!("{}.{}", resolved_qualifier, name);
+            if let Some(t) = self.cte_columns.get(&cte_key) {
+                return Some(t);
+            }
+
+            // Try model columns
             let model_key = format!("{}.{}", resolved_qualifier, name);
             if let Some(t) = self.model_columns.get(&model_key) {
                 return Some(t);
@@ -84,7 +107,14 @@ impl TypeContext {
         }
 
         // Unqualified lookup - search all sources
-        // First try model columns
+        // First try CTE columns (CTEs shadow outer scope)
+        for (key, typed_col) in &self.cte_columns {
+            if key.ends_with(&format!(".{}", name)) {
+                return Some(typed_col);
+            }
+        }
+
+        // Then try model columns
         for (key, typed_col) in &self.model_columns {
             if key.ends_with(&format!(".{}", name)) {
                 return Some(typed_col);
@@ -516,6 +546,84 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
     }
 }
 
+/// Infer the column names and types from a CTE definition
+///
+/// This extracts columns from the CTE's query and optionally overrides
+/// the inferred names with explicit column names if provided.
+pub fn infer_cte_columns(cte: &Cte, ctx: &TypeContext) -> Vec<(String, TypedColumn)> {
+    let mut columns = Vec::new();
+
+    // Get explicit column names (if present)
+    let explicit_names = cte.column_names();
+
+    // Get the CTE's query (SELECT statement)
+    let select_stmt = match cte.query().and_then(|q| q.select_stmt()) {
+        Some(s) => s,
+        None => return columns,
+    };
+
+    let select_list = match select_stmt.select_list() {
+        Some(l) => l,
+        None => return columns,
+    };
+
+    // Process each select item
+    for (i, item) in select_list.items().enumerate() {
+        // Determine column name:
+        // 1. Use explicit name from CTE column list (if available at this position)
+        // 2. Use explicit alias from AS clause
+        // 3. Try to infer from expression (column reference name)
+        // 4. Fall back to generated name
+        let col_name = if i < explicit_names.len() {
+            explicit_names[i].clone()
+        } else if let Some(alias) = item.alias() {
+            alias
+        } else if let Some(expr) = item.expression() {
+            // Try to infer name from expression
+            infer_column_name(&expr).unwrap_or_else(|| format!("col{}", i + 1))
+        } else {
+            format!("col{}", i + 1)
+        };
+
+        // Infer type from expression
+        let typed_col = if let Some(expr) = item.expression() {
+            infer_expression_type(&expr, ctx).unwrap_or(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            })
+        } else {
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            }
+        };
+
+        columns.push((col_name, typed_col));
+    }
+
+    columns
+}
+
+/// Infer a column name from an expression
+///
+/// For simple column references, returns the column name.
+/// For function calls, returns the function name.
+/// For other expressions, returns None.
+fn infer_column_name(expr: &Expr) -> Option<String> {
+    // Try column reference
+    if let Some(col_ref) = expr.as_column_ref() {
+        return Some(col_ref.name().to_string());
+    }
+
+    // Try function call - use function name
+    if let Some(func) = expr.as_function_call() {
+        return func.name();
+    }
+
+    // For other expressions, we can't infer a name
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +777,85 @@ mod tests {
             }),
             _ => None,
         }
+    }
+
+    #[test]
+    fn test_cte_column_lookup() {
+        let mut ctx = TypeContext::new();
+
+        // Add a CTE column
+        ctx.add_cte_column(
+            "daily_totals",
+            "day",
+            TypedColumn {
+                data_type: DataType::Date,
+                nullable: false,
+            },
+        );
+
+        ctx.add_cte_column(
+            "daily_totals",
+            "total",
+            TypedColumn {
+                data_type: DataType::Decimal {
+                    precision: 38,
+                    scale: 10,
+                },
+                nullable: true,
+            },
+        );
+
+        // Check that CTE is registered
+        assert!(ctx.is_cte("daily_totals"));
+        assert!(!ctx.is_cte("nonexistent"));
+
+        // Look up CTE column with qualifier
+        let result = ctx.lookup_column(Some("daily_totals"), "day");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().data_type, DataType::Date);
+
+        // Look up CTE column without qualifier
+        let result = ctx.lookup_column(None, "total");
+        assert!(result.is_some());
+        assert!(matches!(
+            result.unwrap().data_type,
+            DataType::Decimal { .. }
+        ));
+    }
+
+    #[test]
+    fn test_cte_shadows_source() {
+        let mut ctx = TypeContext::new();
+
+        // Add a source column with name "orders"
+        ctx.add_source_column(
+            "raw",
+            "orders",
+            "amount",
+            TypedColumn {
+                data_type: DataType::Integer,
+                nullable: false,
+            },
+        );
+
+        // Add a CTE with the same name "orders" but different column type
+        ctx.add_cte_column(
+            "orders",
+            "amount",
+            TypedColumn {
+                data_type: DataType::BigInt,
+                nullable: true,
+            },
+        );
+
+        // CTE should shadow the source - BigInt should be returned, not Integer
+        let result = ctx.lookup_column(Some("orders"), "amount");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().data_type, DataType::BigInt);
+
+        // Unqualified lookup should also return CTE column
+        let result = ctx.lookup_column(None, "amount");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().data_type, DataType::BigInt);
     }
 }
