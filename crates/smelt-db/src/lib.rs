@@ -1727,4 +1727,110 @@ SELECT inner_total FROM outer_cte
             );
         }
     }
+
+    #[test]
+    fn test_recursive_cte_without_explicit_columns() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      nodes:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: parent_id
+            type: INTEGER
+"#;
+
+        // Recursive CTE WITHOUT explicit column list
+        let sql = r#"
+WITH RECURSIVE tree AS (
+    SELECT id, parent_id FROM smelt.source('raw.nodes') WHERE parent_id IS NULL
+    UNION ALL
+    SELECT n.id, n.parent_id FROM smelt.source('raw.nodes') n
+    INNER JOIN tree ON n.parent_id = tree.id
+)
+SELECT id, parent_id FROM tree
+"#;
+
+        let path = PathBuf::from("models/test_recursive.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 2 columns: id and parent_id
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that id has INTEGER type (inferred from anchor term)
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert!(
+            id_col.unwrap().data_type.is_some(),
+            "Column 'id' should have a type"
+        );
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "Expected INTEGER for 'id'"
+        );
+
+        // Check that parent_id also has INTEGER type
+        let parent_id_col = schema.columns.iter().find(|c| c.name == "parent_id");
+        assert!(parent_id_col.is_some(), "Column 'parent_id' not found");
+        assert!(
+            parent_id_col.unwrap().data_type.is_some(),
+            "Column 'parent_id' should have a type"
+        );
+        assert_eq!(
+            parent_id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "Expected INTEGER for 'parent_id'"
+        );
+    }
+
+    #[test]
+    fn test_recursive_cte_with_literal_anchor() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // Recursive CTE with literal in anchor term (no source references)
+        let sql = r#"
+WITH RECURSIVE nums AS (
+    SELECT 1 as n
+    UNION ALL
+    SELECT n + 1 FROM nums WHERE n < 10
+)
+SELECT n FROM nums
+"#;
+
+        let path = PathBuf::from("models/test_recursive_literal.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 1 column: n
+        assert_eq!(schema.columns.len(), 1);
+
+        // Check that n has SmallInt type (from literal 1 in anchor term)
+        let n_col = schema.columns.iter().find(|c| c.name == "n");
+        assert!(n_col.is_some(), "Column 'n' not found");
+        assert!(
+            n_col.unwrap().data_type.is_some(),
+            "Column 'n' should have a type"
+        );
+        assert_eq!(
+            n_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::SmallInt,
+            "Expected SmallInt for 'n' (from literal 1)"
+        );
+    }
 }

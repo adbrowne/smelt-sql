@@ -475,10 +475,10 @@ The following SQL features are supported by the parser but not yet handled by th
 - **LATERAL correlation** - Correlated column references in lateral subqueries
 - **FILTER clause awareness** - Currently ignored in aggregate type inference
 
-**CTE Type Inference Limitations (MVP):**
-- Nested CTEs (WITH inside subqueries) - CTE columns in nested scopes not resolved
-- Recursive CTEs without explicit column lists - types remain Unknown
-- UNION type reconciliation in recursive CTEs - uses anchor term types only
+**CTE Type Inference Status:**
+- ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
+- ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
+- ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
 
 ### ✅ Phase 18c: CTE Type Inference (January 18, 2026)
 
