@@ -471,7 +471,7 @@ The following SQL features are supported by the parser but not yet handled by th
 - ✅ **UNION type inference** - Combined result type from multiple SELECT statements (January 18, 2026)
 
 **Medium Priority:**
-- **JOIN column tracking** - Columns from joined tables not fully available
+- ✅ **JOIN column tracking** - Columns from joined tables fully available (January 18, 2026)
 - **LATERAL correlation** - Correlated column references in lateral subqueries
 - **FILTER clause awareness** - Currently ignored in aggregate type inference
 
@@ -479,6 +479,23 @@ The following SQL features are supported by the parser but not yet handled by th
 - ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
 - ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
 - ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18g: JOIN Column Tracking (January 18, 2026)
+
+Columns from joined tables are now properly tracked in the type context, enabling type inference for queries with JOINs.
+
+**Changes** (`crates/smelt-db/src/lib.rs`):
+- Extracted `process_table_ref()` helper function for processing table references
+- `type_context()` now iterates over `from_clause.joins()` in addition to `table_refs()`
+- All join types supported: INNER, LEFT, RIGHT, FULL, CROSS
+
+**Example:**
+```sql
+SELECT o.id, o.amount, u.name
+FROM smelt.source('raw.orders') o
+INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
+-- All columns (id, amount, name) have proper types from their respective sources
+```
 
 ### ✅ Phase 18f: UNION Type Inference (January 18, 2026)
 

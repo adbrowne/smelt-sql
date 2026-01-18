@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use smelt_parser::{self, File as AstFile, RefCall};
+use smelt_parser::{self, File as AstFile, RefCall, TableRef};
 use smelt_types::{parse_type, DataType, TypedColumn};
 
 pub mod schema;
@@ -1026,65 +1026,15 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
             }
 
             if let Some(from_clause) = select_stmt.from_clause() {
+                // Process main table refs in FROM clause
                 for table_ref in from_clause.table_refs() {
-                    // Check for smelt.ref() calls
-                    if let Some(func) = table_ref.function_call() {
-                        if let Some(ref_call) = RefCall::from_function_call(func) {
-                            if let Some(model_name) = ref_call.model_name() {
-                                // Resolve upstream model and get its typed schema
-                                if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                                    let upstream_schema = db.typed_model_schema(upstream_path);
+                    process_table_ref(db, &table_ref, &mut ctx);
+                }
 
-                                    // Add upstream columns to context
-                                    for col in &upstream_schema.columns {
-                                        if col.name != "*" {
-                                            if let Some(typed_col) = &col.data_type {
-                                                ctx.add_model_column(
-                                                    &model_name,
-                                                    &col.name,
-                                                    typed_col.clone(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Check for smelt.source() calls
-                    if let Some(func) = table_ref.function_call() {
-                        if let Some(source_call) =
-                            smelt_parser::ast::SourceCall::from_function_call(func)
-                        {
-                            if let Some(source_name) = source_call.source_name() {
-                                if let Some(table_name) = source_call.table_name() {
-                                    let qualified_name = format!("{}.{}", source_name, table_name);
-
-                                    // Add explicit alias if present (e.g., "t" from "smelt.source('raw.users') t")
-                                    if let Some(explicit_alias) = table_ref.alias() {
-                                        ctx.add_alias(&explicit_alias, &qualified_name);
-                                    }
-
-                                    // Also add implicit alias using the table name
-                                    ctx.add_alias(&table_name, &qualified_name);
-                                }
-                            }
-                        }
-                    }
-
-                    // Check for CTE references with aliases (e.g., "FROM daily_totals dt")
-                    // When a table_ref is just an identifier (not a function call), and that
-                    // identifier is a known CTE, register any alias
-                    if table_ref.function_call().is_none() {
-                        if let Some(table_name) = table_ref.identifier() {
-                            if ctx.is_cte(&table_name) {
-                                // Add explicit alias if present (e.g., "dt" from "daily_totals dt")
-                                if let Some(explicit_alias) = table_ref.alias() {
-                                    ctx.add_alias(&explicit_alias, &table_name);
-                                }
-                            }
-                        }
+                // Process table refs from JOIN clauses
+                for join in from_clause.joins() {
+                    if let Some(table_ref) = join.table_ref() {
+                        process_table_ref(db, &table_ref, &mut ctx);
                     }
                 }
             }
@@ -1092,6 +1042,69 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
     }
 
     Arc::new(ctx)
+}
+
+/// Process a single table reference and add its columns/aliases to the context.
+/// This handles smelt.ref(), smelt.source(), and CTE references.
+fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut TypeContext) {
+    // Check for smelt.ref() calls
+    if let Some(func) = table_ref.function_call() {
+        if let Some(ref_call) = RefCall::from_function_call(func) {
+            if let Some(model_name) = ref_call.model_name() {
+                // Resolve upstream model and get its typed schema
+                if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
+                    let upstream_schema = db.typed_model_schema(upstream_path);
+
+                    // Add upstream columns to context
+                    for col in &upstream_schema.columns {
+                        if col.name != "*" {
+                            if let Some(typed_col) = &col.data_type {
+                                ctx.add_model_column(&model_name, &col.name, typed_col.clone());
+                            }
+                        }
+                    }
+
+                    // Register alias if present
+                    if let Some(explicit_alias) = table_ref.alias() {
+                        ctx.add_alias(&explicit_alias, &model_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for smelt.source() calls
+    if let Some(func) = table_ref.function_call() {
+        if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
+            if let Some(source_name) = source_call.source_name() {
+                if let Some(table_name) = source_call.table_name() {
+                    let qualified_name = format!("{}.{}", source_name, table_name);
+
+                    // Add explicit alias if present (e.g., "t" from "smelt.source('raw.users') t")
+                    if let Some(explicit_alias) = table_ref.alias() {
+                        ctx.add_alias(&explicit_alias, &qualified_name);
+                    }
+
+                    // Also add implicit alias using the table name
+                    ctx.add_alias(&table_name, &qualified_name);
+                }
+            }
+        }
+    }
+
+    // Check for CTE references with aliases (e.g., "FROM daily_totals dt")
+    // When a table_ref is just an identifier (not a function call), and that
+    // identifier is a known CTE, register any alias
+    if table_ref.function_call().is_none() {
+        if let Some(table_name) = table_ref.identifier() {
+            if ctx.is_cte(&table_name) {
+                // Add explicit alias if present (e.g., "dt" from "daily_totals dt")
+                if let Some(explicit_alias) = table_ref.alias() {
+                    ctx.add_alias(&explicit_alias, &table_name);
+                }
+            }
+        }
+    }
 }
 
 fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> {
@@ -2209,6 +2222,205 @@ SELECT CAST(3 AS BIGINT) as n
             n_col.unwrap().data_type.as_ref().unwrap().data_type,
             DataType::BigInt,
             "Chained UNION of SMALLINT, INTEGER, BIGINT should be BIGINT"
+        );
+    }
+
+    #[test]
+    fn test_join_column_tracking_source() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR(100)
+"#;
+
+        // JOIN query - columns from joined table should be available
+        let sql = r#"
+SELECT o.id, o.amount, u.name
+FROM smelt.source('raw.orders') o
+INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
+"#;
+
+        let path = PathBuf::from("models/test_join.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check that id from orders is INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER from orders"
+        );
+
+        // Check that amount from orders is DECIMAL
+        let amount_col = schema.columns.iter().find(|c| c.name == "amount");
+        assert!(amount_col.is_some(), "Column 'amount' not found");
+        assert!(
+            matches!(
+                amount_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "amount should be DECIMAL from orders"
+        );
+
+        // Check that name from users (joined table) is VARCHAR/Text
+        let name_col = schema.columns.iter().find(|c| c.name == "name");
+        assert!(name_col.is_some(), "Column 'name' not found");
+        assert!(
+            matches!(
+                name_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Varchar { .. }
+            ),
+            "name should be VARCHAR from joined users table"
+        );
+    }
+
+    #[test]
+    fn test_join_column_tracking_multiple_joins() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: product_id
+            type: INTEGER
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR(100)
+      products:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: price
+            type: DOUBLE
+"#;
+
+        // Multiple JOINs - columns from all joined tables should be available
+        let sql = r#"
+SELECT o.id, u.name, p.price
+FROM smelt.source('raw.orders') o
+INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
+INNER JOIN smelt.source('raw.products') p ON o.product_id = p.id
+"#;
+
+        let path = PathBuf::from("models/test_multi_join.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check that id from orders is INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER"
+        );
+
+        // Check that name from users is VARCHAR
+        let name_col = schema.columns.iter().find(|c| c.name == "name");
+        assert!(name_col.is_some(), "Column 'name' not found");
+        assert!(
+            matches!(
+                name_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Varchar { .. }
+            ),
+            "name should be VARCHAR from joined users table"
+        );
+
+        // Check that price from products (second join) is DOUBLE
+        let price_col = schema.columns.iter().find(|c| c.name == "price");
+        assert!(price_col.is_some(), "Column 'price' not found");
+        assert_eq!(
+            price_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "price should be DOUBLE from joined products table"
+        );
+    }
+
+    #[test]
+    fn test_join_column_tracking_left_join() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: email
+            type: TEXT
+"#;
+
+        // LEFT JOIN - columns from joined table should still be available
+        let sql = r#"
+SELECT o.id, u.email
+FROM smelt.source('raw.orders') o
+LEFT JOIN smelt.source('raw.users') u ON o.user_id = u.id
+"#;
+
+        let path = PathBuf::from("models/test_left_join.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that email from users (LEFT JOINed) has a string type
+        let email_col = schema.columns.iter().find(|c| c.name == "email");
+        assert!(email_col.is_some(), "Column 'email' not found");
+        // TEXT is parsed as Varchar { max_length: None } or Text
+        let email_type = &email_col.unwrap().data_type.as_ref().unwrap().data_type;
+        assert!(
+            matches!(email_type, DataType::Text | DataType::Varchar { .. }),
+            "email should be TEXT/VARCHAR from LEFT JOINed users table, got {:?}",
+            email_type
         );
     }
 }
