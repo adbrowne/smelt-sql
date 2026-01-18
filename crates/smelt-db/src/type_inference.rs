@@ -2,7 +2,7 @@
 ///
 /// This module provides type inference capabilities for SQL expressions,
 /// including literals, column references, CAST expressions, and aggregates.
-use smelt_parser::ast::{BinaryExpr, CastExpr, Expr, FunctionCall};
+use smelt_parser::ast::{BinaryExpr, CaseExpr, CastExpr, Expr, FunctionCall};
 use smelt_types::{parse_type, DataType, TypedColumn};
 use std::collections::HashMap;
 
@@ -111,6 +111,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_cast_type(&cast_expr);
     }
 
+    // Try CASE expression
+    if let Some(case_expr) = expr.as_case() {
+        return infer_case_expr_type(&case_expr, ctx);
+    }
+
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
@@ -145,6 +150,35 @@ fn infer_cast_type(cast_expr: &CastExpr) -> Option<TypedColumn> {
         // CAST can produce NULL if the input is NULL
         nullable: true,
     })
+}
+
+/// Infer the type of a CASE expression
+/// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses)
+fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<TypedColumn> {
+    // Try to get the type from the first WHEN clause's THEN expression
+    for when_clause in case_expr.when_clauses() {
+        if let Some(result_expr) = when_clause.result() {
+            if let Some(result_type) = infer_expression_type(&result_expr, ctx) {
+                return Some(TypedColumn {
+                    data_type: result_type.data_type,
+                    // CASE is always nullable (could return NULL if no conditions match without ELSE)
+                    nullable: true,
+                });
+            }
+        }
+    }
+
+    // Fall back to ELSE expression if no WHEN clauses have inferable types
+    if let Some(else_expr) = case_expr.else_expr() {
+        if let Some(else_type) = infer_expression_type(&else_expr, ctx) {
+            return Some(TypedColumn {
+                data_type: else_type.data_type,
+                nullable: true,
+            });
+        }
+    }
+
+    None
 }
 
 /// Infer the type of a function call (aggregates, etc.)
