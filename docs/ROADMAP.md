@@ -461,6 +461,21 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 - Backend-specific types (HUGEINT for DuckDB, Spark types)
 - LSP quick-fixes for type errors
 
+### Type Checker Feature Gaps
+
+The following SQL features are supported by the parser but not yet handled by the type checker:
+
+**High Priority:**
+- **CTE column resolution** - WITH clause columns not registered in TypeContext
+- **BETWEEN/IN/EXISTS type inference** - Should return Boolean
+- **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type)
+- **UNION type inference** - Combined result type from multiple SELECT statements
+
+**Medium Priority:**
+- **JOIN column tracking** - Columns from joined tables not fully available
+- **LATERAL correlation** - Correlated column references in lateral subqueries
+- **FILTER clause awareness** - Currently ignored in aggregate type inference
+
 ### ✅ Phase 18b: Comprehensive Type Inference (January 18, 2026)
 
 Added recursive type inference for functions that preserve argument types:
