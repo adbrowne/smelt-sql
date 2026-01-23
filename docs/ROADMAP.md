@@ -466,15 +466,211 @@ Add a type system to smelt that models tables and columns with SQL types, enabli
 The following SQL features are supported by the parser but not yet handled by the type checker:
 
 **High Priority:**
-- **CTE column resolution** - WITH clause columns not registered in TypeContext
-- **BETWEEN/IN/EXISTS type inference** - Should return Boolean
-- **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type)
-- **UNION type inference** - Combined result type from multiple SELECT statements
+- ✅ **BETWEEN/IN/EXISTS type inference** - Returns Boolean (January 18, 2026)
+- ✅ **Unary operators** - NOT (→ Boolean), negation (→ preserve numeric type) (January 18, 2026)
+- ✅ **UNION type inference** - Combined result type from multiple SELECT statements (January 18, 2026)
 
 **Medium Priority:**
-- **JOIN column tracking** - Columns from joined tables not fully available
-- **LATERAL correlation** - Correlated column references in lateral subqueries
-- **FILTER clause awareness** - Currently ignored in aggregate type inference
+- ✅ **JOIN column tracking** - Columns from joined tables fully available (January 18, 2026)
+- ✅ **LATERAL correlation** - Correlated column references in lateral subqueries (January 18, 2026)
+- ✅ **FILTER clause awareness** - Aggregate types preserved with FILTER clauses (January 18, 2026)
+
+**CTE Type Inference Status:**
+- ✅ Nested CTEs (WITH inside CTEs) - CTE columns in nested scopes fully resolved
+- ✅ Recursive CTEs without explicit column lists - types inferred from anchor term
+- ⏸️ UNION type reconciliation in recursive CTEs - uses anchor term types only (acceptable for MVP)
+
+### ✅ Phase 18j: Extended Function Type Inference (January 18, 2026)
+
+Added type inference for 50+ additional SQL functions across math, date/time, string, and aggregate categories.
+
+**Math functions** (`crates/smelt-db/src/type_inference.rs`):
+- Preserve argument type: `ABS`, `SIGN`, `ROUND`, `TRUNC`, `CEIL`, `FLOOR`, `MOD`
+- Return Double: `POWER`, `SQRT`, `EXP`, `LN`, `LOG`, `LOG10`, `LOG2`
+- Trigonometric: `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`, `SINH`, `COSH`, `TANH`
+- Constants: `PI`, `RANDOM` (non-nullable)
+
+**Date/time functions**:
+- `EXTRACT`, `DATE_PART` → Double
+- `MAKE_DATE` → Date, `MAKE_TIME` → Time, `MAKE_TIMESTAMP` → Timestamp
+- `AGE` → Interval
+
+**String functions**:
+- Text output: `REPLACE`, `TRANSLATE`, `REVERSE`, `REPEAT`, `LPAD`, `RPAD`, `LEFT`, `RIGHT`, `SPLIT_PART`, `INITCAP`, `QUOTE_IDENT`, `QUOTE_LITERAL`
+- Integer output: `POSITION`, `STRPOS`
+
+**Aggregate/special functions**:
+- `GREATEST`, `LEAST` → preserve first argument type
+- `ARRAY_AGG` → Array of argument type
+- `STRING_AGG`, `LISTAGG` → Text
+- JSON functions (basic): `JSON_BUILD_OBJECT`, `TO_JSON`, etc. → Text
+
+### ✅ Phase 18i: FILTER Clause Awareness (January 18, 2026)
+
+Aggregate functions with FILTER clauses now have proper AST support and type inference works correctly.
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `FilterClause` AST wrapper with `expression()` method to get the filter condition
+- `FunctionCall::filter_clause()` method to access the optional FILTER clause
+
+**Type inference behavior**:
+- FILTER clause does not change the return type of aggregates
+- `COUNT(*) FILTER (WHERE ...)` → BigInt (same as COUNT without FILTER)
+- `SUM(x) FILTER (WHERE ...)` → Decimal (same as SUM without FILTER)
+- `AVG(x) FILTER (WHERE ...)` → Double (same as AVG without FILTER)
+
+**Example:**
+```sql
+SELECT
+    COUNT(*) as total,
+    COUNT(*) FILTER (WHERE status = 'completed') as completed,
+    SUM(amount) FILTER (WHERE status = 'pending') as pending_sum
+FROM smelt.source('raw.orders')
+-- total → BIGINT, completed → BIGINT, pending_sum → DECIMAL(38,10)
+```
+
+### ✅ Phase 18h: LATERAL Correlation (January 18, 2026)
+
+LATERAL subqueries can now access columns from preceding table references in the FROM clause. Subquery columns are properly registered in the type context.
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `TableRef::is_lateral()` - Check if table reference has LATERAL keyword
+- `TableRef::subquery()` - Get the subquery if this table reference contains one
+- Updated `TableRef::alias()` to correctly detect aliases after subquery closing parenthesis
+
+**Type inference changes** (`crates/smelt-db/src/lib.rs`):
+- `process_table_ref()` now handles subqueries (including LATERAL subqueries)
+- Infers column types from subquery's SELECT list
+- Registers subquery columns under the alias name in the type context
+- Column names derived from: alias, column reference name, or generated name
+
+**Example:**
+```sql
+SELECT u.id, recent.total_amount
+FROM smelt.source('raw.users') u
+LEFT JOIN LATERAL (
+    SELECT SUM(o.amount) as total_amount
+    FROM smelt.source('raw.orders') o
+    WHERE o.user_id = u.id
+) recent ON true
+-- recent.total_amount → DECIMAL(38,10) (inferred from SUM aggregate)
+```
+
+**Limitations:**
+- LATERAL correlation itself (u.id reference inside subquery) is parsed but not yet validated at the type level
+- Subqueries without aliases are not tracked (alias is required for column registration)
+
+### ✅ Phase 18g: JOIN Column Tracking (January 18, 2026)
+
+Columns from joined tables are now properly tracked in the type context, enabling type inference for queries with JOINs.
+
+**Changes** (`crates/smelt-db/src/lib.rs`):
+- Extracted `process_table_ref()` helper function for processing table references
+- `type_context()` now iterates over `from_clause.joins()` in addition to `table_refs()`
+- All join types supported: INNER, LEFT, RIGHT, FULL, CROSS
+
+**Example:**
+```sql
+SELECT o.id, o.amount, u.name
+FROM smelt.source('raw.orders') o
+INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
+-- All columns (id, amount, name) have proper types from their respective sources
+```
+
+### ✅ Phase 18f: UNION Type Inference (January 18, 2026)
+
+Added type inference for UNION and UNION ALL queries. Types from all branches are combined using type promotion.
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `SelectStmt::has_union()` - Check if SELECT has a UNION clause
+- `SelectStmt::is_union_all()` - Check if UNION is UNION ALL
+- `SelectStmt::union_select()` - Get the SELECT statement after UNION
+
+**Type inference** (`crates/smelt-db/src/type_inference.rs`):
+- `promote_types()` - Combine two types to the widest compatible type
+  - Numeric promotion: SmallInt < Integer < BigInt < Decimal < Double
+  - String types unify to Text
+  - Timestamp types prefer timezone-aware if either has it
+  - Unknown is dominated by any known type
+- `infer_select_column_types()` - Infer types for SELECT, recursively handling UNION
+  - Combines types from all UNION branches using promotion
+  - Supports chained UNIONs (A UNION B UNION C)
+
+**Example:**
+```sql
+SELECT CAST(1 AS INTEGER) as n
+UNION
+SELECT CAST(2 AS BIGINT) as n
+-- n → BIGINT (promoted from INTEGER + BIGINT)
+```
+
+**Limitations:**
+- Column resolution in UNION branches with different sources can be ambiguous if unqualified column names conflict
+
+### ✅ Phase 18e: Unary Operator Type Inference (January 18, 2026)
+
+Added type inference for unary operators (NOT and negation).
+
+**Parser changes** (`crates/smelt-parser/src/ast.rs`):
+- `BinaryExpr::is_unary()` - Check if expression is unary (no right operand)
+- `BinaryExpr::unary_operand_column()` - Extract column reference from unary operand
+  - Handles bare identifier tokens not wrapped in expression nodes
+  - Supports qualified names (table.column)
+
+**Type inference** (`crates/smelt-db/src/type_inference.rs`):
+- **NOT operator** → Boolean (nullable, NOT NULL = NULL)
+- **Unary negation** (`-expr`) → Preserves numeric type of operand
+  - Works with column references, expressions, and nested unary ops
+
+**Example:**
+```sql
+SELECT -amount as negative_amount, NOT is_active as inactive
+FROM smelt.source('raw.orders')
+-- negative_amount → INTEGER (preserves source column type)
+-- inactive → Boolean
+```
+
+### ✅ Phase 18d: BETWEEN/IN/EXISTS Type Inference (January 18, 2026)
+
+Added type inference for BETWEEN, IN, and EXISTS expressions. All three return Boolean type.
+
+**Changes** (`crates/smelt-db/src/type_inference.rs`):
+- BETWEEN expressions → Boolean (nullable, could be NULL if any operand is NULL)
+- IN expressions → Boolean (nullable, could be NULL if expr or values contain NULL)
+- EXISTS expressions → Boolean (non-nullable, always returns TRUE or FALSE)
+
+### ✅ Phase 18c: CTE Type Inference (January 18, 2026)
+
+Added type inference for Common Table Expressions (CTEs). CTE columns are now registered in `TypeContext` and can be resolved in the main query.
+
+**TypeContext changes** (`crates/smelt-db/src/type_inference.rs`):
+- `cte_columns: HashMap<String, TypedColumn>` - CTE column storage
+- `cte_names: HashSet<String>` - Known CTE names for shadowing checks
+- `add_cte_column()` - Register CTE columns with their inferred types
+- `is_cte()` - Check if a name is a known CTE
+- Updated `lookup_column()` to check CTEs first (CTEs shadow outer scope)
+
+**CTE column inference** (`crates/smelt-db/src/type_inference.rs`):
+- `infer_cte_columns()` - Infer column names and types from CTE query
+- Handles explicit column lists (e.g., `WITH cte(a, b) AS ...`)
+- Falls back to alias names, then column references, then generated names
+
+**Integration** (`crates/smelt-db/src/lib.rs`):
+- Process WITH clause before FROM clause in `type_context()`
+- CTEs processed in order for forward references between CTEs
+- Bootstrap recursive CTEs with Unknown types before inference
+- CTE aliases registered for qualified lookups (e.g., `cte_name.column`)
+
+**Example that now works:**
+```sql
+WITH daily_totals AS (
+    SELECT DATE(created_at) as day, SUM(amount) as total
+    FROM smelt.source('raw.orders')
+    GROUP BY DATE(created_at)
+)
+SELECT day, total FROM daily_totals WHERE total > 1000
+-- day → DATE, total → DECIMAL(38,10)
+```
 
 ### ✅ Phase 18b: Comprehensive Type Inference (January 18, 2026)
 

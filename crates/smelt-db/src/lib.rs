@@ -7,14 +7,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use smelt_parser::{self, File as AstFile, RefCall};
+use smelt_parser::{self, File as AstFile, RefCall, TableRef};
 use smelt_types::{parse_type, DataType, TypedColumn};
 
 pub mod schema;
 pub mod type_inference;
 
 pub use schema::{Column, ColumnSource, ModelSchema};
-pub use type_inference::{infer_expression_type, TypeContext};
+pub use type_inference::{
+    infer_cte_columns, infer_expression_type, infer_select_column_types, TypeContext,
+};
 
 /// Input queries - these are set by the LSP when files change
 #[salsa::query_group(InputsStorage)]
@@ -991,52 +993,48 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
 
     if let Some(file) = AstFile::cast(syntax) {
         if let Some(select_stmt) = file.select_stmt() {
-            if let Some(from_clause) = select_stmt.from_clause() {
-                for table_ref in from_clause.table_refs() {
-                    // Check for smelt.ref() calls
-                    if let Some(func) = table_ref.function_call() {
-                        if let Some(ref_call) = RefCall::from_function_call(func) {
-                            if let Some(model_name) = ref_call.model_name() {
-                                // Resolve upstream model and get its typed schema
-                                if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                                    let upstream_schema = db.typed_model_schema(upstream_path);
-
-                                    // Add upstream columns to context
-                                    for col in &upstream_schema.columns {
-                                        if col.name != "*" {
-                                            if let Some(typed_col) = &col.data_type {
-                                                ctx.add_model_column(
-                                                    &model_name,
-                                                    &col.name,
-                                                    typed_col.clone(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+            // Process WITH clause CTEs (in order for forward references)
+            // CTEs must be processed before FROM clause so they're available for column lookup
+            if let Some(with_clause) = select_stmt.with_clause() {
+                for cte in with_clause.ctes() {
+                    if let Some(cte_name) = cte.name() {
+                        // For recursive CTEs with explicit column list, bootstrap with Unknown types first
+                        // This allows the recursive reference to find the columns
+                        if with_clause.is_recursive() {
+                            for col_name in cte.column_names() {
+                                ctx.add_cte_column(
+                                    &cte_name,
+                                    &col_name,
+                                    TypedColumn {
+                                        data_type: DataType::Unknown,
+                                        nullable: true,
+                                    },
+                                );
                             }
                         }
+
+                        // Infer columns from CTE query
+                        let columns = infer_cte_columns(&cte, &ctx);
+                        for (col_name, typed_col) in columns {
+                            ctx.add_cte_column(&cte_name, &col_name, typed_col);
+                        }
+
+                        // Register CTE name as alias to itself (for qualified lookups like cte_name.col)
+                        ctx.add_alias(&cte_name, &cte_name);
                     }
+                }
+            }
 
-                    // Check for smelt.source() calls
-                    if let Some(func) = table_ref.function_call() {
-                        if let Some(source_call) =
-                            smelt_parser::ast::SourceCall::from_function_call(func)
-                        {
-                            if let Some(source_name) = source_call.source_name() {
-                                if let Some(table_name) = source_call.table_name() {
-                                    let qualified_name = format!("{}.{}", source_name, table_name);
+            if let Some(from_clause) = select_stmt.from_clause() {
+                // Process main table refs in FROM clause
+                for table_ref in from_clause.table_refs() {
+                    process_table_ref(db, &table_ref, &mut ctx);
+                }
 
-                                    // Add explicit alias if present (e.g., "t" from "smelt.source('raw.users') t")
-                                    if let Some(explicit_alias) = table_ref.alias() {
-                                        ctx.add_alias(&explicit_alias, &qualified_name);
-                                    }
-
-                                    // Also add implicit alias using the table name
-                                    ctx.add_alias(&table_name, &qualified_name);
-                                }
-                            }
-                        }
+                // Process table refs from JOIN clauses
+                for join in from_clause.joins() {
+                    if let Some(table_ref) = join.table_ref() {
+                        process_table_ref(db, &table_ref, &mut ctx);
                     }
                 }
             }
@@ -1044,6 +1042,114 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
     }
 
     Arc::new(ctx)
+}
+
+/// Process a single table reference and add its columns/aliases to the context.
+/// This handles smelt.ref(), smelt.source(), CTE references, and subqueries (including LATERAL).
+fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut TypeContext) {
+    // Check for smelt.ref() calls
+    if let Some(func) = table_ref.function_call() {
+        if let Some(ref_call) = RefCall::from_function_call(func) {
+            if let Some(model_name) = ref_call.model_name() {
+                // Resolve upstream model and get its typed schema
+                if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
+                    let upstream_schema = db.typed_model_schema(upstream_path);
+
+                    // Add upstream columns to context
+                    for col in &upstream_schema.columns {
+                        if col.name != "*" {
+                            if let Some(typed_col) = &col.data_type {
+                                ctx.add_model_column(&model_name, &col.name, typed_col.clone());
+                            }
+                        }
+                    }
+
+                    // Register alias if present
+                    if let Some(explicit_alias) = table_ref.alias() {
+                        ctx.add_alias(&explicit_alias, &model_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for smelt.source() calls
+    if let Some(func) = table_ref.function_call() {
+        if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
+            if let Some(source_name) = source_call.source_name() {
+                if let Some(table_name) = source_call.table_name() {
+                    let qualified_name = format!("{}.{}", source_name, table_name);
+
+                    // Add explicit alias if present (e.g., "t" from "smelt.source('raw.users') t")
+                    if let Some(explicit_alias) = table_ref.alias() {
+                        ctx.add_alias(&explicit_alias, &qualified_name);
+                    }
+
+                    // Also add implicit alias using the table name
+                    ctx.add_alias(&table_name, &qualified_name);
+                }
+            }
+        }
+    }
+
+    // Check for CTE references with aliases (e.g., "FROM daily_totals dt")
+    // When a table_ref is just an identifier (not a function call), and that
+    // identifier is a known CTE, register any alias
+    if table_ref.function_call().is_none() && table_ref.subquery().is_none() {
+        if let Some(table_name) = table_ref.identifier() {
+            if ctx.is_cte(&table_name) {
+                // Add explicit alias if present (e.g., "dt" from "daily_totals dt")
+                if let Some(explicit_alias) = table_ref.alias() {
+                    ctx.add_alias(&explicit_alias, &table_name);
+                }
+            }
+        }
+    }
+
+    // Check for subqueries (including LATERAL subqueries)
+    // These create derived tables whose columns should be available via the alias
+    if let Some(subquery) = table_ref.subquery() {
+        if let Some(alias) = table_ref.alias() {
+            // Get the SELECT statement from the subquery
+            if let Some(select_stmt) = subquery.select_stmt() {
+                // Get the column names from the SELECT list
+                if let Some(select_list) = select_stmt.select_list() {
+                    // Infer column types using the current context
+                    // For LATERAL subqueries, this allows referencing preceding table columns
+                    let column_types = infer_select_column_types(&select_stmt, ctx);
+
+                    // Register each column under the subquery's alias
+                    for (i, item) in select_list.items().enumerate() {
+                        // Get column name from alias or expression
+                        let col_name = if let Some(item_alias) = item.alias() {
+                            item_alias
+                        } else if let Some(expr) = item.expression() {
+                            // Try to get name from column reference
+                            if let Some(col_ref) = expr.as_column_ref() {
+                                col_ref.name().to_string()
+                            } else {
+                                format!("col{}", i + 1)
+                            }
+                        } else {
+                            format!("col{}", i + 1)
+                        };
+
+                        // Get type from inferred types
+                        let typed_col = column_types.get(i).cloned().unwrap_or(TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        });
+
+                        // Add column under the subquery alias (like a CTE)
+                        ctx.add_cte_column(&alias, &col_name, typed_col);
+                    }
+
+                    // Register the alias as a known "CTE" for lookup purposes
+                    ctx.add_alias(&alias, &alias);
+                }
+            }
+        }
+    }
 }
 
 fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> {
@@ -1067,27 +1173,18 @@ fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> 
         None => return base_schema,
     };
 
-    let select_list = match select_stmt.select_list() {
-        Some(l) => l,
-        None => return base_schema,
-    };
+    // Use infer_select_column_types which handles UNION by combining types
+    let inferred_types = infer_select_column_types(&select_stmt, &ctx);
 
     // Create new columns with inferred types
     let mut typed_columns = Vec::new();
-    let items: Vec<_> = select_list.items().collect();
 
-    for (i, item) in items.iter().enumerate() {
-        if i >= base_schema.columns.len() {
-            break;
-        }
+    for (i, col) in base_schema.columns.iter().enumerate() {
+        let mut col = col.clone();
 
-        let mut col = base_schema.columns[i].clone();
-
-        // Try to infer type from expression
-        if let Some(expr) = item.expression() {
-            if let Some(typed_col) = infer_expression_type(&expr, &ctx) {
-                col.data_type = Some(typed_col);
-            }
+        // Use inferred type if available
+        if let Some(typed_col) = inferred_types.get(i) {
+            col.data_type = Some(typed_col.clone());
         }
 
         typed_columns.push(col);
@@ -1486,5 +1583,1113 @@ sources:
         // Note: Column type inference from sources requires column reference resolution
         // which is a more complex case. For now, the basic literal and aggregate
         // inference is working.
+    }
+
+    #[test]
+    fn test_simple_cte_type_inference() {
+        let mut db = Database::default();
+
+        // Create sources.yml with typed columns
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: created_at
+            type: TIMESTAMP
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // SQL with CTE using DATE() and SUM()
+        let sql = r#"
+WITH daily_totals AS (
+    SELECT DATE(created_at) as day, SUM(amount) as total
+    FROM smelt.source('raw.orders')
+    GROUP BY DATE(created_at)
+)
+SELECT day, total FROM daily_totals WHERE total > 1000
+"#;
+
+        let path = PathBuf::from("models/test_cte.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 2 columns: day and total
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that day has DATE type (from DATE() function)
+        let day_col = schema.columns.iter().find(|c| c.name == "day");
+        assert!(day_col.is_some(), "Column 'day' not found");
+        if let Some(typed_col) = &day_col.unwrap().data_type {
+            assert_eq!(typed_col.data_type, DataType::Date);
+        }
+
+        // Check that total has Decimal type (from SUM())
+        let total_col = schema.columns.iter().find(|c| c.name == "total");
+        assert!(total_col.is_some(), "Column 'total' not found");
+        if let Some(typed_col) = &total_col.unwrap().data_type {
+            assert!(
+                matches!(typed_col.data_type, DataType::Decimal { .. }),
+                "Expected Decimal type for 'total', got {:?}",
+                typed_col.data_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_ctes_forward_reference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // Multiple CTEs where cte2 references cte1
+        let sql = r#"
+WITH cte1 AS (
+    SELECT SUM(amount) as total
+    FROM smelt.source('raw.orders')
+),
+cte2 AS (
+    SELECT total * 2 as doubled
+    FROM cte1
+)
+SELECT doubled FROM cte2
+"#;
+
+        let path = PathBuf::from("models/test_multi_cte.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 1 column: doubled
+        assert_eq!(schema.columns.len(), 1);
+
+        // Check that doubled has inferred type from the multiplication expression
+        let doubled_col = schema.columns.iter().find(|c| c.name == "doubled");
+        assert!(doubled_col.is_some(), "Column 'doubled' not found");
+    }
+
+    #[test]
+    fn test_cte_explicit_column_list() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // CTE with explicit column list - names should override inferred names
+        let sql = r#"
+WITH order_stats(order_sum, order_count) AS (
+    SELECT SUM(amount), COUNT(*)
+    FROM smelt.source('raw.orders')
+)
+SELECT order_sum, order_count FROM order_stats
+"#;
+
+        let path = PathBuf::from("models/test_explicit_cols.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 2 columns with explicit names
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that order_sum exists (explicit name, not SUM)
+        let order_sum_col = schema.columns.iter().find(|c| c.name == "order_sum");
+        assert!(
+            order_sum_col.is_some(),
+            "Column 'order_sum' not found - explicit column list should override inferred names"
+        );
+
+        // Check that order_count exists (explicit name, not COUNT)
+        let order_count_col = schema.columns.iter().find(|c| c.name == "order_count");
+        assert!(
+            order_count_col.is_some(),
+            "Column 'order_count' not found - explicit column list should override inferred names"
+        );
+    }
+
+    #[test]
+    fn test_nested_cte_in_cte() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // Nested CTE: outer_cte contains inner_cte in its definition
+        let sql = r#"
+WITH outer_cte AS (
+    WITH inner_cte AS (
+        SELECT SUM(amount) as inner_total
+        FROM smelt.source('raw.orders')
+    )
+    SELECT inner_total FROM inner_cte
+)
+SELECT inner_total FROM outer_cte
+"#;
+
+        let path = PathBuf::from("models/test_nested_cte.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 1 column: inner_total
+        assert_eq!(schema.columns.len(), 1);
+
+        // Check that inner_total has Decimal type (from SUM() in nested CTE)
+        let result_col = schema.columns.iter().find(|c| c.name == "inner_total");
+        assert!(result_col.is_some(), "Column 'inner_total' not found");
+        if let Some(typed_col) = &result_col.unwrap().data_type {
+            assert!(
+                matches!(typed_col.data_type, DataType::Decimal { .. }),
+                "Expected Decimal type for 'inner_total' (from SUM in nested CTE), got {:?}",
+                typed_col.data_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_recursive_cte_without_explicit_columns() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      nodes:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: parent_id
+            type: INTEGER
+"#;
+
+        // Recursive CTE WITHOUT explicit column list
+        let sql = r#"
+WITH RECURSIVE tree AS (
+    SELECT id, parent_id FROM smelt.source('raw.nodes') WHERE parent_id IS NULL
+    UNION ALL
+    SELECT n.id, n.parent_id FROM smelt.source('raw.nodes') n
+    INNER JOIN tree ON n.parent_id = tree.id
+)
+SELECT id, parent_id FROM tree
+"#;
+
+        let path = PathBuf::from("models/test_recursive.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 2 columns: id and parent_id
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that id has INTEGER type (inferred from anchor term)
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert!(
+            id_col.unwrap().data_type.is_some(),
+            "Column 'id' should have a type"
+        );
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "Expected INTEGER for 'id'"
+        );
+
+        // Check that parent_id also has INTEGER type
+        let parent_id_col = schema.columns.iter().find(|c| c.name == "parent_id");
+        assert!(parent_id_col.is_some(), "Column 'parent_id' not found");
+        assert!(
+            parent_id_col.unwrap().data_type.is_some(),
+            "Column 'parent_id' should have a type"
+        );
+        assert_eq!(
+            parent_id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "Expected INTEGER for 'parent_id'"
+        );
+    }
+
+    #[test]
+    fn test_recursive_cte_with_literal_anchor() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // Recursive CTE with literal in anchor term (no source references)
+        let sql = r#"
+WITH RECURSIVE nums AS (
+    SELECT 1 as n
+    UNION ALL
+    SELECT n + 1 FROM nums WHERE n < 10
+)
+SELECT n FROM nums
+"#;
+
+        let path = PathBuf::from("models/test_recursive_literal.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        // Should have 1 column: n
+        assert_eq!(schema.columns.len(), 1);
+
+        // Check that n has SmallInt type (from literal 1 in anchor term)
+        let n_col = schema.columns.iter().find(|c| c.name == "n");
+        assert!(n_col.is_some(), "Column 'n' not found");
+        assert!(
+            n_col.unwrap().data_type.is_some(),
+            "Column 'n' should have a type"
+        );
+        assert_eq!(
+            n_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::SmallInt,
+            "Expected SmallInt for 'n' (from literal 1)"
+        );
+    }
+
+    #[test]
+    fn test_between_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // BETWEEN expression should return Boolean
+        let sql = r#"
+SELECT amount BETWEEN 10 AND 100 as in_range
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_between.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let in_range_col = schema.columns.iter().find(|c| c.name == "in_range");
+        assert!(in_range_col.is_some(), "Column 'in_range' not found");
+        assert!(
+            in_range_col.unwrap().data_type.is_some(),
+            "Column 'in_range' should have a type"
+        );
+        assert_eq!(
+            in_range_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Boolean,
+            "BETWEEN should return Boolean"
+        );
+    }
+
+    #[test]
+    fn test_in_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: status
+            type: VARCHAR(50)
+"#;
+
+        // IN expression should return Boolean
+        let sql = r#"
+SELECT status IN ('pending', 'processing', 'shipped') as is_active
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_in.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let is_active_col = schema.columns.iter().find(|c| c.name == "is_active");
+        assert!(is_active_col.is_some(), "Column 'is_active' not found");
+        assert!(
+            is_active_col.unwrap().data_type.is_some(),
+            "Column 'is_active' should have a type"
+        );
+        assert_eq!(
+            is_active_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Boolean,
+            "IN should return Boolean"
+        );
+    }
+
+    #[test]
+    fn test_exists_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: user_id
+            type: INTEGER
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#;
+
+        // EXISTS expression should return Boolean (never NULL)
+        let sql = r#"
+SELECT EXISTS (SELECT 1 FROM smelt.source('raw.users') WHERE id = user_id) as has_user
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_exists.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let has_user_col = schema.columns.iter().find(|c| c.name == "has_user");
+        assert!(has_user_col.is_some(), "Column 'has_user' not found");
+        assert!(
+            has_user_col.unwrap().data_type.is_some(),
+            "Column 'has_user' should have a type"
+        );
+        let typed_col = has_user_col.unwrap().data_type.as_ref().unwrap();
+        assert_eq!(
+            typed_col.data_type,
+            DataType::Boolean,
+            "EXISTS should return Boolean"
+        );
+        assert!(
+            !typed_col.nullable,
+            "EXISTS should never be NULL (always TRUE or FALSE)"
+        );
+    }
+
+    #[test]
+    fn test_not_operator_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: is_completed
+            type: BOOLEAN
+"#;
+
+        // NOT operator should return Boolean
+        let sql = r#"
+SELECT NOT is_completed as is_pending
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_not.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let is_pending_col = schema.columns.iter().find(|c| c.name == "is_pending");
+        assert!(is_pending_col.is_some(), "Column 'is_pending' not found");
+        assert!(
+            is_pending_col.unwrap().data_type.is_some(),
+            "Column 'is_pending' should have a type"
+        );
+        assert_eq!(
+            is_pending_col
+                .unwrap()
+                .data_type
+                .as_ref()
+                .unwrap()
+                .data_type,
+            DataType::Boolean,
+            "NOT should return Boolean"
+        );
+    }
+
+    #[test]
+    fn test_unary_negation_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+
+        // Unary negation should preserve numeric type
+        let sql = r#"
+SELECT -amount as negative_amount
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_negation.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let neg_col = schema.columns.iter().find(|c| c.name == "negative_amount");
+        assert!(neg_col.is_some(), "Column 'negative_amount' not found");
+        assert!(
+            neg_col.unwrap().data_type.is_some(),
+            "Column 'negative_amount' should have a type"
+        );
+        assert_eq!(
+            neg_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "Unary negation should preserve numeric type (INTEGER)"
+        );
+    }
+
+    #[test]
+    fn test_union_same_types() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+      returns:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // UNION with same types should preserve those types
+        let sql = r#"
+SELECT id, amount FROM smelt.source('raw.orders')
+UNION
+SELECT id, amount FROM smelt.source('raw.returns')
+"#;
+
+        let path = PathBuf::from("models/test_union_same.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 2);
+
+        // id should be INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "UNION with same types should preserve INTEGER"
+        );
+
+        // amount should be DECIMAL
+        let amount_col = schema.columns.iter().find(|c| c.name == "amount");
+        assert!(amount_col.is_some(), "Column 'amount' not found");
+        assert!(
+            matches!(
+                amount_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "UNION with same types should preserve DECIMAL"
+        );
+    }
+
+    #[test]
+    fn test_union_type_promotion() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // UNION with INTEGER literal and BIGINT literal should promote to BIGINT
+        // Using CAST to ensure we get specific types
+        let sql = r#"
+SELECT CAST(1 AS INTEGER) as n
+UNION
+SELECT CAST(2 AS BIGINT) as n
+"#;
+
+        let path = PathBuf::from("models/test_union_promote.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let n_col = schema.columns.iter().find(|c| c.name == "n");
+        assert!(n_col.is_some(), "Column 'n' not found");
+        assert_eq!(
+            n_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "UNION of INTEGER and BIGINT should promote to BIGINT"
+        );
+    }
+
+    #[test]
+    fn test_union_all_type_promotion() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // UNION ALL with INTEGER and DOUBLE should promote to DOUBLE
+        let sql = r#"
+SELECT CAST(1 AS INTEGER) as value
+UNION ALL
+SELECT CAST(2.5 AS DOUBLE) as value
+"#;
+
+        let path = PathBuf::from("models/test_union_all.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let value_col = schema.columns.iter().find(|c| c.name == "value");
+        assert!(value_col.is_some(), "Column 'value' not found");
+        assert_eq!(
+            value_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "UNION ALL of INTEGER and DOUBLE should promote to DOUBLE"
+        );
+    }
+
+    #[test]
+    fn test_union_chained() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources: {}
+"#;
+
+        // Chained UNION: SMALLINT UNION INTEGER UNION BIGINT should be BIGINT
+        let sql = r#"
+SELECT CAST(1 AS SMALLINT) as n
+UNION
+SELECT CAST(2 AS INTEGER) as n
+UNION
+SELECT CAST(3 AS BIGINT) as n
+"#;
+
+        let path = PathBuf::from("models/test_union_chained.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 1);
+
+        let n_col = schema.columns.iter().find(|c| c.name == "n");
+        assert!(n_col.is_some(), "Column 'n' not found");
+        assert_eq!(
+            n_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "Chained UNION of SMALLINT, INTEGER, BIGINT should be BIGINT"
+        );
+    }
+
+    #[test]
+    fn test_join_column_tracking_source() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR(100)
+"#;
+
+        // JOIN query - columns from joined table should be available
+        let sql = r#"
+SELECT o.id, o.amount, u.name
+FROM smelt.source('raw.orders') o
+INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
+"#;
+
+        let path = PathBuf::from("models/test_join.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check that id from orders is INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER from orders"
+        );
+
+        // Check that amount from orders is DECIMAL
+        let amount_col = schema.columns.iter().find(|c| c.name == "amount");
+        assert!(amount_col.is_some(), "Column 'amount' not found");
+        assert!(
+            matches!(
+                amount_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "amount should be DECIMAL from orders"
+        );
+
+        // Check that name from users (joined table) is VARCHAR/Text
+        let name_col = schema.columns.iter().find(|c| c.name == "name");
+        assert!(name_col.is_some(), "Column 'name' not found");
+        assert!(
+            matches!(
+                name_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Varchar { .. }
+            ),
+            "name should be VARCHAR from joined users table"
+        );
+    }
+
+    #[test]
+    fn test_join_column_tracking_multiple_joins() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: product_id
+            type: INTEGER
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR(100)
+      products:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: price
+            type: DOUBLE
+"#;
+
+        // Multiple JOINs - columns from all joined tables should be available
+        let sql = r#"
+SELECT o.id, u.name, p.price
+FROM smelt.source('raw.orders') o
+INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
+INNER JOIN smelt.source('raw.products') p ON o.product_id = p.id
+"#;
+
+        let path = PathBuf::from("models/test_multi_join.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check that id from orders is INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER"
+        );
+
+        // Check that name from users is VARCHAR
+        let name_col = schema.columns.iter().find(|c| c.name == "name");
+        assert!(name_col.is_some(), "Column 'name' not found");
+        assert!(
+            matches!(
+                name_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Varchar { .. }
+            ),
+            "name should be VARCHAR from joined users table"
+        );
+
+        // Check that price from products (second join) is DOUBLE
+        let price_col = schema.columns.iter().find(|c| c.name == "price");
+        assert!(price_col.is_some(), "Column 'price' not found");
+        assert_eq!(
+            price_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "price should be DOUBLE from joined products table"
+        );
+    }
+
+    #[test]
+    fn test_join_column_tracking_left_join() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: email
+            type: TEXT
+"#;
+
+        // LEFT JOIN - columns from joined table should still be available
+        let sql = r#"
+SELECT o.id, u.email
+FROM smelt.source('raw.orders') o
+LEFT JOIN smelt.source('raw.users') u ON o.user_id = u.id
+"#;
+
+        let path = PathBuf::from("models/test_left_join.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 2);
+
+        // Check that email from users (LEFT JOINed) has a string type
+        let email_col = schema.columns.iter().find(|c| c.name == "email");
+        assert!(email_col.is_some(), "Column 'email' not found");
+        // TEXT is parsed as Varchar { max_length: None } or Text
+        let email_type = &email_col.unwrap().data_type.as_ref().unwrap().data_type;
+        assert!(
+            matches!(email_type, DataType::Text | DataType::Varchar { .. }),
+            "email should be TEXT/VARCHAR from LEFT JOINed users table, got {:?}",
+            email_type
+        );
+    }
+
+    #[test]
+    fn test_lateral_parsing_debug() {
+        // First, verify the AST structure
+        let sql = r#"
+SELECT u.id, recent.total_amount
+FROM smelt.source('raw.users') u
+LEFT JOIN LATERAL (
+    SELECT SUM(o.amount) as total_amount
+    FROM smelt.source('raw.orders') o
+) recent ON true
+"#;
+
+        let parsed = smelt_parser::parse(sql);
+        assert!(
+            parsed.errors.is_empty(),
+            "Parse errors: {:?}",
+            parsed.errors
+        );
+
+        let file = smelt_parser::ast::File::cast(parsed.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let from = select.from_clause().unwrap();
+
+        // Check main table ref
+        let main_refs: Vec<_> = from.table_refs().collect();
+        assert_eq!(main_refs.len(), 1, "Should have 1 main table ref");
+        assert_eq!(main_refs[0].alias(), Some("u".to_string()));
+
+        // Check JOIN
+        let joins: Vec<_> = from.joins().collect();
+        assert_eq!(joins.len(), 1, "Should have 1 JOIN");
+
+        let join = &joins[0];
+        let join_table_ref = join.table_ref().expect("JOIN should have table_ref");
+
+        // Check LATERAL and subquery
+        assert!(
+            join_table_ref.is_lateral(),
+            "JOIN table ref should be LATERAL"
+        );
+        assert!(
+            join_table_ref.subquery().is_some(),
+            "JOIN table ref should have subquery"
+        );
+        assert_eq!(
+            join_table_ref.alias(),
+            Some("recent".to_string()),
+            "JOIN table ref should have alias 'recent'"
+        );
+    }
+
+    #[test]
+    fn test_lateral_correlation_basic() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR(100)
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // LATERAL subquery that references columns from the preceding table
+        // Using LEFT JOIN LATERAL since comma syntax was removed
+        let sql = r#"
+SELECT u.id, u.name, recent.total_amount
+FROM smelt.source('raw.users') u
+LEFT JOIN LATERAL (
+    SELECT SUM(o.amount) as total_amount
+    FROM smelt.source('raw.orders') o
+    WHERE o.user_id = u.id
+) recent ON true
+"#;
+
+        let path = PathBuf::from("models/test_lateral.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        // Check that id from users is INTEGER
+        let id_col = schema.columns.iter().find(|c| c.name == "id");
+        assert!(id_col.is_some(), "Column 'id' not found");
+        assert_eq!(
+            id_col.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER from users"
+        );
+
+        // Check that name from users is VARCHAR
+        let name_col = schema.columns.iter().find(|c| c.name == "name");
+        assert!(name_col.is_some(), "Column 'name' not found");
+        assert!(
+            matches!(
+                name_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Varchar { .. }
+            ),
+            "name should be VARCHAR from users"
+        );
+
+        // Check that total_amount from LATERAL subquery is DECIMAL (from SUM)
+        let total_col = schema.columns.iter().find(|c| c.name == "total_amount");
+        assert!(total_col.is_some(), "Column 'total_amount' not found");
+        assert!(
+            matches!(
+                total_col.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "total_amount should be DECIMAL from SUM in LATERAL subquery"
+        );
+    }
+
+    #[test]
+    fn test_filter_clause_type_inference() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: status
+            type: VARCHAR(50)
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+
+        // Aggregates with FILTER clauses - types should match unfiltered versions
+        let sql = r#"
+SELECT
+    COUNT(*) as total_count,
+    COUNT(*) FILTER (WHERE status = 'completed') as completed_count,
+    SUM(amount) as total_sum,
+    SUM(amount) FILTER (WHERE status = 'completed') as completed_sum,
+    AVG(amount) FILTER (WHERE status = 'pending') as pending_avg
+FROM smelt.source('raw.orders')
+"#;
+
+        let path = PathBuf::from("models/test_filter.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let schema = db.typed_model_schema(path.clone());
+
+        assert_eq!(schema.columns.len(), 5);
+
+        // COUNT without FILTER should be BIGINT
+        let total_count = schema.columns.iter().find(|c| c.name == "total_count");
+        assert!(total_count.is_some(), "Column 'total_count' not found");
+        assert_eq!(
+            total_count.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "COUNT should return BIGINT"
+        );
+
+        // COUNT with FILTER should also be BIGINT (FILTER doesn't change return type)
+        let completed_count = schema.columns.iter().find(|c| c.name == "completed_count");
+        assert!(
+            completed_count.is_some(),
+            "Column 'completed_count' not found"
+        );
+        assert_eq!(
+            completed_count
+                .unwrap()
+                .data_type
+                .as_ref()
+                .unwrap()
+                .data_type,
+            DataType::BigInt,
+            "COUNT with FILTER should return BIGINT"
+        );
+
+        // SUM without FILTER should be DECIMAL
+        let total_sum = schema.columns.iter().find(|c| c.name == "total_sum");
+        assert!(total_sum.is_some(), "Column 'total_sum' not found");
+        assert!(
+            matches!(
+                total_sum.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM should return DECIMAL"
+        );
+
+        // SUM with FILTER should also be DECIMAL
+        let completed_sum = schema.columns.iter().find(|c| c.name == "completed_sum");
+        assert!(completed_sum.is_some(), "Column 'completed_sum' not found");
+        assert!(
+            matches!(
+                completed_sum.unwrap().data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM with FILTER should return DECIMAL"
+        );
+
+        // AVG with FILTER should be DOUBLE
+        let pending_avg = schema.columns.iter().find(|c| c.name == "pending_avg");
+        assert!(pending_avg.is_some(), "Column 'pending_avg' not found");
+        assert_eq!(
+            pending_avg.unwrap().data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "AVG with FILTER should return DOUBLE"
+        );
     }
 }

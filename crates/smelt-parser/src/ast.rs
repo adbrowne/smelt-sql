@@ -96,6 +96,57 @@ impl SelectStmt {
     pub(crate) fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
+
+    /// Check if this SELECT has a UNION clause
+    pub fn has_union(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == UNION_KW)
+    }
+
+    /// Check if the UNION is UNION ALL (vs regular UNION which removes duplicates)
+    pub fn is_union_all(&self) -> bool {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .collect();
+
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind() == UNION_KW {
+                // Skip whitespace to find next meaningful token
+                for next_token in &tokens[i + 1..] {
+                    match next_token.kind() {
+                        WHITESPACE | COMMENT => continue,
+                        ALL_KW => return true,
+                        _ => break,
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the SELECT statement after UNION (if any)
+    pub fn union_select(&self) -> Option<SelectStmt> {
+        let mut found_union = false;
+
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if token.kind() == UNION_KW {
+                    found_union = true;
+                }
+            } else if found_union {
+                if let Some(n) = child.as_node() {
+                    if n.kind() == SELECT_STMT {
+                        return SelectStmt::cast(n.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// SELECT list (columns)
@@ -397,6 +448,24 @@ impl TableRef {
             }
         }
 
+        // For subqueries with implicit alias (LATERAL (...) alias_name),
+        // check if the last token is an IDENT that's after the subquery
+        if self.subquery().is_some() {
+            if let Some(subquery) = self.subquery() {
+                let subquery_range = subquery.0.text_range();
+                // Check if last_ident is after the subquery
+                for token in tokens.iter().rev() {
+                    if token.kind() == IDENT {
+                        let token_start = token.text_range().start();
+                        if token_start > subquery_range.end() {
+                            return Some(token.text().to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -404,6 +473,19 @@ impl TableRef {
     #[allow(dead_code)] // Used by printer module
     pub(crate) fn syntax(&self) -> &SyntaxNode {
         &self.0
+    }
+
+    /// Check if this table reference is LATERAL (allows correlated subquery)
+    pub fn is_lateral(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == LATERAL_KW)
+    }
+
+    /// Get the subquery if this table reference contains one
+    pub fn subquery(&self) -> Option<Subquery> {
+        self.0.children().find_map(Subquery::cast)
     }
 }
 
@@ -678,10 +760,62 @@ impl BinaryExpr {
                     AND_KW => return Some("AND".to_string()),
                     OR_KW => return Some("OR".to_string()),
                     IS_KW => return Some("IS".to_string()),
+                    NOT_KW => return Some("NOT".to_string()),
                     _ => {}
                 }
             }
         }
+        None
+    }
+
+    /// Check if this is a unary expression (e.g., -x, NOT y)
+    /// Unary expressions have no right operand
+    pub fn is_unary(&self) -> bool {
+        self.right().is_none()
+    }
+
+    /// Get the unary operand as a column reference
+    /// For unary expressions where the operand is a simple identifier (not wrapped in a node),
+    /// this extracts the column reference from tokens.
+    pub fn unary_operand_column(&self) -> Option<ColumnRef> {
+        // First try getting as a normal expression
+        if let Some(expr) = self.left() {
+            return expr.as_column_ref();
+        }
+
+        // For unary expressions, the operand might be a bare identifier token
+        // not wrapped in an expression node. Extract column ref from tokens.
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+            .collect();
+
+        if tokens.is_empty() {
+            return None;
+        }
+
+        // Simple identifier
+        if tokens.len() == 1 && tokens[0].kind() == IDENT {
+            return Some(ColumnRef {
+                qualifier: None,
+                name: tokens[0].text().to_string(),
+            });
+        }
+
+        // Qualified identifier: table.column
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            return Some(ColumnRef {
+                qualifier: Some(tokens[0].text().to_string()),
+                name: tokens[2].text().to_string(),
+            });
+        }
+
         None
     }
 }
@@ -767,6 +901,30 @@ impl FunctionCall {
             .filter(|n| n.kind() == ARG_LIST)
             .flat_map(|arg_list| arg_list.children().filter_map(Expr::cast))
             .collect()
+    }
+
+    /// Get the FILTER clause if present (PostgreSQL aggregate filter)
+    pub fn filter_clause(&self) -> Option<FilterClause> {
+        self.0.children().find_map(FilterClause::cast)
+    }
+}
+
+/// FILTER clause for aggregate functions (e.g., FILTER (WHERE status = 'active'))
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FilterClause(SyntaxNode);
+
+impl FilterClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == FILTER_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the filter condition expression
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
     }
 }
 
