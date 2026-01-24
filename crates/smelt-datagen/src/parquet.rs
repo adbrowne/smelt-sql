@@ -27,6 +27,8 @@ fn session_schema() -> Schema {
         Field::new("product_category", DataType::Utf8, false),
         Field::new("product_revenue", DataType::Int32, false),
         Field::new("product_purchase_count", DataType::Int32, false),
+        Field::new("country", DataType::Utf8, false),
+        Field::new("user_status", DataType::Utf8, false),
     ])
 }
 
@@ -80,6 +82,8 @@ fn sessions_to_record_batch(sessions: &[Session], schema: &Arc<Schema>) -> Resul
     let mut product_categories = StringBuilder::new();
     let mut product_revenues: Vec<i32> = Vec::with_capacity(sessions.len());
     let mut product_purchase_counts: Vec<i32> = Vec::with_capacity(sessions.len());
+    let mut countries = StringBuilder::new();
+    let mut user_statuses = StringBuilder::new();
 
     for session in sessions {
         visitor_ids.append_value(session.visitor_id.to_string());
@@ -95,6 +99,8 @@ fn sessions_to_record_batch(sessions: &[Session], schema: &Arc<Schema>) -> Resul
         product_categories.append_value(session.product_category.as_str());
         product_revenues.push(session.product_revenue);
         product_purchase_counts.push(session.product_purchase_count);
+        countries.append_value(&session.country);
+        user_statuses.append_value(session.user_status.as_str());
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -108,6 +114,8 @@ fn sessions_to_record_batch(sessions: &[Session], schema: &Arc<Schema>) -> Resul
         Arc::new(product_categories.finish()),
         Arc::new(Int32Array::from(product_revenues)),
         Arc::new(Int32Array::from(product_purchase_counts)),
+        Arc::new(countries.finish()),
+        Arc::new(user_statuses.finish()),
     ];
 
     RecordBatch::try_new(schema.clone(), columns).context("Failed to create record batch")

@@ -100,12 +100,34 @@ impl ProductCategory {
     }
 }
 
+/// User status categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserStatus {
+    New,
+    High,
+    Medium,
+    Low,
+}
+
+impl UserStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UserStatus::New => "new",
+            UserStatus::High => "high",
+            UserStatus::Medium => "medium",
+            UserStatus::Low => "low",
+        }
+    }
+}
+
 /// A visitor with sticky attributes.
 #[derive(Debug, Clone)]
 pub struct Visitor {
     pub id: Uuid,
     pub platform_preference: Platform,
     pub return_probability: f64,
+    pub country: &'static str,
+    pub user_status: UserStatus,
 }
 
 /// A session record.
@@ -122,6 +144,8 @@ pub struct Session {
     pub product_category: ProductCategory,
     pub product_revenue: i32,
     pub product_purchase_count: i32,
+    pub country: String,
+    pub user_status: UserStatus,
 }
 
 /// Shared visitor pool that can be cloned across parallel workers.
@@ -305,6 +329,8 @@ impl DayGenerator {
                 product_category,
                 product_revenue,
                 product_purchase_count,
+                country: visitor.country.to_string(),
+                user_status: visitor.user_status,
             });
         }
 
@@ -316,6 +342,8 @@ impl DayGenerator {
 fn generate_visitors(rng: &mut impl Rng, count: usize) -> Vec<Visitor> {
     let uuid_g = uuid_gen();
     let platform_g = platform_gen();
+    let country_g = country_gen();
+    let user_status_g = user_status_gen();
 
     (0..count)
         .map(|_| {
@@ -323,11 +351,15 @@ fn generate_visitors(rng: &mut impl Rng, count: usize) -> Vec<Visitor> {
             let platform_preference = platform_g.generate(rng);
             // Power-law distribution for return probability
             let return_probability = rng.gen::<f64>().powf(2.0) * 0.8;
+            let country = country_g.generate(rng);
+            let user_status = user_status_g.generate(rng);
 
             Visitor {
                 id,
                 platform_preference,
                 return_probability,
+                country,
+                user_status,
             }
         })
         .collect()
@@ -400,6 +432,49 @@ fn product_category_gen() -> WeightedChoice<ProductCategory> {
         (ProductCategory::Sports, 0.15),
         (ProductCategory::Beauty, 0.15),
         (ProductCategory::Food, 0.10),
+    ])
+}
+
+/// Generator for country (population-weighted EU member states).
+fn country_gen() -> WeightedChoice<&'static str> {
+    weighted_choice(vec![
+        ("DE", 0.19),  // Germany
+        ("FR", 0.15),  // France
+        ("IT", 0.14),  // Italy
+        ("ES", 0.11),  // Spain
+        ("PL", 0.09),  // Poland
+        ("RO", 0.04),  // Romania
+        ("NL", 0.04),  // Netherlands
+        ("BE", 0.03),  // Belgium
+        ("GR", 0.02),  // Greece
+        ("CZ", 0.02),  // Czechia
+        ("PT", 0.02),  // Portugal
+        ("SE", 0.02),  // Sweden
+        ("HU", 0.02),  // Hungary
+        ("AT", 0.02),  // Austria
+        ("BG", 0.01),  // Bulgaria
+        ("DK", 0.01),  // Denmark
+        ("FI", 0.01),  // Finland
+        ("SK", 0.01),  // Slovakia
+        ("IE", 0.01),  // Ireland
+        ("HR", 0.01),  // Croatia
+        ("LT", 0.005), // Lithuania
+        ("SI", 0.005), // Slovenia
+        ("LV", 0.004), // Latvia
+        ("EE", 0.003), // Estonia
+        ("CY", 0.002), // Cyprus
+        ("LU", 0.001), // Luxembourg
+        ("MT", 0.001), // Malta
+    ])
+}
+
+/// Generator for user status.
+fn user_status_gen() -> WeightedChoice<UserStatus> {
+    weighted_choice(vec![
+        (UserStatus::New, 0.20),
+        (UserStatus::High, 0.15),
+        (UserStatus::Medium, 0.35),
+        (UserStatus::Low, 0.30),
     ])
 }
 
@@ -644,6 +719,8 @@ impl Iterator for SessionIterator {
                 product_category,
                 product_revenue,
                 product_purchase_count,
+                country: visitor.country.to_string(),
+                user_status: visitor.user_status,
             };
 
             if i == 0 {
