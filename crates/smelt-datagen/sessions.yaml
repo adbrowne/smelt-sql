@@ -1,0 +1,149 @@
+# Approximation of the original hardcoded session dataset.
+#
+# Limitations vs the original generator:
+#   - visit_campaign appears with fixed 40% probability rather than only for
+#     sem/referral/affiliate/email sources (combined weight = 0.40)
+#   - product_purchase_count uses geometric(p=0.8) rather than 80% zero +
+#     geometric(0.5)+1, so the zero-purchase rate is different
+#   - product_revenue is independent log-normal rather than being derived
+#     from purchase_count × category price
+#   - Each row is one category; the original emits 1-4 rows per session
+#     sharing the same session_id
+
+seed: 42
+
+datasets:
+  - name: sessions
+    output: output
+    num_rows: 100000000
+    partition:
+      column: session_date
+      start: "2024-01-01"
+      days: 30
+    entity:
+      # Original: num_sessions / 5 visitors → pool_ratio = 0.2
+      pool_ratio: 0.2
+      columns:
+        - name: visitor_id
+          generator: { type: uuid }
+        - name: country
+          generator:
+            type: weighted_choice
+            values:
+              DE: 0.190   # Germany
+              FR: 0.150   # France
+              IT: 0.140   # Italy
+              ES: 0.110   # Spain
+              PL: 0.090   # Poland
+              RO: 0.040   # Romania
+              NL: 0.040   # Netherlands
+              BE: 0.030   # Belgium
+              GR: 0.020   # Greece
+              CZ: 0.020   # Czechia
+              PT: 0.020   # Portugal
+              SE: 0.020   # Sweden
+              HU: 0.020   # Hungary
+              AT: 0.020   # Austria
+              BG: 0.010   # Bulgaria
+              DK: 0.010   # Denmark
+              FI: 0.010   # Finland
+              SK: 0.010   # Slovakia
+              IE: 0.010   # Ireland
+              HR: 0.010   # Croatia
+              LT: 0.005   # Lithuania
+              SI: 0.005   # Slovenia
+              LV: 0.004   # Latvia
+              EE: 0.003   # Estonia
+              CY: 0.002   # Cyprus
+              LU: 0.001   # Luxembourg
+              MT: 0.001   # Malta
+        - name: user_status
+          generator:
+            type: weighted_choice
+            values:
+              new: 0.20
+              high: 0.15
+              medium: 0.35
+              low: 0.30
+    columns:
+      - name: session_id
+        generator: { type: uuid }
+      - name: platform
+        generator:
+          type: weighted_choice
+          values:
+            web_desktop: 0.40
+            android: 0.25
+            ios: 0.20
+            web_mobile: 0.15
+      - name: visit_source
+        generator:
+          type: weighted_choice
+          values:
+            seo: 0.30
+            direct: 0.25
+            sem: 0.15
+            referral: 0.10
+            affiliate: 0.08
+            email: 0.07
+            social: 0.03
+            organic_social: 0.02
+      - name: visit_campaign
+        generator:
+          type: optional
+          prob: 0.40   # sem + referral + affiliate + email = 0.40
+          inner:
+            type: one_of
+            values:
+              - summer_sale_2024
+              - winter_promo
+              - black_friday
+              - cyber_monday
+              - spring_clearance
+              - new_arrivals
+              - loyalty_rewards
+              - flash_sale_jan
+              - flash_sale_feb
+              - flash_sale_mar
+              - brand_launch
+              - influencer_collab
+              - email_exclusive
+              - app_install
+              - retargeting_cart
+              - retargeting_browse
+              - holiday_special
+              - back_to_school
+              - mothers_day
+              - fathers_day
+              - valentines
+              - easter_promo
+              - labor_day
+              - memorial_day
+              - new_year
+              - free_shipping
+              - bogo_deal
+              - clearance_final
+              - vip_early_access
+              - referral_bonus
+      - name: widget_views
+        generator: { type: log_normal, median: 5.0, sigma: 1.0, max: 100 }
+      - name: product_views
+        generator: { type: log_normal, median: 3.0, sigma: 1.0, max: 50 }
+      - name: product_category
+        generator:
+          type: weighted_choice
+          values:
+            electronics: 0.20
+            clothing: 0.25
+            home: 0.15
+            sports: 0.15
+            beauty: 0.15
+            food: 0.10
+      - name: product_purchase_count
+        # Original: 80% zero, else geometric(0.5)+1. Approximated with
+        # geometric(p=0.8) which has mean 1.25 and heavy mass near zero.
+        generator: { type: geometric, p: 0.8 }
+      - name: product_revenue
+        # Original: purchase_count × category_avg_price × uniform(0.5, 1.5)
+        # Approximated as log-normal centred around a mid-range price in cents.
+        generator: { type: log_normal, median: 5000.0, sigma: 1.2, max: 75000 }
