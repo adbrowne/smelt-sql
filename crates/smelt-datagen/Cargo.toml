@@ -17,6 +17,9 @@ arrow.workspace = true
 parquet.workspace = true
 rayon.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+indexmap.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

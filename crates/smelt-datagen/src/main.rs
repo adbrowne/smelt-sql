@@ -11,6 +11,10 @@ use std::time::Instant;
 #[command(name = "smelt-datagen")]
 #[command(about = "Deterministic data generation for smelt")]
 struct Args {
+    /// Path to YAML config file (replaces all other flags when provided)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
     /// Output directory for Hive-partitioned Parquet files
     #[arg(short, long, default_value = "output")]
     output: PathBuf,
@@ -39,6 +43,75 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    if let Some(config_path) = args.config {
+        let text = std::fs::read_to_string(&config_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config {:?}: {}", config_path, e))?;
+        let config: smelt_datagen::config::DatagenConfig = serde_yaml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+        run_config(config, args.quiet)
+    } else {
+        run_session_generator(args)
+    }
+}
+
+fn run_config(config: smelt_datagen::config::DatagenConfig, quiet: bool) -> Result<()> {
+    let global_seed = config.seed.unwrap_or(42);
+
+    for dataset in &config.datasets {
+        if !quiet {
+            println!(
+                "Generating dataset '{}' ({} rows) -> {}",
+                dataset.name, dataset.num_rows, dataset.output
+            );
+        }
+
+        let start_time = Instant::now();
+        let last_print = AtomicU64::new(0);
+        let total_rows = dataset.num_rows;
+
+        let progress_fn = |current: usize, total: usize| {
+            let elapsed = start_time.elapsed().as_secs();
+            let last = last_print.load(Ordering::Relaxed);
+            if elapsed > last {
+                last_print.store(elapsed, Ordering::Relaxed);
+                let pct = (current as f64 / total as f64) * 100.0;
+                let rate = current as f64 / elapsed.max(1) as f64;
+                let eta = if rate > 0.0 && current < total {
+                    ((total - current) as f64 / rate) as u64
+                } else {
+                    0
+                };
+                eprint!(
+                    "\r  {:.1}% ({}/{}) - {:.0} rows/sec - ETA: {}s    ",
+                    pct, current, total, rate, eta
+                );
+            }
+        };
+
+        let progress: Option<&(dyn Fn(usize, usize) + Sync)> =
+            if quiet { None } else { Some(&progress_fn) };
+
+        let count =
+            smelt_datagen::generic_parquet::write_generic_dataset(dataset, global_seed, progress)?;
+
+        let elapsed = start_time.elapsed();
+
+        if !quiet {
+            eprintln!();
+            println!(
+                "  Done: {} rows in {:.2}s ({:.0} rows/sec)",
+                count,
+                elapsed.as_secs_f64(),
+                count as f64 / elapsed.as_secs_f64(),
+            );
+            let _ = total_rows; // suppress warning
+        }
+    }
+
+    Ok(())
+}
+
+fn run_session_generator(args: Args) -> Result<()> {
     let start_date = NaiveDate::parse_from_str(&args.start_date, "%Y-%m-%d")
         .map_err(|e| anyhow::anyhow!("Invalid date format: {}", e))?;
 

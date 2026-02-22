@@ -48,3 +48,8 @@ uuid = { version = "1.0", features = ["v4"] }
 chrono = "0.4"
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+# Ordered map (preserves insertion order)
+indexmap = { version = "2", features = ["serde"] }
