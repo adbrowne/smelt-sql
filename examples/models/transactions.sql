@@ -1,5 +1,5 @@
 -- Transactions source model
--- Maps raw.transactions to the smelt namespace
+-- Maps raw transactions to the smelt namespace
 
 SELECT
     transaction_id,
@@ -7,4 +7,4 @@ SELECT
     amount,
     transaction_timestamp,
     transaction_type
-FROM raw.transactions
+FROM smelt.source('raw.transactions')

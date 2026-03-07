@@ -11,5 +11,5 @@ SELECT
     user_id,
     first_value(event_time) over (PARTITION BY user_id ORDER BY event_time) AS first_event_time,
     last_value(event_time) over (PARTITION BY user_id ORDER BY event_time) AS last_event_time
-FROM source.events
+FROM smelt.source('raw.events')
 GROUP BY user_id
