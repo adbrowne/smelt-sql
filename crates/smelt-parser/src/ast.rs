@@ -216,6 +216,15 @@ impl SelectItem {
         }
     }
 
+    /// Check if this select item is a wildcard (*)
+    pub fn is_wildcard(&self) -> bool {
+        self.0.children_with_tokens().any(|child| {
+            child
+                .as_token()
+                .is_some_and(|t| t.kind() == STAR || t.kind() == MULTIPLY)
+        }) && self.expression().is_none()
+    }
+
     /// Get the text range of this select item
     pub fn range(&self) -> TextRange {
         self.0.text_range()
@@ -588,6 +597,11 @@ impl Expr {
     /// Get the full text of this expression
     pub fn text(&self) -> String {
         self.0.text().to_string()
+    }
+
+    /// Get the text range of this expression
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
     }
 
     /// Check if this is a simple column reference (identifier possibly qualified)

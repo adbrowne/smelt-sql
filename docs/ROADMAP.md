@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Row Polymorphism (March 7, 2026)**: Models with `SELECT *` now properly propagate types and schemas through `RowExtension` entries instead of placeholder wildcard columns. New `resolved_model_schema()` Salsa query recursively expands wildcards through model chains. Input constraint extraction identifies what columns each model requires from its refs.
+
 **Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, CASE expressions, scalar subqueries, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.
 
 **Parser Gap Fixes (January 18, 2026)**: Fixed 5 high/medium severity parser gaps discovered by PostgreSQL compatibility testing: `<>` operator, `||` string concatenation, UNION ALL printing, NULLS FIRST/LAST printing, and expressions in function arguments.
@@ -2162,11 +2164,37 @@ These features require significant architectural work and are not prioritized:
   - TABLESAMPLE - Table sampling with BERNOULLI/SYSTEM and REPEATABLE
   - FILTER (WHERE condition) - Conditional aggregation
 
+## ✅ Row Polymorphism (COMPLETED)
+
+**Completed**: March 7, 2026
+
+### What Was Implemented
+
+- **Row extensions replace wildcard columns**: `SELECT *` no longer creates placeholder `Column { name: "*" }` entries. Instead, models produce `RowExtension` entries that reference the upstream model, enabling proper expansion.
+
+- **`resolved_model_schema()` Salsa query**: Recursively resolves row extensions by expanding upstream model schemas. Supports chains (A -> B -> C where each uses `SELECT *`). Salsa memoization prevents redundant computation.
+
+- **Type propagation through wildcards**: Types from upstream models now flow through `SELECT *` chains. `resolved_model_schema()` returns fully typed columns even when intermediate models use wildcards.
+
+- **Input constraint extraction**: New `model_input_constraints()` Salsa query analyzes SQL to determine what columns each model requires from its refs. Handles qualified (`t.col`) and unqualified column references, function arguments, WHERE clauses, and JOIN ON conditions.
+
+- **Parser fix for `SELECT *, col`**: Fixed parser to handle `SELECT *, additional_columns` syntax (previously only parsed `SELECT *` alone).
+
+- **LSP hover improvements**: Hover on `smelt.ref()` now shows resolved schemas with expanded wildcards, unresolved row extensions, and input constraints.
+
+### Files Modified
+
+- `crates/smelt-parser/src/parser.rs` - Fixed `SELECT *, col` parsing
+- `crates/smelt-parser/src/ast.rs` - Added `SelectItem::is_wildcard()`, `Expr::text_range()`
+- `crates/smelt-db/src/schema.rs` - Added `RowExtension`, `InputConstraint`, `ColumnConstraint`, `ResolvedSchema` types; extended `ModelSchema`
+- `crates/smelt-db/src/lib.rs` - New `resolved_model_schema()`, `model_input_constraints()` queries; updated `model_schema()`, `process_table_ref()`, `typed_model_schema()`, `available_columns()`
+- `crates/smelt-db/src/type_inference.rs` - Added `TypeContext::resolve_alias()`
+- `crates/smelt-lsp/src/main.rs` - Updated hover to use resolved schemas and show constraints
+
 ### ⏸️ Deferred
 
 - `smelt.metric()` support (awaiting metrics design)
 - Configuration annotations (`@materialize`, etc.)
-- Column-level schema tracking
 - Additional SQL syntax (INTERSECT/EXCEPT, INSERT/UPDATE/DELETE, CREATE TABLE/VIEW)
 
 ---
