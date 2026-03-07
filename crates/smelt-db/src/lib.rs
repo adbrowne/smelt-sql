@@ -34,9 +34,17 @@ pub trait Inputs {
     #[salsa::input]
     fn all_files(&self) -> Arc<Vec<PathBuf>>;
 
-    /// Get the raw YAML content of sources.yml
+    /// Get the raw YAML content of sources.yml for a specific project
     #[salsa::input]
-    fn sources_yaml(&self) -> Arc<String>;
+    fn project_sources_yaml(&self, project_root: PathBuf) -> Arc<String>;
+
+    /// Get the project root for a given file path
+    #[salsa::input]
+    fn file_project_root(&self, path: PathBuf) -> PathBuf;
+
+    /// Get all project roots discovered in the workspace
+    #[salsa::input]
+    fn all_project_roots(&self) -> Arc<Vec<PathBuf>>;
 }
 
 /// Syntax queries - parsing and CST construction
@@ -55,14 +63,14 @@ pub trait Syntax: Inputs {
     /// Extract all source() calls from a model with their positions
     fn model_sources(&self, path: PathBuf) -> Arc<Vec<SourceLocation>>;
 
-    /// Parse sources.yml into structured config
-    fn sources_config(&self) -> Arc<SourcesConfig>;
+    /// Parse sources.yml into structured config for a project
+    fn sources_config(&self, project_root: PathBuf) -> Arc<SourcesConfig>;
 
-    /// Get any parse error from sources.yml
-    fn sources_yaml_error(&self) -> Option<YamlParseError>;
+    /// Get any parse error from sources.yml for a project
+    fn sources_yaml_error(&self, project_root: PathBuf) -> Option<YamlParseError>;
 
-    /// Get invalid type errors from sources.yml column definitions
-    fn sources_type_errors(&self) -> Arc<Vec<SourceTypeError>>;
+    /// Get invalid type errors from sources.yml column definitions for a project
+    fn sources_type_errors(&self, project_root: PathBuf) -> Arc<Vec<SourceTypeError>>;
 
     /// Get all models in the project
     fn all_models(&self) -> Arc<HashMap<PathBuf, Model>>;
@@ -75,9 +83,14 @@ pub trait Semantic: Syntax {
     /// Returns None if the ref is undefined
     fn resolve_ref(&self, model_name: String) -> Option<PathBuf>;
 
-    /// Resolve a source() to its table definition
+    /// Resolve a source() to its table definition within a project
     /// Returns None if the source is undefined
-    fn resolve_source(&self, source_name: String, table_name: String) -> Option<SourceTableDef>;
+    fn resolve_source(
+        &self,
+        project_root: PathBuf,
+        source_name: String,
+        table_name: String,
+    ) -> Option<SourceTableDef>;
 
     /// Get all diagnostics for a file
     fn file_diagnostics(&self, path: PathBuf) -> Arc<Vec<Diagnostic>>;
@@ -204,8 +217,8 @@ fn model_sources(db: &dyn Syntax, path: PathBuf) -> Arc<Vec<SourceLocation>> {
     }
 }
 
-fn sources_config(db: &dyn Syntax) -> Arc<SourcesConfig> {
-    let yaml = db.sources_yaml();
+fn sources_config(db: &dyn Syntax, project_root: PathBuf) -> Arc<SourcesConfig> {
+    let yaml = db.project_sources_yaml(project_root);
     if yaml.is_empty() {
         return Arc::new(SourcesConfig::default());
     }
@@ -216,8 +229,8 @@ fn sources_config(db: &dyn Syntax) -> Arc<SourcesConfig> {
     }
 }
 
-fn sources_yaml_error(db: &dyn Syntax) -> Option<YamlParseError> {
-    let yaml = db.sources_yaml();
+fn sources_yaml_error(db: &dyn Syntax, project_root: PathBuf) -> Option<YamlParseError> {
+    let yaml = db.project_sources_yaml(project_root);
     if yaml.is_empty() {
         return None;
     }
@@ -239,8 +252,8 @@ fn sources_yaml_error(db: &dyn Syntax) -> Option<YamlParseError> {
     }
 }
 
-fn sources_type_errors(db: &dyn Syntax) -> Arc<Vec<SourceTypeError>> {
-    let yaml = db.sources_yaml();
+fn sources_type_errors(db: &dyn Syntax, project_root: PathBuf) -> Arc<Vec<SourceTypeError>> {
+    let yaml = db.project_sources_yaml(project_root);
     if yaml.is_empty() {
         return Arc::new(Vec::new());
     }
@@ -325,10 +338,11 @@ fn resolve_ref(db: &dyn Semantic, model_name: String) -> Option<PathBuf> {
 
 fn resolve_source(
     db: &dyn Semantic,
+    project_root: PathBuf,
     source_name: String,
     table_name: String,
 ) -> Option<SourceTableDef> {
-    let config = db.sources_config();
+    let config = db.sources_config(project_root);
 
     // Find the source with this name
     let source = config.sources.iter().find(|s| s.name == source_name)?;
@@ -339,6 +353,7 @@ fn resolve_source(
 
 fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
+    let project_root = db.file_project_root(path.clone());
 
     // Add parse errors
     let parse = db.parse_file(path.clone());
@@ -390,6 +405,7 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
     for source_loc in sources.iter() {
         if db
             .resolve_source(
+                project_root.clone(),
                 source_loc.source_name.clone(),
                 source_loc.table_name.clone(),
             )
@@ -405,7 +421,7 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
 
     // If model references sources and there's a YAML parse error, report it
     if !sources.is_empty() {
-        if let Some(yaml_error) = db.sources_yaml_error() {
+        if let Some(yaml_error) = db.sources_yaml_error(project_root.clone()) {
             diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: format!("sources.yml parse error: {}", yaml_error.message),
@@ -417,7 +433,7 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
         }
 
         // Check for invalid type definitions in sources.yml
-        let type_errors = db.sources_type_errors();
+        let type_errors = db.sources_type_errors(project_root.clone());
         for error in type_errors.iter() {
             // Only report if this model uses this source
             let source_qualified = format!("{}.{}", error.source_name, error.table_name);
@@ -978,9 +994,10 @@ fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
 
 fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
     let mut ctx = TypeContext::new();
+    let project_root = db.file_project_root(path.clone());
 
     // Get sources config and add source column types
-    let sources_config = db.sources_config();
+    let sources_config = db.sources_config(project_root);
     for source in &sources_config.sources {
         for table in &source.tables {
             for col in &table.columns {
@@ -1500,6 +1517,10 @@ mod tests {
             raw_events_path.clone(),
             sessions_path.clone(),
         ]));
+        db.set_file_project_root(raw_events_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(sessions_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.model_schema(sessions_path);
 
@@ -1551,6 +1572,10 @@ mod tests {
             raw_events_path.clone(),
             sessions_path.clone(),
         ]));
+        db.set_file_project_root(raw_events_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(sessions_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let available = db.available_columns(sessions_path);
 
@@ -1576,6 +1601,7 @@ mod tests {
 
         // Register the file (no other files, so ref won't resolve)
         db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
 
         // Get diagnostics
         let diagnostics = db.file_diagnostics(path);
@@ -1648,6 +1674,7 @@ mod tests {
 
         // Register the file (no other files, so ref won't resolve)
         db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
 
         // Get diagnostics
         let diagnostics = db.file_diagnostics(path);
@@ -1715,7 +1742,9 @@ mod tests {
             Arc::new("SELECT 42 as small_num, 100000 as medium_num, 'hello' as greeting FROM source.test".to_string()),
         );
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path);
 
@@ -1754,7 +1783,9 @@ mod tests {
             Arc::new("SELECT COUNT(*) as cnt, AVG(price) as avg_price FROM source.test GROUP BY category".to_string()),
         );
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path);
 
@@ -1804,7 +1835,9 @@ sources:
             Arc::new("SELECT id, email, created_at FROM smelt.source('raw.users')".to_string()),
         );
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path);
 
@@ -1845,7 +1878,9 @@ SELECT day, total FROM daily_totals WHERE total > 1000
         let path = PathBuf::from("models/test_cte.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -1901,7 +1936,9 @@ SELECT doubled FROM cte2
         let path = PathBuf::from("models/test_multi_cte.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -1939,7 +1976,9 @@ SELECT order_sum, order_count FROM order_stats
         let path = PathBuf::from("models/test_explicit_cols.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -1990,7 +2029,9 @@ SELECT inner_total FROM outer_cte
         let path = PathBuf::from("models/test_nested_cte.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2039,7 +2080,9 @@ SELECT id, parent_id FROM tree
         let path = PathBuf::from("models/test_recursive.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2094,7 +2137,9 @@ SELECT n FROM nums
         let path = PathBuf::from("models/test_recursive_literal.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2138,7 +2183,9 @@ FROM smelt.source('raw.orders')
         let path = PathBuf::from("models/test_between.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2180,7 +2227,9 @@ FROM smelt.source('raw.orders')
         let path = PathBuf::from("models/test_in.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2226,7 +2275,9 @@ FROM smelt.source('raw.orders')
         let path = PathBuf::from("models/test_exists.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2273,7 +2324,9 @@ FROM smelt.source('raw.orders')
         let path = PathBuf::from("models/test_not.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2320,7 +2373,9 @@ FROM smelt.source('raw.orders')
         let path = PathBuf::from("models/test_negation.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2371,7 +2426,9 @@ SELECT id, amount FROM smelt.source('raw.returns')
         let path = PathBuf::from("models/test_union_same.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2417,7 +2474,9 @@ SELECT CAST(2 AS BIGINT) as n
         let path = PathBuf::from("models/test_union_promote.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2450,7 +2509,9 @@ SELECT CAST(2.5 AS DOUBLE) as value
         let path = PathBuf::from("models/test_union_all.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2485,7 +2546,9 @@ SELECT CAST(3 AS BIGINT) as n
         let path = PathBuf::from("models/test_union_chained.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2534,7 +2597,9 @@ INNER JOIN smelt.source('raw.users') u ON o.user_id = u.id
         let path = PathBuf::from("models/test_join.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2613,7 +2678,9 @@ INNER JOIN smelt.source('raw.products') p ON o.product_id = p.id
         let path = PathBuf::from("models/test_multi_join.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2681,7 +2748,9 @@ LEFT JOIN smelt.source('raw.users') u ON o.user_id = u.id
         let path = PathBuf::from("models/test_left_join.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2789,7 +2858,9 @@ LEFT JOIN LATERAL (
         let path = PathBuf::from("models/test_lateral.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2859,7 +2930,9 @@ FROM smelt.source('raw.orders')
         let path = PathBuf::from("models/test_filter.sql");
         db.set_file_text(path.clone(), Arc::new(sql.to_string()));
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.typed_model_schema(path.clone());
 
@@ -2945,7 +3018,10 @@ FROM smelt.source('raw.orders')
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.model_schema(downstream_path);
 
@@ -2975,7 +3051,10 @@ FROM smelt.source('raw.orders')
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let schema = db.model_schema(downstream_path);
 
@@ -3010,7 +3089,10 @@ FROM smelt.source('raw.orders')
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let resolved = db.resolved_model_schema(downstream_path);
 
@@ -3053,7 +3135,10 @@ FROM smelt.source('raw.orders')
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let resolved = db.resolved_model_schema(downstream_path);
 
@@ -3095,7 +3180,11 @@ FROM smelt.source('raw.orders')
             b_path.clone(),
             c_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(a_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(b_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(c_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let resolved = db.resolved_model_schema(c_path);
 
@@ -3136,7 +3225,10 @@ sources:
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let resolved = db.resolved_model_schema(downstream_path);
 
@@ -3173,7 +3265,10 @@ sources:
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let constraints = db.model_input_constraints(downstream_path);
 
@@ -3206,7 +3301,10 @@ sources:
             upstream_path.clone(),
             downstream_path.clone(),
         ]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let constraints = db.model_input_constraints(downstream_path);
 
@@ -3227,7 +3325,9 @@ sources:
         );
 
         db.set_all_files(Arc::new(vec![path.clone()]));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
 
         let constraints = db.model_input_constraints(path);
         assert!(constraints.is_empty());

@@ -25,9 +25,11 @@ impl TestWorkspace {
         let models_dir = temp_dir.path().join("models");
         std::fs::create_dir_all(&models_dir).expect("Failed to create models directory");
 
+        let project_root = temp_dir.path().to_path_buf();
         let mut db = Database::default();
         db.set_all_files(Arc::new(Vec::new()));
-        db.set_sources_yaml(Arc::new(String::new()));
+        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![project_root]));
 
         Self {
             temp_dir,
@@ -35,6 +37,10 @@ impl TestWorkspace {
             models_dir,
             model_files: Vec::new(),
         }
+    }
+
+    fn project_root(&self) -> PathBuf {
+        self.temp_dir.path().to_path_buf()
     }
 
     /// Add a model file to the workspace
@@ -47,6 +53,8 @@ impl TestWorkspace {
         // Update database
         self.db
             .set_file_text(path.clone(), Arc::new(sql.to_string()));
+        self.db
+            .set_file_project_root(path.clone(), self.project_root());
         self.model_files.push(path);
         self.db.set_all_files(Arc::new(self.model_files.clone()));
     }
@@ -66,7 +74,8 @@ impl TestWorkspace {
     fn set_sources_yml(&mut self, content: &str) {
         let path = self.temp_dir.path().join("sources.yml");
         std::fs::write(&path, content).expect("Failed to write sources.yml");
-        self.db.set_sources_yaml(Arc::new(content.to_string()));
+        self.db
+            .set_project_sources_yaml(self.project_root(), Arc::new(content.to_string()));
     }
 
     /// Get the path for a model
@@ -449,7 +458,9 @@ sources:
 "#,
         );
 
-        let resolved = ws.db.resolve_source("raw".to_string(), "users".to_string());
+        let resolved =
+            ws.db
+                .resolve_source(ws.project_root(), "raw".to_string(), "users".to_string());
 
         assert!(resolved.is_some());
         let table = resolved.unwrap();
@@ -476,7 +487,7 @@ sources:
 "#,
         );
 
-        let config = ws.db.sources_config();
+        let config = ws.db.sources_config(ws.project_root());
 
         assert_eq!(config.sources.len(), 1);
         let raw = &config.sources[0];
@@ -629,7 +640,7 @@ sources:
         );
 
         // Get sources config and verify columns are available
-        let config = ws.db.sources_config();
+        let config = ws.db.sources_config(ws.project_root());
         let raw = config.sources.iter().find(|s| s.name == "raw").unwrap();
         let users = raw.tables.iter().find(|t| t.name == "users").unwrap();
 
