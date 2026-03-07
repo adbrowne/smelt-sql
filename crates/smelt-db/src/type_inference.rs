@@ -75,6 +75,11 @@ impl TypeContext {
         self.cte_names.contains(name)
     }
 
+    /// Resolve an alias to its qualified name
+    pub fn resolve_alias(&self, alias: &str) -> Option<String> {
+        self.aliases.get(alias).cloned()
+    }
+
     /// Look up a column type by name (with optional qualifier)
     /// CTEs shadow outer scope, so we check them first.
     pub fn lookup_column(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {

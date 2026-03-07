@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rowan::TextRange;
 use serde::Deserialize;
 use smelt_parser::{self, File as AstFile, RefCall, TableRef};
 use smelt_types::{parse_type, DataType, TypedColumn};
@@ -13,7 +14,10 @@ use smelt_types::{parse_type, DataType, TypedColumn};
 pub mod schema;
 pub mod type_inference;
 
-pub use schema::{Column, ColumnSource, ModelSchema};
+pub use schema::{
+    Column, ColumnConstraint, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema,
+    RowExtension,
+};
 pub use type_inference::{
     infer_cte_columns, infer_expression_type, infer_select_column_types, TypeContext,
 };
@@ -98,6 +102,12 @@ pub trait TypeChecking: Schema {
 
     /// Build type context for a model (source and upstream model types)
     fn type_context(&self, path: PathBuf) -> Arc<TypeContext>;
+
+    /// Get the fully resolved schema (row extensions expanded)
+    fn resolved_model_schema(&self, path: PathBuf) -> Arc<ResolvedSchema>;
+
+    /// Extract input constraints from a model's SQL
+    fn model_input_constraints(&self, path: PathBuf) -> Arc<Vec<InputConstraint>>;
 }
 
 /// The main database that combines all query groups
@@ -839,26 +849,20 @@ fn model_schema(db: &dyn Schema, path: PathBuf) -> Arc<ModelSchema> {
 
     // Extract columns from select list
     let mut columns = Vec::new();
+    let mut row_extensions = Vec::new();
 
     for item in select_list.items() {
         // Handle SELECT *
-        if let Some(expr) = item.expression() {
-            if expr.text().trim() == "*" {
-                // Wildcard - need to expand from source(s)
-                for ref_name in &from_refs {
-                    columns.push(Column {
-                        name: "*".to_string(),
-                        alias: None,
-                        source: ColumnSource::Wildcard {
-                            model_name: ref_name.clone(),
-                        },
-                        expression: "*".to_string(),
-                        range: item.range(),
-                        data_type: None, // Wildcard type is determined by expansion
-                    });
-                }
-                continue;
+        if item.is_wildcard() {
+            // Create RowExtension entries instead of wildcard Column entries
+            for ref_name in &from_refs {
+                row_extensions.push(schema::RowExtension {
+                    ref_name: ref_name.clone(),
+                    excluded_columns: vec![],
+                    range: item.range(),
+                });
             }
+            continue;
         }
 
         // Regular column
@@ -915,11 +919,23 @@ fn model_schema(db: &dyn Schema, path: PathBuf) -> Arc<ModelSchema> {
             source,
             expression,
             range: item.range(),
-            data_type: None, // Type inference will be done in Phase 4
+            data_type: None,
         });
     }
 
-    Arc::new(ModelSchema { columns })
+    // For SELECT *, col patterns: exclude explicitly selected columns from row extensions
+    if !row_extensions.is_empty() {
+        let explicit_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+        for ext in &mut row_extensions {
+            ext.excluded_columns = explicit_names.clone();
+        }
+    }
+
+    Arc::new(ModelSchema {
+        columns,
+        row_extensions,
+        input_constraints: vec![],
+    })
 }
 
 fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
@@ -944,10 +960,6 @@ fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
 
                                     // Add upstream columns to available list
                                     for col in upstream_schema.columns.iter() {
-                                        // Skip wildcards
-                                        if col.name == "*" {
-                                            continue;
-                                        }
                                         available.push(col.clone());
                                     }
                                 }
@@ -1053,14 +1065,13 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
             if let Some(model_name) = ref_call.model_name() {
                 // Resolve upstream model and get its typed schema
                 if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                    let upstream_schema = db.typed_model_schema(upstream_path);
+                    // Use resolved schema to get columns through wildcards
+                    let resolved = db.resolved_model_schema(upstream_path);
 
-                    // Add upstream columns to context
-                    for col in &upstream_schema.columns {
-                        if col.name != "*" {
-                            if let Some(typed_col) = &col.data_type {
-                                ctx.add_model_column(&model_name, &col.name, typed_col.clone());
-                            }
+                    // Add all resolved columns to context
+                    for col in &resolved.columns {
+                        if let Some(typed_col) = &col.data_type {
+                            ctx.add_model_column(&model_name, &col.name, typed_col.clone());
                         }
                     }
 
@@ -1192,7 +1203,226 @@ fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> 
 
     Arc::new(ModelSchema {
         columns: typed_columns,
+        row_extensions: base_schema.row_extensions.clone(),
+        input_constraints: base_schema.input_constraints.clone(),
     })
+}
+
+fn resolved_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ResolvedSchema> {
+    let typed_schema = db.typed_model_schema(path.clone());
+
+    // If no row extensions, return concrete columns directly
+    if typed_schema.row_extensions.is_empty() {
+        return Arc::new(ResolvedSchema {
+            columns: typed_schema.columns.clone(),
+            is_fully_resolved: true,
+            unresolved_extensions: vec![],
+        });
+    }
+
+    let mut columns = Vec::new();
+    let mut unresolved_extensions = Vec::new();
+    let mut is_fully_resolved = true;
+
+    // First, expand row extensions (they represent columns from SELECT *)
+    for ext in &typed_schema.row_extensions {
+        if let Some(upstream_path) = db.resolve_ref(ext.ref_name.clone()) {
+            // Recursively resolve upstream schema
+            let upstream_resolved = db.resolved_model_schema(upstream_path);
+
+            // Add upstream columns not in excluded list
+            for col in &upstream_resolved.columns {
+                if !ext.excluded_columns.contains(&col.name) {
+                    columns.push(col.clone());
+                }
+            }
+
+            // Propagate any unresolved extensions from upstream
+            if !upstream_resolved.is_fully_resolved {
+                is_fully_resolved = false;
+                for upstream_ext in &upstream_resolved.unresolved_extensions {
+                    unresolved_extensions.push(upstream_ext.clone());
+                }
+            }
+        } else {
+            // Can't resolve this ref, carry extension forward
+            is_fully_resolved = false;
+            unresolved_extensions.push(ext.clone());
+        }
+    }
+
+    // Then add explicit columns (they come after wildcards in SELECT *, col order)
+    for col in &typed_schema.columns {
+        columns.push(col.clone());
+    }
+
+    Arc::new(ResolvedSchema {
+        columns,
+        is_fully_resolved,
+        unresolved_extensions,
+    })
+}
+
+fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<InputConstraint>> {
+    use schema::{ColumnConstraint, InputConstraint};
+
+    let parse = db.parse_file(path.clone());
+    let syntax = parse.syntax();
+    let ctx = db.type_context(path.clone());
+
+    let file = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return Arc::new(vec![]),
+    };
+
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return Arc::new(vec![]),
+    };
+
+    // Build a map of alias -> ref_name from the FROM clause
+    let mut alias_to_ref: HashMap<String, String> = HashMap::new();
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if let Some(func) = table_ref.function_call() {
+                if let Some(ref_call) = RefCall::from_function_call(func) {
+                    if let Some(model_name) = ref_call.model_name() {
+                        // Register the model name itself
+                        alias_to_ref.insert(model_name.clone(), model_name.clone());
+                        // Register explicit alias
+                        if let Some(alias) = table_ref.alias() {
+                            alias_to_ref.insert(alias, model_name);
+                        }
+                    }
+                }
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                if let Some(func) = table_ref.function_call() {
+                    if let Some(ref_call) = RefCall::from_function_call(func) {
+                        if let Some(model_name) = ref_call.model_name() {
+                            alias_to_ref.insert(model_name.clone(), model_name.clone());
+                            if let Some(alias) = table_ref.alias() {
+                                alias_to_ref.insert(alias, model_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if alias_to_ref.is_empty() {
+        return Arc::new(vec![]);
+    }
+
+    // Collect column references from SELECT, WHERE, JOIN ON, GROUP BY, ORDER BY
+    let mut constraints_map: HashMap<String, HashMap<String, ColumnConstraint>> = HashMap::new();
+
+    // Helper closure to record a constraint
+    let mut record_constraint =
+        |ref_name: &str, col_name: &str, expected_type: Option<TypedColumn>, range: TextRange| {
+            let entry = constraints_map
+                .entry(ref_name.to_string())
+                .or_default()
+                .entry(col_name.to_string())
+                .or_insert_with(|| ColumnConstraint {
+                    expected_type: None,
+                    usage_sites: vec![],
+                });
+            if entry.expected_type.is_none() {
+                entry.expected_type = expected_type;
+            }
+            entry.usage_sites.push(range);
+        };
+
+    // Extract column references from expressions recursively
+    #[allow(clippy::type_complexity)]
+    fn collect_column_refs(
+        expr: &smelt_parser::ast::Expr,
+        alias_to_ref: &HashMap<String, String>,
+        ctx: &TypeContext,
+        record: &mut dyn FnMut(&str, &str, Option<TypedColumn>, TextRange),
+    ) {
+        if let Some(col_ref) = expr.as_column_ref() {
+            let col_name = col_ref.name().to_string();
+            if col_name == "*" {
+                return;
+            }
+
+            if let Some(qualifier) = col_ref.qualifier() {
+                // Qualified: t.column_name -> look up qualifier in alias map
+                let resolved = ctx
+                    .resolve_alias(qualifier)
+                    .unwrap_or_else(|| qualifier.to_string());
+                if let Some(ref_name) = alias_to_ref.get(&resolved) {
+                    let inferred = ctx.lookup_column(Some(qualifier), &col_name).cloned();
+                    record(ref_name, &col_name, inferred, expr.text_range());
+                }
+            } else if alias_to_ref.len() == 1 {
+                // Unqualified with single ref: assume it comes from that ref
+                let ref_name = alias_to_ref.values().next().unwrap();
+                let inferred = ctx.lookup_column(None, &col_name).cloned();
+                record(ref_name, &col_name, inferred, expr.text_range());
+            }
+        }
+
+        // Recurse into function arguments
+        if let Some(func) = expr.as_function_call() {
+            for arg in func.arguments() {
+                collect_column_refs(&arg, alias_to_ref, ctx, record);
+            }
+        }
+
+        // Recurse into binary expressions
+        if let Some(bin) = expr.as_binary() {
+            if let Some(lhs) = bin.left() {
+                collect_column_refs(&lhs, alias_to_ref, ctx, record);
+            }
+            if let Some(rhs) = bin.right() {
+                collect_column_refs(&rhs, alias_to_ref, ctx, record);
+            }
+        }
+    }
+
+    // Collect from SELECT list
+    if let Some(select_list) = select_stmt.select_list() {
+        for item in select_list.items() {
+            if let Some(expr) = item.expression() {
+                collect_column_refs(&expr, &alias_to_ref, &ctx, &mut record_constraint);
+            }
+        }
+    }
+
+    // Collect from WHERE clause
+    if let Some(where_clause) = select_stmt.where_clause() {
+        if let Some(expr) = where_clause.expression() {
+            collect_column_refs(&expr, &alias_to_ref, &ctx, &mut record_constraint);
+        }
+    }
+
+    // Collect from JOIN ON conditions
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for join in from_clause.joins() {
+            if let Some(condition) = join.condition() {
+                if let Some(on_expr) = condition.on_expression() {
+                    collect_column_refs(&on_expr, &alias_to_ref, &ctx, &mut record_constraint);
+                }
+            }
+        }
+    }
+
+    // Build InputConstraint list
+    let constraints: Vec<InputConstraint> = constraints_map
+        .into_iter()
+        .map(|(ref_name, required_columns)| InputConstraint {
+            ref_name,
+            required_columns,
+        })
+        .collect();
+
+    Arc::new(constraints)
 }
 
 #[cfg(test)]
@@ -2691,5 +2921,315 @@ FROM smelt.source('raw.orders')
             DataType::Double,
             "AVG with FILTER should return DOUBLE"
         );
+    }
+
+    // ---- Row Polymorphism Tests ----
+
+    #[test]
+    fn test_select_star_produces_row_extension() {
+        let mut db = Database::default();
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT user_id, email FROM source.users".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/passthrough.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT * FROM smelt.ref('input')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let schema = db.model_schema(downstream_path);
+
+        // Should have no explicit columns but one row extension
+        assert_eq!(schema.columns.len(), 0);
+        assert_eq!(schema.row_extensions.len(), 1);
+        assert_eq!(schema.row_extensions[0].ref_name, "input");
+    }
+
+    #[test]
+    fn test_select_star_plus_column_produces_row_extension_with_exclusion() {
+        let mut db = Database::default();
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT user_id, email FROM source.users".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/extended.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT *, 1 as foo FROM smelt.ref('input')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let schema = db.model_schema(downstream_path);
+
+        // Should have one explicit column (foo) and one row extension
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "foo");
+        assert_eq!(schema.row_extensions.len(), 1);
+        assert_eq!(schema.row_extensions[0].ref_name, "input");
+        // foo should be excluded from expansion
+        assert!(schema.row_extensions[0]
+            .excluded_columns
+            .contains(&"foo".to_string()));
+    }
+
+    #[test]
+    fn test_resolved_schema_expands_wildcard() {
+        let mut db = Database::default();
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT 42 as user_id, 'test' as email FROM source.users".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/passthrough.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT * FROM smelt.ref('input')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let resolved = db.resolved_model_schema(downstream_path);
+
+        assert!(resolved.is_fully_resolved);
+        assert_eq!(resolved.columns.len(), 2);
+
+        let names: Vec<&str> = resolved.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"user_id"));
+        assert!(names.contains(&"email"));
+
+        // Types should propagate through the wildcard
+        let user_id = resolved
+            .columns
+            .iter()
+            .find(|c| c.name == "user_id")
+            .unwrap();
+        assert!(
+            user_id.data_type.is_some(),
+            "Type should propagate through SELECT *"
+        );
+    }
+
+    #[test]
+    fn test_resolved_schema_star_plus_column() {
+        let mut db = Database::default();
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT 42 as user_id, 'test' as email FROM source.users".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/extended.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT *, 1 as foo FROM smelt.ref('input')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let resolved = db.resolved_model_schema(downstream_path);
+
+        assert!(resolved.is_fully_resolved);
+        // user_id + email from upstream (foo excluded from wildcard) + foo explicit
+        assert_eq!(resolved.columns.len(), 3);
+
+        let names: Vec<&str> = resolved.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"user_id"));
+        assert!(names.contains(&"email"));
+        assert!(names.contains(&"foo"));
+    }
+
+    #[test]
+    fn test_resolved_schema_chain() {
+        let mut db = Database::default();
+
+        // A -> B -> C chain with SELECT *
+        let a_path = PathBuf::from("models/a.sql");
+        db.set_file_text(
+            a_path.clone(),
+            Arc::new("SELECT 1 as col_a FROM source.test".to_string()),
+        );
+
+        let b_path = PathBuf::from("models/b.sql");
+        db.set_file_text(
+            b_path.clone(),
+            Arc::new("SELECT * FROM smelt.ref('a')".to_string()),
+        );
+
+        let c_path = PathBuf::from("models/c.sql");
+        db.set_file_text(
+            c_path.clone(),
+            Arc::new("SELECT * FROM smelt.ref('b')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            a_path.clone(),
+            b_path.clone(),
+            c_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let resolved = db.resolved_model_schema(c_path);
+
+        assert!(resolved.is_fully_resolved);
+        assert_eq!(resolved.columns.len(), 1);
+        assert_eq!(resolved.columns[0].name, "col_a");
+    }
+
+    #[test]
+    fn test_type_inference_through_wildcard() {
+        let mut db = Database::default();
+
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: email
+            type: VARCHAR(255)
+"#;
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT id, email FROM smelt.source('raw.users')".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/passthrough.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT * FROM smelt.ref('input')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(sources_yaml.to_string()));
+
+        let resolved = db.resolved_model_schema(downstream_path);
+
+        assert_eq!(resolved.columns.len(), 2);
+
+        let id_col = resolved.columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(
+            id_col.data_type.is_some(),
+            "Type should propagate: id should be INTEGER"
+        );
+        assert_eq!(
+            id_col.data_type.as_ref().unwrap().data_type,
+            DataType::Integer
+        );
+    }
+
+    #[test]
+    fn test_input_constraints_single_ref() {
+        let mut db = Database::default();
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT user_id, email FROM source.users".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/consumer.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT user_id FROM smelt.ref('input')".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let constraints = db.model_input_constraints(downstream_path);
+
+        // Should have one constraint on 'input' requiring 'user_id'
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].ref_name, "input");
+        assert!(
+            constraints[0].required_columns.contains_key("user_id"),
+            "Should require user_id from input"
+        );
+    }
+
+    #[test]
+    fn test_input_constraints_with_alias() {
+        let mut db = Database::default();
+
+        let upstream_path = PathBuf::from("models/input.sql");
+        db.set_file_text(
+            upstream_path.clone(),
+            Arc::new("SELECT user_id, email FROM source.users".to_string()),
+        );
+
+        let downstream_path = PathBuf::from("models/consumer.sql");
+        db.set_file_text(
+            downstream_path.clone(),
+            Arc::new("SELECT t.user_id, t.email FROM smelt.ref('input') t".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![
+            upstream_path.clone(),
+            downstream_path.clone(),
+        ]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let constraints = db.model_input_constraints(downstream_path);
+
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].ref_name, "input");
+        assert!(constraints[0].required_columns.contains_key("user_id"));
+        assert!(constraints[0].required_columns.contains_key("email"));
+    }
+
+    #[test]
+    fn test_no_constraints_without_refs() {
+        let mut db = Database::default();
+
+        let path = PathBuf::from("models/standalone.sql");
+        db.set_file_text(
+            path.clone(),
+            Arc::new("SELECT 1 as x FROM source.test".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_sources_yaml(Arc::new(String::new()));
+
+        let constraints = db.model_input_constraints(path);
+        assert!(constraints.is_empty());
     }
 }

@@ -300,30 +300,30 @@ impl<'a> Parser<'a> {
         self.start_node(SELECT_LIST);
         self.skip_trivia();
 
-        // Handle SELECT *
-        if self.at(STAR) {
-            self.start_node(SELECT_ITEM);
-            self.advance();
-            self.finish_node();
-        } else {
-            // Parse comma-separated select items
-            loop {
+        // Parse comma-separated select items (including *)
+        loop {
+            if self.at(STAR) {
+                // Handle SELECT * as a special select item
+                self.start_node(SELECT_ITEM);
+                self.advance();
+                self.finish_node();
+            } else {
                 self.parse_select_item();
+            }
 
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
                 self.skip_trivia();
-                if self.at(COMMA) {
-                    self.advance();
-                    self.skip_trivia();
-                    // Allow trailing comma - break if next token ends the SELECT list
-                    if self.at_any(&[
-                        FROM_KW, WHERE_KW, GROUP_KW, HAVING_KW, ORDER_KW, LIMIT_KW, EOF, INNER_KW,
-                        LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, JOIN_KW,
-                    ]) {
-                        break;
-                    }
-                } else {
+                // Allow trailing comma - break if next token ends the SELECT list
+                if self.at_any(&[
+                    FROM_KW, WHERE_KW, GROUP_KW, HAVING_KW, ORDER_KW, LIMIT_KW, EOF, INNER_KW,
+                    LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, JOIN_KW,
+                ]) {
                     break;
                 }
+            } else {
+                break;
             }
         }
 

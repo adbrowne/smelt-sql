@@ -4,8 +4,10 @@
 /// - Tracking column names and lineage
 /// - LSP features (hover, autocomplete)
 /// - Future refactoring API
+/// - Row polymorphism (wildcard expansion, input constraints)
 use rowan::TextRange;
 use smelt_types::TypedColumn;
+use std::collections::HashMap;
 
 /// Represents a column in a model's output schema
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,10 +57,48 @@ pub enum ColumnSource {
     Unknown,
 }
 
+/// Represents a row extension: "...plus all other columns from this ref"
+/// Replaces wildcard Column entries with a structured reference that can be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowExtension {
+    pub ref_name: String,
+    /// Columns already explicitly selected (excluded from expansion to avoid duplicates)
+    pub excluded_columns: Vec<String>,
+    pub range: TextRange,
+}
+
+/// Constraint: this model requires a ref to have specific columns
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputConstraint {
+    pub ref_name: String,
+    pub required_columns: HashMap<String, ColumnConstraint>,
+}
+
+/// A single column constraint within an InputConstraint
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnConstraint {
+    /// Type the column must be compatible with (None = any type)
+    pub expected_type: Option<TypedColumn>,
+    /// Where in the SQL this constraint originates
+    pub usage_sites: Vec<TextRange>,
+}
+
+/// Schema with all row extensions expanded where possible
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSchema {
+    pub columns: Vec<Column>,
+    pub is_fully_resolved: bool,
+    pub unresolved_extensions: Vec<RowExtension>,
+}
+
 /// Schema for a model (list of output columns)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSchema {
     pub columns: Vec<Column>,
+    /// Row extensions from SELECT * (resolved lazily via resolved_model_schema)
+    pub row_extensions: Vec<RowExtension>,
+    /// Constraints this model places on its input refs
+    pub input_constraints: Vec<InputConstraint>,
 }
 
 impl ModelSchema {
@@ -66,6 +106,8 @@ impl ModelSchema {
     pub fn empty() -> Self {
         Self {
             columns: Vec::new(),
+            row_extensions: Vec::new(),
+            input_constraints: Vec::new(),
         }
     }
 
@@ -112,6 +154,8 @@ mod tests {
                     data_type: None,
                 },
             ],
+            row_extensions: vec![],
+            input_constraints: vec![],
         };
 
         assert!(schema.find_column("user_id").is_some());
@@ -140,6 +184,8 @@ mod tests {
                     data_type: None,
                 },
             ],
+            row_extensions: vec![],
+            input_constraints: vec![],
         };
 
         assert_eq!(schema.column_names(), vec!["a", "b"]);

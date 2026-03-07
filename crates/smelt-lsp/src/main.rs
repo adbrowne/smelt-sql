@@ -461,22 +461,17 @@ impl LanguageServer for Backend {
                 // Check if cursor is within this ref call
                 if cursor_offset >= start && cursor_offset <= end {
                     if let Some(model_name) = ref_call.model_name() {
-                        // Resolve upstream model and show its typed schema
+                        // Resolve upstream model and show its resolved schema
                         if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                            // Use typed_model_schema to get type information
-                            let schema = db.typed_model_schema(upstream_path);
+                            // Use resolved_model_schema to get type information through wildcards
+                            let resolved = db.resolved_model_schema(upstream_path.clone());
 
                             // Format schema as markdown
                             let mut content = format!("**Model: {}**\n\n", model_name);
                             content.push_str("| Column | Type | Source |\n");
                             content.push_str("|--------|------|--------|\n");
 
-                            for col in schema.columns.iter() {
-                                // Skip wildcards
-                                if col.name == "*" {
-                                    continue;
-                                }
-
+                            for col in resolved.columns.iter() {
                                 // Column name
                                 content.push_str(&format!("| `{}` | ", col.name));
 
@@ -519,6 +514,37 @@ impl LanguageServer for Backend {
                                 }
 
                                 content.push_str(" |\n");
+                            }
+
+                            // Show unresolved row extensions
+                            if !resolved.unresolved_extensions.is_empty() {
+                                content.push_str("\n*...plus columns from:*\n");
+                                for ext in &resolved.unresolved_extensions {
+                                    content.push_str(&format!("- `{}`\n", ext.ref_name));
+                                }
+                            }
+
+                            // Show input constraints
+                            let constraints = db.model_input_constraints(upstream_path);
+                            if !constraints.is_empty() {
+                                content.push_str("\n**Requires:**\n");
+                                for constraint in constraints.iter() {
+                                    for (col_name, col_constraint) in &constraint.required_columns {
+                                        if let Some(ref typed_col) = col_constraint.expected_type {
+                                            content.push_str(&format!(
+                                                "- `{}` (`{}`) from `{}`\n",
+                                                col_name,
+                                                format_type(typed_col),
+                                                constraint.ref_name,
+                                            ));
+                                        } else {
+                                            content.push_str(&format!(
+                                                "- `{}` from `{}`\n",
+                                                col_name, constraint.ref_name,
+                                            ));
+                                        }
+                                    }
+                                }
                             }
 
                             return Ok(Some(Hover {
