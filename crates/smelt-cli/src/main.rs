@@ -441,15 +441,31 @@ async fn table(args: TableArgs) -> Result<()> {
     // 3. Initialize Salsa database (same pattern as LSP)
     let mut db = smelt_db::Database::default();
 
-    // Load sources.yml
-    let sources_path = project_dir.join("sources.yml");
-    let sources_yaml = std::fs::read_to_string(&sources_path).unwrap_or_default();
-    db.set_sources_yaml(Arc::new(sources_yaml));
+    // Load sources.yml or sources.yaml
+    let sources_yaml = {
+        let yml_path = project_dir.join("sources.yml");
+        let yaml_path = project_dir.join("sources.yaml");
+        match (yml_path.exists(), yaml_path.exists()) {
+            (true, true) => {
+                eprintln!(
+                    "Warning: Both sources.yml and sources.yaml exist in {}",
+                    project_dir.display()
+                );
+                std::fs::read_to_string(&yml_path).unwrap_or_default()
+            }
+            (true, false) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
+            (false, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
+            (false, false) => String::new(),
+        }
+    };
+    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
+    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
 
     // Register all model files
     let mut file_paths = Vec::new();
     for model in &models {
         db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+        db.set_file_project_root(model.path.clone(), project_dir.clone());
         file_paths.push(model.path.clone());
     }
     db.set_all_files(Arc::new(file_paths));

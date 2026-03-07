@@ -13,6 +13,85 @@ use smelt_db::{
 use smelt_parser::ast::File as AstFile;
 use smelt_types::TypedColumn;
 
+/// Find a config file supporting both .yml and .yaml extensions.
+/// Returns the path if exactly one exists. Errors if both exist.
+fn find_config_file(
+    dir: &std::path::Path,
+    base_name: &str,
+) -> std::result::Result<Option<PathBuf>, String> {
+    let yml = dir.join(format!("{}.yml", base_name));
+    let yaml = dir.join(format!("{}.yaml", base_name));
+    match (yml.exists(), yaml.exists()) {
+        (true, true) => Err(format!(
+            "Both {}.yml and {}.yaml exist in {}",
+            base_name,
+            base_name,
+            dir.display()
+        )),
+        (true, false) => Ok(Some(yml)),
+        (false, true) => Ok(Some(yaml)),
+        (false, false) => Ok(None),
+    }
+}
+
+/// Recursively find directories containing smelt.yml/smelt.yaml
+fn find_smelt_projects(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut projects = Vec::new();
+    find_smelt_projects_recursive(root, &mut projects);
+    projects
+}
+
+/// Check if a file is a sources config file (sources.yml or sources.yaml)
+fn is_sources_file(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "sources.yml" || n == "sources.yaml")
+}
+
+/// Find the project root for a file by longest prefix match against known roots
+fn find_project_root_for_file(file: &std::path::Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| file.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .cloned()
+}
+
+/// Walk up from a file path looking for smelt.yml/smelt.yaml to find project root
+fn find_project_root_by_walking_up(file: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = file.parent()?;
+    loop {
+        if dir.join("smelt.yml").exists() || dir.join("smelt.yaml").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn find_smelt_projects_recursive(dir: &std::path::Path, projects: &mut Vec<PathBuf>) {
+    // Check if this directory has smelt.yml or smelt.yaml
+    let has_yml = dir.join("smelt.yml").exists();
+    let has_yaml = dir.join("smelt.yaml").exists();
+    if has_yml || has_yaml {
+        projects.push(dir.to_path_buf());
+    }
+
+    // Recurse into subdirectories, skipping common non-project dirs
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if matches!(name, ".git" | "target" | "node_modules") {
+                        continue;
+                    }
+                }
+                find_smelt_projects_recursive(&path, projects);
+            }
+        }
+    }
+}
+
 /// Tracks errors that occurred during workspace initialization
 #[derive(Default)]
 struct InitErrors {
@@ -136,21 +215,22 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let mut init_errors = InitErrors::default();
 
-        // Initialize all_files and sources_yaml to empty first - ensures Salsa queries are always set
+        // Initialize inputs to empty first - ensures Salsa queries are always set
         // even if workspace folders aren't provided or models/ doesn't exist
         {
             let mut db = self.db.lock().await;
             db.set_all_files(Arc::new(Vec::new()));
-            db.set_sources_yaml(Arc::new(String::new()));
+            db.set_all_project_roots(Arc::new(Vec::new()));
         }
 
         // Get workspace folders if provided
         if let Some(workspace_folders) = params.workspace_folders {
             let mut db = self.db.lock().await;
+            let mut all_files = Vec::new();
+            let mut all_project_roots = Vec::new();
 
-            // Scan for .sql files in models/ directory at workspace root
-            for folder in workspace_folders {
-                let path = match folder.uri.to_file_path() {
+            for folder in &workspace_folders {
+                let workspace_path = match folder.uri.to_file_path() {
                     Ok(p) => p,
                     Err(_) => {
                         init_errors.workspace_errors.push(format!(
@@ -161,74 +241,119 @@ impl LanguageServer for Backend {
                     }
                 };
 
-                // Load sources.yml from workspace root (same location as smelt.yml)
-                let sources_path = path.join("sources.yml");
-                match std::fs::read_to_string(&sources_path) {
-                    Ok(sources_content) => {
-                        db.set_sources_yaml(Arc::new(sources_content));
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // Not an error - sources.yml is optional
-                    }
-                    Err(e) => {
-                        init_errors
-                            .source_errors
-                            .push(format!("Failed to read sources.yml: {}", e));
-                    }
-                }
+                // Recursively discover smelt projects
+                let project_roots = find_smelt_projects(&workspace_path);
 
-                // Scan models/ directory
-                let models_path = path.join("models");
-                match std::fs::read_dir(&models_path) {
-                    Ok(entries) => {
-                        let mut files = Vec::new();
+                for project_root in project_roots {
+                    // Check for ambiguous smelt config
+                    if project_root.join("smelt.yml").exists()
+                        && project_root.join("smelt.yaml").exists()
+                    {
+                        init_errors.workspace_errors.push(format!(
+                            "Both smelt.yml and smelt.yaml exist in {}",
+                            project_root.display()
+                        ));
+                        continue;
+                    }
 
-                        for entry_result in entries {
-                            match entry_result {
-                                Ok(entry) => {
-                                    let entry_path = entry.path();
-                                    if entry_path.extension().and_then(|s| s.to_str())
-                                        == Some("sql")
-                                    {
-                                        match std::fs::read_to_string(&entry_path) {
-                                            Ok(content) => {
-                                                db.set_file_text(
-                                                    entry_path.clone(),
-                                                    Arc::new(content),
-                                                );
-                                                files.push(entry_path);
-                                            }
-                                            Err(e) => {
-                                                init_errors.model_errors.push(format!(
-                                                    "Failed to read {}: {}",
-                                                    entry_path.display(),
-                                                    e
-                                                ));
+                    all_project_roots.push(project_root.clone());
+
+                    // Load sources config for this project
+                    match find_config_file(&project_root, "sources") {
+                        Ok(Some(sources_path)) => match std::fs::read_to_string(&sources_path) {
+                            Ok(content) => {
+                                db.set_project_sources_yaml(
+                                    project_root.clone(),
+                                    Arc::new(content),
+                                );
+                            }
+                            Err(e) => {
+                                init_errors.source_errors.push(format!(
+                                    "Failed to read {}: {}",
+                                    sources_path.display(),
+                                    e
+                                ));
+                                db.set_project_sources_yaml(
+                                    project_root.clone(),
+                                    Arc::new(String::new()),
+                                );
+                            }
+                        },
+                        Ok(None) => {
+                            // No sources file - that's fine
+                            db.set_project_sources_yaml(
+                                project_root.clone(),
+                                Arc::new(String::new()),
+                            );
+                        }
+                        Err(msg) => {
+                            init_errors.source_errors.push(msg);
+                            db.set_project_sources_yaml(
+                                project_root.clone(),
+                                Arc::new(String::new()),
+                            );
+                        }
+                    }
+
+                    // Scan models/ directory for this project
+                    let models_path = project_root.join("models");
+                    match std::fs::read_dir(&models_path) {
+                        Ok(entries) => {
+                            for entry_result in entries {
+                                match entry_result {
+                                    Ok(entry) => {
+                                        let entry_path = entry.path();
+                                        if entry_path.extension().and_then(|s| s.to_str())
+                                            == Some("sql")
+                                        {
+                                            match std::fs::read_to_string(&entry_path) {
+                                                Ok(content) => {
+                                                    db.set_file_text(
+                                                        entry_path.clone(),
+                                                        Arc::new(content),
+                                                    );
+                                                    db.set_file_project_root(
+                                                        entry_path.clone(),
+                                                        project_root.clone(),
+                                                    );
+                                                    all_files.push(entry_path);
+                                                }
+                                                Err(e) => {
+                                                    init_errors.model_errors.push(format!(
+                                                        "Failed to read {}: {}",
+                                                        entry_path.display(),
+                                                        e
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    init_errors.model_errors.push(format!(
-                                        "Failed to read directory entry in models/: {}",
-                                        e
-                                    ));
+                                    Err(e) => {
+                                        init_errors.model_errors.push(format!(
+                                            "Failed to read directory entry in {}: {}",
+                                            models_path.display(),
+                                            e
+                                        ));
+                                    }
                                 }
                             }
                         }
-
-                        db.set_all_files(Arc::new(files));
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // Not an error - models/ directory is optional
-                    }
-                    Err(e) => {
-                        init_errors
-                            .workspace_errors
-                            .push(format!("Failed to read models/ directory: {}", e));
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Not an error - models/ directory is optional
+                        }
+                        Err(e) => {
+                            init_errors.workspace_errors.push(format!(
+                                "Failed to read {}: {}",
+                                models_path.display(),
+                                e
+                            ));
+                        }
                     }
                 }
             }
+
+            db.set_all_files(Arc::new(all_files));
+            db.set_all_project_roots(Arc::new(all_project_roots));
         }
 
         // Store errors for reporting after initialized notification
@@ -299,19 +424,60 @@ impl LanguageServer for Backend {
             None => return,
         };
 
-        // Check if this is sources.yml - update sources config and refresh all diagnostics
-        if path.file_name().is_some_and(|n| n == "sources.yml") {
+        // Check if this is sources.yml/yaml - update sources config and refresh all diagnostics
+        if is_sources_file(&path) {
+            if let Some(project_root) = path.parent().map(|p| p.to_path_buf()) {
+                let mut db = self.db.lock().await;
+                db.set_project_sources_yaml(project_root, Arc::new(params.text_document.text));
+                drop(db);
+                self.publish_all_diagnostics().await;
+            }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("sql") {
             let mut db = self.db.lock().await;
-            db.set_sources_yaml(Arc::new(params.text_document.text));
+            // If this file wasn't seen during init, find its project root
+            let project_roots = db.all_project_roots();
+            let has_project_root = project_roots.iter().any(|root| path.starts_with(root));
+            if has_project_root {
+                // Find matching project root (longest prefix match)
+                if let Some(project_root) = find_project_root_for_file(&path, &project_roots) {
+                    db.set_file_project_root(path.clone(), project_root);
+                }
+            } else {
+                // Try to discover project root by walking up
+                if let Some(project_root) = find_project_root_by_walking_up(&path) {
+                    // Register this new project
+                    let mut roots = (*project_roots).clone();
+                    if !roots.contains(&project_root) {
+                        roots.push(project_root.clone());
+                        db.set_all_project_roots(Arc::new(roots));
+                        // Load sources for this project
+                        let sources_content = find_config_file(&project_root, "sources")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| std::fs::read_to_string(p).ok())
+                            .unwrap_or_default();
+                        db.set_project_sources_yaml(
+                            project_root.clone(),
+                            Arc::new(sources_content),
+                        );
+                    }
+                    db.set_file_project_root(path.clone(), project_root);
+                }
+            }
+            // Register this file if not already known
+            let mut files = (*db.all_files()).clone();
+            if !files.contains(&path) {
+                files.push(path.clone());
+                db.set_all_files(Arc::new(files));
+            }
+            db.set_file_text(path, Arc::new(params.text_document.text));
             drop(db);
-            // Refresh diagnostics on all model files since source resolution may have changed
-            self.publish_all_diagnostics().await;
+            self.publish_diagnostics(uri).await;
         } else {
-            // Update file content in database
+            // Non-SQL, non-sources file
             let mut db = self.db.lock().await;
             db.set_file_text(path, Arc::new(params.text_document.text));
             drop(db);
-            // Publish diagnostics
             self.publish_diagnostics(uri).await;
         }
     }
@@ -325,19 +491,17 @@ impl LanguageServer for Backend {
 
         // Get new text (we use FULL sync, so there's only one change)
         if let Some(change) = params.content_changes.into_iter().next() {
-            // Check if this is sources.yml - update sources config and refresh all diagnostics
-            if path.file_name().is_some_and(|n| n == "sources.yml") {
-                let mut db = self.db.lock().await;
-                db.set_sources_yaml(Arc::new(change.text));
-                drop(db);
-                // Refresh diagnostics on all model files since source resolution may have changed
-                self.publish_all_diagnostics().await;
+            if is_sources_file(&path) {
+                if let Some(project_root) = path.parent().map(|p| p.to_path_buf()) {
+                    let mut db = self.db.lock().await;
+                    db.set_project_sources_yaml(project_root, Arc::new(change.text));
+                    drop(db);
+                    self.publish_all_diagnostics().await;
+                }
             } else {
-                // Update in database - Salsa will handle incremental recomputation
                 let mut db = self.db.lock().await;
                 db.set_file_text(path, Arc::new(change.text));
                 drop(db);
-                // Publish diagnostics
                 self.publish_diagnostics(uri).await;
             }
         }
@@ -573,8 +737,9 @@ impl LanguageServer for Backend {
                         let qualified_name = source_call.qualified_name().unwrap_or_default();
 
                         // Try to resolve the source
+                        let project_root = db.file_project_root(path.clone());
                         if let Some(table_def) =
-                            db.resolve_source(source_name.clone(), table_name.clone())
+                            db.resolve_source(project_root, source_name.clone(), table_name.clone())
                         {
                             // Format source info as markdown
                             let mut content = format!("**Source: {}**\n\n", qualified_name);
@@ -682,7 +847,8 @@ impl LanguageServer for Backend {
             }
             CompletionContext::InsideSource => {
                 // Complete source.table names
-                let config = db.sources_config();
+                let project_root = db.file_project_root(path.clone());
+                let config = db.sources_config(project_root);
                 let mut items = Vec::new();
 
                 for source in &config.sources {
@@ -794,7 +960,8 @@ impl LanguageServer for Backend {
                                     table_name,
                                 } => {
                                     // Get columns from sources.yml
-                                    let config = db.sources_config();
+                                    let project_root = db.file_project_root(path.clone());
+                                    let config = db.sources_config(project_root);
                                     for source in &config.sources {
                                         if source.name == *source_name {
                                             for table in &source.tables {
