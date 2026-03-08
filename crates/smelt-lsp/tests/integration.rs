@@ -803,6 +803,67 @@ JOIN user_orders o ON u.id = o.user_id"#,
     }
 
     #[test]
+    fn test_python_model_ref_resolution() {
+        // Simulate the LSP registering a Python model's generated SQL.
+        // The virtual path must use `<name>.sql` so parse_model derives the correct name.
+        let mut ws = TestWorkspace::new();
+
+        // Register the Python model's SQL under the correct virtual path
+        let virtual_path = ws.models_dir.join("combined_events.sql");
+        let sql = "SELECT event_type, COUNT(*) as cnt FROM raw_events GROUP BY event_type";
+        std::fs::write(&virtual_path, sql).expect("write virtual sql");
+        ws.db
+            .set_file_text(virtual_path.clone(), Arc::new(sql.to_string()));
+        ws.db
+            .set_file_project_root(virtual_path.clone(), ws.project_root());
+        ws.model_files.push(virtual_path);
+        ws.db.set_all_files(Arc::new(ws.model_files.clone()));
+
+        // Add a SQL model that references the Python model
+        ws.add_model(
+            "event_summary",
+            "SELECT * FROM smelt.ref('combined_events')",
+        );
+
+        let diags = ws.db.file_diagnostics(ws.model_path("event_summary"));
+        assert!(
+            diags.is_empty(),
+            "Expected no diagnostics when Python model is registered with <name>.sql path, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_py_gen_prefix_breaks_ref_resolution() {
+        // Regression guard: the old __py_gen__ naming scheme causes ref resolution failure
+        let mut ws = TestWorkspace::new();
+
+        // Register the Python model's SQL under the OLD broken virtual path
+        let virtual_path = ws.models_dir.join("__py_gen__combined_events.sql");
+        let sql = "SELECT event_type, COUNT(*) as cnt FROM raw_events GROUP BY event_type";
+        std::fs::write(&virtual_path, sql).expect("write virtual sql");
+        ws.db
+            .set_file_text(virtual_path.clone(), Arc::new(sql.to_string()));
+        ws.db
+            .set_file_project_root(virtual_path.clone(), ws.project_root());
+        ws.model_files.push(virtual_path);
+        ws.db.set_all_files(Arc::new(ws.model_files.clone()));
+
+        // A SQL model referencing 'combined_events' should NOT resolve
+        ws.add_model(
+            "event_summary",
+            "SELECT * FROM smelt.ref('combined_events')",
+        );
+
+        let diags = ws.db.file_diagnostics(ws.model_path("event_summary"));
+        assert!(
+            !diags.is_empty(),
+            "Expected undefined ref diagnostic with __py_gen__ prefix path"
+        );
+        assert!(diags[0].message.contains("Undefined model"));
+    }
+
+    #[test]
     fn test_recursive_cte_available_for_completion() {
         let mut ws = TestWorkspace::new();
         ws.add_model(
