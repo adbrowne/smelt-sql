@@ -274,6 +274,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             ModelConfig {
                 materialization: Some(Materialization::Table),
                 incremental: None,
+                tags: Vec::new(),
             },
         );
 
