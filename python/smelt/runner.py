@@ -39,6 +39,8 @@ def main():
 
     results = []
     for name, func in _registered_models.items():
+        # Reset query log so each model only records its own queries
+        project._queries = []
         sql = func(project)
         if not isinstance(sql, str):
             print(
@@ -49,7 +51,7 @@ def main():
         results.append({
             "name": name,
             "sql": sql,
-            "queries": project._queries,
+            "queries": list(project._queries),
         })
 
     json.dump(results, sys.stdout)

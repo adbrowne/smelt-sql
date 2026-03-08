@@ -50,8 +50,8 @@ impl ModelDiscovery {
         }
     }
 
-    /// Discover SQL model files. Returns (sql_models, python_file_candidates).
-    /// Python files with `@model` decorators are returned separately for later execution.
+    /// Discover SQL model files under the configured model paths.
+    /// Returns a list of [`ModelFile`] instances representing the discovered SQL models.
     pub fn discover_models(&self) -> Result<Vec<ModelFile>> {
         let mut models = Vec::new();
 

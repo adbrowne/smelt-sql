@@ -223,7 +223,7 @@ pub fn discover_python_models(
     let max_rounds = 5;
     let mut python_models: Vec<ModelFile> = Vec::new();
 
-    for round in 0..max_rounds {
+    for _round in 0..max_rounds {
         let context_json = build_project_context(sql_models, &python_models, config);
         let mut new_models = Vec::new();
 
@@ -289,13 +289,6 @@ pub fn discover_python_models(
         }
 
         python_models = new_models;
-
-        // First round always continues to check convergence
-        if round == 0 {
-            // Validate on first round too (single-pass case)
-            validate_fixed_point(&python_models, config)?;
-            return Ok(python_models);
-        }
     }
 
     Err(anyhow!(

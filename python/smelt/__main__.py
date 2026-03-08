@@ -1,4 +1,5 @@
-"""Allow running as `python -m smelt.runner`."""
+"""Allow running as ``python -m smelt``."""
 from smelt.runner import main
 
-main()
+if __name__ == "__main__":
+    main()

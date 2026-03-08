@@ -501,12 +501,11 @@ async fn table(args: TableArgs) -> Result<()> {
         .with_context(|| "Failed to scan for Python models")?;
 
     if !python_files.is_empty() {
-        let python_sdk_path = project_dir.join("python");
         let python_models = discover_python_models(
             &python_files,
             &models,
             &config,
-            &python_sdk_path,
+            &project_dir,
             config.python.as_deref(),
         )
         .with_context(|| "Failed to discover Python models")?;

@@ -356,15 +356,14 @@ impl LanguageServer for Backend {
                     let python_models =
                         python_scan::discover_python_models(&models_path, &project_root);
                     for py_model in &python_models {
-                        db.set_file_text(
-                            py_model.source_path.clone(),
-                            Arc::new(py_model.sql.clone()),
-                        );
-                        db.set_file_project_root(
-                            py_model.source_path.clone(),
-                            project_root.clone(),
-                        );
-                        all_files.push(py_model.source_path.clone());
+                        // Store generated SQL under a synthetic .sql path so it is not
+                        // overwritten by did_open/did_change updates for the .py source file.
+                        let mut virtual_sql_path = py_model.source_path.clone();
+                        virtual_sql_path.set_extension("sql");
+
+                        db.set_file_text(virtual_sql_path.clone(), Arc::new(py_model.sql.clone()));
+                        db.set_file_project_root(virtual_sql_path.clone(), project_root.clone());
+                        all_files.push(virtual_sql_path);
                     }
                 }
             }
