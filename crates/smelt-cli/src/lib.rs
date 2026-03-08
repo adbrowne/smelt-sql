@@ -16,5 +16,5 @@ pub use discovery::{ModelDiscovery, ModelFile, RefInfo};
 pub use errors::CliError;
 pub use graph::DependencyGraph;
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
-pub use selector::{parse_selector, SelectionMethod, Selector};
+pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use transformer::{inject_time_filter, TimeRange, TransformError};

@@ -75,6 +75,11 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
         return Err(SelectorParseError::Empty);
     }
 
+    // Reject remaining `+` characters (e.g. "model++" would leave "model+" after stripping)
+    if rest.contains('+') {
+        return Err(SelectorParseError::InvalidCharacter('+'));
+    }
+
     // Parse method
     let method = if let Some(tag) = rest.strip_prefix("tag:") {
         if tag.is_empty() {
@@ -96,6 +101,7 @@ pub fn parse_selector(input: &str) -> Result<Selector, SelectorParseError> {
 pub enum SelectorParseError {
     Empty,
     EmptyTag,
+    InvalidCharacter(char),
 }
 
 impl fmt::Display for SelectorParseError {
@@ -104,6 +110,9 @@ impl fmt::Display for SelectorParseError {
             SelectorParseError::Empty => write!(f, "Selector cannot be empty"),
             SelectorParseError::EmptyTag => {
                 write!(f, "Tag name cannot be empty in 'tag:' selector")
+            }
+            SelectorParseError::InvalidCharacter(c) => {
+                write!(f, "Invalid character '{}' in selector name", c)
             }
         }
     }
@@ -193,6 +202,30 @@ mod tests {
     #[test]
     fn test_just_plus() {
         assert_eq!(parse_selector("+"), Err(SelectorParseError::Empty));
+    }
+
+    #[test]
+    fn test_double_plus_model() {
+        assert_eq!(
+            parse_selector("model_name++"),
+            Err(SelectorParseError::InvalidCharacter('+'))
+        );
+    }
+
+    #[test]
+    fn test_double_plus_tag() {
+        assert_eq!(
+            parse_selector("tag:revenue++"),
+            Err(SelectorParseError::InvalidCharacter('+'))
+        );
+    }
+
+    #[test]
+    fn test_plus_in_middle() {
+        assert_eq!(
+            parse_selector("model+name"),
+            Err(SelectorParseError::InvalidCharacter('+'))
+        );
     }
 
     #[test]
