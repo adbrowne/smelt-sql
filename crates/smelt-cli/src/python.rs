@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -65,7 +66,7 @@ pub fn scan_for_model_decorators(content: &str) -> Vec<usize> {
 }
 
 /// Find the Python SDK path.
-/// Resolution order: SMELT_PYTHON_SDK env var → project_dir/python/ → bundled with binary
+/// Resolution order: SMELT_PYTHON_SDK env var → project_dir/python/ → walk up from project_dir
 pub fn find_python_sdk(project_dir: &Path) -> Result<PathBuf> {
     // 1. SMELT_PYTHON_SDK env var
     if let Ok(sdk_path) = std::env::var("SMELT_PYTHON_SDK") {
@@ -144,12 +145,13 @@ fn run_python_model(
     project_context_json: &str,
     python_sdk_path: &Path,
 ) -> Result<Vec<PythonModelOutput>> {
+    let pythonpath = build_pythonpath(python_sdk_path, file_path);
     let output = Command::new(python)
         .arg("-m")
         .arg("smelt.runner")
         .arg(file_path)
         .arg(project_context_json)
-        .env("PYTHONPATH", python_sdk_path)
+        .env("PYTHONPATH", pythonpath)
         .output()
         .with_context(|| format!("Failed to execute Python model: {}", file_path.display()))?;
 
@@ -200,6 +202,58 @@ fn build_project_context(
     serde_json::to_string(&context).expect("Failed to serialize project context")
 }
 
+/// Build PYTHONPATH by prepending SDK path and model file's parent directory
+/// to any existing PYTHONPATH. Uses platform-appropriate path separator.
+fn build_pythonpath(sdk_path: &Path, file_path: &Path) -> std::ffi::OsString {
+    let mut paths: Vec<PathBuf> = vec![sdk_path.to_path_buf()];
+    if let Some(parent) = file_path.parent() {
+        paths.push(parent.to_path_buf());
+    }
+    if let Ok(existing) = std::env::var("PYTHONPATH") {
+        for p in std::env::split_paths(&existing) {
+            paths.push(p);
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| sdk_path.as_os_str().to_os_string())
+}
+
+/// Build a map from function name to the line number of its `@model` decorator.
+/// Scans for `@model` (or `@model(...)`) followed by `def <name>`.
+pub fn build_decorator_map(content: &str) -> HashMap<String, usize> {
+    let mut map = HashMap::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed == "@model" || trimmed.starts_with("@model(") {
+            let decorator_line = i + 1; // 1-indexed
+                                        // Scan forward for the `def` line, skipping blank lines
+            let mut j = i + 1;
+            while j < lines.len() {
+                let def_trimmed = lines[j].trim();
+                if def_trimmed.is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if def_trimmed.starts_with("def ") {
+                    if let Some(name) = def_trimmed
+                        .strip_prefix("def ")
+                        .and_then(|rest| rest.split('(').next())
+                        .map(|n| n.trim().to_string())
+                    {
+                        map.insert(name, decorator_line);
+                    }
+                }
+                break;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    map
+}
+
 /// Discover and execute Python models.
 ///
 /// Uses iterative discovery with fixed-point validation:
@@ -207,7 +261,7 @@ fn build_project_context(
 /// 2. If new models produced, rebuild context and re-run
 /// 3. Stop when output stabilizes (or max rounds reached)
 pub fn discover_python_models(
-    python_files: &[(PathBuf, Vec<usize>)], // (path, decorator_lines)
+    python_files: &[(PathBuf, Vec<usize>, String)], // (path, decorator_lines, content)
     sql_models: &[ModelFile],
     config: &Config,
     project_dir: &Path,
@@ -223,16 +277,24 @@ pub fn discover_python_models(
     let max_rounds = 5;
     let mut python_models: Vec<ModelFile> = Vec::new();
 
+    // Pre-compute decorator maps once (they don't change across rounds)
+    let decorator_maps: Vec<HashMap<String, usize>> = python_files
+        .iter()
+        .map(|(_, _, content)| build_decorator_map(content))
+        .collect();
+
     for _round in 0..max_rounds {
         let context_json = build_project_context(sql_models, &python_models, config);
         let mut new_models = Vec::new();
 
-        for (file_path, decorator_lines) in python_files {
+        for ((file_path, _decorator_lines, _file_content), decorator_map) in
+            python_files.iter().zip(decorator_maps.iter())
+        {
             let outputs = run_python_model(&python, file_path, &context_json, &python_sdk_path)?;
 
             for output in outputs {
-                // Find the decorator line for this model (use first if only one)
-                let source_line = decorator_lines.first().copied().unwrap_or(1);
+                // Look up the decorator line for this specific model function
+                let source_line = decorator_map.get(&output.name).copied().unwrap_or(1);
 
                 // Parse the returned SQL through smelt-parser
                 let parse = smelt_parser::parse(&output.sql);
@@ -302,12 +364,17 @@ fn models_equal(a: &[ModelFile], b: &[ModelFile]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    for (ma, mb) in a.iter().zip(b.iter()) {
-        if ma.name != mb.name || ma.content != mb.content {
-            return false;
-        }
-    }
-    true
+    let mut a_sorted: Vec<(&str, &str)> = a
+        .iter()
+        .map(|m| (m.name.as_str(), m.content.as_str()))
+        .collect();
+    let mut b_sorted: Vec<(&str, &str)> = b
+        .iter()
+        .map(|m| (m.name.as_str(), m.content.as_str()))
+        .collect();
+    a_sorted.sort();
+    b_sorted.sort();
+    a_sorted == b_sorted
 }
 
 /// Validate that no Python-produced model matches its own input queries.
@@ -557,6 +624,651 @@ def union_model(project):
         assert_eq!(python_models[0].refs.len(), 2);
         assert_eq!(python_models[0].refs[0].model_name, "table_a");
         assert_eq!(python_models[0].refs[1].model_name, "table_b");
+    }
+
+    // --- New tests for PR review fixes ---
+
+    #[test]
+    fn test_models_equal_order_independent() {
+        // Fix #1: models_equal should not depend on order
+        let model_a = ModelFile {
+            name: "alpha".to_string(),
+            path: PathBuf::from("a.py"),
+            content: "SELECT 1".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+        };
+        let model_b = ModelFile {
+            name: "beta".to_string(),
+            path: PathBuf::from("b.py"),
+            content: "SELECT 2".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+        };
+
+        let set1 = vec![model_a.clone(), model_b.clone()];
+        let set2 = vec![model_b, model_a];
+        assert!(models_equal(&set1, &set2));
+    }
+
+    #[test]
+    fn test_models_equal_different_content() {
+        let model_a = ModelFile {
+            name: "same_name".to_string(),
+            path: PathBuf::from("a.py"),
+            content: "SELECT 1".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+        };
+        let model_b = ModelFile {
+            name: "same_name".to_string(),
+            path: PathBuf::from("a.py"),
+            content: "SELECT 2".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+            kind: ModelKind::Sql,
+        };
+
+        assert!(!models_equal(&[model_a], &[model_b]));
+    }
+
+    #[test]
+    fn test_build_decorator_map() {
+        let content = r#"from smelt import model
+
+@model
+def first_model(project):
+    return "SELECT 1"
+
+@model
+def second_model(project):
+    return "SELECT 2"
+"#;
+        let map = build_decorator_map(content);
+        assert_eq!(map.get("first_model"), Some(&3));
+        assert_eq!(map.get("second_model"), Some(&7));
+    }
+
+    #[test]
+    fn test_build_decorator_map_with_gaps() {
+        // Blank lines between @model and def should be handled
+        let content = r#"from smelt import model
+
+@model
+
+def my_model(project):
+    return "SELECT 1"
+"#;
+        let map = build_decorator_map(content);
+        assert_eq!(map.get("my_model"), Some(&3));
+    }
+
+    #[test]
+    fn test_scan_decorator_with_parens() {
+        let content = r#"from smelt import model
+
+@model()
+def my_model(project):
+    return "SELECT 1"
+"#;
+        let lines = scan_for_model_decorators(content);
+        assert_eq!(lines, vec![3]);
+
+        let map = build_decorator_map(content);
+        assert_eq!(map.get("my_model"), Some(&3));
+    }
+
+    #[test]
+    fn test_multiple_models_one_file() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let py_content = r#"from smelt import model
+
+@model
+def model_one(project):
+    return "SELECT 1 as id"
+
+@model
+def model_two(project):
+    return "SELECT 2 as id"
+"#;
+        std::fs::write(models_dir.join("multi.py"), py_content).unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+        assert_eq!(python_files.len(), 1);
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let python_models =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+
+        assert_eq!(python_models.len(), 2);
+        let names: Vec<&str> = python_models.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"model_one"));
+        assert!(names.contains(&"model_two"));
+
+        // Verify source_line attribution (Fix #7)
+        for m in &python_models {
+            if let ModelKind::Python { source_line, .. } = &m.kind {
+                match m.name.as_str() {
+                    "model_one" => assert_eq!(*source_line, 3),
+                    "model_two" => assert_eq!(*source_line, 7),
+                    _ => panic!("unexpected model name"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_models_convergence() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // Create SQL models tagged as "event_source"
+        std::fs::write(
+            models_dir.join("page_views.sql"),
+            "---\ntags:\n  - event_source\n---\nSELECT 1 as event_id",
+        )
+        .unwrap();
+        std::fs::write(
+            models_dir.join("clicks.sql"),
+            "---\ntags:\n  - event_source\n---\nSELECT 2 as event_id",
+        )
+        .unwrap();
+
+        // Python model that uses find_models
+        std::fs::write(
+            models_dir.join("combined.py"),
+            r#"from smelt import model
+
+@model
+def combined(project):
+    children = project.find_models(tag="event_source")
+    if not children:
+        return "SELECT 1 as event_id"
+    refs = [f"SELECT * FROM smelt.ref('{m.name}')" for m in children]
+    return " UNION ALL ".join(refs)
+"#,
+        )
+        .unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let sql_models = discovery.discover_models().unwrap();
+        let python_files = discovery.discover_python_files().unwrap();
+
+        let mut model_config = std::collections::HashMap::new();
+        model_config.insert(
+            "page_views".to_string(),
+            crate::config::ModelConfig {
+                materialization: None,
+                incremental: None,
+                tags: vec!["event_source".to_string()],
+            },
+        );
+        model_config.insert(
+            "clicks".to_string(),
+            crate::config::ModelConfig {
+                materialization: None,
+                incremental: None,
+                tags: vec!["event_source".to_string()],
+            },
+        );
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: model_config,
+            python: None,
+        };
+
+        let python_models =
+            discover_python_models(&python_files, &sql_models, &config, project_dir, None).unwrap();
+
+        assert_eq!(python_models.len(), 1);
+        assert_eq!(python_models[0].name, "combined");
+        // Should reference both event_source models
+        assert!(python_models[0].content.contains("page_views"));
+        assert!(python_models[0].content.contains("clicks"));
+    }
+
+    #[test]
+    fn test_circular_meta_dependency() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // Python model that queries tag "generated" but also produces a model with that tag
+        std::fs::write(
+            models_dir.join("circular.py"),
+            r#"from smelt import model
+
+@model
+def circular_model(project):
+    children = project.find_models(tag="generated")
+    return "SELECT 1"
+"#,
+        )
+        .unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let python_files = discovery.discover_python_files().unwrap();
+
+        let mut model_config = std::collections::HashMap::new();
+        model_config.insert(
+            "circular_model".to_string(),
+            crate::config::ModelConfig {
+                materialization: None,
+                incremental: None,
+                tags: vec!["generated".to_string()],
+            },
+        );
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: model_config,
+            python: None,
+        };
+
+        let result = discover_python_models(&python_files, &[], &config, project_dir, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("circular dependency"), "got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_bad_python_syntax() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let bad_content = r#"from smelt import model
+
+@model
+def bad_model(project)
+    return "SELECT 1"
+"#;
+        std::fs::write(models_dir.join("bad_syntax.py"), bad_content).unwrap();
+
+        let python_files = vec![(
+            models_dir.join("bad_syntax.py"),
+            vec![3],
+            bad_content.to_string(),
+        )];
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let result = discover_python_models(&python_files, &[], &config, project_dir, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_non_string_return() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let py_content = r#"from smelt import model
+
+@model
+def bad_return(project):
+    return 42
+"#;
+        std::fs::write(models_dir.join("bad_return.py"), py_content).unwrap();
+
+        let python_files = vec![(
+            models_dir.join("bad_return.py"),
+            vec![3],
+            py_content.to_string(),
+        )];
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let result = discover_python_models(&python_files, &[], &config, project_dir, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_sql_output() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let py_content = r#"from smelt import model
+
+@model
+def bad_sql(project):
+    return "NOT VALID SQL !!! SELECT FROM WHERE"
+"#;
+        std::fs::write(models_dir.join("bad_sql.py"), py_content).unwrap();
+
+        let python_files = vec![(
+            models_dir.join("bad_sql.py"),
+            vec![3],
+            py_content.to_string(),
+        )];
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let result =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+        // Model is produced but with parse errors
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].parse_errors.is_empty());
+    }
+
+    #[test]
+    fn test_empty_find_models() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let py_content = r#"from smelt import model
+
+@model
+def no_matches(project):
+    children = project.find_models(tag="nonexistent_tag")
+    if not children:
+        return "SELECT 1 as fallback"
+    return "SELECT 2"
+"#;
+        std::fs::write(models_dir.join("no_matches.py"), py_content).unwrap();
+
+        let python_files = vec![(
+            models_dir.join("no_matches.py"),
+            vec![3],
+            py_content.to_string(),
+        )];
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let result =
+            discover_python_models(&python_files, &[], &config, project_dir, None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "no_matches");
+        assert!(result[0].content.contains("fallback"));
+    }
+
+    #[test]
+    fn test_python_model_name_collision() {
+        // When a Python model produces a model with the same name as an existing SQL model,
+        // the graph build silently overwrites. This test documents the current behavior.
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let sdk_dir = project_dir.join("python").join("smelt");
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        let repo_sdk = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python")
+            .join("smelt");
+        for entry in std::fs::read_dir(&repo_sdk).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), sdk_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let models_dir = project_dir.join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        // SQL model named "colliding"
+        std::fs::write(models_dir.join("colliding.sql"), "SELECT 1 as from_sql").unwrap();
+
+        // Python model that also produces "colliding"
+        let py_content = r#"from smelt import model
+
+@model
+def colliding(project):
+    return "SELECT 2 as from_python"
+"#;
+        std::fs::write(models_dir.join("gen_colliding.py"), py_content).unwrap();
+
+        let discovery = crate::discovery::ModelDiscovery::new(
+            project_dir.to_path_buf(),
+            vec!["models".to_string()],
+        );
+        let sql_models = discovery.discover_models().unwrap();
+        let python_files = discovery.discover_python_files().unwrap();
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let python_models =
+            discover_python_models(&python_files, &sql_models, &config, project_dir, None).unwrap();
+
+        // Both exist but graph will have collision - one overwrites the other
+        let mut all_models = sql_models;
+        all_models.extend(python_models);
+        let colliding_count = all_models.iter().filter(|m| m.name == "colliding").count();
+        assert_eq!(
+            colliding_count, 2,
+            "both models should exist before graph build"
+        );
+
+        let graph = crate::graph::DependencyGraph::build(all_models, None).unwrap();
+        // Graph silently keeps one (HashMap semantics) - documenting current behavior
+        let order = graph.execution_order().unwrap();
+        let colliding_in_order = order.iter().filter(|n| *n == "colliding").count();
+        assert_eq!(colliding_in_order, 1, "graph deduplicates by name");
     }
 
     #[test]

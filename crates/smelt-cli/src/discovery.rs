@@ -81,8 +81,8 @@ impl ModelDiscovery {
     }
 
     /// Scan model paths for Python files containing `@model` decorators.
-    /// Returns (file_path, decorator_line_numbers) pairs.
-    pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<usize>)>> {
+    /// Returns (file_path, decorator_line_numbers, file_content) tuples.
+    pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<usize>, String)>> {
         let mut python_files = Vec::new();
 
         for model_path in &self.model_paths {
@@ -106,7 +106,7 @@ impl ModelDiscovery {
                     let decorator_lines = crate::python::scan_for_model_decorators(&content);
 
                     if !decorator_lines.is_empty() {
-                        python_files.push((path.to_path_buf(), decorator_lines));
+                        python_files.push((path.to_path_buf(), decorator_lines, content));
                     }
                 }
             }

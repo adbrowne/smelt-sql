@@ -9,6 +9,7 @@ Outputs JSON to stdout:
 """
 import importlib.util
 import json
+import os
 import sys
 
 
@@ -32,8 +33,19 @@ def main():
 
     project = ProjectContext(project_data.get("models", []))
 
+    # Add model file's directory to sys.path so sibling imports work
+    model_dir = os.path.dirname(os.path.abspath(file_path))
+    if model_dir not in sys.path:
+        sys.path.insert(0, model_dir)
+
     # Load the model file
     spec = importlib.util.spec_from_file_location("model", file_path)
+    if spec is None or spec.loader is None:
+        print(
+            f"Error: Could not load Python model file: {file_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 

@@ -71,6 +71,21 @@ fn find_python_sdk(project_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Build PYTHONPATH by prepending SDK path and model file's parent directory
+/// to any existing PYTHONPATH.
+fn build_pythonpath(sdk_path: &Path, file_path: &Path) -> std::ffi::OsString {
+    let mut paths: Vec<PathBuf> = vec![sdk_path.to_path_buf()];
+    if let Some(parent) = file_path.parent() {
+        paths.push(parent.to_path_buf());
+    }
+    if let Ok(existing) = std::env::var("PYTHONPATH") {
+        for p in std::env::split_paths(&existing) {
+            paths.push(p);
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| sdk_path.as_os_str().to_os_string())
+}
+
 /// Scan a models directory for Python files and execute them to get SQL.
 /// Returns a list of discovered Python models, or empty if Python is unavailable.
 pub fn discover_python_models(models_path: &Path, project_dir: &Path) -> Vec<PythonModel> {
@@ -112,12 +127,13 @@ pub fn discover_python_models(models_path: &Path, project_dir: &Path) -> Vec<Pyt
 
     let mut models = Vec::new();
     for file_path in &python_files {
+        let pythonpath = build_pythonpath(&sdk_path, file_path);
         let output = match Command::new(&python)
             .arg("-m")
             .arg("smelt.runner")
             .arg(file_path)
             .arg(context_json)
-            .env("PYTHONPATH", &sdk_path)
+            .env("PYTHONPATH", pythonpath)
             .output()
         {
             Ok(o) if o.status.success() => o,
