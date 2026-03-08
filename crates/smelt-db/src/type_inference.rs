@@ -80,6 +80,23 @@ impl TypeContext {
         self.aliases.get(alias).cloned()
     }
 
+    /// Get all CTE names in scope
+    pub fn cte_names(&self) -> impl Iterator<Item = &str> {
+        self.cte_names.iter().map(|s| s.as_str())
+    }
+
+    /// Get columns for a specific CTE
+    pub fn cte_columns(&self, cte_name: &str) -> Vec<(&str, &TypedColumn)> {
+        let prefix = format!("{}.", cte_name);
+        self.cte_columns
+            .iter()
+            .filter_map(move |(key, typed_col)| {
+                key.strip_prefix(&prefix)
+                    .map(|col_name| (col_name, typed_col))
+            })
+            .collect()
+    }
+
     /// Look up a column type by name (with optional qualifier)
     /// CTEs shadow outer scope, so we check them first.
     pub fn lookup_column(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {

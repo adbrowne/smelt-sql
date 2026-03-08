@@ -1036,6 +1036,49 @@ impl LanguageServer for Backend {
                 }
                 Vec::new()
             }
+            CompletionContext::FromClause => {
+                // Offer CTE names defined in the current query's WITH clause
+                let parse = db.parse_file(path.clone());
+                let syntax = parse.syntax();
+
+                let mut items = Vec::new();
+
+                if let Some(file) = smelt_parser::ast::File::cast(syntax) {
+                    if let Some(select_stmt) = file.select_stmt() {
+                        if let Some(with_clause) = select_stmt.with_clause() {
+                            let type_ctx = db.type_context(path.clone());
+
+                            for cte in with_clause.ctes() {
+                                if let Some(cte_name) = cte.name() {
+                                    // Get column info for documentation
+                                    let columns = type_ctx.cte_columns(&cte_name);
+                                    let doc = if columns.is_empty() {
+                                        None
+                                    } else {
+                                        let col_strs: Vec<String> = columns
+                                            .iter()
+                                            .map(|(name, typed_col)| {
+                                                format!("{}: {}", name, format_type(typed_col))
+                                            })
+                                            .collect();
+                                        Some(Documentation::String(col_strs.join("\n")))
+                                    };
+
+                                    items.push(CompletionItem {
+                                        label: cte_name.clone(),
+                                        kind: Some(CompletionItemKind::STRUCT),
+                                        detail: Some("CTE".to_string()),
+                                        documentation: doc,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                items
+            }
             CompletionContext::None => Vec::new(),
         };
 
@@ -1054,6 +1097,7 @@ enum CompletionContext {
     InsideSource,            // Cursor inside source('|')
     ColumnName,              // Cursor in a position where column name is expected
     QualifiedColumn(String), // Cursor after alias. (e.g., "t." for table alias t)
+    FromClause,              // Cursor in FROM/JOIN position (offer CTE names)
     None,
 }
 
@@ -1108,7 +1152,68 @@ fn determine_completion_context(text: &str, offset: usize) -> CompletionContext 
         }
     }
 
+    // Check if we're in a FROM/JOIN position (after FROM or JOIN keyword)
+    // Look for the last FROM or JOIN keyword and check we're in table-ref position
+    let upper = before_trimmed.to_uppercase();
+    if is_in_from_position(&upper) {
+        return CompletionContext::FromClause;
+    }
+
     CompletionContext::None
+}
+
+/// Check if cursor is in a FROM/JOIN table reference position
+fn is_in_from_position(upper_text: &str) -> bool {
+    // Find the last occurrence of FROM or JOIN keywords
+    let from_pos = upper_text.rfind("FROM");
+    let join_pos = upper_text.rfind("JOIN");
+
+    let keyword_end = match (from_pos, join_pos) {
+        (Some(f), Some(j)) => {
+            if f > j {
+                Some(f + 4) // "FROM" is 4 chars
+            } else {
+                Some(j + 4) // "JOIN" is 4 chars
+            }
+        }
+        (Some(f), None) => Some(f + 4),
+        (None, Some(j)) => Some(j + 4),
+        (None, None) => None,
+    };
+
+    let keyword_end = match keyword_end {
+        Some(e) => e,
+        None => return false,
+    };
+
+    // Text after the keyword
+    let after_keyword = &upper_text[keyword_end..];
+
+    // We're in FROM position if:
+    // 1. Nothing after keyword (just whitespace) - typing the first table ref
+    // 2. Or after a comma (additional table ref in comma-separated list)
+    // But NOT if we've already entered a complete expression (have ON, WHERE, etc.)
+    let trimmed = after_keyword.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    // If we see clause keywords after the FROM/JOIN, we've moved past table position
+    let terminating_keywords = [
+        "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION", "ON", "USING", "INNER", "LEFT",
+        "RIGHT", "FULL", "CROSS", "SELECT",
+    ];
+    for kw in &terminating_keywords {
+        if trimmed.contains(kw) {
+            return false;
+        }
+    }
+
+    // If the text after keyword is just whitespace or a partial identifier, we're in position
+    // Check: no complete table expression yet (no whitespace-separated tokens beyond one)
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    // If 0 tokens (just spaces) or 1 partial token being typed - we're in FROM position
+    tokens.len() <= 1
 }
 
 /// Extract the alias/identifier before a dot at the end of the text
@@ -1258,4 +1363,80 @@ async fn main() {
 
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_clause_context_after_from_keyword() {
+        let text = "WITH cte AS (SELECT 1) SELECT * FROM ";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(matches!(ctx, CompletionContext::FromClause));
+    }
+
+    #[test]
+    fn test_from_clause_context_partial_identifier() {
+        let text = "WITH cte AS (SELECT 1) SELECT * FROM ct";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(matches!(ctx, CompletionContext::FromClause));
+    }
+
+    #[test]
+    fn test_from_clause_context_after_join() {
+        let text = "SELECT * FROM a JOIN ";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(matches!(ctx, CompletionContext::FromClause));
+    }
+
+    #[test]
+    fn test_not_from_context_inside_ref() {
+        let text = "SELECT * FROM smelt.ref('";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(matches!(ctx, CompletionContext::InsideRef));
+    }
+
+    #[test]
+    fn test_not_from_context_inside_source() {
+        let text = "SELECT * FROM smelt.source('";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(matches!(ctx, CompletionContext::InsideSource));
+    }
+
+    #[test]
+    fn test_not_from_context_after_where() {
+        // After WHERE, we're past the FROM clause table position
+        let text = "SELECT * FROM t WHERE ";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(!matches!(ctx, CompletionContext::FromClause));
+    }
+
+    #[test]
+    fn test_not_from_context_after_on() {
+        let text = "SELECT * FROM a JOIN b ON ";
+        let ctx = determine_completion_context(text, text.len());
+        assert!(!matches!(ctx, CompletionContext::FromClause));
+    }
+
+    #[test]
+    fn test_from_position_empty_after_from() {
+        assert!(is_in_from_position("SELECT * FROM "));
+    }
+
+    #[test]
+    fn test_from_position_partial_identifier() {
+        assert!(is_in_from_position("SELECT * FROM CT"));
+    }
+
+    #[test]
+    fn test_from_position_after_join() {
+        assert!(is_in_from_position("SELECT * FROM A JOIN "));
+    }
+
+    #[test]
+    fn test_not_from_position_complete_table_ref() {
+        // After a complete table ref with alias, we're past the position
+        assert!(!is_in_from_position("SELECT * FROM TABLE_A T"));
+    }
 }

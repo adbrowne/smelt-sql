@@ -704,4 +704,128 @@ sources:
         let order_col = ctx.lookup_column(Some("o"), "order_id");
         assert!(order_col.is_some(), "Should find 'order_id' via alias 'o'");
     }
+
+    #[test]
+    fn test_cte_names_available_for_from_completion() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      orders:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+          - name: created_at
+            type: TIMESTAMP
+"#,
+        );
+        ws.add_model(
+            "model",
+            r#"WITH daily_totals AS (
+    SELECT DATE(created_at) as day, SUM(amount) as total
+    FROM smelt.source('raw.orders')
+    GROUP BY DATE(created_at)
+)
+SELECT day, total FROM daily_totals WHERE total > 1000"#,
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // CTE name should be registered
+        assert!(ctx.is_cte("daily_totals"));
+
+        // CTE columns should be available
+        let columns = ctx.cte_columns("daily_totals");
+        assert!(!columns.is_empty(), "CTE should have inferred columns");
+
+        let col_names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
+        assert!(col_names.contains(&"day"), "Should have 'day' column");
+        assert!(col_names.contains(&"total"), "Should have 'total' column");
+    }
+
+    #[test]
+    fn test_multiple_ctes_available_for_completion() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+      orders:
+        columns:
+          - name: user_id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+"#,
+        );
+        ws.add_model(
+            "model",
+            r#"WITH
+active_users AS (
+    SELECT id, name FROM smelt.source('raw.users')
+),
+user_orders AS (
+    SELECT user_id, SUM(amount) as total FROM smelt.source('raw.orders') GROUP BY user_id
+)
+SELECT u.id, u.name, o.total
+FROM active_users u
+JOIN user_orders o ON u.id = o.user_id"#,
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // Both CTEs should be registered
+        assert!(ctx.is_cte("active_users"));
+        assert!(ctx.is_cte("user_orders"));
+
+        // active_users columns
+        let au_columns = ctx.cte_columns("active_users");
+        let au_names: Vec<&str> = au_columns.iter().map(|(name, _)| *name).collect();
+        assert!(au_names.contains(&"id"));
+        assert!(au_names.contains(&"name"));
+
+        // user_orders columns
+        let uo_columns = ctx.cte_columns("user_orders");
+        let uo_names: Vec<&str> = uo_columns.iter().map(|(name, _)| *name).collect();
+        assert!(uo_names.contains(&"user_id"));
+        assert!(uo_names.contains(&"total"));
+    }
+
+    #[test]
+    fn test_recursive_cte_available_for_completion() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "model",
+            r#"WITH RECURSIVE counter(n) AS (
+    SELECT 1
+    UNION ALL
+    SELECT n + 1 FROM counter WHERE n < 10
+)
+SELECT n FROM counter"#,
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+
+        // Recursive CTE should be registered
+        assert!(ctx.is_cte("counter"));
+
+        // Should have explicit column from column list
+        let columns = ctx.cte_columns("counter");
+        let col_names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
+        assert!(
+            col_names.contains(&"n"),
+            "Should have 'n' column from explicit list"
+        );
+    }
 }
