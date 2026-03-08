@@ -4,3 +4,5 @@ target/
 !.claude/settings.json
 datagen.duckdb
 output/
+__pycache__/
+*.pyc
