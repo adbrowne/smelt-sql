@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    executor, find_project_root, inject_time_filter, BackendType, Config, DependencyGraph,
-    ModelDiscovery, SourceConfig, SqlCompiler, TimeRange,
+    executor, find_project_root, inject_time_filter, parse_selector, BackendType, Config,
+    DependencyGraph, ModelDiscovery, SourceConfig, SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
 use std::path::PathBuf;
@@ -64,6 +64,10 @@ struct RunArgs {
     /// End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD)
     #[arg(long = "event-time-end", requires = "event_time_start")]
     event_time_end: Option<String>,
+
+    /// Select models to run (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -151,10 +155,32 @@ async fn run(args: RunArgs) -> Result<()> {
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
-    // 5. Determine execution order
-    let execution_order = graph
-        .execution_order()
-        .with_context(|| "Failed to determine execution order")?;
+    // 5. Determine execution order (with optional selector filtering)
+    let execution_order = if args.select.is_empty() {
+        graph
+            .execution_order()
+            .with_context(|| "Failed to determine execution order")?
+    } else {
+        let selectors: Vec<_> = args
+            .select
+            .iter()
+            .map(|s| parse_selector(s))
+            .collect::<Result<_, _>>()
+            .with_context(|| "Failed to parse --select argument")?;
+
+        let selected = graph
+            .select_models(&selectors, &config)
+            .with_context(|| "Failed to select models")?;
+
+        if selected.is_empty() {
+            println!("No models matched the selectors");
+            return Ok(());
+        }
+
+        graph
+            .filtered_execution_order(&selected)
+            .with_context(|| "Failed to determine execution order")?
+    };
 
     println!(
         "\nExecution order: {}",

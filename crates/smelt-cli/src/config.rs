@@ -98,6 +98,8 @@ pub struct ModelConfig {
     pub materialization: Option<Materialization>,
     #[serde(default)]
     pub incremental: Option<IncrementalConfig>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -164,6 +166,31 @@ impl Config {
             .get(model_name)
             .and_then(|m| m.incremental.as_ref())
             .filter(|i| i.enabled)
+    }
+
+    /// Get merged tags for a model (union of smelt.yml + frontmatter, deduplicated)
+    pub fn get_tags(
+        &self,
+        model_name: &str,
+        metadata: Option<&crate::metadata::ModelMetadata>,
+    ) -> Vec<String> {
+        let mut tags: Vec<String> = Vec::new();
+
+        // Add tags from smelt.yml model config
+        if let Some(model_config) = self.models.get(model_name) {
+            tags.extend(model_config.tags.iter().cloned());
+        }
+
+        // Add tags from SQL frontmatter
+        if let Some(meta) = metadata {
+            for tag in &meta.tags {
+                if !tags.contains(tag) {
+                    tags.push(tag.clone());
+                }
+            }
+        }
+
+        tags
     }
 
     /// Get incremental config with SQL metadata precedence
