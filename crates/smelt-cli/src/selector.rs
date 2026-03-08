@@ -113,7 +113,7 @@ impl fmt::Display for SelectorParseError {
                 write!(f, "Tag name cannot be empty in 'tag:' selector")
             }
             SelectorParseError::InvalidCharacter(c) => {
-                write!(f, "Invalid character '{}' in selector name", c)
+                write!(f, "Invalid character '{}' in selector", c)
             }
         }
     }
