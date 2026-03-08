@@ -13,6 +13,7 @@ use std::process::Command;
 use crate::config::Config;
 use crate::discovery::{ModelFile, ModelKind};
 use crate::errors::CliError;
+use crate::metadata::{extract_file_metadata, FileMetadata};
 
 /// Data passed to Python models as project context.
 #[derive(Debug, Serialize)]
@@ -305,6 +306,21 @@ pub fn discover_python_models(
                     Vec::new()
                 };
 
+                // Extract metadata from generated SQL frontmatter
+                let model_metadata =
+                    extract_file_metadata(&output.sql)
+                        .ok()
+                        .and_then(|fm| match fm {
+                            FileMetadata::Single { metadata, .. } => Some(metadata),
+                            FileMetadata::Multi { models } => models
+                                .into_iter()
+                                .find(|section| {
+                                    section.metadata.name.as_deref() == Some(&output.name)
+                                })
+                                .map(|section| Box::new(section.metadata)),
+                            FileMetadata::Empty => None,
+                        });
+
                 // Convert parse errors, attributing them to the Python file
                 let parse_errors: Vec<smelt_parser::ParseError> = parse
                     .errors
@@ -326,7 +342,7 @@ pub fn discover_python_models(
                     content: output.sql,
                     refs,
                     parse_errors,
-                    metadata: None,
+                    metadata: model_metadata,
                     kind: ModelKind::Python {
                         source_line,
                         queries: output
@@ -1269,6 +1285,83 @@ def colliding(project):
         let order = graph.execution_order().unwrap();
         let colliding_in_order = order.iter().filter(|n| *n == "colliding").count();
         assert_eq!(colliding_in_order, 1, "graph deduplicates by name");
+    }
+
+    #[test]
+    fn test_validate_fixed_point_detects_circular_tag() {
+        let metadata = crate::metadata::ModelMetadata {
+            tags: vec!["event_source".to_string()],
+            ..Default::default()
+        };
+
+        let model = ModelFile {
+            name: "combined_events".to_string(),
+            path: PathBuf::from("models/combined_events.py"),
+            content: "SELECT 1".to_string(),
+            refs: Vec::new(),
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(metadata)),
+            kind: ModelKind::Python {
+                source_line: 1,
+                queries: vec![PythonModelQuery {
+                    kind: "find_models".to_string(),
+                    tag: Some("event_source".to_string()),
+                    directory: None,
+                }],
+            },
+        };
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let result = validate_fixed_point(&[model], &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("circular"));
+    }
+
+    #[test]
+    fn test_validate_fixed_point_no_false_positive() {
+        let metadata = crate::metadata::ModelMetadata {
+            tags: vec!["output_model".to_string()],
+            ..Default::default()
+        };
+
+        let model = ModelFile {
+            name: "combined_events".to_string(),
+            path: PathBuf::from("models/combined_events.py"),
+            content: "SELECT 1".to_string(),
+            refs: Vec::new(),
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(metadata)),
+            kind: ModelKind::Python {
+                source_line: 1,
+                queries: vec![PythonModelQuery {
+                    kind: "find_models".to_string(),
+                    tag: Some("event_source".to_string()),
+                    directory: None,
+                }],
+            },
+        };
+
+        let config = crate::config::Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            targets: std::collections::HashMap::new(),
+            default_materialization: crate::config::Materialization::View,
+            models: std::collections::HashMap::new(),
+            python: None,
+        };
+
+        let result = validate_fixed_point(&[model], &config);
+        assert!(result.is_ok());
     }
 
     #[test]
