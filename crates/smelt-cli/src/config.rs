@@ -168,23 +168,28 @@ impl Config {
             .filter(|i| i.enabled)
     }
 
-    /// Get merged tags for a model (union of smelt.yml + frontmatter, deduplicated)
+    /// Get merged tags for a model (union of smelt.yml + frontmatter, fully deduplicated)
     pub fn get_tags(
         &self,
         model_name: &str,
         metadata: Option<&crate::metadata::ModelMetadata>,
     ) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         let mut tags: Vec<String> = Vec::new();
 
         // Add tags from smelt.yml model config
         if let Some(model_config) = self.models.get(model_name) {
-            tags.extend(model_config.tags.iter().cloned());
+            for tag in &model_config.tags {
+                if seen.insert(tag.clone()) {
+                    tags.push(tag.clone());
+                }
+            }
         }
 
         // Add tags from SQL frontmatter
         if let Some(meta) = metadata {
             for tag in &meta.tags {
-                if !tags.contains(tag) {
+                if seen.insert(tag.clone()) {
                     tags.push(tag.clone());
                 }
             }

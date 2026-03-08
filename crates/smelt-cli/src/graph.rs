@@ -152,6 +152,7 @@ impl DependencyGraph {
         config: &Config,
     ) -> Result<HashSet<String>> {
         let mut selected = HashSet::new();
+        let dependents = self.build_dependents_map();
 
         for selector in selectors {
             // Find directly matching models
@@ -188,7 +189,6 @@ impl DependencyGraph {
 
             // Expand downstream
             if selector.include_downstream {
-                let dependents = self.build_dependents_map();
                 for model_name in &direct_matches {
                     self.collect_downstream(model_name, &dependents, &mut selected);
                 }
@@ -601,5 +601,20 @@ mod tests {
         assert!(tags.contains(&"shared".to_string()));
         assert!(tags.contains(&"from_yml".to_string()));
         assert!(tags.contains(&"from_sql".to_string()));
+    }
+
+    #[test]
+    fn test_select_nonexistent_model() {
+        let models = vec![make_model("A", vec![])];
+        let graph = DependencyGraph::build(models, None).unwrap();
+        let config = make_test_config_with_tags(vec![]);
+
+        let selectors = vec![crate::selector::parse_selector("nonexistent").unwrap()];
+        let result = graph.select_models(&selectors, &config);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("nonexistent"));
+        assert!(err_msg.contains("not found"));
     }
 }

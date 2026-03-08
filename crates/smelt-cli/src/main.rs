@@ -164,9 +164,8 @@ async fn run(args: RunArgs) -> Result<()> {
         let selectors: Vec<_> = args
             .select
             .iter()
-            .map(|s| parse_selector(s))
-            .collect::<Result<_, _>>()
-            .with_context(|| "Failed to parse --select argument")?;
+            .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
+            .collect::<Result<_, _>>()?;
 
         let selected = graph
             .select_models(&selectors, &config)
