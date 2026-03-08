@@ -151,8 +151,9 @@ impl ModelDiscovery {
             })
             .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
 
-        // Parse using smelt-parser
-        let parse = smelt_parser::parse(&content);
+        // Parse using smelt-parser (strip frontmatter to avoid false parse errors)
+        let clean_content = smelt_parser::strip_frontmatter(&content);
+        let parse = smelt_parser::parse(&clean_content);
 
         // Extract refs using AST
         let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
