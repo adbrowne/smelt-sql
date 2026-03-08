@@ -140,9 +140,48 @@ impl salsa::Database for Database {}
 
 // Query implementations
 
+/// Replace YAML frontmatter with SQL comments to avoid parse errors
+/// while preserving line numbers for accurate diagnostics.
+fn strip_frontmatter(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("---\n") && !trimmed.starts_with("---\r\n") {
+        return text.to_string();
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    // Find the opening ---
+    let open = match lines.iter().position(|l| l.trim() == "---") {
+        Some(i) => i,
+        None => return text.to_string(),
+    };
+    // Find the closing ---
+    let close = match lines.iter().skip(open + 1).position(|l| l.trim() == "---") {
+        Some(i) => open + 1 + i,
+        None => return text.to_string(),
+    };
+
+    let mut result = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i >= open && i <= close {
+            // Replace frontmatter lines with comments of the same length
+            result.push(format!("--{}", &" ".repeat(line.len().saturating_sub(2))));
+        } else {
+            result.push(line.to_string());
+        }
+    }
+
+    // Preserve trailing newline if present
+    let mut joined = result.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 fn parse_file(db: &dyn Syntax, path: PathBuf) -> Arc<smelt_parser::Parse> {
     let text = db.file_text(path);
-    Arc::new(smelt_parser::parse(&text))
+    let clean_text = strip_frontmatter(&text);
+    Arc::new(smelt_parser::parse(&clean_text))
 }
 
 fn parse_model(db: &dyn Syntax, path: PathBuf) -> Option<Arc<Model>> {
@@ -3331,5 +3370,64 @@ sources:
 
         let constraints = db.model_input_constraints(path);
         assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn test_strip_frontmatter_basic() {
+        let input = "---\ntags:\n  - event_source\n---\nSELECT 1\n";
+        let result = strip_frontmatter(input);
+        // Frontmatter lines replaced with comments, SQL preserved
+        assert!(result.contains("SELECT 1"));
+        assert!(!result.contains("tags:"));
+        assert!(!result.contains("event_source"));
+        // Line count preserved
+        assert_eq!(input.lines().count(), result.lines().count());
+    }
+
+    #[test]
+    fn test_strip_frontmatter_no_frontmatter() {
+        let input = "SELECT 1\nFROM foo\n";
+        let result = strip_frontmatter(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_strip_frontmatter_comment_only() {
+        let input = "-- just a comment\nSELECT 1\n";
+        let result = strip_frontmatter(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_frontmatter_no_parse_errors() {
+        let mut db = Database::default();
+        let path = PathBuf::from("models/tagged_model.sql");
+        let content = "---\ntags:\n  - event_source\n---\nSELECT event_id, user_id\nFROM smelt.ref('raw_events')\n";
+
+        db.set_file_text(path.clone(), Arc::new(content.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+        let diagnostics = db.file_diagnostics(path.clone());
+
+        // Should have no parse errors - only potentially an undefined ref diagnostic
+        let parse_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| !d.message.contains("Undefined"))
+            .collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Frontmatter should not cause parse errors, got: {:?}",
+            parse_errors
+        );
+
+        // Verify the model was parsed successfully (has a SELECT)
+        let model = db.parse_model(path);
+        assert!(
+            model.is_some(),
+            "Model with frontmatter should parse successfully"
+        );
     }
 }
