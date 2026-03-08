@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Python Model Support - Phase 1 (March 8, 2026)**: Python models as an escape hatch for programmatic model generation. Python functions decorated with `@model` return SQL strings that get parsed by the existing smelt parser. Includes: Python SDK (`python/smelt/`), subprocess protocol with JSON I/O, `@model` decorator scanning, iterative discovery with fixed-point validation, full ref extraction from generated SQL, mixed SQL/Python dependency graphs, LSP awareness (Python models as valid ref targets), and comprehensive tests. Python config via `SMELT_PYTHON` env var or `python` field in `smelt.yml`.
+
 **Row Polymorphism (March 7, 2026)**: Models with `SELECT *` now properly propagate types and schemas through `RowExtension` entries instead of placeholder wildcard columns. New `resolved_model_schema()` Salsa query recursively expands wildcards through model chains. Input constraint extraction identifies what columns each model requires from its refs.
 
 **Comprehensive Type Inference (January 18, 2026)**: Added recursive type inference for MIN/MAX, COALESCE, NULLIF, CASE expressions, scalar subqueries, and window functions (LAG, LEAD, etc.) to preserve argument types. Implemented binary operator type inference for arithmetic, comparisons, and string concatenation. The `smelt table` command now correctly shows TIMESTAMP for MIN/MAX of timestamp columns instead of UNKNOWN.

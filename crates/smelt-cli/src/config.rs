@@ -50,6 +50,9 @@ pub struct Config {
     pub default_materialization: Materialization,
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
+    /// Path to Python interpreter (overridden by SMELT_PYTHON env var)
+    #[serde(default)]
+    pub python: Option<String>,
 }
 
 fn default_model_paths() -> Vec<String> {

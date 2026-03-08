@@ -284,6 +284,7 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         }
     }
 
@@ -416,6 +417,7 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata,
+            kind: crate::discovery::ModelKind::Sql,
         }
     }
 
@@ -453,6 +455,7 @@ mod tests {
             targets,
             default_materialization: Materialization::View,
             models,
+            python: None,
         }
     }
 

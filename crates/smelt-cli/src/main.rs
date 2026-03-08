@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    executor, find_project_root, inject_time_filter, parse_selector, BackendType, Config,
-    DependencyGraph, ModelDiscovery, SourceConfig, SqlCompiler, TimeRange,
+    discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
+    BackendType, Config, DependencyGraph, ModelDiscovery, SourceConfig, SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
 use std::path::PathBuf;
@@ -129,13 +129,45 @@ async fn run(args: RunArgs) -> Result<()> {
         println!("Loaded {} source tables", source_count);
     }
 
-    // 3. Discover models
+    // 3. Discover models (SQL + Python)
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
-    let models = discovery
+    let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    println!("Found {} models", models.len());
+    // Discover and execute Python models
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+
+        if !python_models.is_empty() {
+            println!(
+                "Found {} Python model(s) from {} file(s)",
+                python_models.len(),
+                python_files.len()
+            );
+            models.extend(python_models);
+        }
+    }
+
+    if models.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No models found in model paths: {}",
+            config.model_paths.join(", ")
+        ));
+    }
+
+    println!("Found {} models total", models.len());
 
     // Report any parse errors
     for model in &models {
@@ -459,9 +491,27 @@ async fn table(args: TableArgs) -> Result<()> {
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
-    let models = discovery
+    let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
+
+    // Discover Python models for table command too
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+
+    if !python_files.is_empty() {
+        let python_sdk_path = project_dir.join("python");
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &python_sdk_path,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
+    }
 
     // 3. Initialize Salsa database (same pattern as LSP)
     let mut db = smelt_db::Database::default();

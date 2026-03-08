@@ -172,6 +172,7 @@ mod tests {
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),
+            python: None,
         }
     }
 
@@ -192,6 +193,7 @@ GROUP BY user_id
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();
@@ -218,6 +220,7 @@ JOIN smelt.ref('model_b') b ON a.id = b.id
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();
@@ -244,6 +247,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();
@@ -266,6 +270,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             refs: vec![],
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let mut config = make_test_config();
@@ -295,6 +300,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();
@@ -317,6 +323,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();
@@ -343,6 +350,7 @@ JOIN smelt.ref('model_a') b ON a.parent_id = b.id
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();
@@ -372,6 +380,7 @@ WHERE event_type = 'click'
             refs: extract_refs_from_sql(sql),
             parse_errors: Vec::new(),
             metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
         };
 
         let config = make_test_config();

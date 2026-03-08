@@ -53,6 +53,12 @@ pub enum CliError {
         col: u32,
         snippet: String,
     },
+
+    #[error("Python interpreter not found.\nInstall Python 3 or set the SMELT_PYTHON environment variable.")]
+    PythonNotFound,
+
+    #[error("Python model error in {file}:\n{message}")]
+    PythonExecutionError { file: PathBuf, message: String },
 }
 
 /// Helper to convert TextRange to line/column for error messages

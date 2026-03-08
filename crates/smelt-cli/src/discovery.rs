@@ -5,6 +5,17 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata};
+use crate::python::PythonModelQuery;
+
+/// Whether a model comes from a SQL file or Python generation.
+#[derive(Debug, Clone)]
+pub enum ModelKind {
+    Sql,
+    Python {
+        source_line: usize,
+        queries: Vec<PythonModelQuery>,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct ModelFile {
@@ -15,6 +26,8 @@ pub struct ModelFile {
     pub parse_errors: Vec<smelt_parser::ParseError>,
     /// Metadata extracted from YAML frontmatter
     pub metadata: Option<Box<ModelMetadata>>,
+    /// Whether this model is from a SQL file or Python generation.
+    pub kind: ModelKind,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +50,8 @@ impl ModelDiscovery {
         }
     }
 
+    /// Discover SQL model files. Returns (sql_models, python_file_candidates).
+    /// Python files with `@model` decorators are returned separately for later execution.
     pub fn discover_models(&self) -> Result<Vec<ModelFile>> {
         let mut models = Vec::new();
 
@@ -62,14 +77,42 @@ impl ModelDiscovery {
             }
         }
 
-        if models.is_empty() {
-            return Err(anyhow!(
-                "No models found in model paths: {}",
-                self.model_paths.join(", ")
-            ));
+        Ok(models)
+    }
+
+    /// Scan model paths for Python files containing `@model` decorators.
+    /// Returns (file_path, decorator_line_numbers) pairs.
+    pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<usize>)>> {
+        let mut python_files = Vec::new();
+
+        for model_path in &self.model_paths {
+            let search_path = self.project_root.join(model_path);
+
+            if !search_path.exists() {
+                continue;
+            }
+
+            for entry in WalkDir::new(&search_path)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path();
+
+                if path.extension().and_then(|s| s.to_str()) == Some("py") {
+                    let content = std::fs::read_to_string(path)
+                        .with_context(|| format!("Failed to read Python file: {:?}", path))?;
+
+                    let decorator_lines = crate::python::scan_for_model_decorators(&content);
+
+                    if !decorator_lines.is_empty() {
+                        python_files.push((path.to_path_buf(), decorator_lines));
+                    }
+                }
+            }
         }
 
-        Ok(models)
+        Ok(python_files)
     }
 
     fn parse_model_file(&self, path: &Path) -> Result<ModelFile> {
@@ -125,11 +168,12 @@ impl ModelDiscovery {
             refs,
             parse_errors: parse.errors,
             metadata: model_metadata,
+            kind: ModelKind::Sql,
         })
     }
 }
 
-fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
+pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
     file.refs()
         .filter_map(|ref_call| {
             let model_name = ref_call.model_name()?;

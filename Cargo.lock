@@ -3210,6 +3210,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower-lsp",
+ "walkdir",
 ]
 
 [[package]]

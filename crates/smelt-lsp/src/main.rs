@@ -10,6 +10,8 @@ use smelt_db::{
     Database, Diagnostic as DbDiagnostic, DiagnosticSeverity as DbSeverity, Inputs, Schema,
     Semantic, Syntax, TypeChecking,
 };
+
+mod python_scan;
 use smelt_parser::ast::File as AstFile;
 use smelt_types::TypedColumn;
 
@@ -348,6 +350,21 @@ impl LanguageServer for Backend {
                                 e
                             ));
                         }
+                    }
+
+                    // Discover Python models and register their generated SQL
+                    let python_models =
+                        python_scan::discover_python_models(&models_path, &project_root);
+                    for py_model in &python_models {
+                        db.set_file_text(
+                            py_model.source_path.clone(),
+                            Arc::new(py_model.sql.clone()),
+                        );
+                        db.set_file_project_root(
+                            py_model.source_path.clone(),
+                            project_root.clone(),
+                        );
+                        all_files.push(py_model.source_path.clone());
                     }
                 }
             }
