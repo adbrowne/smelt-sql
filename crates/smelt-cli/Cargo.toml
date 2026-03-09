@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Core smelt dependencies
+smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
 smelt-types = { path = "../smelt-types" }

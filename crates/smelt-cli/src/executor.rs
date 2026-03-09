@@ -1,10 +1,10 @@
 use crate::compiler::CompiledModel;
-use crate::config::SourceConfig;
 use crate::errors::CliError;
 use anyhow::Result;
 use smelt_backend::{
     Backend, ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec,
 };
+use smelt_core::SourcesConfig;
 
 /// Execute a compiled model using any Backend implementation.
 pub async fn execute_model(
@@ -86,18 +86,18 @@ pub async fn execute_model_incremental(
 }
 
 /// Validate that all source tables exist in the backend.
-pub async fn validate_sources(backend: &dyn Backend, sources: &SourceConfig) -> Result<()> {
+pub async fn validate_sources(backend: &dyn Backend, sources: &SourcesConfig) -> Result<()> {
     let mut missing = Vec::new();
 
-    for (schema_name, schema) in &sources.sources {
-        for table_name in schema.tables.keys() {
+    for source in &sources.sources {
+        for table in &source.tables {
             let exists = backend
-                .table_exists(schema_name, table_name)
+                .table_exists(&source.name, &table.name)
                 .await
                 .unwrap_or(false);
 
             if !exists {
-                missing.push(format!("{}.{}", schema_name, table_name));
+                missing.push(format!("{}.{}", source.name, table.name));
             }
         }
     }

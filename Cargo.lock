@@ -3154,12 +3154,27 @@ dependencies = [
  "smelt-backend",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
+ "smelt-core",
  "smelt-db",
  "smelt-parser",
  "smelt-types",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
+ "walkdir",
+]
+
+[[package]]
+name = "smelt-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rowan",
+ "serde",
+ "serde_yaml",
+ "smelt-parser",
+ "smelt-types",
+ "thiserror 2.0.17",
  "walkdir",
 ]
 
@@ -3192,6 +3207,7 @@ dependencies = [
  "salsa",
  "serde",
  "serde_yaml",
+ "smelt-core",
  "smelt-parser",
  "smelt-types",
 ]
@@ -3204,6 +3220,7 @@ dependencies = [
  "lsp-types",
  "serde",
  "serde_json",
+ "smelt-core",
  "smelt-db",
  "smelt-parser",
  "smelt-types",

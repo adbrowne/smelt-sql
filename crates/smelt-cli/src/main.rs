@@ -6,7 +6,7 @@ use smelt_backend::{Backend, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
     discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
-    BackendType, Config, DependencyGraph, ModelDiscovery, SourceConfig, SqlCompiler, TimeRange,
+    BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
 use std::path::PathBuf;
@@ -122,10 +122,10 @@ async fn run(args: RunArgs) -> Result<()> {
     })?;
 
     // Load source configuration (optional)
-    let sources = SourceConfig::load(&project_dir).ok();
+    let sources = SourcesConfig::load(&project_dir).ok();
 
     if let Some(ref source_config) = sources {
-        let source_count: usize = source_config.sources.values().map(|s| s.tables.len()).sum();
+        let source_count: usize = source_config.sources.iter().map(|s| s.tables.len()).sum();
         println!("Loaded {} source tables", source_count);
     }
 

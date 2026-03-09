@@ -1,8 +1,9 @@
-use crate::config::{Config, SourceConfig};
+use crate::config::Config;
 use crate::discovery::ModelFile;
 use crate::errors::CliError;
 use crate::selector::{SelectionMethod, Selector};
 use anyhow::{anyhow, Result};
+use smelt_core::SourcesConfig;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct DependencyGraph {
@@ -15,16 +16,16 @@ pub struct DependencyGraph {
 }
 
 impl DependencyGraph {
-    pub fn build(models: Vec<ModelFile>, sources: Option<&SourceConfig>) -> Result<Self> {
+    pub fn build(models: Vec<ModelFile>, sources: Option<&SourcesConfig>) -> Result<Self> {
         let mut dependencies = HashMap::new();
         let mut models_map = HashMap::new();
 
         // Build source set (schema.table format)
         let mut source_set = HashSet::new();
         if let Some(sources) = sources {
-            for (schema_name, schema) in &sources.sources {
-                for table_name in schema.tables.keys() {
-                    source_set.insert(format!("{}.{}", schema_name, table_name));
+            for source in &sources.sources {
+                for table in &source.tables {
+                    source_set.insert(format!("{}.{}", source.name, table.name));
                 }
             }
         }
@@ -363,28 +364,27 @@ mod tests {
 
     #[test]
     fn test_source_reference() {
-        use crate::config::{SourceColumn, SourceConfig, SourceSchema, SourceTable};
+        use smelt_core::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
 
         let models = vec![make_model("A", vec!["source.events"])];
 
-        let mut sources = HashMap::new();
-        let mut tables = HashMap::new();
-        tables.insert(
-            "events".to_string(),
-            SourceTable {
-                description: String::new(),
-                columns: vec![SourceColumn::new(
-                    "id".to_string(),
-                    "INTEGER".to_string(),
-                    String::new(),
-                )],
-            },
-        );
-        sources.insert("source".to_string(), SourceSchema { tables });
-
-        let source_config = SourceConfig {
-            version: 1,
-            sources,
+        let source_config = SourcesConfig {
+            sources: vec![SourceDef {
+                name: "source".to_string(),
+                database: None,
+                schema: None,
+                description: None,
+                tables: vec![SourceTableDef {
+                    name: "events".to_string(),
+                    identifier: None,
+                    description: None,
+                    columns: vec![SourceColumnDef {
+                        name: "id".to_string(),
+                        data_type: None,
+                        description: None,
+                    }],
+                }],
+            }],
         };
 
         let graph = DependencyGraph::build(models, Some(&source_config)).unwrap();

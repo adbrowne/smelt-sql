@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use smelt_cli::{Config, DependencyGraph, ModelDiscovery, SourceConfig};
+use smelt_cli::{Config, DependencyGraph, ModelDiscovery, SourcesConfig};
 
 fn project_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,7 +68,7 @@ fn test_workspace_no_undefined_refs() {
         models.extend(python_models);
     }
 
-    let sources = SourceConfig::load(&project_dir).ok();
+    let sources = SourcesConfig::load(&project_dir).ok();
 
     // Remove broken_model (intentionally references nonexistent model)
     models.retain(|m| m.name != "broken_model");

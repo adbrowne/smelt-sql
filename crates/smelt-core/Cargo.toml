@@ -1,16 +1,17 @@
 [package]
-name = "smelt-db"
+name = "smelt-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-salsa.workspace = true
-anyhow.workspace = true
+smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }
+
 rowan.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-smelt-core = { path = "../smelt-core" }
-smelt-parser = { path = "../smelt-parser" }
-smelt-types = { path = "../smelt-types" }
+thiserror.workspace = true
+anyhow.workspace = true
+walkdir = "2.4"

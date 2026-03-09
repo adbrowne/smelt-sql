@@ -6,6 +6,10 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use smelt_core::{
+    find_config_file, find_project_root_by_walking_up, find_project_root_for_file,
+    find_smelt_projects, is_sources_file,
+};
 use smelt_db::{
     Database, Diagnostic as DbDiagnostic, DiagnosticSeverity as DbSeverity, Inputs, Schema,
     Semantic, Syntax, TypeChecking,
@@ -14,85 +18,6 @@ use smelt_db::{
 mod python_scan;
 use smelt_parser::ast::File as AstFile;
 use smelt_types::TypedColumn;
-
-/// Find a config file supporting both .yml and .yaml extensions.
-/// Returns the path if exactly one exists. Errors if both exist.
-fn find_config_file(
-    dir: &std::path::Path,
-    base_name: &str,
-) -> std::result::Result<Option<PathBuf>, String> {
-    let yml = dir.join(format!("{}.yml", base_name));
-    let yaml = dir.join(format!("{}.yaml", base_name));
-    match (yml.exists(), yaml.exists()) {
-        (true, true) => Err(format!(
-            "Both {}.yml and {}.yaml exist in {}",
-            base_name,
-            base_name,
-            dir.display()
-        )),
-        (true, false) => Ok(Some(yml)),
-        (false, true) => Ok(Some(yaml)),
-        (false, false) => Ok(None),
-    }
-}
-
-/// Recursively find directories containing smelt.yml/smelt.yaml
-fn find_smelt_projects(root: &std::path::Path) -> Vec<PathBuf> {
-    let mut projects = Vec::new();
-    find_smelt_projects_recursive(root, &mut projects);
-    projects
-}
-
-/// Check if a file is a sources config file (sources.yml or sources.yaml)
-fn is_sources_file(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == "sources.yml" || n == "sources.yaml")
-}
-
-/// Find the project root for a file by longest prefix match against known roots
-fn find_project_root_for_file(file: &std::path::Path, roots: &[PathBuf]) -> Option<PathBuf> {
-    roots
-        .iter()
-        .filter(|root| file.starts_with(root))
-        .max_by_key(|root| root.components().count())
-        .cloned()
-}
-
-/// Walk up from a file path looking for smelt.yml/smelt.yaml to find project root
-fn find_project_root_by_walking_up(file: &std::path::Path) -> Option<PathBuf> {
-    let mut dir = file.parent()?;
-    loop {
-        if dir.join("smelt.yml").exists() || dir.join("smelt.yaml").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-}
-
-fn find_smelt_projects_recursive(dir: &std::path::Path, projects: &mut Vec<PathBuf>) {
-    // Check if this directory has smelt.yml or smelt.yaml
-    let has_yml = dir.join("smelt.yml").exists();
-    let has_yaml = dir.join("smelt.yaml").exists();
-    if has_yml || has_yaml {
-        projects.push(dir.to_path_buf());
-    }
-
-    // Recurse into subdirectories, skipping common non-project dirs
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if matches!(name, ".git" | "target" | "node_modules") {
-                        continue;
-                    }
-                }
-                find_smelt_projects_recursive(&path, projects);
-            }
-        }
-    }
-}
 
 /// Tracks errors that occurred during workspace initialization
 #[derive(Default)]
