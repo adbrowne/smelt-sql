@@ -197,6 +197,7 @@ mod tests {
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),
+            python: None,
         }
     }
 

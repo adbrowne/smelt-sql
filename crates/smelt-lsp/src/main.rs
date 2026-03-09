@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,6 +15,9 @@ use smelt_db::{
     Database, Diagnostic as DbDiagnostic, DiagnosticSeverity as DbSeverity, Inputs, Schema,
     Semantic, Syntax, TypeChecking,
 };
+
+mod python_scan;
+use python_scan::PythonModelCache;
 use smelt_parser::ast::File as AstFile;
 use smelt_types::TypedColumn;
 
@@ -48,6 +52,15 @@ struct Backend {
     db: Arc<Mutex<Database>>,
     /// Errors collected during initialization, reported after `initialized` notification
     init_errors: Arc<Mutex<Option<InitErrors>>>,
+    /// Maps virtual .sql paths (used in Salsa) back to actual .py source paths + decorator line
+    /// for goto-definition. The u32 is the 0-indexed line of the `@model` decorator.
+    python_model_sources: Arc<Mutex<HashMap<PathBuf, (PathBuf, u32)>>>,
+    /// Cache of Python model results (keyed by content hash)
+    python_cache: Arc<Mutex<PythonModelCache>>,
+    /// Diagnostics for Python files (separate from Salsa-managed SQL diagnostics)
+    python_diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>>,
+    /// Project roots discovered during init (needed for file-change handling)
+    project_roots: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Backend {
@@ -56,6 +69,10 @@ impl Backend {
             client,
             db: Arc::new(Mutex::new(Database::default())),
             init_errors: Arc::new(Mutex::new(None)),
+            python_model_sources: Arc::new(Mutex::new(HashMap::new())),
+            python_cache: Arc::new(Mutex::new(PythonModelCache::default())),
+            python_diagnostics: Arc::new(Mutex::new(HashMap::new())),
+            project_roots: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -132,6 +149,202 @@ impl Backend {
                 self.publish_diagnostics(uri).await;
             }
         }
+    }
+
+    /// Handle a Python model file change: re-execute and update Salsa.
+    /// Uses background execution with last-known-good fallback on failure.
+    async fn handle_python_file_change(&self, py_path: &std::path::Path) {
+        // Find the project root for this file
+        let project_roots = self.project_roots.lock().await.clone();
+        let project_root = match find_project_root_for_file(py_path, &project_roots) {
+            Some(root) => root,
+            None => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "Cannot find project root for Python model: {}",
+                            py_path.display()
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let py_path = py_path.to_path_buf();
+        let db = self.db.clone();
+        let py_sources = self.python_model_sources.clone();
+        let py_diags = self.python_diagnostics.clone();
+        let cache = self.python_cache.clone();
+        let client = self.client.clone();
+
+        // Spawn background task for subprocess execution
+        tokio::task::spawn(async move {
+            let py_path_for_blocking = py_path.clone();
+            let project_root_for_blocking = project_root.clone();
+            let cache_for_blocking = cache.clone();
+
+            let scan_result = tokio::task::spawn_blocking(move || {
+                let mut cache_guard = cache_for_blocking.blocking_lock();
+                python_scan::execute_single_python_file(
+                    &py_path_for_blocking,
+                    &project_root_for_blocking,
+                    &mut cache_guard,
+                )
+            })
+            .await;
+
+            let scan_result = match scan_result {
+                Ok(r) => r,
+                Err(e) => {
+                    client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("Python model re-execution panicked: {}", e),
+                        )
+                        .await;
+                    return;
+                }
+            };
+
+            // Update Python diagnostics for this file
+            {
+                let mut diags = py_diags.lock().await;
+                if scan_result.errors.is_empty() {
+                    // Clear previous errors
+                    diags.remove(&py_path);
+                    if let Ok(uri) = Url::from_file_path(&py_path) {
+                        client.publish_diagnostics(uri, Vec::new(), None).await;
+                    }
+                } else {
+                    let file_diags: Vec<lsp_types::Diagnostic> = scan_result
+                        .errors
+                        .iter()
+                        .map(|error| {
+                            let line = error.line.unwrap_or(1).saturating_sub(1);
+                            lsp_types::Diagnostic {
+                                range: Range {
+                                    start: Position::new(line, 0),
+                                    end: Position::new(line, 0),
+                                },
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: error.message.clone(),
+                                source: Some("smelt-python".to_string()),
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+                    diags.insert(py_path.clone(), file_diags.clone());
+                    if let Ok(uri) = Url::from_file_path(&py_path) {
+                        client.publish_diagnostics(uri, file_diags, None).await;
+                    }
+                }
+            }
+
+            // On failure, keep last-known-good SQL in Salsa (don't update)
+            if scan_result.models.is_empty() && !scan_result.errors.is_empty() {
+                client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "Python model {} failed, keeping last-known-good SQL",
+                            py_path.display()
+                        ),
+                    )
+                    .await;
+                return;
+            }
+
+            // Update Salsa with new SQL
+            {
+                let mut db_guard = db.lock().await;
+                let mut sources = py_sources.lock().await;
+
+                // Remove old virtual paths from this .py file
+                let old_virtual_paths: Vec<PathBuf> = sources
+                    .iter()
+                    .filter(|(_, (src, _))| *src == py_path)
+                    .map(|(vp, _)| vp.clone())
+                    .collect();
+
+                let mut files = (*db_guard.all_files()).clone();
+                for old_vp in &old_virtual_paths {
+                    sources.remove(old_vp);
+                    files.retain(|f| f != old_vp);
+                }
+
+                // Register new models
+                for py_model in &scan_result.models {
+                    let virtual_sql_path = py_model
+                        .source_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join(format!("{}.sql", py_model.name));
+
+                    db_guard
+                        .set_file_text(virtual_sql_path.clone(), Arc::new(py_model.sql.clone()));
+                    db_guard.set_file_project_root(virtual_sql_path.clone(), project_root.clone());
+                    sources.insert(
+                        virtual_sql_path.clone(),
+                        (py_model.source_path.clone(), py_model.decorator_line),
+                    );
+                    if !files.contains(&virtual_sql_path) {
+                        files.push(virtual_sql_path);
+                    }
+                }
+
+                db_guard.set_all_files(Arc::new(files));
+            }
+
+            // Republish all diagnostics since ref resolution may have changed
+            let db_guard = db.lock().await;
+            let files = db_guard.all_files().clone();
+            drop(db_guard);
+
+            for path in files.iter() {
+                if let Ok(uri) = Url::from_file_path(path) {
+                    let db_guard = db.lock().await;
+                    let diagnostics = db_guard.file_diagnostics(path.clone());
+                    let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
+                        .iter()
+                        .map(|d| lsp_types::Diagnostic {
+                            range: Range {
+                                start: Position {
+                                    line: d.range.start.line,
+                                    character: d.range.start.column,
+                                },
+                                end: Position {
+                                    line: d.range.end.line,
+                                    character: d.range.end.column,
+                                },
+                            },
+                            severity: Some(match d.severity {
+                                DbSeverity::Error => DiagnosticSeverity::ERROR,
+                                DbSeverity::Warning => DiagnosticSeverity::WARNING,
+                                DbSeverity::Info => DiagnosticSeverity::INFORMATION,
+                            }),
+                            message: d.message.clone(),
+                            source: Some("smelt".to_string()),
+                            ..Default::default()
+                        })
+                        .collect();
+                    drop(db_guard);
+                    client.publish_diagnostics(uri, lsp_diagnostics, None).await;
+                }
+            }
+
+            client
+                .log_message(
+                    MessageType::INFO,
+                    format!(
+                        "Python model {} re-executed successfully ({} model(s))",
+                        py_path.display(),
+                        scan_result.models.len()
+                    ),
+                )
+                .await;
+        });
     }
 }
 
@@ -220,65 +433,140 @@ impl LanguageServer for Backend {
                         }
                     }
 
-                    // Scan models/ directory for this project
-                    let models_path = project_root.join("models");
-                    match std::fs::read_dir(&models_path) {
-                        Ok(entries) => {
-                            for entry_result in entries {
-                                match entry_result {
-                                    Ok(entry) => {
-                                        let entry_path = entry.path();
-                                        if entry_path.extension().and_then(|s| s.to_str())
-                                            == Some("sql")
-                                        {
-                                            match std::fs::read_to_string(&entry_path) {
-                                                Ok(content) => {
-                                                    db.set_file_text(
-                                                        entry_path.clone(),
-                                                        Arc::new(content),
-                                                    );
-                                                    db.set_file_project_root(
-                                                        entry_path.clone(),
-                                                        project_root.clone(),
-                                                    );
-                                                    all_files.push(entry_path);
-                                                }
-                                                Err(e) => {
-                                                    init_errors.model_errors.push(format!(
-                                                        "Failed to read {}: {}",
-                                                        entry_path.display(),
-                                                        e
-                                                    ));
+                    // Load config to get model_paths (defaults to ["models"])
+                    let model_paths = smelt_core::Config::load(&project_root)
+                        .map(|c| c.model_paths)
+                        .unwrap_or_else(|_| vec!["models".to_string()]);
+
+                    // Scan model directories for this project
+                    for model_path in &model_paths {
+                        let models_path = project_root.join(model_path);
+                        match std::fs::read_dir(&models_path) {
+                            Ok(entries) => {
+                                for entry_result in entries {
+                                    match entry_result {
+                                        Ok(entry) => {
+                                            let entry_path = entry.path();
+                                            if entry_path.extension().and_then(|s| s.to_str())
+                                                == Some("sql")
+                                            {
+                                                match std::fs::read_to_string(&entry_path) {
+                                                    Ok(content) => {
+                                                        db.set_file_text(
+                                                            entry_path.clone(),
+                                                            Arc::new(content),
+                                                        );
+                                                        db.set_file_project_root(
+                                                            entry_path.clone(),
+                                                            project_root.clone(),
+                                                        );
+                                                        all_files.push(entry_path);
+                                                    }
+                                                    Err(e) => {
+                                                        init_errors.model_errors.push(format!(
+                                                            "Failed to read {}: {}",
+                                                            entry_path.display(),
+                                                            e
+                                                        ));
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                    Err(e) => {
-                                        init_errors.model_errors.push(format!(
-                                            "Failed to read directory entry in {}: {}",
-                                            models_path.display(),
-                                            e
-                                        ));
+                                        Err(e) => {
+                                            init_errors.model_errors.push(format!(
+                                                "Failed to read directory entry in {}: {}",
+                                                models_path.display(),
+                                                e
+                                            ));
+                                        }
                                     }
                                 }
                             }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                // Not an error - model directory is optional
+                            }
+                            Err(e) => {
+                                init_errors.workspace_errors.push(format!(
+                                    "Failed to read {}: {}",
+                                    models_path.display(),
+                                    e
+                                ));
+                            }
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            // Not an error - models/ directory is optional
+
+                        // Discover Python models and register their generated SQL
+                        let mut cache = self.python_cache.lock().await;
+                        *cache = PythonModelCache::load(&project_root);
+                        let scan_result = python_scan::discover_python_models(
+                            &models_path,
+                            &project_root,
+                            &mut cache,
+                        );
+                        drop(cache);
+
+                        if !scan_result.models.is_empty() {
+                            let mut py_sources = self.python_model_sources.lock().await;
+                            for py_model in &scan_result.models {
+                                // Use <name>.sql so file_stem() yields the model name directly.
+                                // Multi-model .py files each get their own virtual file.
+                                let virtual_sql_path = py_model
+                                    .source_path
+                                    .parent()
+                                    .unwrap_or_else(|| std::path::Path::new("."))
+                                    .join(format!("{}.sql", py_model.name));
+
+                                db.set_file_text(
+                                    virtual_sql_path.clone(),
+                                    Arc::new(py_model.sql.clone()),
+                                );
+                                db.set_file_project_root(
+                                    virtual_sql_path.clone(),
+                                    project_root.clone(),
+                                );
+                                // Map virtual path back to actual .py source for goto-definition
+                                py_sources.insert(
+                                    virtual_sql_path.clone(),
+                                    (py_model.source_path.clone(), py_model.decorator_line),
+                                );
+                                all_files.push(virtual_sql_path);
+                            }
                         }
-                        Err(e) => {
-                            init_errors.workspace_errors.push(format!(
-                                "Failed to read {}: {}",
-                                models_path.display(),
-                                e
-                            ));
+
+                        // Collect Python model errors as diagnostics
+                        if !scan_result.errors.is_empty() {
+                            let mut py_diags = self.python_diagnostics.lock().await;
+                            for error in &scan_result.errors {
+                                let line = error.line.unwrap_or(1).saturating_sub(1);
+                                let diag = lsp_types::Diagnostic {
+                                    range: Range {
+                                        start: Position::new(line, 0),
+                                        end: Position::new(line, 0),
+                                    },
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    message: error.message.clone(),
+                                    source: Some("smelt-python".to_string()),
+                                    ..Default::default()
+                                };
+                                py_diags
+                                    .entry(error.source_path.clone())
+                                    .or_default()
+                                    .push(diag);
+                                init_errors.model_errors.push(format!(
+                                    "Python model error in {}: {}",
+                                    error.source_path.display(),
+                                    error.message,
+                                ));
+                            }
                         }
                     }
                 }
             }
 
             db.set_all_files(Arc::new(all_files));
-            db.set_all_project_roots(Arc::new(all_project_roots));
+            db.set_all_project_roots(Arc::new(all_project_roots.clone()));
+
+            // Store project roots for file-change handling
+            *self.project_roots.lock().await = all_project_roots;
         }
 
         // Store errors for reporting after initialized notification
@@ -310,6 +598,22 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "smelt language server initialized")
             .await;
 
+        // Register file watchers for .py files (dynamic registration)
+        let registration = Registration {
+            id: "python-file-watcher".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: Some(
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                    watchers: vec![FileSystemWatcher {
+                        glob_pattern: GlobPattern::String("**/models/**/*.py".to_string()),
+                        kind: Some(WatchKind::all()),
+                    }],
+                })
+                .unwrap(),
+            ),
+        };
+        let _ = self.client.register_capability(vec![registration]).await;
+
         // Report any initialization errors
         if let Some(errors) = self.init_errors.lock().await.take() {
             if errors.has_errors() {
@@ -333,6 +637,16 @@ impl LanguageServer for Backend {
                             errors.total_count()
                         ),
                     )
+                    .await;
+            }
+        }
+
+        // Publish Python diagnostics collected during init
+        let py_diags = self.python_diagnostics.lock().await;
+        for (path, diagnostics) in py_diags.iter() {
+            if let Ok(uri) = Url::from_file_path(path) {
+                self.client
+                    .publish_diagnostics(uri, diagnostics.clone(), None)
                     .await;
             }
         }
@@ -398,13 +712,15 @@ impl LanguageServer for Backend {
             db.set_file_text(path, Arc::new(params.text_document.text));
             drop(db);
             self.publish_diagnostics(uri).await;
-        } else {
-            // Non-SQL, non-sources file
+        } else if path.extension().and_then(|s| s.to_str()) != Some("py") {
+            // Non-SQL, non-sources, non-Python file
             let mut db = self.db.lock().await;
             db.set_file_text(path, Arc::new(params.text_document.text));
             drop(db);
             self.publish_diagnostics(uri).await;
         }
+        // Skip .py files - they are handled during init via subprocess execution,
+        // and parsing them as SQL would produce spurious diagnostics
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -423,11 +739,25 @@ impl LanguageServer for Backend {
                     drop(db);
                     self.publish_all_diagnostics().await;
                 }
-            } else {
+            } else if path.extension().and_then(|s| s.to_str()) != Some("py") {
                 let mut db = self.db.lock().await;
                 db.set_file_text(path, Arc::new(change.text));
                 drop(db);
                 self.publish_diagnostics(uri).await;
+            }
+            // Skip .py files - parsing as SQL would produce spurious diagnostics
+        }
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        for change in params.changes {
+            let path = match change.uri.to_file_path() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if path.extension().and_then(|s| s.to_str()) == Some("py") {
+                self.handle_python_file_change(&path).await;
             }
         }
     }
@@ -472,30 +802,44 @@ impl LanguageServer for Backend {
             offset
         };
 
-        // Find RefCall at cursor position using AST
-        if let Some(file) = AstFile::cast(syntax) {
+        // Find RefCall at cursor position using AST and resolve the target path
+        let resolved_path = if let Some(file) = AstFile::cast(syntax) {
+            let mut result = None;
             for ref_call in file.refs() {
                 let range = ref_call.range();
                 let start: usize = range.start().into();
                 let end: usize = range.end().into();
 
-                // Check if cursor is within this ref call
                 if cursor_offset >= start && cursor_offset <= end {
                     if let Some(ref_name) = ref_call.model_name() {
-                        // Resolve the ref
-                        if let Some(target_path) = db.resolve_ref(ref_name) {
-                            if let Ok(target_uri) = Url::from_file_path(&target_path) {
-                                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                    uri: target_uri,
-                                    range: Range {
-                                        start: Position::new(0, 0),
-                                        end: Position::new(0, 0),
-                                    },
-                                })));
-                            }
-                        }
+                        result = db.resolve_ref(ref_name);
+                        break;
                     }
                 }
+            }
+            result
+        } else {
+            None
+        };
+        drop(db);
+
+        // If we found a target, map virtual .sql paths back to .py sources
+        if let Some(target_path) = resolved_path {
+            let py_sources = self.python_model_sources.lock().await;
+            let (actual_path, target_line) = py_sources
+                .get(&target_path)
+                .map(|(p, line)| (p.clone(), *line))
+                .unwrap_or((target_path, 0));
+            drop(py_sources);
+
+            if let Ok(target_uri) = Url::from_file_path(&actual_path) {
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: Range {
+                        start: Position::new(target_line, 0),
+                        end: Position::new(target_line, 0),
+                    },
+                })));
             }
         }
 

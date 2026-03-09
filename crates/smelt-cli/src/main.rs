@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    executor, find_project_root, inject_time_filter, parse_selector, BackendType, Config,
-    DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
+    discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
+    BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
 use std::path::PathBuf;
@@ -147,13 +147,45 @@ async fn run(args: RunArgs) -> Result<()> {
         println!("Loaded {} source tables", source_count);
     }
 
-    // 3. Discover models
+    // 3. Discover models (SQL + Python)
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
-    let models = discovery
+    let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    println!("Found {} models", models.len());
+    // Discover and execute Python models
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+
+        if !python_models.is_empty() {
+            println!(
+                "Found {} Python model(s) from {} file(s)",
+                python_models.len(),
+                python_files.len()
+            );
+            models.extend(python_models);
+        }
+    }
+
+    if models.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No models found in model paths: {}",
+            config.model_paths.join(", ")
+        ));
+    }
+
+    println!("Found {} models total", models.len());
 
     // Report any parse errors
     for model in &models {
@@ -477,9 +509,26 @@ async fn table(args: TableArgs) -> Result<()> {
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
-    let models = discovery
+    let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
+
+    // Discover Python models for table command too
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
+    }
 
     // 3. Initialize Salsa database (same pattern as LSP)
     let mut db = smelt_db::Database::default();
@@ -625,9 +674,6 @@ async fn ui(args: UiArgs) -> Result<()> {
 
     println!("Found {} models", models.len());
 
-    let graph = DependencyGraph::build(models.clone(), sources.as_ref())
-        .with_context(|| "Failed to build dependency graph")?;
-
     // Initialize smelt-db for schema queries
     let mut db = smelt_db::Database::default();
     let sources_yaml = {
@@ -650,11 +696,26 @@ async fn ui(args: UiArgs) -> Result<()> {
     }
     db.set_all_files(Arc::new(file_paths));
 
+    // Build a smelt-core DependencyGraph for UI builders (they use smelt-core types)
+    let core_models: Vec<smelt_core::ModelFile> = models
+        .iter()
+        .map(|m| smelt_core::ModelFile {
+            name: m.name.clone(),
+            path: m.path.clone(),
+            content: m.content.clone(),
+            refs: m.refs.clone(),
+            parse_errors: m.parse_errors.clone(),
+            metadata: m.metadata.clone(),
+        })
+        .collect();
+    let core_graph = smelt_core::graph::DependencyGraph::build(core_models, sources.as_ref())
+        .with_context(|| "Failed to build UI dependency graph")?;
+
     // Build responses using smelt-ui builders
     let project_response =
-        smelt_ui::build::build_project_response(&config, &graph, sources.as_ref());
-    let graph_response = smelt_ui::build::build_graph_response(&graph, &config);
-    let model_details = smelt_ui::build::build_model_details(&graph, &config, &db);
+        smelt_ui::build::build_project_response(&config, &core_graph, sources.as_ref());
+    let graph_response = smelt_ui::build::build_graph_response(&core_graph, &config);
+    let model_details = smelt_ui::build::build_model_details(&core_graph, &config, &db);
 
     smelt_ui::start_server(
         project_response,

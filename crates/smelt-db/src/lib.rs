@@ -142,7 +142,8 @@ impl salsa::Database for Database {}
 
 fn parse_file(db: &dyn Syntax, path: PathBuf) -> Arc<smelt_parser::Parse> {
     let text = db.file_text(path);
-    Arc::new(smelt_parser::parse(&text))
+    let clean_text = smelt_parser::strip_frontmatter(&text);
+    Arc::new(smelt_parser::parse(&clean_text))
 }
 
 fn parse_model(db: &dyn Syntax, path: PathBuf) -> Option<Arc<Model>> {
@@ -3201,5 +3202,38 @@ sources:
 
         let constraints = db.model_input_constraints(path);
         assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_no_parse_errors() {
+        let mut db = Database::default();
+        let path = PathBuf::from("models/tagged_model.sql");
+        let content = "---\ntags:\n  - event_source\n---\nSELECT event_id, user_id\nFROM smelt.ref('raw_events')\n";
+
+        db.set_file_text(path.clone(), Arc::new(content.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+        let diagnostics = db.file_diagnostics(path.clone());
+
+        // Should have no parse errors - only potentially an undefined ref diagnostic
+        let parse_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| !d.message.contains("Undefined"))
+            .collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Frontmatter should not cause parse errors, got: {:?}",
+            parse_errors
+        );
+
+        // Verify the model was parsed successfully (has a SELECT)
+        let model = db.parse_model(path);
+        assert!(
+            model.is_some(),
+            "Model with frontmatter should parse successfully"
+        );
     }
 }

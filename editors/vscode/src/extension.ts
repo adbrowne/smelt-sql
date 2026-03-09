@@ -57,7 +57,10 @@ export function activate(context: vscode.ExtensionContext) {
             { scheme: 'file', pattern: '**/models/**/*.sql' }
         ],
         synchronize: {
-            fileEvents: vscode.workspace.createFileSystemWatcher('**/models/**/*.sql')
+            fileEvents: [
+                vscode.workspace.createFileSystemWatcher('**/models/**/*.sql'),
+                vscode.workspace.createFileSystemWatcher('**/models/**/*.py'),
+            ]
         },
         workspaceFolder: workspaceFolder,
         outputChannelName: 'smelt Language Server'
