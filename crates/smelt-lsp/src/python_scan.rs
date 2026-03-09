@@ -137,7 +137,23 @@ pub fn discover_python_models(models_path: &Path, project_dir: &Path) -> Vec<Pyt
             .output()
         {
             Ok(o) if o.status.success() => o,
-            _ => continue,
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                eprintln!(
+                    "[smelt-lsp] Python model execution failed for {}: {}",
+                    file_path.display(),
+                    stderr.trim()
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[smelt-lsp] Failed to run Python for {}: {}",
+                    file_path.display(),
+                    e
+                );
+                continue;
+            }
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);

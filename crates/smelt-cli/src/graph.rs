@@ -18,7 +18,7 @@ pub struct DependencyGraph {
 impl DependencyGraph {
     pub fn build(models: Vec<ModelFile>, sources: Option<&SourcesConfig>) -> Result<Self> {
         let mut dependencies = HashMap::new();
-        let mut models_map = HashMap::new();
+        let mut models_map: HashMap<String, ModelFile> = HashMap::new();
 
         // Build source set (schema.table format)
         let mut source_set = HashSet::new();
@@ -34,6 +34,14 @@ impl DependencyGraph {
         for model in models {
             let deps: Vec<String> = model.refs.iter().map(|r| r.model_name.clone()).collect();
 
+            if let Some(existing) = models_map.get(&model.name) {
+                eprintln!(
+                    "Warning: Duplicate model name '{}'. Model at {} overwrites model at {}.",
+                    model.name,
+                    model.path.display(),
+                    existing.path.display()
+                );
+            }
             dependencies.insert(model.name.clone(), deps);
             models_map.insert(model.name.clone(), model);
         }

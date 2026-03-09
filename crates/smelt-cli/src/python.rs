@@ -400,6 +400,11 @@ fn validate_fixed_point(models: &[ModelFile], config: &Config) -> Result<()> {
         if let ModelKind::Python { queries, .. } = &model.kind {
             let model_tags =
                 config.get_tags(&model.name, model.metadata.as_ref().map(|b| b.as_ref()));
+            let model_directory = model
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str());
 
             for query in queries {
                 if query.kind == "find_models" {
@@ -411,6 +416,17 @@ fn validate_fixed_point(models: &[ModelFile], config: &Config) -> Result<()> {
                                  at the meta level.",
                                 model.name,
                                 tag
+                            ));
+                        }
+                    }
+                    if let Some(ref dir) = query.directory {
+                        if model_directory == Some(dir.as_str()) {
+                            return Err(anyhow!(
+                                "Python model '{}' calls find_models(directory=\"{}\") but the \
+                                 produced model itself is in that directory. This would create a \
+                                 circular dependency at the meta level.",
+                                model.name,
+                                dir
                             ));
                         }
                     }
