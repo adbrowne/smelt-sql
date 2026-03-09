@@ -20,6 +20,8 @@ pub struct PythonModel {
     pub name: String,
     pub sql: String,
     pub source_path: PathBuf,
+    /// Line number of the `@model` decorator (0-indexed), for goto-definition.
+    pub decorator_line: u32,
 }
 
 /// An error from Python model execution.
@@ -60,6 +62,7 @@ struct CacheEntry {
 struct CachedModel {
     name: String,
     sql: String,
+    decorator_line: u32,
 }
 
 impl PythonModelCache {
@@ -124,6 +127,43 @@ pub fn has_model_decorator(content: &str) -> bool {
         let trimmed = line.trim();
         trimmed == "@model" || trimmed.starts_with("@model(")
     })
+}
+
+/// Build a map of model function name → decorator line (0-indexed).
+/// Scans for `@model` decorators followed by `def func_name(...)`.
+fn build_decorator_map(content: &str) -> HashMap<String, u32> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut map = HashMap::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed == "@model" || trimmed.starts_with("@model(") {
+            let decorator_line = i as u32;
+            // Scan forward for the `def` line
+            let mut j = i + 1;
+            while j < lines.len() {
+                let def_trimmed = lines[j].trim();
+                if def_trimmed.is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if def_trimmed.starts_with("def ") {
+                    if let Some(name) = def_trimmed
+                        .strip_prefix("def ")
+                        .and_then(|rest| rest.split('(').next())
+                        .map(|n| n.trim().to_string())
+                    {
+                        map.insert(name, decorator_line);
+                    }
+                }
+                break;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    map
 }
 
 /// Find the Python interpreter (python3 or python).
@@ -319,6 +359,7 @@ pub fn discover_python_models(
 
     for (file_path, content) in &python_files {
         let hash = content_hash(content);
+        let decorator_map = build_decorator_map(content);
 
         // Check cache first
         if let Some(cached) = cache.get(file_path, &hash) {
@@ -327,6 +368,7 @@ pub fn discover_python_models(
                     name: cm.name.clone(),
                     sql: cm.sql.clone(),
                     source_path: file_path.clone(),
+                    decorator_line: cm.decorator_line,
                 });
             }
             continue;
@@ -344,16 +386,19 @@ pub fn discover_python_models(
                 .map(|o| CachedModel {
                     name: o.name.clone(),
                     sql: o.sql.clone(),
+                    decorator_line: decorator_map.get(&o.name).copied().unwrap_or(0),
                 })
                 .collect();
             cache.put(file_path.clone(), hash, cached_models);
         }
 
         for out in outputs {
+            let decorator_line = decorator_map.get(&out.name).copied().unwrap_or(0);
             models.push(PythonModel {
                 name: out.name,
                 sql: out.sql,
                 source_path: file_path.clone(),
+                decorator_line,
             });
         }
     }
@@ -420,6 +465,7 @@ pub fn execute_single_python_file(
     }
 
     let hash = content_hash(&content);
+    let decorator_map = build_decorator_map(&content);
 
     // Check cache
     if let Some(cached) = cache.get(file_path, &hash) {
@@ -430,6 +476,7 @@ pub fn execute_single_python_file(
                 name: cm.name.clone(),
                 sql: cm.sql.clone(),
                 source_path: file_path.to_path_buf(),
+                decorator_line: cm.decorator_line,
             })
             .collect();
         return PythonScanResult {
@@ -452,6 +499,7 @@ pub fn execute_single_python_file(
             .map(|o| CachedModel {
                 name: o.name.clone(),
                 sql: o.sql.clone(),
+                decorator_line: decorator_map.get(&o.name).copied().unwrap_or(0),
             })
             .collect();
         cache.put(file_path.to_path_buf(), hash, cached_models);
@@ -459,10 +507,12 @@ pub fn execute_single_python_file(
     }
 
     for out in outputs {
+        let decorator_line = decorator_map.get(&out.name).copied().unwrap_or(0);
         models.push(PythonModel {
             name: out.name,
             sql: out.sql,
             source_path: file_path.to_path_buf(),
+            decorator_line,
         });
     }
 
@@ -509,6 +559,23 @@ ValueError: bad"#;
     }
 
     #[test]
+    fn test_build_decorator_map() {
+        let content = r#"from smelt import model
+
+@model
+def combined_events(project):
+    return "SELECT 1"
+
+@model
+def other_model(project):
+    return "SELECT 2"
+"#;
+        let map = build_decorator_map(content);
+        assert_eq!(map.get("combined_events"), Some(&2)); // 0-indexed line
+        assert_eq!(map.get("other_model"), Some(&6));
+    }
+
+    #[test]
     fn test_cache_put_and_get() {
         let mut cache = PythonModelCache::default();
         let path = PathBuf::from("/test/model.py");
@@ -522,6 +589,7 @@ ValueError: bad"#;
             vec![CachedModel {
                 name: "test_model".to_string(),
                 sql: "SELECT 1".to_string(),
+                decorator_line: 0,
             }],
         );
 

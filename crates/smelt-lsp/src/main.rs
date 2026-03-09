@@ -52,8 +52,9 @@ struct Backend {
     db: Arc<Mutex<Database>>,
     /// Errors collected during initialization, reported after `initialized` notification
     init_errors: Arc<Mutex<Option<InitErrors>>>,
-    /// Maps virtual .sql paths (used in Salsa) back to actual .py source paths for goto-definition
-    python_model_sources: Arc<Mutex<HashMap<PathBuf, PathBuf>>>,
+    /// Maps virtual .sql paths (used in Salsa) back to actual .py source paths + decorator line
+    /// for goto-definition. The u32 is the 0-indexed line of the `@model` decorator.
+    python_model_sources: Arc<Mutex<HashMap<PathBuf, (PathBuf, u32)>>>,
     /// Cache of Python model results (keyed by content hash)
     python_cache: Arc<Mutex<PythonModelCache>>,
     /// Diagnostics for Python files (separate from Salsa-managed SQL diagnostics)
@@ -263,7 +264,7 @@ impl Backend {
                 // Remove old virtual paths from this .py file
                 let old_virtual_paths: Vec<PathBuf> = sources
                     .iter()
-                    .filter(|(_, src)| **src == py_path)
+                    .filter(|(_, (src, _))| *src == py_path)
                     .map(|(vp, _)| vp.clone())
                     .collect();
 
@@ -284,7 +285,10 @@ impl Backend {
                     db_guard
                         .set_file_text(virtual_sql_path.clone(), Arc::new(py_model.sql.clone()));
                     db_guard.set_file_project_root(virtual_sql_path.clone(), project_root.clone());
-                    sources.insert(virtual_sql_path.clone(), py_model.source_path.clone());
+                    sources.insert(
+                        virtual_sql_path.clone(),
+                        (py_model.source_path.clone(), py_model.decorator_line),
+                    );
                     if !files.contains(&virtual_sql_path) {
                         files.push(virtual_sql_path);
                     }
@@ -520,8 +524,10 @@ impl LanguageServer for Backend {
                                     project_root.clone(),
                                 );
                                 // Map virtual path back to actual .py source for goto-definition
-                                py_sources
-                                    .insert(virtual_sql_path.clone(), py_model.source_path.clone());
+                                py_sources.insert(
+                                    virtual_sql_path.clone(),
+                                    (py_model.source_path.clone(), py_model.decorator_line),
+                                );
                                 all_files.push(virtual_sql_path);
                             }
                         }
@@ -820,15 +826,18 @@ impl LanguageServer for Backend {
         // If we found a target, map virtual .sql paths back to .py sources
         if let Some(target_path) = resolved_path {
             let py_sources = self.python_model_sources.lock().await;
-            let actual_path = py_sources.get(&target_path).cloned().unwrap_or(target_path);
+            let (actual_path, target_line) = py_sources
+                .get(&target_path)
+                .map(|(p, line)| (p.clone(), *line))
+                .unwrap_or((target_path, 0));
             drop(py_sources);
 
             if let Ok(target_uri) = Url::from_file_path(&actual_path) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: target_uri,
                     range: Range {
-                        start: Position::new(0, 0),
-                        end: Position::new(0, 0),
+                        start: Position::new(target_line, 0),
+                        end: Position::new(target_line, 0),
                     },
                 })));
             }
