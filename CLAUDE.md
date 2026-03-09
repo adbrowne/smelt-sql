@@ -191,12 +191,7 @@ The `examples/` directory contains SQL model examples demonstrating smelt capabi
 
 **IMPORTANT: Always Work on a Branch**
 
-This directory (`/Users/andrewbrowne/code/smelt`) should always track `main`. Before starting any work:
-
-1. Create a worktree for your feature/fix: `git worktree add ../smelt-<feature-name> -b <branch-name>`
-2. Work in the worktree directory, not this one
-3. This prevents conflicts when multiple Claude sessions are working simultaneously
-4. The main directory stays clean and always reflects the latest `main` branch
+Always work on a git branch for any changes, even small ones. This allows you to commit frequently without worrying about breaking the main branch.
 
 If you find yourself on `main` with uncommitted changes, create a branch immediately before committing.
 
