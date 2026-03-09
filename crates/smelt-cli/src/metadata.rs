@@ -115,15 +115,15 @@ pub fn extract_file_metadata(source: &str) -> Result<FileMetadata, MetadataError
     // Check for single-model frontmatter
     if trimmed.starts_with("---\n") || trimmed.starts_with("---\r\n") {
         // Check if this is actually a multi-model file
-        if source.contains("--- name:") {
-            extract_multi_model(source)
+        if trimmed.contains("--- name:") {
+            extract_multi_model(trimmed)
         } else {
-            extract_single_model(source)
+            extract_single_model(trimmed)
         }
     }
     // Check for multi-model sections or malformed delimiters
-    else if source.contains("--- name:") {
-        extract_multi_model(source)
+    else if trimmed.contains("--- name:") {
+        extract_multi_model(trimmed)
     }
     // Check for malformed delimiters that look like section markers
     else if let Some(line_num) = has_malformed_delimiter(source) {
@@ -490,6 +490,37 @@ SELECT * FROM users"#;
                 assert_eq!(models[0].metadata.materialization, None); // No materialization specified
             }
             _ => panic!("Expected Multi variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_leading_whitespace() {
+        // Python triple-quoted strings often produce leading newlines
+        let source = "\n---\ntags:\n  - event_source\n---\nSELECT * FROM events";
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.tags, vec!["event_source".to_string()]);
+            }
+            _ => panic!("Expected Single variant, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_leading_whitespace_and_spaces() {
+        let source = "  \n\n---\nname: my_model\nmaterialization: table\n---\nSELECT 1";
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.name, Some("my_model".to_string()));
+                assert_eq!(
+                    metadata.materialization,
+                    Some(crate::config::Materialization::Table)
+                );
+            }
+            _ => panic!("Expected Single variant, got {:?}", result),
         }
     }
 }
