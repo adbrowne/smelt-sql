@@ -15,7 +15,7 @@ pub use config::{
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
-pub use graph::DependencyGraph;
+pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};

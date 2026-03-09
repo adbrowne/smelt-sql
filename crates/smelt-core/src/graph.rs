@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::discovery::ModelFile;
 use crate::selector::{SelectionMethod, Selector};
+use crate::SourcesConfig;
 use anyhow::{anyhow, Result};
-use smelt_core::SourcesConfig;
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
@@ -27,7 +27,7 @@ pub struct DependencyGraph {
 impl DependencyGraph {
     pub fn build(models: Vec<ModelFile>, sources: Option<&SourcesConfig>) -> Result<Self> {
         let mut dependencies = HashMap::new();
-        let mut models_map: HashMap<String, ModelFile> = HashMap::new();
+        let mut models_map = HashMap::new();
 
         // Build source set (schema.table format)
         let mut source_set = HashSet::new();
@@ -43,14 +43,6 @@ impl DependencyGraph {
         for model in models {
             let deps: Vec<String> = model.refs.iter().map(|r| r.model_name.clone()).collect();
 
-            if let Some(existing) = models_map.get(&model.name) {
-                eprintln!(
-                    "Warning: Duplicate model name '{}'. Model at {} overwrites model at {}.",
-                    model.name,
-                    model.path.display(),
-                    existing.path.display()
-                );
-            }
             dependencies.insert(model.name.clone(), deps);
             models_map.insert(model.name.clone(), model);
         }
@@ -274,8 +266,22 @@ impl DependencyGraph {
             .ok_or_else(|| anyhow!("Model not found: {}", name))
     }
 
-    pub fn models(&self) -> &HashMap<String, ModelFile> {
-        &self.models
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
+
+    pub fn iter_models(&self) -> impl Iterator<Item = (&str, &ModelFile)> {
+        self.models.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn iter_dependencies(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.dependencies
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    pub fn iter_sources(&self) -> impl Iterator<Item = &str> {
+        self.sources.iter().map(|s| s.as_str())
     }
 }
 
@@ -302,7 +308,6 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata: None,
-            kind: crate::discovery::ModelKind::Sql,
         }
     }
 
@@ -381,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_source_reference() {
-        use smelt_core::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
+        use crate::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
 
         let models = vec![make_model("A", vec!["source.events"])];
 
@@ -434,7 +439,6 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata,
-            kind: crate::discovery::ModelKind::Sql,
         }
     }
 
@@ -472,7 +476,6 @@ mod tests {
             targets,
             default_materialization: Materialization::View,
             models,
-            python: None,
         }
     }
 

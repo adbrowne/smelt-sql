@@ -1,0 +1,21 @@
+import type { GraphResponse, ModelDetailResponse, ProjectResponse } from './types';
+
+const BASE = '';
+
+export async function fetchProject(): Promise<ProjectResponse> {
+  const res = await fetch(`${BASE}/api/project`);
+  if (!res.ok) throw new Error(`Failed to fetch project: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchGraph(): Promise<GraphResponse> {
+  const res = await fetch(`${BASE}/api/graph`);
+  if (!res.ok) throw new Error(`Failed to fetch graph: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchModel(name: string): Promise<ModelDetailResponse> {
+  const res = await fetch(`${BASE}/api/models/${encodeURIComponent(name)}`);
+  if (!res.ok) throw new Error(`Failed to fetch model ${name}: ${res.statusText}`);
+  return res.json();
+}

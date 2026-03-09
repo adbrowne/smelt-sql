@@ -30,9 +30,6 @@ pub enum CliError {
         source: anyhow::Error,
     },
 
-    #[error("Dependency resolution failed:\n  {message}")]
-    DependencyError { message: String },
-
     #[error("Parse error in {file}:{line}:{col}\n  {message}")]
     ParseError {
         file: String,
@@ -40,9 +37,6 @@ pub enum CliError {
         col: u32,
         message: String,
     },
-
-    #[error("Circular dependency detected involving models: {models}")]
-    CircularDependency { models: String },
 
     #[error("Source tables not found in database:\n  {}\n\nHint: Create source tables manually or use 'smelt seed' command", missing.join("\n  "))]
     SourceTablesNotFound { missing: Vec<String> },
