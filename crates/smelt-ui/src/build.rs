@@ -19,7 +19,7 @@ pub fn build_project_response(
     ProjectResponse {
         name: config.name.clone(),
         version: config.version,
-        model_count: graph.models().len(),
+        model_count: graph.model_count(),
         source_count,
     }
 }
@@ -28,13 +28,13 @@ pub fn build_graph_response(graph: &DependencyGraph, config: &Config) -> GraphRe
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
-    for (name, model) in graph.models() {
+    for (name, model) in graph.iter_models() {
         let metadata = model.metadata.as_deref();
         let tags = config.get_tags(name, metadata);
 
         nodes.push(GraphNode {
-            id: name.clone(),
-            label: name.clone(),
+            id: name.to_string(),
+            label: name.to_string(),
             materialization: metadata
                 .and_then(|m| m.materialization.as_ref())
                 .map(|m| format!("{:?}", m).to_lowercase()),
@@ -45,10 +45,10 @@ pub fn build_graph_response(graph: &DependencyGraph, config: &Config) -> GraphRe
         });
     }
 
-    for source_name in graph.sources() {
+    for source_name in graph.iter_sources() {
         nodes.push(GraphNode {
-            id: source_name.clone(),
-            label: source_name.clone(),
+            id: source_name.to_string(),
+            label: source_name.to_string(),
             materialization: Some("source".to_string()),
             tags: vec![],
             description: None,
@@ -57,16 +57,16 @@ pub fn build_graph_response(graph: &DependencyGraph, config: &Config) -> GraphRe
         });
     }
 
-    for (model_name, deps) in graph.dependencies() {
+    for (model_name, deps) in graph.iter_dependencies() {
         for dep in deps {
             edges.push(GraphEdge {
                 source: dep.clone(),
-                target: model_name.clone(),
+                target: model_name.to_string(),
             });
         }
     }
 
-    let graph_sources: Vec<String> = graph.sources().iter().cloned().collect();
+    let graph_sources: Vec<String> = graph.iter_sources().map(|s| s.to_string()).collect();
 
     GraphResponse {
         nodes,
@@ -82,7 +82,7 @@ pub fn build_model_details(
 ) -> HashMap<String, ModelDetailResponse> {
     let mut model_details: HashMap<String, ModelDetailResponse> = HashMap::new();
 
-    for (name, model) in graph.models() {
+    for (name, model) in graph.iter_models() {
         let metadata = model.metadata.as_deref();
         let tags = config.get_tags(name, metadata);
 
@@ -126,9 +126,9 @@ pub fn build_model_details(
             .collect();
 
         model_details.insert(
-            name.clone(),
+            name.to_string(),
             ModelDetailResponse {
-                name: name.clone(),
+                name: name.to_string(),
                 path: model.path.display().to_string(),
                 sql: model.content.clone(),
                 materialization: metadata

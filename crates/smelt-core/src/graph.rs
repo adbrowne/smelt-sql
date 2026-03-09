@@ -266,16 +266,22 @@ impl DependencyGraph {
             .ok_or_else(|| anyhow!("Model not found: {}", name))
     }
 
-    pub fn models(&self) -> &HashMap<String, ModelFile> {
-        &self.models
+    pub fn model_count(&self) -> usize {
+        self.models.len()
     }
 
-    pub fn dependencies(&self) -> &HashMap<String, Vec<String>> {
-        &self.dependencies
+    pub fn iter_models(&self) -> impl Iterator<Item = (&str, &ModelFile)> {
+        self.models.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    pub fn sources(&self) -> &HashSet<String> {
-        &self.sources
+    pub fn iter_dependencies(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.dependencies
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    pub fn iter_sources(&self) -> impl Iterator<Item = &str> {
+        self.sources.iter().map(|s| s.as_str())
     }
 }
 
