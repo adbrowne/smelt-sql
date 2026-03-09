@@ -476,6 +476,7 @@ mod tests {
             targets,
             default_materialization: Materialization::View,
             models,
+            python: None,
         }
     }
 
