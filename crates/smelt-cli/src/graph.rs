@@ -260,6 +260,14 @@ impl DependencyGraph {
     pub fn models(&self) -> &HashMap<String, ModelFile> {
         &self.models
     }
+
+    pub fn dependencies(&self) -> &HashMap<String, Vec<String>> {
+        &self.dependencies
+    }
+
+    pub fn sources(&self) -> &HashSet<String> {
+        &self.sources
+    }
 }
 
 #[cfg(test)]

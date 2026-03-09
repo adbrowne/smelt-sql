@@ -29,6 +29,8 @@ enum Commands {
     Run(RunArgs),
     /// Show column types for a model
     Table(TableArgs),
+    /// Start the web UI for visualizing the model graph
+    Ui(UiArgs),
 }
 
 #[derive(Parser)]
@@ -71,6 +73,17 @@ struct RunArgs {
 }
 
 #[derive(Parser)]
+struct UiArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Port to serve the UI on
+    #[arg(long, default_value = "3000")]
+    port: u16,
+}
+
+#[derive(Parser)]
 struct TableArgs {
     /// Name of the model to inspect
     model_name: String,
@@ -91,6 +104,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Run(args) => run(args).await,
         Commands::Table(args) => table(args).await,
+        Commands::Ui(args) => ui(args).await,
     }
 }
 
@@ -589,4 +603,178 @@ fn print_json(schema: &ModelSchema, model_name: &str) {
     });
 
     println!("{}", to_string_pretty(&output).unwrap());
+}
+
+async fn ui(args: UiArgs) -> Result<()> {
+    use smelt_ui::types::*;
+    use std::collections::HashMap;
+
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    println!("Found {} models", models.len());
+
+    let graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+
+    // Initialize smelt-db for schema queries
+    let mut db = smelt_db::Database::default();
+    let sources_yaml = {
+        let yml_path = project_dir.join("sources.yml");
+        let yaml_path = project_dir.join("sources.yaml");
+        match (yml_path.exists(), yaml_path.exists()) {
+            (true, _) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
+            (_, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
+    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
+
+    let mut file_paths = Vec::new();
+    for model in &models {
+        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+        db.set_file_project_root(model.path.clone(), project_dir.clone());
+        file_paths.push(model.path.clone());
+    }
+    db.set_all_files(Arc::new(file_paths));
+
+    // Build project response
+    let source_count = sources
+        .as_ref()
+        .map(|s| s.sources.iter().map(|src| src.tables.len()).sum())
+        .unwrap_or(0);
+
+    let project_response = ProjectResponse {
+        name: config.name.clone(),
+        version: config.version,
+        model_count: graph.models().len(),
+        source_count,
+    };
+
+    // Build graph response
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for (name, model) in graph.models() {
+        let metadata = model.metadata.as_deref();
+        let tags = config.get_tags(name, metadata);
+
+        nodes.push(GraphNode {
+            id: name.clone(),
+            label: name.clone(),
+            materialization: metadata
+                .and_then(|m| m.materialization.as_ref())
+                .map(|m| format!("{:?}", m).to_lowercase()),
+            tags,
+            description: metadata.and_then(|m| m.description.clone()),
+            has_errors: !model.parse_errors.is_empty(),
+            node_type: NodeType::Model,
+        });
+    }
+
+    for source_name in graph.sources() {
+        nodes.push(GraphNode {
+            id: source_name.clone(),
+            label: source_name.clone(),
+            materialization: Some("source".to_string()),
+            tags: vec![],
+            description: None,
+            has_errors: false,
+            node_type: NodeType::Source,
+        });
+    }
+
+    for (model_name, deps) in graph.dependencies() {
+        for dep in deps {
+            edges.push(GraphEdge {
+                source: dep.clone(),
+                target: model_name.clone(),
+            });
+        }
+    }
+
+    let graph_sources: Vec<String> = graph.sources().iter().cloned().collect();
+
+    let graph_response = GraphResponse {
+        nodes,
+        edges,
+        sources: graph_sources,
+    };
+
+    // Build model detail responses
+    let mut model_details: HashMap<String, ModelDetailResponse> = HashMap::new();
+
+    for (name, model) in graph.models() {
+        let metadata = model.metadata.as_deref();
+        let tags = config.get_tags(name, metadata);
+
+        let schema = db.typed_model_schema(model.path.clone());
+        let columns: Vec<ColumnInfo> = schema
+            .columns
+            .iter()
+            .filter(|col| col.name != "*")
+            .map(|col| {
+                let (data_type, nullable) = match &col.data_type {
+                    Some(t) => (Some(t.data_type.to_string()), Some(t.nullable)),
+                    None => (None, None),
+                };
+
+                let source = match &col.source {
+                    ColumnSource::Computed => ColumnSourceInfo::Computed,
+                    ColumnSource::FromModel {
+                        model_name,
+                        column_name,
+                    } => ColumnSourceInfo::FromModel {
+                        model: model_name.clone(),
+                        column: column_name.clone(),
+                    },
+                    ColumnSource::Wildcard { model_name } => ColumnSourceInfo::Wildcard {
+                        model: model_name.clone(),
+                    },
+                    ColumnSource::ExternalTable { table_name } => ColumnSourceInfo::ExternalTable {
+                        table: table_name.clone(),
+                    },
+                    ColumnSource::Unknown => ColumnSourceInfo::Unknown,
+                };
+
+                ColumnInfo {
+                    name: col.name.clone(),
+                    data_type,
+                    nullable,
+                    source,
+                    expression: col.expression.clone(),
+                }
+            })
+            .collect();
+
+        model_details.insert(
+            name.clone(),
+            ModelDetailResponse {
+                name: name.clone(),
+                path: model.path.display().to_string(),
+                sql: model.content.clone(),
+                materialization: metadata
+                    .and_then(|m| m.materialization.as_ref())
+                    .map(|m| format!("{:?}", m).to_lowercase()),
+                tags,
+                owner: metadata.and_then(|m| m.owner.clone()),
+                description: metadata.and_then(|m| m.description.clone()),
+                refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                columns,
+            },
+        );
+    }
+
+    smelt_ui::start_server(project_response, graph_response, model_details, args.port).await
 }
