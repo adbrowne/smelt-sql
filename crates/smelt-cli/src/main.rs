@@ -81,6 +81,10 @@ struct UiArgs {
     /// Port to serve the UI on
     #[arg(long, default_value = "3000")]
     port: u16,
+
+    /// Host address to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
 }
 
 #[derive(Parser)]
@@ -606,9 +610,6 @@ fn print_json(schema: &ModelSchema, model_name: &str) {
 }
 
 async fn ui(args: UiArgs) -> Result<()> {
-    use smelt_ui::types::*;
-    use std::collections::HashMap;
-
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -649,132 +650,18 @@ async fn ui(args: UiArgs) -> Result<()> {
     }
     db.set_all_files(Arc::new(file_paths));
 
-    // Build project response
-    let source_count = sources
-        .as_ref()
-        .map(|s| s.sources.iter().map(|src| src.tables.len()).sum())
-        .unwrap_or(0);
+    // Build responses using smelt-ui builders
+    let project_response =
+        smelt_ui::build::build_project_response(&config, &graph, sources.as_ref());
+    let graph_response = smelt_ui::build::build_graph_response(&graph, &config);
+    let model_details = smelt_ui::build::build_model_details(&graph, &config, &db);
 
-    let project_response = ProjectResponse {
-        name: config.name.clone(),
-        version: config.version,
-        model_count: graph.models().len(),
-        source_count,
-    };
-
-    // Build graph response
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-
-    for (name, model) in graph.models() {
-        let metadata = model.metadata.as_deref();
-        let tags = config.get_tags(name, metadata);
-
-        nodes.push(GraphNode {
-            id: name.clone(),
-            label: name.clone(),
-            materialization: metadata
-                .and_then(|m| m.materialization.as_ref())
-                .map(|m| format!("{:?}", m).to_lowercase()),
-            tags,
-            description: metadata.and_then(|m| m.description.clone()),
-            has_errors: !model.parse_errors.is_empty(),
-            node_type: NodeType::Model,
-        });
-    }
-
-    for source_name in graph.sources() {
-        nodes.push(GraphNode {
-            id: source_name.clone(),
-            label: source_name.clone(),
-            materialization: Some("source".to_string()),
-            tags: vec![],
-            description: None,
-            has_errors: false,
-            node_type: NodeType::Source,
-        });
-    }
-
-    for (model_name, deps) in graph.dependencies() {
-        for dep in deps {
-            edges.push(GraphEdge {
-                source: dep.clone(),
-                target: model_name.clone(),
-            });
-        }
-    }
-
-    let graph_sources: Vec<String> = graph.sources().iter().cloned().collect();
-
-    let graph_response = GraphResponse {
-        nodes,
-        edges,
-        sources: graph_sources,
-    };
-
-    // Build model detail responses
-    let mut model_details: HashMap<String, ModelDetailResponse> = HashMap::new();
-
-    for (name, model) in graph.models() {
-        let metadata = model.metadata.as_deref();
-        let tags = config.get_tags(name, metadata);
-
-        let schema = db.typed_model_schema(model.path.clone());
-        let columns: Vec<ColumnInfo> = schema
-            .columns
-            .iter()
-            .filter(|col| col.name != "*")
-            .map(|col| {
-                let (data_type, nullable) = match &col.data_type {
-                    Some(t) => (Some(t.data_type.to_string()), Some(t.nullable)),
-                    None => (None, None),
-                };
-
-                let source = match &col.source {
-                    ColumnSource::Computed => ColumnSourceInfo::Computed,
-                    ColumnSource::FromModel {
-                        model_name,
-                        column_name,
-                    } => ColumnSourceInfo::FromModel {
-                        model: model_name.clone(),
-                        column: column_name.clone(),
-                    },
-                    ColumnSource::Wildcard { model_name } => ColumnSourceInfo::Wildcard {
-                        model: model_name.clone(),
-                    },
-                    ColumnSource::ExternalTable { table_name } => ColumnSourceInfo::ExternalTable {
-                        table: table_name.clone(),
-                    },
-                    ColumnSource::Unknown => ColumnSourceInfo::Unknown,
-                };
-
-                ColumnInfo {
-                    name: col.name.clone(),
-                    data_type,
-                    nullable,
-                    source,
-                    expression: col.expression.clone(),
-                }
-            })
-            .collect();
-
-        model_details.insert(
-            name.clone(),
-            ModelDetailResponse {
-                name: name.clone(),
-                path: model.path.display().to_string(),
-                sql: model.content.clone(),
-                materialization: metadata
-                    .and_then(|m| m.materialization.as_ref())
-                    .map(|m| format!("{:?}", m).to_lowercase()),
-                tags,
-                owner: metadata.and_then(|m| m.owner.clone()),
-                description: metadata.and_then(|m| m.description.clone()),
-                refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
-                columns,
-            },
-        );
-    }
-
-    smelt_ui::start_server(project_response, graph_response, model_details, args.port).await
+    smelt_ui::start_server(
+        project_response,
+        graph_response,
+        model_details,
+        args.port,
+        &args.host,
+    )
+    .await
 }

@@ -14,7 +14,7 @@ pub use config::{
 };
 pub use discovery::{ModelDiscovery, ModelFile};
 pub use errors::CliError;
-pub use graph::DependencyGraph;
+pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;

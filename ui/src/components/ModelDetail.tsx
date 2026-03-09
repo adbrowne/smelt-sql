@@ -48,9 +48,9 @@ export function ModelDetail({ model, onClose }: ModelDetailProps) {
               Dependencies
             </h3>
             <div className="flex gap-1 flex-wrap">
-              {model.refs.map((ref) => (
-                <span key={ref} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded">
-                  {ref}
+              {model.refs.map((dep) => (
+                <span key={dep} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded">
+                  {dep}
                 </span>
               ))}
             </div>

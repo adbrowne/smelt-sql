@@ -1,4 +1,5 @@
 mod api;
+pub mod build;
 mod server;
 pub mod types;
 

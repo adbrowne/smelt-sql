@@ -27,6 +27,7 @@ pub async fn start_server(
     graph: GraphResponse,
     models: HashMap<String, ModelDetailResponse>,
     port: u16,
+    host: &str,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         project,
@@ -37,13 +38,15 @@ pub async fn start_server(
     let app = Router::new()
         .route("/api/project", get(api::get_project))
         .route("/api/graph", get(api::get_graph))
-        .route("/api/models/:name", get(api::get_model))
+        .route("/api/models/{name}", get(api::get_model))
         .fallback(static_handler)
+        // Permissive CORS for dev mode (Vite dev server proxies to this port)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
-    println!("Starting UI server at http://localhost:{}", port);
+    let addr = format!("{}:{}", host, port);
+    println!("Starting UI server at http://{}:{}", host, port);
+    println!("Serving a snapshot of your project — restart to pick up changes");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -87,4 +90,147 @@ async fn static_handler(uri: axum::http::Uri) -> Response {
 </body></html>"#,
     )
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<AppState> {
+        let mut models = HashMap::new();
+        models.insert(
+            "test_model".to_string(),
+            ModelDetailResponse {
+                name: "test_model".to_string(),
+                path: "models/test_model.sql".to_string(),
+                sql: "SELECT 1".to_string(),
+                materialization: Some("view".to_string()),
+                tags: vec!["test".to_string()],
+                owner: None,
+                description: Some("A test model".to_string()),
+                refs: vec![],
+                columns: vec![],
+            },
+        );
+
+        Arc::new(AppState {
+            project: ProjectResponse {
+                name: "test".to_string(),
+                version: 1,
+                model_count: 1,
+                source_count: 0,
+            },
+            graph: GraphResponse {
+                nodes: vec![GraphNode {
+                    id: "test_model".to_string(),
+                    label: "test_model".to_string(),
+                    materialization: Some("view".to_string()),
+                    tags: vec!["test".to_string()],
+                    description: Some("A test model".to_string()),
+                    has_errors: false,
+                    node_type: NodeType::Model,
+                }],
+                edges: vec![],
+                sources: vec![],
+            },
+            models,
+        })
+    }
+
+    fn test_app() -> Router {
+        let state = test_state();
+        Router::new()
+            .route("/api/project", get(api::get_project))
+            .route("/api/graph", get(api::get_graph))
+            .route("/api/models/{name}", get(api::get_model))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_get_project() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/project")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let project: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(project["name"], "test");
+        assert_eq!(project["model_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_graph() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let graph: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(graph["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(graph["nodes"][0]["id"], "test_model");
+    }
+
+    #[tokio::test]
+    async fn test_get_model_found() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/test_model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let model: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(model["name"], "test_model");
+        assert_eq!(model["sql"], "SELECT 1");
+    }
+
+    #[tokio::test]
+    async fn test_get_model_not_found() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }

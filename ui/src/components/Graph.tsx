@@ -72,12 +72,12 @@ export function Graph({ data, selectedModel, onSelectModel }: GraphProps) {
     setEdges(layout.edges)
   }, [layout, setNodes, setEdges])
 
-  // Highlight selected node
+  // Highlight selected node via ReactFlow's built-in selected property
   useEffect(() => {
     setNodes((nds) =>
       nds.map((n) => ({
         ...n,
-        data: { ...n.data, selected: n.id === selectedModel },
+        selected: n.id === selectedModel,
       }))
     )
   }, [selectedModel, setNodes])
