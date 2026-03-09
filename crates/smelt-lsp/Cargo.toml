@@ -10,6 +10,7 @@ name = "smelt-lsp"
 path = "src/main.rs"
 
 [dependencies]
+smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }

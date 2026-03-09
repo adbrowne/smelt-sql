@@ -1,10 +1,9 @@
 use anyhow::{anyhow, Context, Result};
-use rowan::TextRange;
+pub use smelt_core::RefInfo;
+use smelt_core::{extract_file_metadata, extract_refs, FileMetadata, ModelMetadata};
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-
-use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata};
 
 #[derive(Debug, Clone)]
 pub struct ModelFile {
@@ -15,13 +14,6 @@ pub struct ModelFile {
     pub parse_errors: Vec<smelt_parser::ParseError>,
     /// Metadata extracted from YAML frontmatter
     pub metadata: Option<Box<ModelMetadata>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RefInfo {
-    pub model_name: String,
-    pub has_named_params: bool,
-    pub range: TextRange,
 }
 
 pub struct ModelDiscovery {
@@ -127,22 +119,6 @@ impl ModelDiscovery {
             metadata: model_metadata,
         })
     }
-}
-
-fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
-    file.refs()
-        .filter_map(|ref_call| {
-            let model_name = ref_call.model_name()?;
-            let has_params = ref_call.named_params().count() > 0;
-            let range = ref_call.range();
-
-            Some(RefInfo {
-                model_name,
-                has_named_params: has_params,
-                range,
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
