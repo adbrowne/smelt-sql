@@ -44,6 +44,14 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        run: cd ui && npm ci && npm run build
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

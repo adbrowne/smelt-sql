@@ -29,6 +29,8 @@ enum Commands {
     Run(RunArgs),
     /// Show column types for a model
     Table(TableArgs),
+    /// Start the web UI for visualizing the model graph
+    Ui(UiArgs),
 }
 
 #[derive(Parser)]
@@ -71,6 +73,21 @@ struct RunArgs {
 }
 
 #[derive(Parser)]
+struct UiArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Port to serve the UI on
+    #[arg(long, default_value = "3000")]
+    port: u16,
+
+    /// Host address to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+}
+
+#[derive(Parser)]
 struct TableArgs {
     /// Name of the model to inspect
     model_name: String,
@@ -91,6 +108,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Run(args) => run(args).await,
         Commands::Table(args) => table(args).await,
+        Commands::Ui(args) => ui(args).await,
     }
 }
 
@@ -589,4 +607,61 @@ fn print_json(schema: &ModelSchema, model_name: &str) {
     });
 
     println!("{}", to_string_pretty(&output).unwrap());
+}
+
+async fn ui(args: UiArgs) -> Result<()> {
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    println!("Found {} models", models.len());
+
+    let graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+
+    // Initialize smelt-db for schema queries
+    let mut db = smelt_db::Database::default();
+    let sources_yaml = {
+        let yml_path = project_dir.join("sources.yml");
+        let yaml_path = project_dir.join("sources.yaml");
+        match (yml_path.exists(), yaml_path.exists()) {
+            (true, _) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
+            (_, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
+    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
+
+    let mut file_paths = Vec::new();
+    for model in &models {
+        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+        db.set_file_project_root(model.path.clone(), project_dir.clone());
+        file_paths.push(model.path.clone());
+    }
+    db.set_all_files(Arc::new(file_paths));
+
+    // Build responses using smelt-ui builders
+    let project_response =
+        smelt_ui::build::build_project_response(&config, &graph, sources.as_ref());
+    let graph_response = smelt_ui::build::build_graph_response(&graph, &config);
+    let model_details = smelt_ui::build::build_model_details(&graph, &config, &db);
+
+    smelt_ui::start_server(
+        project_response,
+        graph_response,
+        model_details,
+        args.port,
+        &args.host,
+    )
+    .await
 }

@@ -4,3 +4,7 @@ target/
 !.claude/settings.json
 datagen.duckdb
 output/
+
+# UI
+ui/node_modules/
+ui/dist/

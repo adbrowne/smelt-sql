@@ -18,6 +18,7 @@ smelt-types = { path = "../smelt-types" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
+smelt-ui = { path = "../smelt-ui" }
 
 # Parser dependencies (for TextRange, etc.)
 rowan.workspace = true
