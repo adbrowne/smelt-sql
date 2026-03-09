@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Python Model Support - Phase 3 LSP + Performance (March 9, 2026)**: Content-hash caching for Python model subprocess results (persisted to `.smelt/python_cache.json`), `.py` file watching with dynamic LSP watcher registration, Python execution error diagnostics surfaced in the editor, and background subprocess execution with last-known-good fallback on failure.
+
 **Python Model Support - Phase 1 (March 8, 2026)**: Python models as an escape hatch for programmatic model generation. Python functions decorated with `@model` return SQL strings that get parsed by the existing smelt parser. Includes: Python SDK (`python/smelt/`), subprocess protocol with JSON I/O, `@model` decorator scanning, iterative discovery with fixed-point validation, full ref extraction from generated SQL, mixed SQL/Python dependency graphs, LSP awareness (Python models as valid ref targets), and comprehensive tests. Python config via `SMELT_PYTHON` env var or `python` field in `smelt.yml`.
 
 **Row Polymorphism (March 7, 2026)**: Models with `SELECT *` now properly propagate types and schemas through `RowExtension` entries instead of placeholder wildcard columns. New `resolved_model_schema()` Salsa query recursively expands wildcards through model chains. Input constraint extraction identifies what columns each model requires from its refs.
@@ -2198,6 +2200,36 @@ These features require significant architectural work and are not prioritized:
 - `smelt.metric()` support (awaiting metrics design)
 - Configuration annotations (`@materialize`, etc.)
 - Additional SQL syntax (INTERSECT/EXCEPT, INSERT/UPDATE/DELETE, CREATE TABLE/VIEW)
+
+---
+
+## ✅ Python Model Support - Phase 3: LSP + Performance (COMPLETED)
+
+**Completed**: March 9, 2026
+
+### What Was Implemented
+
+- **Content-hash caching**: Python model subprocess results are cached by SHA-256 hash of `.py` file content. Cache persists to `.smelt/python_cache.json` so it survives LSP restarts. Unchanged files skip subprocess execution entirely.
+
+- **`.py` file watching**: LSP dynamically registers file watchers for `**/models/**/*.py` via `workspace/didChangeWatchedFiles`. Works with any LSP client, not just VSCode. VSCode extension also updated to watch `.py` files.
+
+- **Python error diagnostics**: Subprocess failures (runtime errors, invalid JSON, missing interpreter) are surfaced as LSP diagnostics on the `.py` file. Line numbers extracted from Python tracebacks when possible. Uses separate `"smelt-python"` diagnostic source.
+
+- **Background execution with last-known-good fallback**: Python model re-execution on file change runs in a background `tokio::spawn` task using `spawn_blocking` for the subprocess. On failure, keeps previous SQL in Salsa (last-known-good) and publishes error diagnostics. On success, updates Salsa and refreshes all diagnostics.
+
+- **Single-file re-execution**: New `execute_single_python_file()` avoids re-scanning all Python files when only one changes.
+
+### Files Modified
+
+- `crates/smelt-lsp/Cargo.toml` - Added `sha2` dependency
+- `crates/smelt-lsp/src/python_scan.rs` - Added `PythonModelCache`, `PythonScanResult`, `PythonModelError`, content hashing, `execute_single_python_file()`, traceback line extraction
+- `crates/smelt-lsp/src/main.rs` - Added `python_cache`, `python_diagnostics`, `project_roots` fields to `Backend`; `did_change_watched_files` handler; `handle_python_file_change()` with background execution; dynamic watcher registration in `initialized()`; Python diagnostic publishing
+- `editors/vscode/src/extension.ts` - Added `.py` file watcher alongside `.sql` watcher
+
+### ⏸️ Deferred
+
+- **Python import dependency tracking**: Cache only hashes the model file itself, not its imports. If a Python model imports from a sibling module, changes to that module won't invalidate the cache. Acceptable for now.
+- **Phase 2 (PyO3 AST bindings)**: Still deferred — Phase 1 SQL strings remain sufficient.
 
 ---
 

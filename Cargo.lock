@@ -3220,6 +3220,7 @@ dependencies = [
  "lsp-types",
  "serde",
  "serde_json",
+ "sha2",
  "smelt-core",
  "smelt-db",
  "smelt-parser",
