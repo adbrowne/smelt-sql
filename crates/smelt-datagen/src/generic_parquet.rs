@@ -1,6 +1,6 @@
 //! Dynamic Parquet writer for YAML-configured datasets.
 
-use crate::config::DatasetConfig;
+use crate::config::{DatasetConfig, FkCounts};
 use crate::generic::{generate_row, make_entity_pool, GenericValue};
 use anyhow::{Context, Result};
 use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, StringBuilder};
@@ -22,11 +22,13 @@ const BATCH_SIZE: usize = 64 * 1024;
 
 /// Write a dataset configured by `config` to Parquet.
 ///
+/// `fk_counts` maps dataset names to their scaled row counts for `ForeignKey` resolution.
 /// Returns the total number of rows written.
 pub fn write_generic_dataset(
     config: &DatasetConfig,
     global_seed: u64,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let seed = config.seed.unwrap_or(global_seed);
     let output = Path::new(&config.output);
@@ -36,9 +38,9 @@ pub fn write_generic_dataset(
     let schema = Arc::new(build_schema(config));
 
     if let Some(part_cfg) = &config.partition {
-        write_partitioned(config, seed, output, schema, part_cfg, progress)
+        write_partitioned(config, seed, output, schema, part_cfg, progress, fk_counts)
     } else {
-        write_single(config, seed, output, schema, progress)
+        write_single(config, seed, output, schema, progress, fk_counts)
     }
 }
 
@@ -84,6 +86,7 @@ fn write_partitioned(
     schema: Arc<Schema>,
     part_cfg: &crate::config::PartitionConfig,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let start_date = NaiveDate::parse_from_str(&part_cfg.start, "%Y-%m-%d")
         .with_context(|| format!("Invalid partition start date: {}", part_cfg.start))?;
@@ -119,13 +122,14 @@ fn write_partitioned(
     let days_vec: Vec<_> = (0..days)
         .map(|i| {
             let date = start_date + chrono::Duration::days(i as i64);
-            (date, day_seeds[i as usize])
+            let base_offset = i as usize * rows_per_day;
+            (date, day_seeds[i as usize], base_offset)
         })
         .collect();
 
     days_vec
         .par_iter()
-        .try_for_each(|(date, day_seed)| -> Result<()> {
+        .try_for_each(|(date, day_seed, base_offset)| -> Result<()> {
             let date_str = date.to_string();
             let partition_dir = output.join(format!("{}={}", part_cfg.column, date_str));
             fs::create_dir_all(&partition_dir)
@@ -146,6 +150,8 @@ fn write_partitioned(
                 entity_pool,
                 &config.columns,
                 Some((part_cfg.column.as_str(), date_str.as_str())),
+                *base_offset,
+                fk_counts,
             )?;
 
             let new_total = total_written.fetch_add(count, Ordering::SeqCst) + count;
@@ -169,6 +175,7 @@ fn write_single(
     output: &Path,
     schema: Arc<Schema>,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let entity_pool = config
         .entity
@@ -195,6 +202,8 @@ fn write_single(
         entity_pool.as_ref(),
         &config.columns,
         None,
+        0,
+        fk_counts,
     )?;
 
     if let Some(cb) = progress {
@@ -218,6 +227,8 @@ fn write_rows_to_file(
     entity_pool: Option<&crate::generic::EntityPool>,
     col_specs: &[crate::config::ColumnConfig],
     partition_col: Option<(&str, &str)>,
+    base_offset: usize,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let props = WriterProperties::builder()
         .set_compression(parquet::basic::Compression::SNAPPY)
@@ -234,7 +245,8 @@ fn write_rows_to_file(
 
         // Collect rows for this batch
         let rows: Vec<Vec<(String, GenericValue)>> = (0..batch_size)
-            .map(|_| {
+            .map(|i| {
+                let row_index = base_offset + written + i;
                 // Sample an entity row if a pool exists
                 let entity_row = entity_pool.map(|pool| {
                     let idx = (rng.next_u64() as usize) % pool.len();
@@ -246,6 +258,8 @@ fn write_rows_to_file(
                     entity_row,
                     col_specs,
                     partition_col,
+                    row_index,
+                    fk_counts,
                 )
             })
             .collect();
@@ -376,7 +390,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let output = tmp.path().to_str().unwrap().to_string();
         let config = make_simple_config(&output, 1000);
-        let count = write_generic_dataset(&config, 42, None).unwrap();
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
         assert_eq!(count, 1000);
         assert!(tmp.path().join("data.parquet").exists());
     }
@@ -402,7 +416,7 @@ mod tests {
                 generator: GeneratorSpec::Uuid,
             }],
         };
-        let count = write_generic_dataset(&config, 42, None).unwrap();
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
         assert!(count > 0);
         // Check partition dirs exist
         for i in 0..3 {
@@ -419,8 +433,8 @@ mod tests {
         let tmp2 = TempDir::new().unwrap();
         let config1 = make_simple_config(tmp1.path().to_str().unwrap(), 500);
         let config2 = make_simple_config(tmp2.path().to_str().unwrap(), 500);
-        write_generic_dataset(&config1, 42, None).unwrap();
-        write_generic_dataset(&config2, 42, None).unwrap();
+        write_generic_dataset(&config1, 42, None, &FkCounts::new()).unwrap();
+        write_generic_dataset(&config2, 42, None, &FkCounts::new()).unwrap();
         let bytes1 = std::fs::read(tmp1.path().join("data.parquet")).unwrap();
         let bytes2 = std::fs::read(tmp2.path().join("data.parquet")).unwrap();
         assert_eq!(bytes1, bytes2, "Output should be deterministic");

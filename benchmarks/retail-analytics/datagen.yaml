@@ -1,0 +1,283 @@
+seed: 42
+scale_factor: 1.0
+
+datasets:
+  # --- Dimension tables (listed first for FK resolution) ---
+
+  - name: customers
+    output: data/customers
+    num_rows: 100000
+    columns:
+      - name: customer_id
+        generator: { type: sequential_id }
+      - name: name_prefix
+        generator:
+          type: weighted_choice
+          values:
+            Mr: 0.35
+            Ms: 0.30
+            Mrs: 0.20
+            Dr: 0.05
+            Prof: 0.02
+            "": 0.08
+      - name: birth_year
+        generator: { type: uniform_int, min: 1950, max: 2005 }
+      - name: gender
+        generator:
+          type: weighted_choice
+          values:
+            M: 0.48
+            F: 0.48
+            Other: 0.04
+      - name: email_domain
+        generator:
+          type: weighted_choice
+          values:
+            gmail.com: 0.35
+            yahoo.com: 0.15
+            hotmail.com: 0.10
+            outlook.com: 0.10
+            icloud.com: 0.08
+            protonmail.com: 0.05
+            aol.com: 0.03
+            other: 0.14
+      - name: country
+        generator:
+          type: weighted_choice
+          values:
+            US: 0.40
+            UK: 0.12
+            DE: 0.10
+            FR: 0.08
+            CA: 0.07
+            AU: 0.05
+            JP: 0.04
+            BR: 0.03
+            IN: 0.03
+            Other: 0.08
+      - name: city
+        generator:
+          type: one_of
+          values: [New York, London, Berlin, Paris, Toronto, Sydney, Tokyo, Sao Paulo, Mumbai, Chicago, Los Angeles, Manchester, Munich, Lyon, Vancouver, Melbourne, Osaka, Rio de Janeiro, Delhi, Houston]
+      - name: signup_date
+        generator:
+          type: one_of
+          values: ["2020-01-15", "2020-03-22", "2020-06-10", "2020-09-05", "2021-01-18", "2021-04-30", "2021-07-12", "2021-10-25", "2022-02-14", "2022-05-08", "2022-08-19", "2022-11-30", "2023-01-05", "2023-04-17", "2023-07-22", "2023-10-01", "2024-01-10", "2024-03-15", "2024-06-20", "2024-09-01"]
+      - name: segment
+        generator:
+          type: weighted_choice
+          values:
+            Regular: 0.50
+            Premium: 0.25
+            VIP: 0.10
+            New: 0.15
+
+  - name: products
+    output: data/products
+    num_rows: 10000
+    columns:
+      - name: product_id
+        generator: { type: sequential_id }
+      - name: category
+        generator:
+          type: weighted_choice
+          values:
+            Electronics: 0.20
+            Clothing: 0.18
+            Home: 0.15
+            Sports: 0.12
+            Beauty: 0.10
+            Food: 0.08
+            Books: 0.07
+            Toys: 0.05
+            Garden: 0.03
+            Automotive: 0.02
+      - name: subcategory
+        generator:
+          type: one_of
+          values: [Smartphones, Laptops, Headphones, T-Shirts, Jeans, Dresses, Furniture, Kitchenware, Bedding, Running, Cycling, Camping, Skincare, Makeup, Haircare, Snacks, Beverages, Organic, Fiction, Nonfiction, Puzzles, Outdoor, Tools, Parts]
+      - name: brand_tier
+        generator:
+          type: weighted_choice
+          values:
+            Budget: 0.30
+            Mid-Range: 0.40
+            Premium: 0.20
+            Luxury: 0.10
+      - name: unit_price_cents
+        generator: { type: log_normal, median: 2500, sigma: 1.2, max: 500000 }
+      - name: weight_grams
+        generator: { type: log_normal, median: 500, sigma: 1.0, max: 50000 }
+      - name: is_digital
+        generator: { type: bool, prob: 0.15 }
+
+  - name: stores
+    output: data/stores
+    num_rows: 500
+    columns:
+      - name: store_id
+        generator: { type: sequential_id }
+      - name: store_type
+        generator:
+          type: weighted_choice
+          values:
+            online: 0.40
+            physical: 0.45
+            marketplace: 0.15
+      - name: region
+        generator:
+          type: one_of
+          values: [North America, Europe, Asia Pacific, Latin America, Middle East, Africa]
+      - name: country
+        generator:
+          type: weighted_choice
+          values:
+            US: 0.35
+            UK: 0.12
+            DE: 0.10
+            FR: 0.08
+            CA: 0.07
+            AU: 0.05
+            JP: 0.05
+            BR: 0.04
+            IN: 0.04
+            Other: 0.10
+      - name: store_size
+        generator:
+          type: weighted_choice
+          values:
+            Small: 0.30
+            Medium: 0.40
+            Large: 0.20
+            Flagship: 0.10
+
+  # --- Fact tables (reference dimension tables via foreign_key) ---
+
+  - name: orders
+    output: data/orders
+    num_rows: 1000000
+    partition:
+      column: order_date
+      start: "2024-07-01"
+      days: 90
+    columns:
+      - name: order_id
+        generator: { type: sequential_id }
+      - name: customer_id
+        generator: { type: foreign_key, dataset: customers }
+      - name: store_id
+        generator: { type: foreign_key, dataset: stores }
+      - name: status
+        generator:
+          type: weighted_choice
+          values:
+            completed: 0.70
+            shipped: 0.12
+            processing: 0.08
+            cancelled: 0.05
+            returned: 0.05
+      - name: payment_method
+        generator:
+          type: weighted_choice
+          values:
+            credit_card: 0.45
+            debit_card: 0.20
+            paypal: 0.15
+            apple_pay: 0.08
+            google_pay: 0.05
+            bank_transfer: 0.04
+            crypto: 0.03
+      - name: shipping_method
+        generator:
+          type: weighted_choice
+          values:
+            standard: 0.50
+            express: 0.25
+            next_day: 0.10
+            pickup: 0.10
+            digital: 0.05
+      - name: discount_pct
+        generator: { type: geometric, p: 0.3 }
+
+  - name: order_items
+    output: data/order_items
+    num_rows: 3000000
+    partition:
+      column: item_date
+      start: "2024-07-01"
+      days: 90
+    columns:
+      - name: order_item_id
+        generator: { type: sequential_id }
+      - name: order_id
+        generator: { type: foreign_key, dataset: orders }
+      - name: product_id
+        generator: { type: foreign_key, dataset: products }
+      - name: quantity
+        generator: { type: geometric, p: 0.5 }
+      - name: unit_price_cents
+        generator: { type: log_normal, median: 2500, sigma: 1.2, max: 500000 }
+      - name: return_flag
+        generator: { type: bool, prob: 0.08 }
+      - name: return_reason
+        generator:
+          type: optional
+          prob: 0.08
+          inner:
+            type: one_of
+            values: [Defective, Wrong Item, Changed Mind, Too Small, Too Large, Not As Described, Damaged in Shipping]
+
+  - name: web_events
+    output: data/web_events
+    num_rows: 5000000
+    partition:
+      column: event_date
+      start: "2024-07-01"
+      days: 90
+    columns:
+      - name: event_id
+        generator: { type: sequential_id }
+      - name: customer_id
+        generator: { type: foreign_key, dataset: customers }
+      - name: event_type
+        generator:
+          type: weighted_choice
+          values:
+            page_view: 0.50
+            product_view: 0.20
+            add_to_cart: 0.10
+            search: 0.08
+            checkout_start: 0.05
+            purchase: 0.04
+            wishlist_add: 0.03
+      - name: page_category
+        generator:
+          type: weighted_choice
+          values:
+            homepage: 0.15
+            product_listing: 0.25
+            product_detail: 0.20
+            cart: 0.10
+            checkout: 0.08
+            search_results: 0.08
+            account: 0.05
+            help: 0.04
+            blog: 0.05
+      - name: referrer_source
+        generator:
+          type: weighted_choice
+          values:
+            direct: 0.30
+            organic_search: 0.25
+            paid_search: 0.15
+            social: 0.12
+            email: 0.08
+            referral: 0.05
+            affiliate: 0.05
+      - name: device_type
+        generator:
+          type: weighted_choice
+          values:
+            mobile: 0.55
+            desktop: 0.35
+            tablet: 0.10

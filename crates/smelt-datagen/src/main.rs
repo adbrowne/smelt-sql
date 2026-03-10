@@ -35,6 +35,10 @@ struct Args {
     #[arg(long, default_value = "2024-01-01")]
     start_date: String,
 
+    /// Scale factor (multiplies each dataset's num_rows; overrides config value)
+    #[arg(long)]
+    scale_factor: Option<f64>,
+
     /// Quiet mode (no progress output)
     #[arg(short, long)]
     quiet: bool,
@@ -48,26 +52,70 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to read config {:?}: {}", config_path, e))?;
         let config: smelt_datagen::config::DatagenConfig = serde_yaml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
-        run_config(config, args.quiet)
+        run_config(config, args.scale_factor, args.quiet)
     } else {
         run_session_generator(args)
     }
 }
 
-fn run_config(config: smelt_datagen::config::DatagenConfig, quiet: bool) -> Result<()> {
+fn run_config(
+    config: smelt_datagen::config::DatagenConfig,
+    cli_scale_factor: Option<f64>,
+    quiet: bool,
+) -> Result<()> {
+    use smelt_datagen::config::{FkCounts, GeneratorSpec};
+
     let global_seed = config.seed.unwrap_or(42);
+    let scale_factor = cli_scale_factor.or(config.scale_factor).unwrap_or(1.0);
+
+    if !quiet {
+        println!("Scale factor: {}", scale_factor);
+    }
+
+    // Build FK resolution map: dataset name -> scaled row count
+    // Also validate that FK references only refer to previously-listed datasets
+    let mut fk_counts = FkCounts::new();
+    for dataset in &config.datasets {
+        // Validate FK references
+        for col in &dataset.columns {
+            if let GeneratorSpec::ForeignKey {
+                dataset: ref target,
+            } = col.generator
+            {
+                if !fk_counts.contains_key(target) {
+                    anyhow::bail!(
+                        "Dataset '{}' column '{}' references dataset '{}' via foreign_key, \
+                         but '{}' has not been listed yet. \
+                         Move it before '{}' in the config.",
+                        dataset.name,
+                        col.name,
+                        target,
+                        target,
+                        dataset.name,
+                    );
+                }
+            }
+        }
+        let scaled_rows = ((dataset.num_rows as f64) * scale_factor).round() as usize;
+        fk_counts.insert(dataset.name.clone(), scaled_rows);
+    }
 
     for dataset in &config.datasets {
+        let scaled_rows = ((dataset.num_rows as f64) * scale_factor).round() as usize;
+        // Create a scaled copy of the dataset config
+        let mut scaled_dataset = dataset.clone();
+        scaled_dataset.num_rows = scaled_rows;
+
         if !quiet {
             println!(
                 "Generating dataset '{}' ({} rows) -> {}",
-                dataset.name, dataset.num_rows, dataset.output
+                scaled_dataset.name, scaled_dataset.num_rows, scaled_dataset.output
             );
         }
 
         let start_time = Instant::now();
         let last_print = AtomicU64::new(0);
-        let total_rows = dataset.num_rows;
+        let total_rows = scaled_dataset.num_rows;
 
         let progress_fn = |current: usize, total: usize| {
             let elapsed = start_time.elapsed().as_secs();
@@ -91,8 +139,12 @@ fn run_config(config: smelt_datagen::config::DatagenConfig, quiet: bool) -> Resu
         let progress: Option<&(dyn Fn(usize, usize) + Sync)> =
             if quiet { None } else { Some(&progress_fn) };
 
-        let count =
-            smelt_datagen::generic_parquet::write_generic_dataset(dataset, global_seed, progress)?;
+        let count = smelt_datagen::generic_parquet::write_generic_dataset(
+            &scaled_dataset,
+            global_seed,
+            progress,
+            &fk_counts,
+        )?;
 
         let elapsed = start_time.elapsed();
 
@@ -104,7 +156,7 @@ fn run_config(config: smelt_datagen::config::DatagenConfig, quiet: bool) -> Resu
                 elapsed.as_secs_f64(),
                 count as f64 / elapsed.as_secs_f64(),
             );
-            let _ = total_rows; // suppress warning
+            let _ = total_rows;
         }
     }
 

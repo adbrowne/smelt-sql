@@ -3,10 +3,16 @@
 use arrow::datatypes::DataType;
 use indexmap::IndexMap;
 use serde::Deserialize;
+use std::collections::HashMap;
+
+/// Maps dataset name to its scaled row count. Used by `ForeignKey` to resolve
+/// the target dimension size without storing any generated values.
+pub type FkCounts = HashMap<String, usize>;
 
 #[derive(Debug, Deserialize)]
 pub struct DatagenConfig {
     pub seed: Option<u64>,
+    pub scale_factor: Option<f64>,
     pub datasets: Vec<DatasetConfig>,
 }
 
@@ -78,6 +84,10 @@ pub enum GeneratorSpec {
         prob: f64,
         inner: Box<GeneratorSpec>,
     },
+    SequentialId,
+    ForeignKey {
+        dataset: String,
+    },
 }
 
 impl GeneratorSpec {
@@ -97,6 +107,8 @@ impl GeneratorSpec {
             GeneratorSpec::Geometric { .. } => DataType::Int32,
             GeneratorSpec::Bool { .. } => DataType::Boolean,
             GeneratorSpec::Optional { inner, .. } => inner.arrow_type(),
+            GeneratorSpec::SequentialId => DataType::Int32,
+            GeneratorSpec::ForeignKey { .. } => DataType::Int32,
         }
     }
 
