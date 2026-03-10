@@ -27,12 +27,13 @@ pub struct EntityPool {
 
 impl EntityPool {
     pub fn new(seed: u64, count: usize, col_specs: &[ColumnConfig]) -> Self {
+        let empty_fk = std::collections::HashMap::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let rows = (0..count)
-            .map(|_| {
+            .map(|i| {
                 col_specs
                     .iter()
-                    .map(|c| apply_spec(&mut rng, &c.generator))
+                    .map(|c| apply_spec(&mut rng, &c.generator, i, &empty_fk))
                     .collect()
             })
             .collect();
@@ -54,12 +55,17 @@ impl EntityPool {
 /// 1. entity columns (if `entity_row` is provided)
 /// 2. regular columns from `col_specs`
 /// 3. partition column (if provided)
+///
+/// `row_index` is the global row index (0-based), used by `SequentialId`.
+/// `fk_counts` maps dataset names to their scaled row counts, used by `ForeignKey`.
 pub fn generate_row(
     rng: &mut impl RngCore,
     entity_col_specs: &[ColumnConfig],
     entity_row: Option<&[GenericValue]>,
     col_specs: &[ColumnConfig],
     partition_col: Option<(&str, &str)>,
+    row_index: usize,
+    fk_counts: &std::collections::HashMap<String, usize>,
 ) -> Vec<(String, GenericValue)> {
     let mut row = Vec::new();
 
@@ -72,7 +78,7 @@ pub fn generate_row(
 
     // Regular columns
     for col in col_specs {
-        let value = apply_spec(rng, &col.generator);
+        let value = apply_spec(rng, &col.generator, row_index, fk_counts);
         row.push((col.name.clone(), value));
     }
 
@@ -94,7 +100,12 @@ pub fn make_entity_pool(seed: u64, num_rows: usize, entity_cfg: &EntityConfig) -
 }
 
 /// Map a [`GeneratorSpec`] to a concrete [`GenericValue`] using `rng`.
-pub fn apply_spec(rng: &mut impl RngCore, spec: &GeneratorSpec) -> GenericValue {
+pub fn apply_spec(
+    rng: &mut impl RngCore,
+    spec: &GeneratorSpec,
+    row_index: usize,
+    fk_counts: &std::collections::HashMap<String, usize>,
+) -> GenericValue {
     match spec {
         GeneratorSpec::Uuid => {
             let id = uuid_gen().generate(rng);
@@ -141,10 +152,16 @@ pub fn apply_spec(rng: &mut impl RngCore, spec: &GeneratorSpec) -> GenericValue 
         GeneratorSpec::Optional { prob, inner } => {
             let r = (rng.next_u64() as f64) / (u64::MAX as f64);
             if r < *prob {
-                apply_spec(rng, inner)
+                apply_spec(rng, inner, row_index, fk_counts)
             } else {
                 GenericValue::Null
             }
+        }
+        GeneratorSpec::SequentialId => GenericValue::Int((row_index + 1) as i32),
+        GeneratorSpec::ForeignKey { dataset } => {
+            let count = fk_counts.get(dataset).copied().unwrap_or(1) as u64;
+            let id = (rng.next_u64() % count) + 1;
+            GenericValue::Int(id as i32)
         }
     }
 }
