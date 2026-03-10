@@ -1,4 +1,4 @@
--- Generated calendar dimension (date spine)
+-- Calendar dimension (sample dates via UNION ALL; parser lacks generate_series support)
 WITH date_spine AS (
     SELECT CAST('2024-07-01' AS DATE) AS calendar_date
     UNION ALL SELECT CAST('2024-07-02' AS DATE)

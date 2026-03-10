@@ -1,4 +1,4 @@
--- Customer web activity summary using BETWEEN, IN, and EXISTS
+-- Customer web activity summary using BETWEEN, IN, and conditional aggregation
 SELECT
     w.customer_id,
     c.segment AS customer_segment,

@@ -1,4 +1,4 @@
--- Anomaly detection using AVG OVER frame and BETWEEN
+-- Anomaly detection using AVG OVER rolling frame and ratio filtering
 WITH daily_revenue AS (
     SELECT
         order_date,

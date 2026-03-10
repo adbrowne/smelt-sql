@@ -63,8 +63,7 @@ fn run_config(
     cli_scale_factor: Option<f64>,
     quiet: bool,
 ) -> Result<()> {
-    use smelt_datagen::config::GeneratorSpec;
-    use std::collections::HashMap;
+    use smelt_datagen::config::{FkCounts, GeneratorSpec};
 
     let global_seed = config.seed.unwrap_or(42);
     let scale_factor = cli_scale_factor.or(config.scale_factor).unwrap_or(1.0);
@@ -75,7 +74,7 @@ fn run_config(
 
     // Build FK resolution map: dataset name -> scaled row count
     // Also validate that FK references only refer to previously-listed datasets
-    let mut fk_counts: HashMap<String, usize> = HashMap::new();
+    let mut fk_counts = FkCounts::new();
     for dataset in &config.datasets {
         // Validate FK references
         for col in &dataset.columns {

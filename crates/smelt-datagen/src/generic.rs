@@ -1,6 +1,6 @@
 //! Generic value types and row generation driven by [`GeneratorSpec`].
 
-use crate::config::{ColumnConfig, EntityConfig, GeneratorSpec};
+use crate::config::{ColumnConfig, EntityConfig, FkCounts, GeneratorSpec};
 use crate::gen::Gen;
 use crate::generators::{
     bool_with_prob, geometric, log_normal, one_of, uniform, uuid_gen, weighted_choice,
@@ -27,7 +27,7 @@ pub struct EntityPool {
 
 impl EntityPool {
     pub fn new(seed: u64, count: usize, col_specs: &[ColumnConfig]) -> Self {
-        let empty_fk = std::collections::HashMap::new();
+        let empty_fk = FkCounts::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let rows = (0..count)
             .map(|i| {
@@ -65,7 +65,7 @@ pub fn generate_row(
     col_specs: &[ColumnConfig],
     partition_col: Option<(&str, &str)>,
     row_index: usize,
-    fk_counts: &std::collections::HashMap<String, usize>,
+    fk_counts: &FkCounts,
 ) -> Vec<(String, GenericValue)> {
     let mut row = Vec::new();
 
@@ -104,7 +104,7 @@ pub fn apply_spec(
     rng: &mut impl RngCore,
     spec: &GeneratorSpec,
     row_index: usize,
-    fk_counts: &std::collections::HashMap<String, usize>,
+    fk_counts: &FkCounts,
 ) -> GenericValue {
     match spec {
         GeneratorSpec::Uuid => {

@@ -1,4 +1,4 @@
--- Channel attribution with subquery in FROM
+-- Channel attribution with subqueries in FROM and multi-table JOIN
 SELECT
     referrer_source,
     device_type,

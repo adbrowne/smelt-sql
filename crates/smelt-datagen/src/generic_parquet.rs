@@ -1,6 +1,6 @@
 //! Dynamic Parquet writer for YAML-configured datasets.
 
-use crate::config::DatasetConfig;
+use crate::config::{DatasetConfig, FkCounts};
 use crate::generic::{generate_row, make_entity_pool, GenericValue};
 use anyhow::{Context, Result};
 use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, StringBuilder};
@@ -28,7 +28,7 @@ pub fn write_generic_dataset(
     config: &DatasetConfig,
     global_seed: u64,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
-    fk_counts: &std::collections::HashMap<String, usize>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let seed = config.seed.unwrap_or(global_seed);
     let output = Path::new(&config.output);
@@ -86,7 +86,7 @@ fn write_partitioned(
     schema: Arc<Schema>,
     part_cfg: &crate::config::PartitionConfig,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
-    fk_counts: &std::collections::HashMap<String, usize>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let start_date = NaiveDate::parse_from_str(&part_cfg.start, "%Y-%m-%d")
         .with_context(|| format!("Invalid partition start date: {}", part_cfg.start))?;
@@ -175,7 +175,7 @@ fn write_single(
     output: &Path,
     schema: Arc<Schema>,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
-    fk_counts: &std::collections::HashMap<String, usize>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let entity_pool = config
         .entity
@@ -228,7 +228,7 @@ fn write_rows_to_file(
     col_specs: &[crate::config::ColumnConfig],
     partition_col: Option<(&str, &str)>,
     base_offset: usize,
-    fk_counts: &std::collections::HashMap<String, usize>,
+    fk_counts: &FkCounts,
 ) -> Result<usize> {
     let props = WriterProperties::builder()
         .set_compression(parquet::basic::Compression::SNAPPY)
@@ -390,8 +390,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let output = tmp.path().to_str().unwrap().to_string();
         let config = make_simple_config(&output, 1000);
-        let count =
-            write_generic_dataset(&config, 42, None, &std::collections::HashMap::new()).unwrap();
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
         assert_eq!(count, 1000);
         assert!(tmp.path().join("data.parquet").exists());
     }
@@ -417,8 +416,7 @@ mod tests {
                 generator: GeneratorSpec::Uuid,
             }],
         };
-        let count =
-            write_generic_dataset(&config, 42, None, &std::collections::HashMap::new()).unwrap();
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
         assert!(count > 0);
         // Check partition dirs exist
         for i in 0..3 {
@@ -435,8 +433,8 @@ mod tests {
         let tmp2 = TempDir::new().unwrap();
         let config1 = make_simple_config(tmp1.path().to_str().unwrap(), 500);
         let config2 = make_simple_config(tmp2.path().to_str().unwrap(), 500);
-        write_generic_dataset(&config1, 42, None, &std::collections::HashMap::new()).unwrap();
-        write_generic_dataset(&config2, 42, None, &std::collections::HashMap::new()).unwrap();
+        write_generic_dataset(&config1, 42, None, &FkCounts::new()).unwrap();
+        write_generic_dataset(&config2, 42, None, &FkCounts::new()).unwrap();
         let bytes1 = std::fs::read(tmp1.path().join("data.parquet")).unwrap();
         let bytes2 = std::fs::read(tmp2.path().join("data.parquet")).unwrap();
         assert_eq!(bytes1, bytes2, "Output should be deterministic");

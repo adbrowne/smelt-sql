@@ -1,4 +1,4 @@
--- Inventory turnover with RANGE frame and LAG/LEAD
+-- Inventory turnover with LAG/LEAD and rolling ROWS frame
 SELECT
     p.product_id,
     p.category,

@@ -3,6 +3,11 @@
 use arrow::datatypes::DataType;
 use indexmap::IndexMap;
 use serde::Deserialize;
+use std::collections::HashMap;
+
+/// Maps dataset name to its scaled row count. Used by `ForeignKey` to resolve
+/// the target dimension size without storing any generated values.
+pub type FkCounts = HashMap<String, usize>;
 
 #[derive(Debug, Deserialize)]
 pub struct DatagenConfig {

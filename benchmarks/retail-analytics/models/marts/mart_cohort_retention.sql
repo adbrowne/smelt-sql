@@ -1,15 +1,10 @@
--- Cohort retention analysis with CTE chain, FIRST_VALUE, and CROSS JOIN
+-- Cohort retention analysis with CTE chain (3+) and date arithmetic
 WITH cohort_base AS (
     SELECT
         customer_id,
         MIN(order_date) AS cohort_date
     FROM smelt.ref('int_order_enriched')
     GROUP BY customer_id
-),
-
-periods AS (
-    SELECT DISTINCT order_date AS period_date
-    FROM smelt.ref('int_order_enriched')
 ),
 
 cohort_activity AS (

@@ -1,4 +1,5 @@
 -- Staged order items with price conversion and return handling
+-- Note: uses 'N/A' instead of NULL because the parser does not yet support NULL as an expression
 SELECT
     order_item_id,
     order_id,

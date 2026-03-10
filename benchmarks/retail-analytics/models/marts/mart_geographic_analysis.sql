@@ -1,4 +1,4 @@
--- Geographic analysis with DISTINCT and ORDER BY expression
+-- Geographic analysis with aggregation and ORDER BY expression
 SELECT DISTINCT
     c.country,
     c.city,
