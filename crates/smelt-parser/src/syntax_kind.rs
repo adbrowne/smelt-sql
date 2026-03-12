@@ -94,7 +94,6 @@ pub enum SyntaxKind {
     MULTIPLY,     // * (same as STAR, but in expression context)
     DIVIDE,       // /
     ARROW,        // => (named parameter)
-    THIN_ARROW,   // -> (lambda)
     DOUBLE_COLON, // :: (PostgreSQL cast operator)
     CONCAT,       // || (string concatenation)
     LBRACKET,     // [

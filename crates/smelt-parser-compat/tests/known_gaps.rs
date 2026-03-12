@@ -85,11 +85,11 @@ fn test_gap_summary() {
 // ===== Tests for smelt_fails gaps (PostgreSQL features not in smelt) =====
 
 #[test]
-fn test_gap_array_subscript() {
-    // Array subscript notation
-    assert_smelt_fails_pg_succeeds("SELECT arr[1] FROM t", "array_subscript");
-    assert_smelt_fails_pg_succeeds("SELECT arr[1:3] FROM t", "array_subscript");
-    assert_smelt_fails_pg_succeeds("SELECT matrix[1][2] FROM t", "array_subscript");
+fn test_array_subscript_now_supported() {
+    // Array subscript notation is now supported (March 2026)
+    assert_both_succeed("SELECT arr[1] FROM t", "array_subscript");
+    assert_both_succeed("SELECT arr[1:3] FROM t", "array_subscript_slice");
+    assert_both_succeed("SELECT matrix[1][2] FROM t", "array_subscript_chained");
 }
 
 #[test]
@@ -331,7 +331,7 @@ fn test_smelt_extensions_valid_pg_syntax() {
 #[test]
 fn test_gap_pattern_detection() {
     // Verify the gap detection patterns work correctly for actual gaps
-    assert!(gaps::is_known_gap("SELECT arr[1] FROM t", "smelt_fails"));
+    // array_subscript removed - now supported (March 2026)
     assert!(gaps::is_known_gap(
         "SELECT data->>'name' FROM t",
         "smelt_fails"
@@ -342,8 +342,7 @@ fn test_gap_pattern_detection() {
 
 #[test]
 fn test_get_matching_gaps() {
-    let gaps = gaps::get_matching_gaps("SELECT arr[1], data->>'name' FROM t");
-    assert!(gaps.contains(&"array_subscript"));
+    let gaps = gaps::get_matching_gaps("SELECT data->>'name' FROM t");
     assert!(gaps.contains(&"json_operators"));
 }
 

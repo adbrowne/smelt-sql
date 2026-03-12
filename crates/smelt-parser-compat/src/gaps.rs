@@ -183,7 +183,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "lambda_expressions",
         description: "Lambda expressions in function arguments: x -> expr, (x, y) -> expr",
         category: "pg_fails",
-        patterns: &[r"\w+\s*->"],
+        patterns: &[r"(?i)\b(TRANSFORM|AGGREGATE|FILTER)\s*\([^)]*\w+\s*->"],
         severity: "low",
         planned_fix: false,
     },

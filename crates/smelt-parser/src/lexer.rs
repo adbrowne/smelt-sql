@@ -74,11 +74,6 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 PLUS
             }
-            '-' if self.peek_char() == Some('>') => {
-                self.advance();
-                self.advance();
-                THIN_ARROW
-            }
             '-' => {
                 self.advance();
                 MINUS

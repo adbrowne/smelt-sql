@@ -1468,6 +1468,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Check if current position starts a single-param lambda: ident ->
+    /// Lambda arrow is MINUS GT (two adjacent tokens with no space between)
     fn is_lambda_single_param(&self) -> bool {
         let mut lookahead = 1;
         while let Some(token) = self.tokens.get(self.pos + lookahead) {
@@ -1477,10 +1478,14 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.tokens
-            .get(self.pos + lookahead)
-            .map(|t| t.kind == THIN_ARROW)
-            .unwrap_or(false)
+        self.is_thin_arrow_at(lookahead)
+    }
+
+    /// Check if tokens at pos+offset and pos+offset+1 form -> (MINUS GT with no space)
+    fn is_thin_arrow_at(&self, offset: usize) -> bool {
+        let minus = self.tokens.get(self.pos + offset);
+        let gt = self.tokens.get(self.pos + offset + 1);
+        matches!((minus, gt), (Some(m), Some(g)) if m.kind == MINUS && g.kind == GT)
     }
 
     /// Check if current position starts a multi-param lambda: (ident, ident) ->
@@ -1557,11 +1562,8 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Must be THIN_ARROW
-        self.tokens
-            .get(self.pos + lookahead)
-            .map(|t| t.kind == THIN_ARROW)
-            .unwrap_or(false)
+        // Must be -> (MINUS GT)
+        self.is_thin_arrow_at(lookahead)
     }
 
     fn parse_lambda_expr(&mut self) {
@@ -1595,7 +1597,9 @@ impl<'a> Parser<'a> {
         }
 
         self.skip_trivia();
-        self.expect(THIN_ARROW);
+        // Consume -> as MINUS GT
+        self.expect(MINUS);
+        self.expect(GT);
         self.skip_trivia();
         self.parse_expression();
 
