@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Smelt SQL Multi-Dialect Superset (March 12, 2026)**: Defining smelt SQL as a logical SQL superset — PostgreSQL base with cherry-picked features from DuckDB and Spark. Phase 4a-4e: QUALIFY clause, lambda expressions/array functions, PIVOT/UNPIVOT, array subscript notation, DATE literal normalization. Parser-level features with backend-specific rewrite rules.
+
 **Python Model Support - Phase 3 LSP + Performance (March 9, 2026)**: Content-hash caching for Python model subprocess results (persisted to `.smelt/python_cache.json`), `.py` file watching with dynamic LSP watcher registration, Python execution error diagnostics surfaced in the editor, and background subprocess execution with last-known-good fallback on failure.
 
 **Python Model Support - Phase 1 (March 8, 2026)**: Python models as an escape hatch for programmatic model generation. Python functions decorated with `@model` return SQL strings that get parsed by the existing smelt parser. Includes: Python SDK (`python/smelt/`), subprocess protocol with JSON I/O, `@model` decorator scanning, iterative discovery with fixed-point validation, full ref extraction from generated SQL, mixed SQL/Python dependency graphs, LSP awareness (Python models as valid ref targets), and comprehensive tests. Python config via `SMELT_PYTHON` env var or `python` field in `smelt.yml`.
@@ -1132,72 +1134,63 @@ All 38 tests passing (5 DuckDB + 2 Spark + 18 CLI + 10 db + 3 parser).
 
 ---
 
-## ⏸️ Phase 4: Dialect Handling (DEFERRED)
+## ✅ Phase 4: Smelt SQL — Multi-Dialect Superset (COMPLETED March 12, 2026)
 
-**Status**: Deferred - architecture proven, implementation not urgent
+**Status**: Parser extensions complete for all 5 sub-phases. Backend rewrite rules are deferred to future work.
 
-### Why Deferred
+### Philosophy
 
-The multi-backend architecture is now validated with DuckDB (working) and Spark (stub). Dialect handling can be implemented when needed for real Spark integration or additional backends.
+Smelt SQL is a **logical SQL superset** built on a PostgreSQL-compatible base, cherry-picking the best syntax from multiple dialects. Users write clean, expressive SQL; smelt rewrites it to the target backend's dialect automatically. This aligns with smelt's core design: users specify *what* to compute, the framework handles *how*.
 
-### What Would Be Implemented
+- PostgreSQL remains the baseline (validated by `smelt-parser-compat` / `pg_query`)
+- Extensions are added when they provide a clear DX improvement
+- Trailing commas (DuckDB-style) are already accepted as the first such extension
+- Each new feature needs: parser support, CST printing, pg_query gap tracking (if non-PG), and backend rewrite rules where applicable
 
-**Dialect-aware SQL rewriting**:
-- Automatic rewriting for safe transformations
-  - Date literal syntax: DuckDB `DATE '2024-01-01'` → Spark `DATE('2024-01-01')`
-  - String concatenation normalization
-  - Function name translations
+### Sub-phases
 
-- Error on impossible transformations
-  - DuckDB QUALIFY → Spark (no direct equivalent)
-  - Backend-specific functions with no translation
+#### ✅ Phase 4a: QUALIFY clause (COMPLETED March 12, 2026)
 
-- Opt-in rewriting for risky transformations
-  - User annotations like `-- @allow_rewrite: qualify`
-  - Transforms that might change semantics or performance
-  - QUALIFY → subquery rewrite (adds overhead)
+**What**: `QUALIFY` clause after `HAVING` for filtering on window function results. New `QUALIFY_KW` keyword, `QUALIFY_CLAUSE` node, `QualifyClause` AST wrapper, printer support, pg_query gap entry. Parser tests + round-trip tests.
 
-**Implementation approach**:
-```rust
-// In smelt-backend crate
-pub trait SqlRewriter {
-    fn rewrite(&self, sql: &str, from: SqlDialect, to: SqlDialect) -> Result<String>;
-}
+---
 
-// Safe rewrites (automatic)
-pub struct SafeRewriter;
+#### ✅ Phase 4b: Lambda expressions and array functions (COMPLETED March 12, 2026)
 
-// Opt-in rewrites (requires annotations)
-pub struct OptInRewriter;
-```
+**What**: Lambda arrow syntax (`->`) for function arguments. New `THIN_ARROW` token, `LAMBDA_EXPR`/`LAMBDA_PARAM_LIST` nodes, `LambdaExpr` AST wrapper. Supports single-param (`x -> x + 1`) and multi-param (`(acc, x) -> acc + x`). Disambiguates `(a, b) -> expr` from parenthesized expression via lookahead. Keywords like `FILTER` can now be used as function names when followed by `(`. pg_query gap entry added.
 
-### Dialect Differences to Handle
+---
 
-| Feature | DuckDB | Spark SQL | Translation |
-|---------|--------|-----------|-------------|
-| Date literal | `DATE '2024-01-01'` | `DATE('2024-01-01')` | ✅ Auto |
-| String concat | `\|\|` | `CONCAT()` or `\|\|` | ✅ Auto |
-| QUALIFY | ✅ Native | ❌ None | ❌ Error or 🔄 Opt-in subquery |
-| MERGE | ✅ Native | ✅ Delta Lake | ✅ Check capability |
-| Array literal | `[1, 2, 3]` | `ARRAY(1, 2, 3)` | ✅ Auto |
-| CREATE OR REPLACE TABLE | ✅ | ❌ | 🔄 DROP + CREATE |
+#### ✅ Phase 4c: PIVOT / UNPIVOT (COMPLETED March 12, 2026)
 
-### Files to Create/Modify
+**What**: PIVOT/UNPIVOT clauses on table references. New `PIVOT_KW`/`UNPIVOT_KW` keywords, `PIVOT_CLAUSE`/`UNPIVOT_CLAUSE`/`PIVOT_IN_LIST` nodes, `PivotClause`/`UnpivotClause` AST wrappers. Parsed after table ref (alongside TABLESAMPLE). Supports aggregate expressions, FOR column, and IN value lists. pg_query gap entry added.
 
-- `crates/smelt-backend/src/rewrite.rs` - Rewriting framework
-- `crates/smelt-backend/src/dialect.rs` - Dialect-specific rules
-- `crates/smelt-parser/` - Parse `@allow_rewrite` annotations
-- `crates/smelt-cli/src/compiler.rs` - Integrate rewriter
+---
 
-### Effort
+#### ✅ Phase 4d: Array subscript notation (COMPLETED March 12, 2026)
 
-Medium - requires parser updates, rewriting framework, comprehensive testing
+**What**: Postfix `[expr]` subscript and `[expr:expr]` slice syntax. New `LBRACKET`/`RBRACKET`/`COLON` tokens, `ARRAY_SUBSCRIPT`/`ARRAY_SLICE` nodes, `ArraySubscript`/`ArraySlice` AST wrappers. Supports chaining (`matrix[1][2]`) and on function results (`ARRAY(1,2,3)[1]`). Closed `array_subscript` gap in `gaps.rs`.
 
-### When to Implement
+---
 
-- When adding real Spark Connect integration
-- When users need to run same models on multiple backends
-- When adding backends with significant dialect differences (BigQuery, Snowflake)
+#### ✅ Phase 4e: DATE literal normalization (COMPLETED March 12, 2026)
+
+**What**: Type keywords (DATE, TIME, TIMESTAMP, INTERVAL) followed by string literals are now recognized as typed literals. Both `DATE '2024-01-01'` and `DATE('2024-01-01')` parse correctly. The former is a typed literal, the latter a function call — both are valid in the AST.
+
+---
+
+### Dialect Rewrite Summary
+
+| Feature | Smelt SQL | DuckDB | Spark | PostgreSQL |
+|---------|-----------|--------|-------|------------|
+| QUALIFY | ✅ Native | ✅ Pass-through | 🔄 Subquery wrap | 🔄 Subquery wrap |
+| Lambda `->` | ✅ Native | ✅ Pass-through | ✅ Pass-through | ❌ Error (no support) |
+| EXPLODE/UNNEST | ✅ Both accepted | 🔄 → UNNEST | 🔄 → EXPLODE | 🔄 → UNNEST |
+| PIVOT | ✅ Native | ✅ Pass-through | ✅ Pass-through | ❌ Error or crosstab |
+| Array subscript | ✅ Native | ✅ Pass-through | ✅ Pass-through | ✅ Pass-through |
+| DATE literal | ✅ Both forms | 🔄 → `DATE '...'` | 🔄 → `DATE('...')` | 🔄 → `DATE '...'` |
+| `::` cast | ✅ Native | ✅ Pass-through | 🔄 → `CAST()` | ✅ Pass-through |
+| Trailing commas | ✅ Accepted | ✅ Pass-through | ❌ Error | ❌ Error |
 
 ---
 

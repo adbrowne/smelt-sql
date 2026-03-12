@@ -72,6 +72,10 @@ pub enum SyntaxKind {
     REPEATABLE_KW,
     // Phase 15: Aggregate function keywords
     FILTER_KW,
+    // Multi-dialect superset keywords
+    QUALIFY_KW,
+    PIVOT_KW,
+    UNPIVOT_KW,
 
     // Operators & punctuation
     LPAREN,       // (
@@ -92,6 +96,9 @@ pub enum SyntaxKind {
     ARROW,        // => (named parameter)
     DOUBLE_COLON, // :: (PostgreSQL cast operator)
     CONCAT,       // || (string concatenation)
+    LBRACKET,     // [
+    RBRACKET,     // ]
+    COLON,        // : (used in array slices)
 
     // Literals & identifiers
     STRING,     // 'value' or "value"
@@ -143,6 +150,15 @@ pub enum SyntaxKind {
     TABLESAMPLE_CLAUSE, // TABLESAMPLE method (percentage) REPEATABLE (seed)
     // Phase 15: Aggregate function nodes
     FILTER_CLAUSE, // FILTER (WHERE condition)
+    // Multi-dialect superset nodes
+    QUALIFY_CLAUSE,    // QUALIFY expression
+    LAMBDA_EXPR,       // x -> expr or (x, y) -> expr
+    LAMBDA_PARAM_LIST, // Parameter list in lambda
+    PIVOT_CLAUSE,      // PIVOT (agg FOR col IN (...))
+    UNPIVOT_CLAUSE,    // UNPIVOT (val FOR name IN (...))
+    PIVOT_IN_LIST,     // IN list for PIVOT/UNPIVOT
+    ARRAY_SUBSCRIPT,   // expr[expr]
+    ARRAY_SLICE,       // expr[expr:expr]
 
     // Error handling
     ERROR, // Invalid syntax
@@ -219,6 +235,9 @@ impl SyntaxKind {
                 | SYSTEM_KW
                 | REPEATABLE_KW
                 | FILTER_KW
+                | QUALIFY_KW
+                | PIVOT_KW
+                | UNPIVOT_KW
         )
     }
 
