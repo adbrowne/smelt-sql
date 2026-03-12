@@ -128,6 +128,11 @@ impl Display for SelectStmt {
             write!(f, " HAVING {}", having_clause)?;
         }
 
+        // QUALIFY clause
+        if let Some(qualify_clause) = self.qualify_clause() {
+            write!(f, " QUALIFY {}", qualify_clause)?;
+        }
+
         // ORDER BY clause
         if let Some(order_by_clause) = self.order_by_clause() {
             write!(f, " {}", order_by_clause)?;
@@ -276,6 +281,15 @@ impl Display for JoinCondition {
 }
 
 impl Display for HavingClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(expr) = self.expression() {
+            write!(f, "{}", expr.text())?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for QualifyClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(expr) = self.expression() {
             write!(f, "{}", expr.text())?;
@@ -469,6 +483,31 @@ impl Display for Subquery {
             write!(f, "{}", select)?;
         }
         write!(f, ")")?;
+        Ok(())
+    }
+}
+
+// ===== Lambda Expressions =====
+
+impl Display for LambdaExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let params = self.params();
+        if params.len() == 1 {
+            write!(f, "{}", params[0])?;
+        } else {
+            write!(f, "(")?;
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", p)?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, " -> ")?;
+        if let Some(body) = self.body() {
+            write!(f, "{}", body.text())?;
+        }
         Ok(())
     }
 }
@@ -711,6 +750,33 @@ mod tests {
     #[test]
     fn test_mixed_case_and_or() {
         assert_round_trip("SELECT * FROM users WHERE a = 1 AnD b = 2 oR c = 3");
+    }
+
+    // QUALIFY round-trip
+    #[test]
+    fn test_qualify_round_trip() {
+        assert_round_trip("SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t QUALIFY rn = 1");
+    }
+
+    #[test]
+    fn test_qualify_with_having_round_trip() {
+        assert_round_trip("SELECT city, COUNT(*) FROM t GROUP BY city HAVING COUNT(*) > 1 QUALIFY ROW_NUMBER() OVER (ORDER BY city) = 1");
+    }
+
+    // Array subscript round-trip
+    #[test]
+    fn test_array_subscript_round_trip() {
+        assert_round_trip("SELECT arr[1] FROM t");
+    }
+
+    #[test]
+    fn test_array_slice_round_trip() {
+        assert_round_trip("SELECT arr[1:3] FROM t");
+    }
+
+    #[test]
+    fn test_date_literal_round_trip() {
+        assert_round_trip("SELECT * FROM t WHERE d = DATE '2024-01-01'");
     }
 
     // UNION ALL printing test

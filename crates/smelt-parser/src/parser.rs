@@ -159,8 +159,9 @@ impl<'a> Parser<'a> {
     fn at_keyword_that_ends_table_ref(&self) -> bool {
         // Keywords that can follow a table reference in the FROM clause
         self.at_any(&[
-            WHERE_KW, GROUP_KW, HAVING_KW, ORDER_KW, LIMIT_KW, // JOIN keywords
-            JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW,
+            WHERE_KW, GROUP_KW, HAVING_KW, QUALIFY_KW, ORDER_KW, LIMIT_KW, // JOIN keywords
+            JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, // PIVOT/UNPIVOT
+            PIVOT_KW, UNPIVOT_KW,
         ])
     }
 
@@ -263,6 +264,12 @@ impl<'a> Parser<'a> {
             self.parse_having_clause();
         }
 
+        // QUALIFY clause (after HAVING, before ORDER BY)
+        self.skip_trivia();
+        if self.at(QUALIFY_KW) {
+            self.parse_qualify_clause();
+        }
+
         // ORDER BY clause
         self.skip_trivia();
         if self.at(ORDER_KW) {
@@ -317,8 +324,8 @@ impl<'a> Parser<'a> {
                 self.skip_trivia();
                 // Allow trailing comma - break if next token ends the SELECT list
                 if self.at_any(&[
-                    FROM_KW, WHERE_KW, GROUP_KW, HAVING_KW, ORDER_KW, LIMIT_KW, EOF, INNER_KW,
-                    LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, JOIN_KW,
+                    FROM_KW, WHERE_KW, GROUP_KW, HAVING_KW, QUALIFY_KW, ORDER_KW, LIMIT_KW, EOF,
+                    INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, JOIN_KW,
                 ]) {
                     break;
                 }
@@ -470,6 +477,14 @@ impl<'a> Parser<'a> {
             self.finish_node(); // TABLESAMPLE_CLAUSE
         }
 
+        // Optional PIVOT/UNPIVOT clause
+        self.skip_trivia();
+        if self.at(PIVOT_KW) {
+            self.parse_pivot_clause();
+        } else if self.at(UNPIVOT_KW) {
+            self.parse_unpivot_clause();
+        }
+
         // Optional AS alias (explicit with AS keyword or implicit)
         self.skip_trivia();
         if self.at(AS_KW) {
@@ -482,6 +497,108 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
+        self.finish_node();
+    }
+
+    fn parse_pivot_clause(&mut self) {
+        self.start_node(PIVOT_CLAUSE);
+        self.expect(PIVOT_KW);
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        // Parse aggregate expression(s): SUM(amount), COUNT(*)
+        self.skip_trivia();
+        self.parse_expression();
+
+        // FOR column
+        self.skip_trivia();
+        // FOR is not a keyword in our lexer, so it's parsed as IDENT
+        if self.at(IDENT) {
+            // Check if text is "FOR"
+            let token = self.tokens[self.pos];
+            let text = &self.input[self.offset..self.offset + token.len];
+            if text.eq_ignore_ascii_case("FOR") {
+                self.advance(); // FOR
+                self.skip_trivia();
+                self.parse_expression(); // column name
+            }
+        }
+
+        // IN (values...)
+        self.skip_trivia();
+        if self.at(IN_KW) {
+            self.parse_pivot_in_list();
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    fn parse_unpivot_clause(&mut self) {
+        self.start_node(UNPIVOT_CLAUSE);
+        self.expect(UNPIVOT_KW);
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        // Value column name
+        self.skip_trivia();
+        self.parse_expression();
+
+        // FOR name column
+        self.skip_trivia();
+        if self.at(IDENT) {
+            let token = self.tokens[self.pos];
+            let text = &self.input[self.offset..self.offset + token.len];
+            if text.eq_ignore_ascii_case("FOR") {
+                self.advance(); // FOR
+                self.skip_trivia();
+                self.parse_expression(); // name column
+            }
+        }
+
+        // IN (columns...)
+        self.skip_trivia();
+        if self.at(IN_KW) {
+            self.parse_pivot_in_list();
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    fn parse_pivot_in_list(&mut self) {
+        self.start_node(PIVOT_IN_LIST);
+        self.expect(IN_KW);
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.finish_node();
+            return;
+        }
+
+        // Parse comma-separated values/columns
+        loop {
+            self.skip_trivia();
+            if self.at(RPAREN) {
+                break;
+            }
+            self.parse_expression();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.expect(RPAREN);
         self.finish_node();
     }
 
@@ -618,7 +735,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.skip_trivia();
                 // Allow trailing comma - break if next token ends GROUP BY
-                if self.at_any(&[HAVING_KW, ORDER_KW, LIMIT_KW, EOF]) {
+                if self.at_any(&[HAVING_KW, QUALIFY_KW, ORDER_KW, LIMIT_KW, EOF]) {
                     break;
                 }
             } else {
@@ -632,6 +749,13 @@ impl<'a> Parser<'a> {
     fn parse_having_clause(&mut self) {
         self.start_node(HAVING_CLAUSE);
         self.expect(HAVING_KW);
+        self.parse_expression();
+        self.finish_node();
+    }
+
+    fn parse_qualify_clause(&mut self) {
+        self.start_node(QUALIFY_CLAUSE);
+        self.expect(QUALIFY_KW);
         self.parse_expression();
         self.finish_node();
     }
@@ -923,6 +1047,22 @@ impl<'a> Parser<'a> {
                 self.skip_trivia();
                 self.expect(RPAREN);
             }
+        } else if self.at_keyword_as_function_name() {
+            // Keywords that can also be function names (e.g., FILTER(arr, ...) as array filter)
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // consume keyword
+            self.skip_trivia();
+            if self.at(LPAREN) {
+                self.start_node_at(checkpoint, FUNCTION_CALL);
+                self.parse_arg_list();
+                self.finish_node();
+            }
+        } else if self.at(IDENT) && self.is_typed_literal() {
+            // Typed literal: DATE '2024-01-01', TIMESTAMP '...', etc.
+            // Consume the type keyword and the string literal together
+            self.advance(); // type keyword (IDENT)
+            self.skip_trivia();
+            self.advance(); // string literal
         } else if self.at(IDENT) {
             // Could be column reference, qualified name, or function call
             let checkpoint = self.builder.checkpoint();
@@ -975,6 +1115,45 @@ impl<'a> Parser<'a> {
             self.advance();
         } else {
             self.error(format!("Expected expression, found {:?}", self.current()));
+        }
+
+        // Postfix: array subscript/slice: expr[index] or expr[start:end]
+        self.skip_trivia();
+        while self.at(LBRACKET) {
+            self.parse_array_subscript();
+            self.skip_trivia();
+        }
+    }
+
+    fn parse_array_subscript(&mut self) {
+        // Determine if this is subscript or slice by looking for COLON
+        let checkpoint = self.builder.checkpoint();
+        self.advance(); // consume [
+        self.skip_trivia();
+
+        // Parse first expression (index or start of slice)
+        let has_first = !self.at(COLON);
+        if has_first {
+            self.parse_expression();
+            self.skip_trivia();
+        }
+
+        if self.at(COLON) {
+            // Slice: [start:end]
+            self.start_node_at(checkpoint, ARRAY_SLICE);
+            self.advance(); // consume :
+            self.skip_trivia();
+            if !self.at(RBRACKET) {
+                self.parse_expression();
+                self.skip_trivia();
+            }
+            self.expect(RBRACKET);
+            self.finish_node();
+        } else {
+            // Simple subscript: [index]
+            self.start_node_at(checkpoint, ARRAY_SUBSCRIPT);
+            self.expect(RBRACKET);
+            self.finish_node();
         }
     }
 
@@ -1203,10 +1382,16 @@ impl<'a> Parser<'a> {
             self.start_node(NAMED_PARAM);
             self.advance(); // consume IDENT or keyword
             self.skip_trivia();
-            self.advance(); // consume ARROW
+            self.advance(); // consume ARROW (=>)
             self.skip_trivia();
             self.parse_expression();
             self.finish_node();
+        } else if self.at(IDENT) && self.is_lambda_single_param() {
+            // Single-param lambda: x -> expr
+            self.parse_lambda_expr();
+        } else if self.at(LPAREN) && self.is_lambda_multi_param() {
+            // Multi-param lambda: (x, y) -> expr
+            self.parse_lambda_expr();
         } else {
             // Regular expression argument - parse as full expression
             // This handles: identifiers, literals, function calls, binary expressions, etc.
@@ -1235,6 +1420,186 @@ impl<'a> Parser<'a> {
             .get(self.pos + lookahead)
             .map(|t| t.kind == ARROW)
             .unwrap_or(false)
+    }
+
+    /// Check if current token is a keyword that can also be used as a function name
+    fn at_keyword_as_function_name(&self) -> bool {
+        if !self.at_any(&[FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW]) {
+            return false;
+        }
+        // Only treat as function name if followed by LPAREN
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == LPAREN)
+            .unwrap_or(false)
+    }
+
+    /// Check if current IDENT is a type keyword followed by a string literal (e.g., DATE '2024-01-01')
+    fn is_typed_literal(&self) -> bool {
+        // Check if current IDENT is a type keyword
+        let token = self.tokens[self.pos];
+        let text = &self.input[self.offset..self.offset + token.len];
+        let upper = text.to_uppercase();
+        if !matches!(upper.as_str(), "DATE" | "TIME" | "TIMESTAMP" | "INTERVAL") {
+            return false;
+        }
+
+        // Look ahead past trivia for a STRING token
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == STRING)
+            .unwrap_or(false)
+    }
+
+    /// Check if current position starts a single-param lambda: ident ->
+    fn is_lambda_single_param(&self) -> bool {
+        let mut lookahead = 1;
+        while let Some(token) = self.tokens.get(self.pos + lookahead) {
+            if token.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == THIN_ARROW)
+            .unwrap_or(false)
+    }
+
+    /// Check if current position starts a multi-param lambda: (ident, ident) ->
+    fn is_lambda_multi_param(&self) -> bool {
+        // We're at LPAREN. Scan forward for: IDENT [, IDENT]* ) ->
+        let mut lookahead = 1;
+
+        // Skip trivia after LPAREN
+        while let Some(token) = self.tokens.get(self.pos + lookahead) {
+            if token.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Must start with IDENT
+        if !self
+            .tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == IDENT)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        lookahead += 1;
+
+        // Loop: skip trivia, then expect COMMA IDENT or RPAREN
+        loop {
+            while let Some(token) = self.tokens.get(self.pos + lookahead) {
+                if token.kind.is_trivia() {
+                    lookahead += 1;
+                } else {
+                    break;
+                }
+            }
+
+            match self.tokens.get(self.pos + lookahead).map(|t| t.kind) {
+                Some(RPAREN) => {
+                    lookahead += 1;
+                    break;
+                }
+                Some(COMMA) => {
+                    lookahead += 1;
+                    // Skip trivia
+                    while let Some(token) = self.tokens.get(self.pos + lookahead) {
+                        if token.kind.is_trivia() {
+                            lookahead += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    // Must be IDENT
+                    if !self
+                        .tokens
+                        .get(self.pos + lookahead)
+                        .map(|t| t.kind == IDENT)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    lookahead += 1;
+                }
+                _ => return false,
+            }
+        }
+
+        // Skip trivia after RPAREN
+        while let Some(token) = self.tokens.get(self.pos + lookahead) {
+            if token.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Must be THIN_ARROW
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == THIN_ARROW)
+            .unwrap_or(false)
+    }
+
+    fn parse_lambda_expr(&mut self) {
+        self.start_node(LAMBDA_EXPR);
+
+        // Parse parameter(s)
+        if self.at(LPAREN) {
+            // Multi-param: (x, y) -> expr
+            self.start_node(LAMBDA_PARAM_LIST);
+            self.advance(); // LPAREN
+            self.skip_trivia();
+            loop {
+                if self.at(IDENT) {
+                    self.advance();
+                }
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                    self.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+            self.expect(RPAREN);
+            self.finish_node(); // LAMBDA_PARAM_LIST
+        } else {
+            // Single-param: x -> expr
+            self.start_node(LAMBDA_PARAM_LIST);
+            self.advance(); // IDENT
+            self.finish_node(); // LAMBDA_PARAM_LIST
+        }
+
+        self.skip_trivia();
+        self.expect(THIN_ARROW);
+        self.skip_trivia();
+        self.parse_expression();
+
+        self.finish_node(); // LAMBDA_EXPR
     }
 
     // ===== Phase 12: Window Function Support =====
@@ -2557,6 +2922,136 @@ LIMIT 100
     fn test_expr_in_function_number_plus_ident() {
         // Binary expression starting with number in function call
         let input = "SELECT COUNT(0 + a) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Phase 4a: QUALIFY clause =====
+
+    #[test]
+    fn test_qualify_basic() {
+        let input = "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t QUALIFY rn = 1";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_qualify_complex_expression() {
+        let input = "SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) = 1";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_qualify_with_having() {
+        let input = "SELECT city, COUNT(*) FROM t GROUP BY city HAVING COUNT(*) > 1 QUALIFY ROW_NUMBER() OVER (ORDER BY city) = 1";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Phase 4b: Lambda expressions =====
+
+    #[test]
+    fn test_lambda_single_param() {
+        let input = "SELECT TRANSFORM(arr, x -> x + 1) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_lambda_multi_param() {
+        let input = "SELECT AGGREGATE(arr, 0, (acc, x) -> acc + x) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_lambda_nested() {
+        let input = "SELECT TRANSFORM(arr, x -> TRANSFORM(x, y -> y + 1)) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_filter_function_not_confused_with_filter_clause() {
+        // FILTER as a function name (not the aggregate FILTER clause)
+        let input = "SELECT FILTER(arr, x -> x > 0) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Phase 4c: PIVOT / UNPIVOT =====
+
+    #[test]
+    fn test_pivot_basic() {
+        let input = "SELECT * FROM t PIVOT (SUM(amount) FOR quarter IN ('Q1', 'Q2', 'Q3', 'Q4'))";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_unpivot_basic() {
+        let input = "SELECT * FROM t UNPIVOT (val FOR name IN (col1, col2, col3))";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_pivot_with_alias() {
+        let input = "SELECT * FROM t PIVOT (SUM(amount) FOR quarter IN ('Q1', 'Q2')) AS p";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Phase 4d: Array subscript/slice =====
+
+    #[test]
+    fn test_array_subscript() {
+        let input = "SELECT arr[1] FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_array_slice() {
+        let input = "SELECT arr[1:3] FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_array_chained_subscript() {
+        let input = "SELECT matrix[1][2] FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_array_subscript_on_function() {
+        let input = "SELECT ARRAY(1, 2, 3)[1] FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Phase 4e: DATE literal =====
+
+    #[test]
+    fn test_date_literal_sql_standard() {
+        let input = "SELECT * FROM t WHERE d = DATE '2024-01-01'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_date_function_call() {
+        let input = "SELECT * FROM t WHERE d = DATE('2024-01-01')";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_timestamp_literal() {
+        let input = "SELECT * FROM t WHERE ts > TIMESTAMP '2024-01-01 00:00:00'";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
     }

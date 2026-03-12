@@ -74,6 +74,11 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 PLUS
             }
+            '-' if self.peek_char() == Some('>') => {
+                self.advance();
+                self.advance();
+                THIN_ARROW
+            }
             '-' => {
                 self.advance();
                 MINUS
@@ -128,6 +133,18 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 self.advance();
                 CONCAT
+            }
+            '[' => {
+                self.advance();
+                LBRACKET
+            }
+            ']' => {
+                self.advance();
+                RBRACKET
+            }
+            ':' if self.peek_char() != Some(':') => {
+                self.advance();
+                COLON
             }
 
             // Strings
@@ -309,6 +326,10 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "REPEATABLE" => REPEATABLE_KW,
         // Phase 15: Aggregate function keywords
         "FILTER" => FILTER_KW,
+        // Multi-dialect superset keywords
+        "QUALIFY" => QUALIFY_KW,
+        "PIVOT" => PIVOT_KW,
+        "UNPIVOT" => UNPIVOT_KW,
         _ => IDENT,
     }
 }

@@ -76,6 +76,10 @@ impl SelectStmt {
         self.0.children().find_map(HavingClause::cast)
     }
 
+    pub fn qualify_clause(&self) -> Option<QualifyClause> {
+        self.0.children().find_map(QualifyClause::cast)
+    }
+
     pub fn order_by_clause(&self) -> Option<OrderByClause> {
         self.0.children().find_map(OrderByClause::cast)
     }
@@ -942,6 +946,118 @@ impl FilterClause {
     }
 }
 
+/// Array subscript: expr[index]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArraySubscript(SyntaxNode);
+
+impl ArraySubscript {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARRAY_SUBSCRIPT {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn index(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
+/// Array slice: expr[start:end]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArraySlice(SyntaxNode);
+
+impl ArraySlice {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARRAY_SLICE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn start(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    pub fn end(&self) -> Option<Expr> {
+        // Get the second expression (after the colon)
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+}
+
+/// PIVOT clause
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PivotClause(SyntaxNode);
+
+impl PivotClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PIVOT_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// UNPIVOT clause
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnpivotClause(SyntaxNode);
+
+impl UnpivotClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == UNPIVOT_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// Lambda expression (e.g., x -> x + 1 or (acc, x) -> acc + x)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LambdaExpr(SyntaxNode);
+
+impl LambdaExpr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LAMBDA_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the parameter names
+    pub fn params(&self) -> Vec<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == LAMBDA_PARAM_LIST)
+            .map(|param_list| {
+                param_list
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == IDENT)
+                    .map(|t| t.text().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get the body expression
+    pub fn body(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
 /// Named parameter in a function call (e.g., filter => expr)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NamedParam(SyntaxNode);
@@ -1387,6 +1503,24 @@ pub struct HavingClause(SyntaxNode);
 impl HavingClause {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         if node.kind() == HAVING_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
+/// QUALIFY clause (window function filtering)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QualifyClause(SyntaxNode);
+
+impl QualifyClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == QUALIFY_CLAUSE {
             Some(Self(node))
         } else {
             None

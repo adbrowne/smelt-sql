@@ -35,14 +35,7 @@ pub struct KnownGap {
 /// smelt-like syntax as valid PostgreSQL function calls.
 pub static KNOWN_GAPS: &[KnownGap] = &[
     // ===== PostgreSQL syntax not yet supported by smelt =====
-    KnownGap {
-        id: "array_subscript",
-        description: "Array subscript notation: arr[1], arr[1:2]",
-        category: "smelt_fails",
-        patterns: &[r"\w+\["],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // array_subscript gap removed - array subscript notation now supported (March 2026)
     KnownGap {
         id: "json_operators",
         description: "JSON operators: ->, ->>, #>, #>>, @>, <@, ?, ?|, ?&",
@@ -179,6 +172,30 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // function call syntax, so they don't actually cause pg_query to fail.
     // The => operator is also valid PostgreSQL syntax for named function arguments.
     KnownGap {
+        id: "qualify_clause",
+        description: "QUALIFY clause for window function filtering (DuckDB/Spark extension)",
+        category: "pg_fails",
+        patterns: &[r"(?i)\bQUALIFY\b"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "lambda_expressions",
+        description: "Lambda expressions in function arguments: x -> expr, (x, y) -> expr",
+        category: "pg_fails",
+        patterns: &[r"\w+\s*->"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "pivot_unpivot",
+        description: "PIVOT/UNPIVOT clauses (DuckDB/Spark extension)",
+        category: "pg_fails",
+        patterns: &[r"(?i)\bPIVOT\s*\(", r"(?i)\bUNPIVOT\s*\("],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
         id: "trailing_comma",
         description: "Trailing commas in SELECT list and GROUP BY (DuckDB extension)",
         category: "pg_fails",
@@ -303,9 +320,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_known_gap_array_subscript() {
-        assert!(is_known_gap("SELECT arr[1] FROM t", "smelt_fails"));
-        assert!(!is_known_gap("SELECT arr FROM t", "smelt_fails"));
+    fn test_array_subscript_no_longer_smelt_fails() {
+        // Array subscript is now supported (March 2026)
+        assert!(!is_known_gap("SELECT arr[1] FROM t", "smelt_fails"));
     }
 
     #[test]
@@ -343,8 +360,7 @@ mod tests {
 
     #[test]
     fn test_get_matching_gaps() {
-        let gaps = get_matching_gaps("SELECT arr[1], data->>'name' FROM t");
-        assert!(gaps.contains(&"array_subscript"));
+        let gaps = get_matching_gaps("SELECT data->>'name' FROM t");
         assert!(gaps.contains(&"json_operators"));
     }
 
