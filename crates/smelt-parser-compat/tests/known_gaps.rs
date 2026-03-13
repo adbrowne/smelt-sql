@@ -9,23 +9,6 @@ use smelt_parser_compat::{gaps, PgParseResult, SmeltParseResult, SparkSqlparserR
 
 // ===== Helper Functions =====
 
-/// Test that smelt fails but pg_query succeeds
-fn assert_smelt_fails_pg_succeeds(sql: &str, gap_id: &str) {
-    let smelt = SmeltParseResult::parse(sql);
-    let pg = PgParseResult::parse(sql);
-
-    assert!(
-        !smelt.success,
-        "{}: Expected smelt to fail, but it succeeded\nSQL: {}",
-        gap_id, sql
-    );
-    assert!(
-        pg.success,
-        "{}: Expected pg_query to succeed, but it failed: {:?}\nSQL: {}",
-        gap_id, pg.error, sql
-    );
-}
-
 /// Test that pg_query fails but smelt succeeds (smelt extension)
 fn assert_pg_fails_smelt_succeeds(sql: &str, gap_id: &str) {
     let smelt = SmeltParseResult::parse(sql);
