@@ -64,6 +64,8 @@ pub enum SyntaxKind {
     WITH_KW,
     RECURSIVE_KW,
     UNION_KW,
+    INTERSECT_KW,
+    EXCEPT_KW,
     // Phase 14: PostgreSQL-specific keywords
     LATERAL_KW,
     TABLESAMPLE_KW,
@@ -72,10 +74,24 @@ pub enum SyntaxKind {
     REPEATABLE_KW,
     // Phase 15: Aggregate function keywords
     FILTER_KW,
+    // SQL data type/constructor keywords
+    ARRAY_KW,
+    VALUES_KW,
+    STRUCT_KW,
     // Multi-dialect superset keywords
     QUALIFY_KW,
     PIVOT_KW,
     UNPIVOT_KW,
+
+    // Batch 3-5 keywords
+    WITHIN_KW,
+    EXCLUDE_KW,
+    TIES_KW,
+    OTHERS_KW,
+    NO_KW,
+    FETCH_KW,
+    NEXT_KW,
+    ONLY_KW,
 
     // Operators & punctuation
     LPAREN,       // (
@@ -99,6 +115,18 @@ pub enum SyntaxKind {
     LBRACKET,     // [
     RBRACKET,     // ]
     COLON,        // : (used in array slices)
+    // JSON operators
+    JSON_ARROW,      // ->
+    JSON_ARROW_TEXT, // ->>
+    HASH_ARROW,      // #>
+    HASH_ARROW_TEXT, // #>>
+    AT_GT,           // @>
+    LT_AT,           // <@
+    // Regex operators
+    TILDE,          // ~
+    TILDE_STAR,     // ~*
+    NOT_TILDE,      // !~
+    NOT_TILDE_STAR, // !~*
 
     // Literals & identifiers
     STRING,     // 'value' or "value"
@@ -151,14 +179,23 @@ pub enum SyntaxKind {
     // Phase 15: Aggregate function nodes
     FILTER_CLAUSE, // FILTER (WHERE condition)
     // Multi-dialect superset nodes
-    QUALIFY_CLAUSE,    // QUALIFY expression
-    LAMBDA_EXPR,       // x -> expr or (x, y) -> expr
-    LAMBDA_PARAM_LIST, // Parameter list in lambda
-    PIVOT_CLAUSE,      // PIVOT (agg FOR col IN (...))
-    UNPIVOT_CLAUSE,    // UNPIVOT (val FOR name IN (...))
-    PIVOT_IN_LIST,     // IN list for PIVOT/UNPIVOT
-    ARRAY_SUBSCRIPT,   // expr[expr]
-    ARRAY_SLICE,       // expr[expr:expr]
+    QUALIFY_CLAUSE,      // QUALIFY expression
+    LAMBDA_EXPR,         // x -> expr or (x, y) -> expr
+    LAMBDA_PARAM_LIST,   // Parameter list in lambda
+    PIVOT_CLAUSE,        // PIVOT (agg FOR col IN (...))
+    UNPIVOT_CLAUSE,      // UNPIVOT (val FOR name IN (...))
+    PIVOT_IN_LIST,       // IN list for PIVOT/UNPIVOT
+    ARRAY_SUBSCRIPT,     // expr[expr]
+    ARRAY_SLICE,         // expr[expr:expr]
+    ARRAY_LITERAL,       // ARRAY[1, 2, 3]
+    VALUES_CLAUSE,       // VALUES (1, 2), (3, 4)
+    VALUES_ROW,          // Single row in VALUES: (1, 2)
+    STRUCT_LITERAL,      // STRUCT(a, b, c)
+    ROW_CONSTRUCTOR,     // ROW(1, 2, 3)
+    ANY_EXPR,            // ANY(expr) / ALL(expr) / SOME(expr)
+    WITHIN_GROUP_CLAUSE, // WITHIN GROUP (ORDER BY ...)
+    FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
+    FETCH_CLAUSE,        // FETCH FIRST N ROWS ONLY
 
     // Error handling
     ERROR, // Invalid syntax
@@ -229,15 +266,28 @@ impl SyntaxKind {
                 | WITH_KW
                 | RECURSIVE_KW
                 | UNION_KW
+                | INTERSECT_KW
+                | EXCEPT_KW
                 | LATERAL_KW
                 | TABLESAMPLE_KW
                 | BERNOULLI_KW
                 | SYSTEM_KW
                 | REPEATABLE_KW
                 | FILTER_KW
+                | ARRAY_KW
+                | VALUES_KW
+                | STRUCT_KW
                 | QUALIFY_KW
                 | PIVOT_KW
                 | UNPIVOT_KW
+                | WITHIN_KW
+                | EXCLUDE_KW
+                | TIES_KW
+                | OTHERS_KW
+                | NO_KW
+                | FETCH_KW
+                | NEXT_KW
+                | ONLY_KW
         )
     }
 

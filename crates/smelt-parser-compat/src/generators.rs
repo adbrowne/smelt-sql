@@ -688,15 +688,67 @@ pub fn select_with_array_subscript() -> impl Strategy<Value = String> {
     (column_name(), table_name()).prop_map(|(col, tbl)| format!("SELECT {}[1] FROM {}", col, tbl))
 }
 
-/// Generate SQL with JSON operator (known gap)
+/// Generate a SELECT with INTERSECT
+pub fn select_intersect() -> impl Strategy<Value = String> {
+    (column_name(), table_name(), table_name()).prop_map(|(col, t1, t2)| {
+        format!(
+            "SELECT {} FROM {} INTERSECT SELECT {} FROM {}",
+            col, t1, col, t2
+        )
+    })
+}
+
+/// Generate a SELECT with EXCEPT
+pub fn select_except() -> impl Strategy<Value = String> {
+    (column_name(), table_name(), table_name()).prop_map(|(col, t1, t2)| {
+        format!(
+            "SELECT {} FROM {} EXCEPT SELECT {} FROM {}",
+            col, t1, col, t2
+        )
+    })
+}
+
+/// Generate SQL with JSON operator
 pub fn select_with_json_operator() -> impl Strategy<Value = String> {
     (column_name(), table_name())
         .prop_map(|(col, tbl)| format!("SELECT {}->>'key' FROM {}", col, tbl))
 }
 
-/// Generate SQL with array literal (known gap)
+/// Generate SQL with array literal
 pub fn select_with_array_literal() -> impl Strategy<Value = String> {
     table_name().prop_map(|tbl| format!("SELECT ARRAY[1, 2, 3] FROM {}", tbl))
+}
+
+/// Generate SQL with VALUES clause
+pub fn select_with_values_cte() -> impl Strategy<Value = String> {
+    alias().prop_map(|name| {
+        format!(
+            "WITH {} AS (VALUES (1, 'a'), (2, 'b')) SELECT * FROM {}",
+            name, name
+        )
+    })
+}
+
+/// Generate SQL with ROW constructor
+pub fn select_with_row_constructor() -> impl Strategy<Value = String> {
+    table_name().prop_map(|tbl| format!("SELECT ROW(1, 2, 3) FROM {}", tbl))
+}
+
+/// Generate SQL with STRUCT literal
+pub fn select_with_struct_literal() -> impl Strategy<Value = String> {
+    table_name().prop_map(|tbl| format!("SELECT STRUCT(1 AS a, 2 AS b) FROM {}", tbl))
+}
+
+/// Generate SQL with regex match operator
+pub fn select_with_regex_match() -> impl Strategy<Value = String> {
+    (column_name(), table_name())
+        .prop_map(|(col, tbl)| format!("SELECT * FROM {} WHERE {} ~ '^A'", tbl, col))
+}
+
+/// Generate SQL with FETCH FIRST
+pub fn select_with_fetch_first() -> impl Strategy<Value = String> {
+    (table_name(), 1u32..100)
+        .prop_map(|(tbl, n)| format!("SELECT * FROM {} FETCH FIRST {} ROWS ONLY", tbl, n))
 }
 
 /// Generate SQL with LIKE operator (known gap)
@@ -711,7 +763,7 @@ pub fn select_with_concat() -> impl Strategy<Value = String> {
         .prop_map(|(c1, c2, tbl)| format!("SELECT {} || ' ' || {} FROM {}", c1, c2, tbl))
 }
 
-/// Generate SQL known to trigger parser gaps
+/// Generate SQL known to trigger parser gaps (or previously did)
 pub fn gap_triggering_select() -> impl Strategy<Value = String> {
     prop_oneof![
         select_with_array_subscript(),
@@ -719,6 +771,10 @@ pub fn gap_triggering_select() -> impl Strategy<Value = String> {
         select_with_array_literal(),
         select_with_like(),
         select_with_concat(),
+        select_with_regex_match(),
+        select_with_row_constructor(),
+        select_with_struct_literal(),
+        select_with_fetch_first(),
     ]
 }
 
@@ -736,6 +792,8 @@ pub fn any_select() -> impl Strategy<Value = String> {
         select_with_window(),
         select_union(),
         select_union_all(),
+        select_intersect(),
+        select_except(),
         select_with_case(),
         select_with_in_subquery(),
         select_with_exists(),
@@ -743,6 +801,7 @@ pub fn any_select() -> impl Strategy<Value = String> {
         select_with_is_null(),
         select_with_is_not_null(),
         select_with_cast(),
+        select_with_fetch_first(),
         // smelt SQL extensions
         select_with_qualify(),
         select_with_qualify_partition(),

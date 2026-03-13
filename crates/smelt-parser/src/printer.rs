@@ -143,15 +143,14 @@ impl Display for SelectStmt {
             write!(f, " {}", limit_clause)?;
         }
 
-        // UNION
-        if has_union(self.syntax()) {
-            write!(f, " UNION")?;
-            if has_union_all(self.syntax()) {
+        // Set operations: UNION / INTERSECT / EXCEPT
+        if let Some(set_op) = get_set_operation(self.syntax()) {
+            write!(f, " {}", set_op.keyword)?;
+            if set_op.all {
                 write!(f, " ALL")?;
             }
-            // Get the next SELECT statement after UNION
-            if let Some(union_select) = get_union_select(self.syntax()) {
-                write!(f, " {}", union_select)?;
+            if let Some(select) = set_op.select {
+                write!(f, " {}", select)?;
             }
         }
 
@@ -525,59 +524,76 @@ fn extract_group_by_expressions(node: &SyntaxNode) -> String {
     expressions.join(", ")
 }
 
-/// Check if SELECT has UNION
-fn has_union(node: &SyntaxNode) -> bool {
-    node.children_with_tokens()
-        .filter_map(|e| e.into_token())
-        .any(|t| t.kind() == UNION_KW)
+/// Info about a set operation (UNION/INTERSECT/EXCEPT)
+struct SetOperation {
+    keyword: &'static str,
+    all: bool,
+    select: Option<SelectStmt>,
 }
 
-/// Check if UNION is UNION ALL
-fn has_union_all(node: &SyntaxNode) -> bool {
+/// Detect and extract set operation (UNION/INTERSECT/EXCEPT) from a SELECT_STMT node
+fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
+    let set_op_kinds = [UNION_KW, INTERSECT_KW, EXCEPT_KW];
+
     let tokens: Vec<_> = node
         .children_with_tokens()
         .filter_map(|e| e.into_token())
         .collect();
 
+    // Find the set operation keyword
+    let mut op_kind = None;
+    let mut has_all = false;
+
     for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == UNION_KW {
-            // Skip whitespace to find next meaningful token
+        if set_op_kinds.contains(&token.kind()) {
+            op_kind = Some(token.kind());
+            // Check for ALL after the keyword
             for next_token in &tokens[i + 1..] {
                 match next_token.kind() {
                     WHITESPACE | COMMENT => continue,
-                    ALL_KW => return true,
+                    ALL_KW => {
+                        has_all = true;
+                        break;
+                    }
                     _ => break,
                 }
             }
-        }
-    }
-    false
-}
-
-/// Get SELECT statement after UNION
-fn get_union_select(node: &SyntaxNode) -> Option<SelectStmt> {
-    let mut found_union = false;
-    for child in node.children() {
-        if found_union && child.kind() == SELECT_STMT {
-            return SelectStmt::cast(child);
+            break;
         }
     }
 
-    // Check tokens for UNION
+    let op_kind = op_kind?;
+
+    let keyword = match op_kind {
+        UNION_KW => "UNION",
+        INTERSECT_KW => "INTERSECT",
+        EXCEPT_KW => "EXCEPT",
+        _ => unreachable!(),
+    };
+
+    // Find the SELECT statement after the set operation
+    let mut found_op = false;
+    let mut select = None;
     for child in node.children_with_tokens() {
         if let Some(token) = child.as_token() {
-            if token.kind() == UNION_KW {
-                found_union = true;
+            if token.kind() == op_kind {
+                found_op = true;
             }
-        } else if found_union {
+        } else if found_op {
             if let Some(n) = child.as_node() {
                 if n.kind() == SELECT_STMT {
-                    return SelectStmt::cast(n.clone());
+                    select = SelectStmt::cast(n.clone());
+                    break;
                 }
             }
         }
     }
-    None
+
+    Some(SetOperation {
+        keyword,
+        all: has_all,
+        select,
+    })
 }
 
 #[cfg(test)]
@@ -799,5 +815,26 @@ mod tests {
     #[test]
     fn test_nulls_last_round_trip() {
         assert_round_trip("SELECT * FROM t ORDER BY name DESC NULLS LAST");
+    }
+
+    // INTERSECT / EXCEPT round-trip
+    #[test]
+    fn test_intersect_round_trip() {
+        assert_round_trip("SELECT id FROM a INTERSECT SELECT id FROM b");
+    }
+
+    #[test]
+    fn test_except_round_trip() {
+        assert_round_trip("SELECT id FROM a EXCEPT SELECT id FROM b");
+    }
+
+    #[test]
+    fn test_intersect_all_round_trip() {
+        assert_round_trip("SELECT id FROM a INTERSECT ALL SELECT id FROM b");
+    }
+
+    #[test]
+    fn test_except_all_round_trip() {
+        assert_round_trip("SELECT id FROM a EXCEPT ALL SELECT id FROM b");
     }
 }

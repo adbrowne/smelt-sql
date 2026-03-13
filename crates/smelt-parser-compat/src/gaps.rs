@@ -38,65 +38,13 @@ pub struct KnownGap {
 pub static KNOWN_GAPS: &[KnownGap] = &[
     // ===== PostgreSQL syntax not yet supported by smelt =====
     // array_subscript gap removed - array subscript notation now supported (March 2026)
-    KnownGap {
-        id: "json_operators",
-        description: "JSON operators: ->, ->>, #>, #>>, @>, <@, ?, ?|, ?&",
-        category: "smelt_fails",
-        dialect: "pg",
-        patterns: &[r"->", r"->>", r"#>", r"#>>", r"@>", r"<@"],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "array_literal",
-        description: "Array literal syntax: ARRAY[1, 2, 3]",
-        category: "smelt_fails",
-        dialect: "both",
-        patterns: &[r"(?i)\bARRAY\s*\["],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "row_constructor",
-        description: "Row constructor: ROW(1, 2, 3)",
-        category: "smelt_fails",
-        dialect: "pg",
-        patterns: &[r"(?i)\bROW\s*\("],
-        severity: "low",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "values_clause",
-        description: "VALUES clause as standalone or in FROM",
-        category: "smelt_fails",
-        dialect: "both",
-        patterns: &[r"(?i)^\s*VALUES\s*\("],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "pattern_match_operators",
-        description: "Pattern matching operators: ~, ~*, !~, !~*",
-        category: "smelt_fails",
-        dialect: "pg",
-        patterns: &[r"\s~\s", r"\s~\*\s", r"\s!~\s", r"\s!~\*\s"],
-        severity: "low",
-        planned_fix: true,
-    },
+    // json_operators gap removed - JSON operators now supported (March 2026)
+    // array_literal gap removed - ARRAY[1,2,3] now supported (March 2026)
+    // row_constructor gap removed - ROW(1,2,3) now supported (March 2026)
+    // values_clause gap removed - VALUES clause now supported (March 2026)
+    // pattern_match_operators gap removed - regex operators now supported (March 2026)
     // string_concat_operator gap removed - || is now supported (January 2026)
-    KnownGap {
-        id: "any_all_some",
-        description: "ANY/ALL/SOME array comparisons",
-        category: "smelt_fails",
-        dialect: "pg",
-        patterns: &[
-            r"(?i)=\s*ANY\s*\(",
-            r"(?i)=\s*ALL\s*\(",
-            r"(?i)=\s*SOME\s*\(",
-        ],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // any_all_some gap removed - ANY/ALL/SOME comparisons now supported (March 2026)
     KnownGap {
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",
@@ -368,9 +316,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_known_gap_json_operator() {
-        assert!(is_known_gap("SELECT data->>'name' FROM t", "smelt_fails"));
-        assert!(is_known_gap("SELECT data->'nested' FROM t", "smelt_fails"));
+    fn test_json_operators_no_longer_smelt_fails() {
+        // JSON operators now supported (March 2026)
+        assert!(!is_known_gap("SELECT data->>'name' FROM t", "smelt_fails"));
+        assert!(!is_known_gap("SELECT data->'nested' FROM t", "smelt_fails"));
     }
 
     #[test]
@@ -402,15 +351,15 @@ mod tests {
 
     #[test]
     fn test_get_matching_gaps() {
-        let gaps = get_matching_gaps("SELECT data->>'name' FROM t");
-        assert!(gaps.contains(&"json_operators"));
+        // JSON operators are no longer a gap, test with remaining gaps
+        let gaps = get_matching_gaps("SELECT * + a FROM t");
+        assert!(gaps.contains(&"star_in_expression"));
     }
 
     #[test]
     fn test_gap_summary() {
         let summary = GapSummary::compute();
         assert!(summary.total > 0);
-        assert!(summary.smelt_fails > 0);
         assert!(summary.pg_fails > 0);
     }
 
