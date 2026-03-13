@@ -403,15 +403,9 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "ARRAY" => ARRAY_KW,
         "VALUES" => VALUES_KW,
         "STRUCT" => STRUCT_KW,
-        // Batch 3-5 keywords
-        "WITHIN" => WITHIN_KW,
-        "EXCLUDE" => EXCLUDE_KW,
-        "TIES" => TIES_KW,
-        "OTHERS" => OTHERS_KW,
-        "NO" => NO_KW,
-        "FETCH" => FETCH_KW,
-        "NEXT" => NEXT_KW,
-        "ONLY" => ONLY_KW,
+        // Note: WITHIN, EXCLUDE, TIES, OTHERS, NO, FETCH, NEXT, ONLY are handled
+        // contextually in the parser (via IDENT text matching) to avoid conflicts
+        // with these common words used as identifiers.
         // Multi-dialect superset keywords
         "QUALIFY" => QUALIFY_KW,
         "PIVOT" => PIVOT_KW,

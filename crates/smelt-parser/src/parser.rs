@@ -74,6 +74,20 @@ impl<'a> Parser<'a> {
         kinds.contains(&self.current())
     }
 
+    /// Get the text of the current token
+    fn current_text(&self) -> &str {
+        if let Some(token) = self.tokens.get(self.pos) {
+            &self.input[self.offset..self.offset + token.len]
+        } else {
+            ""
+        }
+    }
+
+    /// Check if current token is an IDENT with specific text (case-insensitive)
+    fn at_contextual_keyword(&self, text: &str) -> bool {
+        self.at(IDENT) && self.current_text().eq_ignore_ascii_case(text)
+    }
+
     /// Advance to next token, consuming trivia
     fn advance(&mut self) {
         if self.pos < self.tokens.len() {
@@ -166,19 +180,21 @@ impl<'a> Parser<'a> {
             ORDER_KW,
             LIMIT_KW,
             OFFSET_KW,
-            FETCH_KW, // JOIN keywords
+            // JOIN keywords
             JOIN_KW,
             INNER_KW,
             LEFT_KW,
             RIGHT_KW,
             FULL_KW,
-            CROSS_KW, // PIVOT/UNPIVOT
+            CROSS_KW,
+            // PIVOT/UNPIVOT
             PIVOT_KW,
-            UNPIVOT_KW, // Set operations
+            UNPIVOT_KW,
+            // Set operations
             UNION_KW,
             INTERSECT_KW,
             EXCEPT_KW,
-        ])
+        ]) || self.at_contextual_keyword("FETCH")
     }
 
     /// Check if current token can start an expression
@@ -318,7 +334,7 @@ impl<'a> Parser<'a> {
 
         // FETCH FIRST/NEXT N ROW(S) ONLY
         self.skip_trivia();
-        if self.at(FETCH_KW) {
+        if self.at_contextual_keyword("FETCH") {
             self.parse_fetch_clause();
         }
 
@@ -372,7 +388,6 @@ impl<'a> Parser<'a> {
                     ORDER_KW,
                     LIMIT_KW,
                     OFFSET_KW,
-                    FETCH_KW,
                     EOF,
                     INNER_KW,
                     LEFT_KW,
@@ -804,7 +819,6 @@ impl<'a> Parser<'a> {
                     ORDER_KW,
                     LIMIT_KW,
                     OFFSET_KW,
-                    FETCH_KW,
                     EOF,
                     UNION_KW,
                     INTERSECT_KW,
@@ -1298,10 +1312,11 @@ impl<'a> Parser<'a> {
 
     fn parse_fetch_clause(&mut self) {
         self.start_node(FETCH_CLAUSE);
-        self.expect(FETCH_KW);
+        // FETCH is a contextual keyword (IDENT)
+        self.advance(); // consume "FETCH"
         self.skip_trivia();
-        // FIRST or NEXT
-        if self.at(FIRST_KW) || self.at(NEXT_KW) {
+        // FIRST or NEXT (contextual)
+        if self.at(FIRST_KW) || self.at_contextual_keyword("NEXT") {
             self.advance();
         }
         self.skip_trivia();
@@ -1315,8 +1330,8 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         self.skip_trivia();
-        // ONLY
-        if self.at(ONLY_KW) {
+        // ONLY (contextual)
+        if self.at_contextual_keyword("ONLY") {
             self.advance();
         }
         self.finish_node();
@@ -1629,7 +1644,7 @@ impl<'a> Parser<'a> {
     /// WITHIN GROUP (ORDER BY expr)
     fn parse_within_group_if_present(&mut self) {
         self.skip_trivia();
-        if self.at(WITHIN_KW) {
+        if self.at_contextual_keyword("WITHIN") {
             self.start_node(WITHIN_GROUP_CLAUSE);
             self.advance(); // WITHIN
             self.skip_trivia();
@@ -2040,7 +2055,7 @@ impl<'a> Parser<'a> {
 
         // Optional EXCLUDE clause
         self.skip_trivia();
-        if self.at(EXCLUDE_KW) {
+        if self.at_contextual_keyword("EXCLUDE") {
             self.start_node(FRAME_EXCLUDE);
             self.advance(); // EXCLUDE
             self.skip_trivia();
@@ -2048,12 +2063,16 @@ impl<'a> Parser<'a> {
                 self.advance(); // CURRENT
                 self.skip_trivia();
                 self.expect(ROW_KW);
-            } else if self.at_any(&[GROUP_KW, TIES_KW]) {
+            } else if self.at(GROUP_KW) || self.at_contextual_keyword("TIES") {
                 self.advance();
-            } else if self.at(NO_KW) {
+            } else if self.at_contextual_keyword("NO") {
                 self.advance(); // NO
                 self.skip_trivia();
-                self.expect(OTHERS_KW);
+                if self.at_contextual_keyword("OTHERS") {
+                    self.advance();
+                } else {
+                    self.error("Expected OTHERS after NO".to_string());
+                }
             } else {
                 self.error(
                     "Expected CURRENT ROW, GROUP, TIES, or NO OTHERS after EXCLUDE".to_string(),
@@ -3670,6 +3689,50 @@ LIMIT 100
     #[test]
     fn test_lambda_multi_param_still_works() {
         let input = "SELECT AGGREGATE(arr, 0, (acc, x) -> acc + x) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Contextual keywords as identifiers =====
+
+    #[test]
+    fn test_no_as_column_name() {
+        let input = "SELECT no FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_next_as_column_name() {
+        let input = "SELECT next FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_only_as_column_name() {
+        let input = "SELECT only FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_fetch_as_column_name() {
+        let input = "SELECT fetch FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_exclude_as_column_name() {
+        let input = "SELECT exclude FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_within_as_column_name() {
+        let input = "SELECT within FROM t";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
     }

@@ -83,7 +83,9 @@ pub enum SyntaxKind {
     PIVOT_KW,
     UNPIVOT_KW,
 
-    // Batch 3-5 keywords
+    // Contextual keywords (lexed as IDENT, recognized by parser contextually)
+    // These variants exist for the enum but are never produced by the lexer.
+    // They are kept for potential future use in AST node type discrimination.
     WITHIN_KW,
     EXCLUDE_KW,
     TIES_KW,
@@ -280,14 +282,6 @@ impl SyntaxKind {
                 | QUALIFY_KW
                 | PIVOT_KW
                 | UNPIVOT_KW
-                | WITHIN_KW
-                | EXCLUDE_KW
-                | TIES_KW
-                | OTHERS_KW
-                | NO_KW
-                | FETCH_KW
-                | NEXT_KW
-                | ONLY_KW
         )
     }
 

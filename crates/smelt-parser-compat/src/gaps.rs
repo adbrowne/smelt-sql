@@ -365,10 +365,15 @@ mod tests {
 
     #[test]
     fn test_gaps_by_category() {
+        // All smelt_fails gaps have been resolved (March 2026)
         let smelt_gaps = get_gaps_by_category("smelt_fails");
-        assert!(!smelt_gaps.is_empty());
-        for gap in smelt_gaps {
-            assert_eq!(gap.category, "smelt_fails");
+        assert!(smelt_gaps.is_empty());
+
+        // pg_fails gaps still exist (smelt extensions)
+        let pg_gaps = get_gaps_by_category("pg_fails");
+        assert!(!pg_gaps.is_empty());
+        for gap in pg_gaps {
+            assert_eq!(gap.category, "pg_fails");
         }
     }
 
