@@ -76,6 +76,12 @@ pub fn normalize_keywords(sql: &str) -> String {
         "BERNOULLI",
         "SYSTEM",
         "REPEATABLE",
+        // Spark-specific keywords
+        "QUALIFY",
+        "PIVOT",
+        "UNPIVOT",
+        "TRANSFORM",
+        "AGGREGATE",
     ];
 
     let mut result = sql.to_string();

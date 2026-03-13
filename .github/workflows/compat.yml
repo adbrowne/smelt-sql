@@ -1,4 +1,4 @@
-name: PostgreSQL Compatibility
+name: Parser Compatibility
 
 on:
   push:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   parse-equivalence:
-    name: Parse Equivalence Tests
+    name: Parse Equivalence Tests (PG + Spark)
     runs-on: ubuntu-latest
 
     steps:
@@ -31,18 +31,54 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-pg-compat-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-compat-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build smelt-parser-compat
         run: cargo build -p smelt-parser-compat
 
-      - name: Run parse equivalence tests (500 cases)
+      - name: Run parse equivalence tests (500 cases, pg_query + sqlparser-databricks)
         run: cargo test -p smelt-parser-compat --test parse_equivalence
         env:
           PROPTEST_CASES: 500
 
-      - name: Run known gaps tests
+      - name: Run known gaps tests (PG + Spark)
         run: cargo test -p smelt-parser-compat --test known_gaps
+
+  sqlglot-validation:
+    name: sqlglot Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install sqlglot
+        run: pip install sqlglot
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-compat-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build smelt-parser-compat
+        run: cargo build -p smelt-parser-compat
+
+      - name: Run tests with sqlglot validation
+        run: cargo test -p smelt-parser-compat
+        env:
+          SQLGLOT_AVAILABLE: "1"
 
   parse-equivalence-extended:
     name: Extended Parse Equivalence (Nightly)
@@ -64,7 +100,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-pg-compat-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-compat-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build smelt-parser-compat
         run: cargo build -p smelt-parser-compat
@@ -75,7 +111,7 @@ jobs:
           PROPTEST_CASES: 2000
 
   type-checking:
-    name: Type Checking Tests
+    name: Type Checking Tests (PostgreSQL Docker)
     runs-on: ubuntu-latest
     # Only run when specifically requested or on schedule
     if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
@@ -109,7 +145,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-pg-compat-docker-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-compat-docker-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build smelt-parser-compat
         run: cargo build -p smelt-parser-compat
@@ -117,12 +153,42 @@ jobs:
       - name: Run type checking tests
         run: cargo test -p smelt-parser-compat --test type_checking -- --ignored
         env:
-          # Use the service container
           PGHOST: localhost
           PGPORT: 5432
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: postgres
+
+  spark-integration:
+    name: Spark SQL Integration Tests (Docker)
+    runs-on: ubuntu-latest
+    # Only run on schedule (nightly) or when explicitly labeled
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-compat-spark-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Pull Spark Docker image
+        run: docker pull apache/spark:latest
+
+      - name: Build smelt-parser-compat
+        run: cargo build -p smelt-parser-compat
+
+      - name: Run Spark integration tests
+        run: cargo test -p smelt-parser-compat --test spark_integration -- --ignored
 
   gap-report:
     name: Generate Gap Report
@@ -143,7 +209,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-pg-compat-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-compat-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build smelt-parser-compat
         run: cargo build -p smelt-parser-compat

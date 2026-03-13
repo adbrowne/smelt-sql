@@ -7,7 +7,8 @@
 
 use proptest::prelude::*;
 use smelt_parser_compat::{
-    compare_parse_results, gaps, pg_generators, PgParseResult, SmeltParseResult,
+    compare_all_parse_results, compare_parse_results, compare_spark_parse_results, gaps,
+    pg_generators, spark_generators, PgParseResult, SmeltParseResult, SparkSqlparserResult,
 };
 
 /// Configuration for property tests
@@ -359,4 +360,185 @@ fn test_complex_query() {
         LIMIT 100
     "#;
     assert!(compare_parse_results(sql).is_ok());
+}
+
+// ===== Spark / sqlparser-databricks property tests =====
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
+
+    /// Standard SQL generators tested against sqlparser-databricks
+    #[test]
+    fn prop_standard_sql_spark_valid(sql in spark_generators::standard_sql_select()) {
+        if smelt_parser_compat::has_smelt_extensions(&sql) {
+            return Ok(());
+        }
+
+        match compare_spark_parse_results(&sql) {
+            Ok(_) => (),
+            Err(e) => prop_assert!(false, "{}", e),
+        }
+    }
+
+    /// If smelt parses Spark-specific SQL, sqlparser-databricks should too
+    #[test]
+    fn prop_smelt_valid_implies_spark_valid(sql in spark_generators::any_spark_select()) {
+        let smelt_result = SmeltParseResult::parse(&sql);
+        if smelt_result.success {
+            let spark_result = SparkSqlparserResult::parse(&sql);
+            if !spark_result.success
+                && !gaps::is_known_gap(&sql, "spark_fails")
+            {
+                prop_assert!(false,
+                    "smelt succeeded but sqlparser-databricks failed\n\
+                     SQL: {}\n\
+                     sqlparser error: {:?}",
+                    sql, spark_result.error
+                );
+            }
+        }
+    }
+
+    /// If sqlparser-databricks parses, smelt should too (unless known gap)
+    #[test]
+    fn prop_spark_valid_implies_smelt_valid(sql in spark_generators::any_spark_select()) {
+        let spark_result = SparkSqlparserResult::parse(&sql);
+        if spark_result.success {
+            let smelt_result = SmeltParseResult::parse(&sql);
+            if !smelt_result.success
+                && !gaps::is_known_gap(&sql, "smelt_fails")
+            {
+                prop_assert!(false,
+                    "sqlparser-databricks succeeded but smelt failed\n\
+                     SQL: {}\n\
+                     smelt errors: {:?}",
+                    sql, smelt_result.errors
+                );
+            }
+        }
+    }
+
+    /// Standard SQL against all available references
+    #[test]
+    fn prop_all_references_equivalence(sql in pg_generators::simple_select()) {
+        if smelt_parser_compat::has_smelt_extensions(&sql) {
+            return Ok(());
+        }
+
+        match compare_all_parse_results(&sql) {
+            Ok(_) => (),
+            Err(e) => prop_assert!(false, "{}", e),
+        }
+    }
+}
+
+// ===== Explicit Spark SQL unit tests =====
+
+#[test]
+fn test_spark_qualify_basic() {
+    let sql = "SELECT * FROM users QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse QUALIFY: {:?}",
+        smelt.errors
+    );
+
+    let spark = SparkSqlparserResult::parse(sql);
+    assert!(
+        spark.success,
+        "sqlparser-databricks should parse QUALIFY: {:?}",
+        spark.error
+    );
+}
+
+#[test]
+fn test_spark_qualify_with_partition() {
+    let sql = "SELECT * FROM users QUALIFY ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) = 1";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse QUALIFY with PARTITION BY: {:?}",
+        smelt.errors
+    );
+
+    let spark = SparkSqlparserResult::parse(sql);
+    assert!(
+        spark.success,
+        "sqlparser-databricks should parse QUALIFY with PARTITION BY: {:?}",
+        spark.error
+    );
+}
+
+#[test]
+fn test_spark_transform_lambda() {
+    let sql = "SELECT TRANSFORM(arr, x -> x + 1) FROM t";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse TRANSFORM lambda: {:?}",
+        smelt.errors
+    );
+}
+
+#[test]
+fn test_spark_aggregate_lambda() {
+    let sql = "SELECT AGGREGATE(arr, 0, (acc, x) -> acc + x) FROM t";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse AGGREGATE lambda: {:?}",
+        smelt.errors
+    );
+}
+
+#[test]
+fn test_spark_pivot() {
+    let sql = "SELECT * FROM sales PIVOT (SUM(amount) FOR quarter IN ('Q1', 'Q2', 'Q3', 'Q4'))";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse PIVOT: {:?}",
+        smelt.errors
+    );
+}
+
+#[test]
+fn test_spark_unpivot() {
+    let sql = "SELECT * FROM sales UNPIVOT (val FOR quarter IN (q1, q2, q3, q4))";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse UNPIVOT: {:?}",
+        smelt.errors
+    );
+}
+
+#[test]
+fn test_spark_array_subscript() {
+    let sql = "SELECT arr[1] FROM t";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse array subscript: {:?}",
+        smelt.errors
+    );
+
+    let spark = SparkSqlparserResult::parse(sql);
+    assert!(
+        spark.success,
+        "sqlparser-databricks should parse array subscript: {:?}",
+        spark.error
+    );
+}
+
+#[test]
+fn test_spark_array_slice() {
+    let sql = "SELECT arr[1:5] FROM t";
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse array slice: {:?}",
+        smelt.errors
+    );
 }

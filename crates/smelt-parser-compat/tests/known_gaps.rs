@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo test -p smelt-parser-compat --test known_gaps
 
-use smelt_parser_compat::{gaps, PgParseResult, SmeltParseResult};
+use smelt_parser_compat::{gaps, PgParseResult, SmeltParseResult, SparkSqlparserResult};
 
 // ===== Helper Functions =====
 
@@ -439,4 +439,148 @@ fn test_smelt_supports_fetch_clause() {
 fn test_smelt_supports_for_update() {
     // FOR UPDATE is supported by smelt
     assert_both_succeed("SELECT * FROM t FOR UPDATE", "FOR UPDATE");
+}
+
+// ===== Spark-specific gap helpers =====
+
+/// Test that sqlparser-databricks fails but smelt succeeds (smelt extension beyond Spark)
+fn assert_spark_fails_smelt_succeeds(sql: &str, gap_id: &str) {
+    let smelt = SmeltParseResult::parse(sql);
+    let spark = SparkSqlparserResult::parse(sql);
+
+    assert!(
+        smelt.success,
+        "{}: Expected smelt to succeed, but it failed: {:?}\nSQL: {}",
+        gap_id, smelt.errors, sql
+    );
+    assert!(
+        !spark.success,
+        "{}: Expected sqlparser-databricks to fail, but it succeeded\nSQL: {}",
+        gap_id, sql
+    );
+}
+
+/// Test that both smelt and sqlparser-databricks succeed
+fn assert_both_smelt_spark_succeed(sql: &str, description: &str) {
+    let smelt = SmeltParseResult::parse(sql);
+    let spark = SparkSqlparserResult::parse(sql);
+
+    assert!(
+        smelt.success,
+        "{}: Expected smelt to succeed, but it failed: {:?}\nSQL: {}",
+        description, smelt.errors, sql
+    );
+    assert!(
+        spark.success,
+        "{}: Expected sqlparser-databricks to succeed, but it failed: {:?}\nSQL: {}",
+        description, spark.error, sql
+    );
+}
+
+// ===== Spark gap tests =====
+
+#[test]
+fn test_spark_gap_trailing_comma() {
+    // Trailing commas — smelt accepts, sqlparser-databricks rejects
+    assert_spark_fails_smelt_succeeds("SELECT a, b, c, FROM t", "spark_trailing_comma");
+}
+
+#[test]
+fn test_spark_pg_style_cast_supported() {
+    // PostgreSQL-style :: cast — DatabricksDialect actually supports this
+    assert_both_smelt_spark_succeed("SELECT x::INTEGER FROM t", "pg_style_cast");
+}
+
+// ===== Features that work in both smelt and Spark =====
+
+#[test]
+fn test_spark_both_work_qualify() {
+    assert_both_smelt_spark_succeed(
+        "SELECT * FROM t QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1",
+        "QUALIFY clause",
+    );
+}
+
+#[test]
+fn test_spark_both_work_basic_select() {
+    assert_both_smelt_spark_succeed("SELECT * FROM users", "basic select");
+    assert_both_smelt_spark_succeed("SELECT id, name FROM users", "column list");
+    assert_both_smelt_spark_succeed("SELECT id AS user_id FROM users", "column alias");
+}
+
+#[test]
+fn test_spark_both_work_joins() {
+    assert_both_smelt_spark_succeed("SELECT * FROM a JOIN b ON a.id = b.id", "simple JOIN");
+    assert_both_smelt_spark_succeed("SELECT * FROM a INNER JOIN b ON a.id = b.id", "INNER JOIN");
+    assert_both_smelt_spark_succeed("SELECT * FROM a LEFT JOIN b ON a.id = b.id", "LEFT JOIN");
+    assert_both_smelt_spark_succeed("SELECT * FROM a CROSS JOIN b", "CROSS JOIN");
+}
+
+#[test]
+fn test_spark_both_work_window_functions() {
+    assert_both_smelt_spark_succeed("SELECT ROW_NUMBER() OVER () FROM users", "ROW_NUMBER");
+    assert_both_smelt_spark_succeed(
+        "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM users",
+        "ROW_NUMBER with ORDER BY",
+    );
+    assert_both_smelt_spark_succeed(
+        "SELECT SUM(amount) OVER (PARTITION BY user_id) FROM orders",
+        "SUM with PARTITION BY",
+    );
+}
+
+#[test]
+fn test_spark_both_work_cte() {
+    assert_both_smelt_spark_succeed(
+        "WITH t AS (SELECT * FROM users) SELECT * FROM t",
+        "simple CTE",
+    );
+}
+
+#[test]
+fn test_spark_both_work_union() {
+    assert_both_smelt_spark_succeed("SELECT id FROM a UNION SELECT id FROM b", "UNION");
+    assert_both_smelt_spark_succeed("SELECT id FROM a UNION ALL SELECT id FROM b", "UNION ALL");
+}
+
+#[test]
+fn test_spark_both_work_subquery() {
+    assert_both_smelt_spark_succeed("SELECT * FROM (SELECT id FROM users) t", "subquery in FROM");
+    assert_both_smelt_spark_succeed(
+        "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)",
+        "IN subquery",
+    );
+}
+
+// ===== Spark extensions that pg_query rejects but both smelt and Spark accept =====
+
+#[test]
+fn test_qualify_pg_fails_spark_succeeds() {
+    let sql = "SELECT * FROM t QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1";
+    // pg_query should fail (QUALIFY is not PostgreSQL)
+    let pg = PgParseResult::parse(sql);
+    assert!(!pg.success, "pg_query should reject QUALIFY");
+
+    // Both smelt and Spark should succeed
+    assert_both_smelt_spark_succeed(sql, "QUALIFY accepted by smelt and Spark");
+}
+
+#[test]
+fn test_spark_gap_summary() {
+    // Print gap summary including Spark-specific gaps
+    let all_gaps = gaps::KNOWN_GAPS;
+    let spark_gaps: Vec<_> = all_gaps
+        .iter()
+        .filter(|g| g.dialect == "spark" || g.dialect == "both" || g.dialect == "all")
+        .collect();
+
+    println!("Spark-relevant gaps: {}", spark_gaps.len());
+    for gap in &spark_gaps {
+        println!(
+            "  [{}/{}] {} - {}",
+            gap.category, gap.dialect, gap.id, gap.description
+        );
+    }
+
+    assert!(!spark_gaps.is_empty(), "Should have Spark-relevant gaps");
 }
