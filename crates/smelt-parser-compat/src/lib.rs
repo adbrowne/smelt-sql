@@ -23,9 +23,8 @@
 //! ```
 
 pub mod gaps;
+pub mod generators;
 pub mod normalize;
-pub mod pg_generators;
-pub mod spark_generators;
 
 use smelt_parser::{ast::File, parse};
 use std::process::Command;

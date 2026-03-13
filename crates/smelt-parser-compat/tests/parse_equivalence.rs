@@ -8,7 +8,7 @@
 use proptest::prelude::*;
 use smelt_parser_compat::{
     compare_all_parse_results, compare_parse_results, compare_spark_parse_results, gaps,
-    pg_generators, spark_generators, PgParseResult, SmeltParseResult, SparkSqlparserResult,
+    generators, PgParseResult, SmeltParseResult, SparkSqlparserResult,
 };
 
 /// Configuration for property tests
@@ -23,7 +23,7 @@ proptest! {
     /// - smelt extensions (smelt.ref, smelt.source, =>)
     /// - DuckDB-friendly syntax (trailing commas)
     #[test]
-    fn prop_smelt_valid_implies_pg_valid(sql in pg_generators::simple_select()) {
+    fn prop_smelt_valid_implies_pg_valid(sql in generators::simple_select()) {
         let smelt_result = SmeltParseResult::parse(&sql);
         if smelt_result.success {
             // Skip smelt-specific extensions
@@ -48,7 +48,7 @@ proptest! {
 
     /// Property: If pg_query parses, smelt should too (unless it's a known gap)
     #[test]
-    fn prop_pg_valid_implies_smelt_valid(sql in pg_generators::simple_select()) {
+    fn prop_pg_valid_implies_smelt_valid(sql in generators::simple_select()) {
         let pg_result = PgParseResult::parse(&sql);
         if pg_result.success {
             let smelt_result = SmeltParseResult::parse(&sql);
@@ -69,7 +69,7 @@ proptest! {
     /// If smelt parses SQL successfully, prints it back, and pg_query parses both,
     /// the fingerprints should match.
     #[test]
-    fn prop_semantic_equivalence(sql in pg_generators::simple_select()) {
+    fn prop_semantic_equivalence(sql in generators::simple_select()) {
         if smelt_parser_compat::has_smelt_extensions(&sql) {
             return Ok(());
         }
@@ -82,7 +82,7 @@ proptest! {
 
     /// Property: GROUP BY queries maintain equivalence
     #[test]
-    fn prop_group_by_equivalence(sql in pg_generators::select_with_group_by()) {
+    fn prop_group_by_equivalence(sql in generators::select_with_group_by()) {
         if smelt_parser_compat::has_smelt_extensions(&sql) {
             return Ok(());
         }
@@ -95,7 +95,7 @@ proptest! {
 
     /// Property: JOIN queries maintain equivalence
     #[test]
-    fn prop_join_equivalence(sql in pg_generators::select_with_join()) {
+    fn prop_join_equivalence(sql in generators::select_with_join()) {
         if smelt_parser_compat::has_smelt_extensions(&sql) {
             return Ok(());
         }
@@ -108,7 +108,7 @@ proptest! {
 
     /// Property: CTE queries maintain equivalence
     #[test]
-    fn prop_cte_equivalence(sql in pg_generators::select_with_cte()) {
+    fn prop_cte_equivalence(sql in generators::select_with_cte()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -117,7 +117,7 @@ proptest! {
 
     /// Property: Window function queries maintain equivalence
     #[test]
-    fn prop_window_function_equivalence(sql in pg_generators::select_with_window()) {
+    fn prop_window_function_equivalence(sql in generators::select_with_window()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -126,7 +126,7 @@ proptest! {
 
     /// Property: UNION queries maintain equivalence
     #[test]
-    fn prop_union_equivalence(sql in pg_generators::select_union()) {
+    fn prop_union_equivalence(sql in generators::select_union()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -135,7 +135,7 @@ proptest! {
 
     /// Property: CASE expressions maintain equivalence
     #[test]
-    fn prop_case_equivalence(sql in pg_generators::select_with_case()) {
+    fn prop_case_equivalence(sql in generators::select_with_case()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -144,7 +144,7 @@ proptest! {
 
     /// Property: IN subquery queries maintain equivalence
     #[test]
-    fn prop_in_subquery_equivalence(sql in pg_generators::select_with_in_subquery()) {
+    fn prop_in_subquery_equivalence(sql in generators::select_with_in_subquery()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -153,7 +153,7 @@ proptest! {
 
     /// Property: EXISTS queries maintain equivalence
     #[test]
-    fn prop_exists_equivalence(sql in pg_generators::select_with_exists()) {
+    fn prop_exists_equivalence(sql in generators::select_with_exists()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -162,7 +162,7 @@ proptest! {
 
     /// Property: BETWEEN queries maintain equivalence
     #[test]
-    fn prop_between_equivalence(sql in pg_generators::select_with_between()) {
+    fn prop_between_equivalence(sql in generators::select_with_between()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -171,7 +171,7 @@ proptest! {
 
     /// Property: CAST queries maintain equivalence
     #[test]
-    fn prop_cast_equivalence(sql in pg_generators::select_with_cast()) {
+    fn prop_cast_equivalence(sql in generators::select_with_cast()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -180,7 +180,7 @@ proptest! {
 
     /// Property: DISTINCT queries maintain equivalence
     #[test]
-    fn prop_distinct_equivalence(sql in pg_generators::select_distinct()) {
+    fn prop_distinct_equivalence(sql in generators::select_distinct()) {
         match compare_parse_results(&sql) {
             Ok(_) => (),
             Err(e) => prop_assert!(false, "{}", e),
@@ -189,7 +189,7 @@ proptest! {
 
     /// Test with all query types
     #[test]
-    fn prop_any_select_equivalence(sql in pg_generators::any_select()) {
+    fn prop_any_select_equivalence(sql in generators::any_select()) {
         if smelt_parser_compat::has_smelt_extensions(&sql) {
             return Ok(());
         }
@@ -369,7 +369,7 @@ proptest! {
 
     /// Standard SQL generators tested against sqlparser-databricks
     #[test]
-    fn prop_standard_sql_spark_valid(sql in spark_generators::standard_sql_select()) {
+    fn prop_standard_sql_spark_valid(sql in generators::any_select()) {
         if smelt_parser_compat::has_smelt_extensions(&sql) {
             return Ok(());
         }
@@ -382,7 +382,7 @@ proptest! {
 
     /// If smelt parses Spark-specific SQL, sqlparser-databricks should too
     #[test]
-    fn prop_smelt_valid_implies_spark_valid(sql in spark_generators::any_spark_select()) {
+    fn prop_smelt_valid_implies_spark_valid(sql in generators::any_select()) {
         let smelt_result = SmeltParseResult::parse(&sql);
         if smelt_result.success {
             let spark_result = SparkSqlparserResult::parse(&sql);
@@ -401,7 +401,7 @@ proptest! {
 
     /// If sqlparser-databricks parses, smelt should too (unless known gap)
     #[test]
-    fn prop_spark_valid_implies_smelt_valid(sql in spark_generators::any_spark_select()) {
+    fn prop_spark_valid_implies_smelt_valid(sql in generators::any_select()) {
         let spark_result = SparkSqlparserResult::parse(&sql);
         if spark_result.success {
             let smelt_result = SmeltParseResult::parse(&sql);
@@ -420,7 +420,7 @@ proptest! {
 
     /// Standard SQL against all available references
     #[test]
-    fn prop_all_references_equivalence(sql in pg_generators::simple_select()) {
+    fn prop_all_references_equivalence(sql in generators::simple_select()) {
         if smelt_parser_compat::has_smelt_extensions(&sql) {
             return Ok(());
         }

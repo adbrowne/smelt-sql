@@ -1,9 +1,14 @@
-//! PostgreSQL grammar-based SQL generators
+//! smelt SQL generators for property-based testing
 //!
-//! This module provides proptest strategies for generating valid PostgreSQL SELECT queries.
-//! The generators are designed to exercise various SQL features to find parser gaps.
+//! This module provides proptest strategies for generating valid smelt SQL SELECT queries.
+//! smelt SQL is a superset that includes standard SQL plus extensions like QUALIFY, lambdas,
+//! PIVOT/UNPIVOT, array subscript/slice, etc. The generators cover the full superset from
+//! a single module; reference parsers (pg_query, sqlparser-databricks, sqlglot) each validate
+//! the subset they support.
 
 use proptest::prelude::*;
+
+// ===== Primitive generators =====
 
 /// Generate a simple identifier
 pub fn identifier() -> impl Strategy<Value = String> {
@@ -349,6 +354,8 @@ pub fn join_condition() -> impl Strategy<Value = String> {
     ]
 }
 
+// ===== Standard SQL generators =====
+
 /// Generate a simple SELECT statement
 pub fn simple_select() -> impl Strategy<Value = String> {
     (
@@ -584,30 +591,97 @@ pub fn select_with_cast() -> impl Strategy<Value = String> {
         .prop_map(|(cast, a, tbl)| format!("SELECT {} AS {} FROM {}", cast, a, tbl))
 }
 
-/// Generate any valid PostgreSQL SELECT
-pub fn any_select() -> impl Strategy<Value = String> {
-    prop_oneof![
-        simple_select(),
-        select_with_group_by(),
-        select_with_join(),
-        select_distinct(),
-        select_with_cte(),
-        select_with_window(),
-        select_union(),
-        select_union_all(),
-        select_with_case(),
-        select_with_in_subquery(),
-        select_with_exists(),
-        select_with_between(),
-        select_with_is_null(),
-        select_with_is_not_null(),
-        select_with_cast(),
-    ]
+// ===== smelt SQL extensions (QUALIFY, lambdas, PIVOT/UNPIVOT, etc.) =====
+
+/// Generate a SELECT with QUALIFY clause
+pub fn select_with_qualify() -> impl Strategy<Value = String> {
+    (select_list(), table_name(), column_name(), where_clause()).prop_map(
+        |(sel, tbl, order_col, whr)| {
+            let mut sql = format!("SELECT {} FROM {}", sel, tbl);
+            if let Some(w) = whr {
+                sql.push_str(&format!(" {}", w));
+            }
+            sql.push_str(&format!(
+                " QUALIFY ROW_NUMBER() OVER (ORDER BY {}) = 1",
+                order_col
+            ));
+            sql
+        },
+    )
 }
 
-// ===== PostgreSQL-specific syntax that smelt may not support =====
-// These generators intentionally create SQL that may fail in smelt
-// to help discover parser gaps.
+/// Generate a SELECT with QUALIFY using PARTITION BY
+pub fn select_with_qualify_partition() -> impl Strategy<Value = String> {
+    (column_name(), column_name(), table_name()).prop_map(|(part_col, order_col, tbl)| {
+        format!(
+            "SELECT * FROM {} QUALIFY ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {}) = 1",
+            tbl, part_col, order_col
+        )
+    })
+}
+
+/// Generate a TRANSFORM lambda expression
+pub fn select_with_transform() -> impl Strategy<Value = String> {
+    (column_name(), table_name()).prop_map(|(arr_col, tbl)| {
+        format!("SELECT TRANSFORM({}, x -> x + 1) FROM {}", arr_col, tbl)
+    })
+}
+
+/// Generate an AGGREGATE lambda expression
+pub fn select_with_aggregate_func() -> impl Strategy<Value = String> {
+    (column_name(), table_name()).prop_map(|(arr_col, tbl)| {
+        format!(
+            "SELECT AGGREGATE({}, 0, (acc, x) -> acc + x) FROM {}",
+            arr_col, tbl
+        )
+    })
+}
+
+/// Generate a SELECT with PIVOT
+pub fn select_with_pivot() -> impl Strategy<Value = String> {
+    (table_name(), column_name(), column_name()).prop_map(|(tbl, agg_col, pivot_col)| {
+        format!(
+            "SELECT * FROM {} PIVOT (SUM({}) FOR {} IN ('a', 'b', 'c'))",
+            tbl, agg_col, pivot_col
+        )
+    })
+}
+
+/// Generate a SELECT with UNPIVOT
+pub fn select_with_unpivot() -> impl Strategy<Value = String> {
+    (table_name(), column_name(), column_name()).prop_map(|(tbl, col1, col2)| {
+        format!(
+            "SELECT * FROM {} UNPIVOT (val FOR name IN ({}, {}))",
+            tbl, col1, col2
+        )
+    })
+}
+
+/// Generate a SELECT with array slice
+pub fn select_with_array_slice() -> impl Strategy<Value = String> {
+    (column_name(), table_name()).prop_map(|(col, tbl)| format!("SELECT {}[1:5] FROM {}", col, tbl))
+}
+
+/// Generate a SELECT with FILTER clause on aggregate
+pub fn select_with_filter_aggregate() -> impl Strategy<Value = String> {
+    (column_name(), table_name(), comparison_expr()).prop_map(|(col, tbl, cond)| {
+        format!("SELECT COUNT({}) FILTER (WHERE {}) FROM {}", col, cond, tbl)
+    })
+}
+
+/// Generate a SELECT with multiple smelt features combined (window + QUALIFY)
+pub fn select_with_spark_window_qualify() -> impl Strategy<Value = String> {
+    (column_name(), column_name(), table_name(), alias()).prop_map(
+        |(sel_col, order_col, tbl, win_alias)| {
+            format!(
+                "SELECT {}, ROW_NUMBER() OVER (ORDER BY {}) AS {} FROM {} QUALIFY {} = 1",
+                sel_col, order_col, win_alias, tbl, win_alias
+            )
+        },
+    )
+}
+
+// ===== Gap-triggering generators (syntax known to expose parser gaps) =====
 
 /// Generate SQL with array subscript (known gap)
 pub fn select_with_array_subscript() -> impl Strategy<Value = String> {
@@ -648,6 +722,38 @@ pub fn gap_triggering_select() -> impl Strategy<Value = String> {
     ]
 }
 
+// ===== Composite generators =====
+
+/// Generate any valid smelt SQL SELECT (full superset)
+pub fn any_select() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Standard SQL
+        simple_select(),
+        select_with_group_by(),
+        select_with_join(),
+        select_distinct(),
+        select_with_cte(),
+        select_with_window(),
+        select_union(),
+        select_union_all(),
+        select_with_case(),
+        select_with_in_subquery(),
+        select_with_exists(),
+        select_with_between(),
+        select_with_is_null(),
+        select_with_is_not_null(),
+        select_with_cast(),
+        // smelt SQL extensions
+        select_with_qualify(),
+        select_with_qualify_partition(),
+        select_with_transform(),
+        select_with_aggregate_func(),
+        select_with_pivot(),
+        select_with_unpivot(),
+        select_with_array_slice(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +784,34 @@ mod tests {
         #[test]
         fn test_select_with_window_structure(sql in select_with_window()) {
             assert!(sql.contains("OVER"));
+        }
+
+        #[test]
+        fn test_qualify_structure(sql in select_with_qualify()) {
+            assert!(sql.contains("QUALIFY"));
+            assert!(sql.contains("ROW_NUMBER"));
+        }
+
+        #[test]
+        fn test_transform_structure(sql in select_with_transform()) {
+            assert!(sql.contains("TRANSFORM"));
+            assert!(sql.contains("->"));
+        }
+
+        #[test]
+        fn test_pivot_structure(sql in select_with_pivot()) {
+            assert!(sql.contains("PIVOT"));
+            assert!(sql.contains("SUM"));
+        }
+
+        #[test]
+        fn test_unpivot_structure(sql in select_with_unpivot()) {
+            assert!(sql.contains("UNPIVOT"));
+        }
+
+        #[test]
+        fn test_array_subscript_structure(sql in select_with_array_subscript()) {
+            assert!(sql.contains("["));
         }
     }
 }
