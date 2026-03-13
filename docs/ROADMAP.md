@@ -4,6 +4,21 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**SQL Parser Gap Fill (March 13, 2026)**: Implemented 12 features across 6 categories to close remaining SQL parser gaps:
+- **Set operations**: INTERSECT [ALL], EXCEPT [ALL] alongside existing UNION [ALL]
+- **Block comments**: `/* ... */` with nested comment support
+- **ARRAY literals**: `ARRAY[1, 2, 3]` syntax
+- **VALUES clause**: Standalone and in CTEs: `VALUES (1, 'a'), (2, 'b')`
+- **JSON operators**: `->`, `->>`, `#>`, `#>>`, `@>`, `<@`
+- **Regex operators**: `~`, `~*`, `!~`, `!~*`
+- **ROW constructor**: `ROW(1, 2, 3)`
+- **ANY/ALL/SOME**: Array comparisons: `= ANY(...)`, `> ALL(...)`
+- **WITHIN GROUP**: Ordered-set aggregates: `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY val)`
+- **Window EXCLUDE**: `EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS`
+- **FETCH FIRST**: `FETCH FIRST N ROWS ONLY` with OFFSET support
+- **STRUCT literals**: `STRUCT(expr AS name, ...)`
+Removed 7 known parser gaps from smelt-parser-compat. Lambda expressions updated to work with new `->` tokenization.
+
 **Multi-Dialect Compatibility Testing (March 13, 2026)**: Extended `smelt-parser-compat` with three-layer verification: pg_query (existing), sqlparser-rs DatabricksDialect (new, pure Rust), and sqlglot subprocess (new, Python, optional). Added Spark-specific SQL generators, dialect-aware gap tracking, Docker-based Spark integration tests, and unified `compare_all_parse_results()`. CI workflow renamed from `pg-compat.yml` to `compat.yml` with sqlglot and Spark Docker jobs.
 
 **Smelt SQL Multi-Dialect Superset (March 12, 2026)**: Defining smelt SQL as a logical SQL superset — PostgreSQL base with cherry-picked features from DuckDB and Spark. Phase 4a-4e: QUALIFY clause, lambda expressions/array functions, PIVOT/UNPIVOT, array subscript notation, DATE literal normalization. Parser-level features with backend-specific rewrite rules.

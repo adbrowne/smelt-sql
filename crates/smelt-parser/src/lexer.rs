@@ -74,10 +74,21 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 PLUS
             }
+            '-' if self.peek_char() == Some('>') => {
+                self.advance();
+                self.advance();
+                if self.current_char() == '>' {
+                    self.advance();
+                    JSON_ARROW_TEXT // ->>
+                } else {
+                    JSON_ARROW // ->
+                }
+            }
             '-' => {
                 self.advance();
                 MINUS
             }
+            '/' if self.peek_char() == Some('*') => self.consume_block_comment(),
             '/' => {
                 self.advance();
                 DIVIDE
@@ -91,10 +102,25 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 EQ
             }
+            '!' if self.peek_char() == Some('~') => {
+                self.advance(); // !
+                self.advance(); // ~
+                if self.current_char() == '*' {
+                    self.advance();
+                    NOT_TILDE_STAR // !~*
+                } else {
+                    NOT_TILDE // !~
+                }
+            }
             '!' if self.peek_char() == Some('=') => {
                 self.advance();
                 self.advance();
                 NE
+            }
+            '<' if self.peek_char() == Some('@') => {
+                self.advance();
+                self.advance();
+                LT_AT
             }
             '<' if self.peek_char() == Some('>') => {
                 self.advance();
@@ -142,6 +168,33 @@ impl<'a> Lexer<'a> {
                 COLON
             }
 
+            // Hash operators (#>, #>>)
+            '#' if self.peek_char() == Some('>') => {
+                self.advance(); // #
+                self.advance(); // >
+                if self.current_char() == '>' {
+                    self.advance();
+                    HASH_ARROW_TEXT // #>>
+                } else {
+                    HASH_ARROW // #>
+                }
+            }
+            // Containment operator (@>)
+            '@' if self.peek_char() == Some('>') => {
+                self.advance();
+                self.advance();
+                AT_GT
+            }
+            // Regex match operators (~, ~*)
+            '~' => {
+                self.advance();
+                if self.current_char() == '*' {
+                    self.advance();
+                    TILDE_STAR // ~*
+                } else {
+                    TILDE // ~
+                }
+            }
             // Strings
             '\'' | '"' => self.consume_string(c),
 
@@ -193,6 +246,29 @@ impl<'a> Lexer<'a> {
         // Consume until newline or EOF
         while self.current_char() != '\n' && self.current_char() != '\0' {
             self.advance();
+        }
+
+        COMMENT
+    }
+
+    fn consume_block_comment(&mut self) -> SyntaxKind {
+        // Consume /*
+        self.advance();
+        self.advance();
+
+        let mut depth = 1;
+        while depth > 0 && self.current_char() != '\0' {
+            if self.current_char() == '/' && self.peek_char() == Some('*') {
+                self.advance();
+                self.advance();
+                depth += 1;
+            } else if self.current_char() == '*' && self.peek_char() == Some('/') {
+                self.advance();
+                self.advance();
+                depth -= 1;
+            } else {
+                self.advance();
+            }
         }
 
         COMMENT
@@ -313,6 +389,8 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "WITH" => WITH_KW,
         "RECURSIVE" => RECURSIVE_KW,
         "UNION" => UNION_KW,
+        "INTERSECT" => INTERSECT_KW,
+        "EXCEPT" => EXCEPT_KW,
         // Phase 14: PostgreSQL-specific keywords
         "LATERAL" => LATERAL_KW,
         "TABLESAMPLE" => TABLESAMPLE_KW,
@@ -321,6 +399,13 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "REPEATABLE" => REPEATABLE_KW,
         // Phase 15: Aggregate function keywords
         "FILTER" => FILTER_KW,
+        // SQL data type/constructor keywords
+        "ARRAY" => ARRAY_KW,
+        "VALUES" => VALUES_KW,
+        "STRUCT" => STRUCT_KW,
+        // Note: WITHIN, EXCLUDE, TIES, OTHERS, NO, FETCH, NEXT, ONLY are handled
+        // contextually in the parser (via IDENT text matching) to avoid conflicts
+        // with these common words used as identifiers.
         // Multi-dialect superset keywords
         "QUALIFY" => QUALIFY_KW,
         "PIVOT" => PIVOT_KW,

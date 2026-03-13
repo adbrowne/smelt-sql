@@ -74,6 +74,20 @@ impl<'a> Parser<'a> {
         kinds.contains(&self.current())
     }
 
+    /// Get the text of the current token
+    fn current_text(&self) -> &str {
+        if let Some(token) = self.tokens.get(self.pos) {
+            &self.input[self.offset..self.offset + token.len]
+        } else {
+            ""
+        }
+    }
+
+    /// Check if current token is an IDENT with specific text (case-insensitive)
+    fn at_contextual_keyword(&self, text: &str) -> bool {
+        self.at(IDENT) && self.current_text().eq_ignore_ascii_case(text)
+    }
+
     /// Advance to next token, consuming trivia
     fn advance(&mut self) {
         if self.pos < self.tokens.len() {
@@ -159,16 +173,35 @@ impl<'a> Parser<'a> {
     fn at_keyword_that_ends_table_ref(&self) -> bool {
         // Keywords that can follow a table reference in the FROM clause
         self.at_any(&[
-            WHERE_KW, GROUP_KW, HAVING_KW, QUALIFY_KW, ORDER_KW, LIMIT_KW, // JOIN keywords
-            JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, // PIVOT/UNPIVOT
-            PIVOT_KW, UNPIVOT_KW,
-        ])
+            WHERE_KW,
+            GROUP_KW,
+            HAVING_KW,
+            QUALIFY_KW,
+            ORDER_KW,
+            LIMIT_KW,
+            OFFSET_KW,
+            // JOIN keywords
+            JOIN_KW,
+            INNER_KW,
+            LEFT_KW,
+            RIGHT_KW,
+            FULL_KW,
+            CROSS_KW,
+            // PIVOT/UNPIVOT
+            PIVOT_KW,
+            UNPIVOT_KW,
+            // Set operations
+            UNION_KW,
+            INTERSECT_KW,
+            EXCEPT_KW,
+        ]) || self.at_contextual_keyword("FETCH")
     }
 
     /// Check if current token can start an expression
     fn at_expression_start(&self) -> bool {
         self.at_any(&[
-            IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXISTS_KW,
+            IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXISTS_KW, ARRAY_KW, ROW_KW,
+            STRUCT_KW, MINUS,
         ])
     }
 
@@ -179,9 +212,11 @@ impl<'a> Parser<'a> {
 
         self.skip_trivia();
 
-        // Parse SELECT statement (can start with WITH)
+        // Parse SELECT statement (can start with WITH) or VALUES clause
         if self.at(SELECT_KW) || self.at(WITH_KW) {
             self.parse_select_stmt();
+        } else if self.at(VALUES_KW) {
+            self.parse_values_clause();
         } else if !self.at(EOF) {
             self.error("Expected SELECT statement".to_string());
             self.sync_to(&[EOF]);
@@ -278,14 +313,35 @@ impl<'a> Parser<'a> {
 
         // LIMIT clause
         self.skip_trivia();
-        if self.at(LIMIT_KW) {
+        let has_limit = self.at(LIMIT_KW);
+        if has_limit {
             self.parse_limit_clause();
         }
 
-        // UNION clause (set operations)
+        // OFFSET without LIMIT (for FETCH FIRST pattern)
         self.skip_trivia();
-        if self.at(UNION_KW) {
-            self.advance();
+        if self.at(OFFSET_KW) && !has_limit {
+            self.start_node(LIMIT_CLAUSE);
+            self.advance(); // OFFSET
+            self.skip_trivia();
+            if self.at(NUMBER) {
+                self.advance();
+            } else {
+                self.error("Expected number after OFFSET".to_string());
+            }
+            self.finish_node();
+        }
+
+        // FETCH FIRST/NEXT N ROW(S) ONLY
+        self.skip_trivia();
+        if self.at_contextual_keyword("FETCH") {
+            self.parse_fetch_clause();
+        }
+
+        // Set operations: UNION / INTERSECT / EXCEPT
+        self.skip_trivia();
+        if self.at_any(&[UNION_KW, INTERSECT_KW, EXCEPT_KW]) {
+            self.advance(); // consume UNION/INTERSECT/EXCEPT
             self.skip_trivia();
             // Optional ALL
             if self.at(ALL_KW) {
@@ -296,7 +352,7 @@ impl<'a> Parser<'a> {
             if self.at(SELECT_KW) || self.at(WITH_KW) {
                 self.parse_select_stmt();
             } else {
-                self.error("Expected SELECT after UNION".to_string());
+                self.error("Expected SELECT after set operation".to_string());
             }
         }
 
@@ -324,8 +380,24 @@ impl<'a> Parser<'a> {
                 self.skip_trivia();
                 // Allow trailing comma - break if next token ends the SELECT list
                 if self.at_any(&[
-                    FROM_KW, WHERE_KW, GROUP_KW, HAVING_KW, QUALIFY_KW, ORDER_KW, LIMIT_KW, EOF,
-                    INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW, JOIN_KW,
+                    FROM_KW,
+                    WHERE_KW,
+                    GROUP_KW,
+                    HAVING_KW,
+                    QUALIFY_KW,
+                    ORDER_KW,
+                    LIMIT_KW,
+                    OFFSET_KW,
+                    EOF,
+                    INNER_KW,
+                    LEFT_KW,
+                    RIGHT_KW,
+                    FULL_KW,
+                    CROSS_KW,
+                    JOIN_KW,
+                    UNION_KW,
+                    INTERSECT_KW,
+                    EXCEPT_KW,
                 ]) {
                     break;
                 }
@@ -397,13 +469,19 @@ impl<'a> Parser<'a> {
             self.advance(); // consume LPAREN
             self.skip_trivia();
 
-            // Check if it's a subquery (starts with SELECT)
-            if self.at(SELECT_KW) {
+            // Check if it's a subquery (starts with SELECT or WITH) or VALUES
+            if self.at(SELECT_KW) || self.at(WITH_KW) {
                 self.start_node_at(checkpoint, SUBQUERY);
                 self.parse_select_stmt();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node(); // Close SUBQUERY
+            } else if self.at(VALUES_KW) {
+                self.start_node_at(checkpoint, SUBQUERY);
+                self.parse_values_clause();
+                self.skip_trivia();
+                self.expect(RPAREN);
+                self.finish_node();
             } else {
                 // Not a subquery, error
                 self.error("Expected SELECT in subquery".to_string());
@@ -735,7 +813,17 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.skip_trivia();
                 // Allow trailing comma - break if next token ends GROUP BY
-                if self.at_any(&[HAVING_KW, QUALIFY_KW, ORDER_KW, LIMIT_KW, EOF]) {
+                if self.at_any(&[
+                    HAVING_KW,
+                    QUALIFY_KW,
+                    ORDER_KW,
+                    LIMIT_KW,
+                    OFFSET_KW,
+                    EOF,
+                    UNION_KW,
+                    INTERSECT_KW,
+                    EXCEPT_KW,
+                ]) {
                     break;
                 }
             } else {
@@ -873,11 +961,39 @@ impl<'a> Parser<'a> {
 
         loop {
             self.skip_trivia();
-            if self.at_any(&[EQ, NE, LT, GT, LE, GE]) {
+            if self.at_any(&[
+                EQ,
+                NE,
+                LT,
+                GT,
+                LE,
+                GE,
+                TILDE,
+                TILDE_STAR,
+                NOT_TILDE,
+                NOT_TILDE_STAR,
+            ]) {
                 self.start_node(BINARY_EXPR);
                 self.advance();
                 self.skip_trivia();
-                self.parse_concat_expr();
+                // Check for ANY/ALL/SOME(expr)
+                if self.at_any(&[ANY_KW, SOME_KW, ALL_KW]) && self.is_keyword_followed_by_lparen() {
+                    self.start_node(ANY_EXPR);
+                    self.advance(); // ANY/ALL/SOME
+                    self.skip_trivia();
+                    self.expect(LPAREN);
+                    self.skip_trivia();
+                    if self.at(SELECT_KW) {
+                        self.parse_subquery();
+                    } else {
+                        self.parse_expression();
+                    }
+                    self.skip_trivia();
+                    self.expect(RPAREN);
+                    self.finish_node(); // ANY_EXPR
+                } else {
+                    self.parse_concat_expr();
+                }
                 self.finish_node();
             } else if self.at(IS_KW) {
                 // IS [NOT] NULL
@@ -965,13 +1081,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_concat_expr(&mut self) {
-        self.parse_additive_expr();
+        self.parse_json_expr();
 
         while self.at(CONCAT) {
             self.start_node(BINARY_EXPR);
             self.advance();
             self.skip_trivia();
+            self.parse_json_expr();
+            self.finish_node();
+        }
+    }
+
+    fn parse_json_expr(&mut self) {
+        self.parse_additive_expr();
+
+        self.skip_trivia();
+        while self.at_any(&[
+            JSON_ARROW,
+            JSON_ARROW_TEXT,
+            HASH_ARROW,
+            HASH_ARROW_TEXT,
+            AT_GT,
+            LT_AT,
+        ]) {
+            self.start_node(BINARY_EXPR);
+            self.advance();
+            self.skip_trivia();
             self.parse_additive_expr();
+            self.skip_trivia();
             self.finish_node();
         }
     }
@@ -1022,7 +1159,21 @@ impl<'a> Parser<'a> {
     fn parse_primary_expr(&mut self) {
         self.skip_trivia();
 
-        if self.at(CASE_KW) {
+        if self.at(ARRAY_KW) && self.is_keyword_followed_by_lbracket() {
+            self.parse_array_literal();
+        } else if self.at(ARRAY_KW) && self.is_keyword_followed_by_lparen() {
+            // ARRAY(expr) function-call style
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // ARRAY_KW
+            self.skip_trivia();
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            self.parse_arg_list();
+            self.finish_node();
+        } else if self.at(ROW_KW) && self.is_keyword_followed_by_lparen() {
+            self.parse_row_constructor();
+        } else if self.at(STRUCT_KW) && self.is_keyword_followed_by_lparen() {
+            self.parse_struct_literal();
+        } else if self.at(CASE_KW) {
             self.parse_case_expr();
         } else if self.at(CAST_KW) {
             self.parse_cast_expr();
@@ -1073,7 +1224,8 @@ impl<'a> Parser<'a> {
                 // Simple function call: func()
                 self.start_node_at(checkpoint, FUNCTION_CALL);
                 self.parse_arg_list();
-                self.parse_filter_clause_if_present(); // PostgreSQL FILTER clause
+                self.parse_within_group_if_present();
+                self.parse_filter_clause_if_present();
                 self.finish_node();
 
                 // Check for OVER clause (window function)
@@ -1092,7 +1244,8 @@ impl<'a> Parser<'a> {
                     // Namespaced function call: smelt.ref()
                     self.start_node_at(checkpoint, FUNCTION_CALL);
                     self.parse_arg_list();
-                    self.parse_filter_clause_if_present(); // PostgreSQL FILTER clause
+                    self.parse_within_group_if_present();
+                    self.parse_filter_clause_if_present();
                     self.finish_node();
 
                     // Check for OVER clause (window function)
@@ -1155,6 +1308,148 @@ impl<'a> Parser<'a> {
             self.expect(RBRACKET);
             self.finish_node();
         }
+    }
+
+    fn parse_fetch_clause(&mut self) {
+        self.start_node(FETCH_CLAUSE);
+        // FETCH is a contextual keyword (IDENT)
+        self.advance(); // consume "FETCH"
+        self.skip_trivia();
+        // FIRST or NEXT (contextual)
+        if self.at(FIRST_KW) || self.at_contextual_keyword("NEXT") {
+            self.advance();
+        }
+        self.skip_trivia();
+        // Optional count
+        if self.at(NUMBER) {
+            self.advance();
+        }
+        self.skip_trivia();
+        // ROW or ROWS
+        if self.at(ROW_KW) || self.at(ROWS_KW) {
+            self.advance();
+        }
+        self.skip_trivia();
+        // ONLY (contextual)
+        if self.at_contextual_keyword("ONLY") {
+            self.advance();
+        }
+        self.finish_node();
+    }
+
+    fn parse_values_clause(&mut self) {
+        self.start_node(VALUES_CLAUSE);
+        self.expect(VALUES_KW);
+
+        // Parse comma-separated rows: (expr, expr), (expr, expr)
+        loop {
+            self.skip_trivia();
+            self.start_node(VALUES_ROW);
+            if self.expect(LPAREN) {
+                loop {
+                    self.skip_trivia();
+                    if self.at(RPAREN) {
+                        break;
+                    }
+                    self.parse_expression();
+                    self.skip_trivia();
+                    if self.at(COMMA) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(RPAREN);
+            }
+            self.finish_node(); // VALUES_ROW
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.finish_node(); // VALUES_CLAUSE
+    }
+
+    fn parse_array_literal(&mut self) {
+        self.start_node(ARRAY_LITERAL);
+        self.expect(ARRAY_KW);
+        self.skip_trivia();
+        if self.expect(LBRACKET) {
+            loop {
+                self.skip_trivia();
+                if self.at(RBRACKET) {
+                    break;
+                }
+                self.parse_expression();
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(RBRACKET);
+        }
+        self.finish_node();
+    }
+
+    fn parse_row_constructor(&mut self) {
+        self.start_node(ROW_CONSTRUCTOR);
+        self.expect(ROW_KW);
+        self.skip_trivia();
+        if self.expect(LPAREN) {
+            loop {
+                self.skip_trivia();
+                if self.at(RPAREN) {
+                    break;
+                }
+                self.parse_expression();
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(RPAREN);
+        }
+        self.finish_node();
+    }
+
+    fn parse_struct_literal(&mut self) {
+        self.start_node(STRUCT_LITERAL);
+        self.expect(STRUCT_KW);
+        self.skip_trivia();
+        if self.expect(LPAREN) {
+            loop {
+                self.skip_trivia();
+                if self.at(RPAREN) {
+                    break;
+                }
+                self.parse_expression();
+                // Optional AS name
+                self.skip_trivia();
+                if self.at(AS_KW) {
+                    self.advance();
+                    self.skip_trivia();
+                    if self.at(IDENT) {
+                        self.advance();
+                    }
+                }
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(RPAREN);
+        }
+        self.finish_node();
     }
 
     fn parse_case_expr(&mut self) {
@@ -1345,6 +1640,28 @@ impl<'a> Parser<'a> {
         self.finish_node();
     }
 
+    /// Parse optional WITHIN GROUP clause for ordered-set aggregate functions
+    /// WITHIN GROUP (ORDER BY expr)
+    fn parse_within_group_if_present(&mut self) {
+        self.skip_trivia();
+        if self.at_contextual_keyword("WITHIN") {
+            self.start_node(WITHIN_GROUP_CLAUSE);
+            self.advance(); // WITHIN
+            self.skip_trivia();
+            self.expect(GROUP_KW);
+            self.skip_trivia();
+            if self.expect(LPAREN) {
+                self.skip_trivia();
+                if self.at(ORDER_KW) {
+                    self.parse_order_by_clause();
+                }
+                self.skip_trivia();
+                self.expect(RPAREN);
+            }
+            self.finish_node();
+        }
+    }
+
     /// Parse optional FILTER clause for aggregate functions (PostgreSQL)
     /// FILTER (WHERE condition)
     fn parse_filter_clause_if_present(&mut self) {
@@ -1422,9 +1739,41 @@ impl<'a> Parser<'a> {
             .unwrap_or(false)
     }
 
+    /// Check if current keyword is followed by LBRACKET (skipping trivia)
+    fn is_keyword_followed_by_lbracket(&self) -> bool {
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == LBRACKET)
+            .unwrap_or(false)
+    }
+
+    /// Check if current keyword is followed by LPAREN (skipping trivia)
+    fn is_keyword_followed_by_lparen(&self) -> bool {
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        self.tokens
+            .get(self.pos + lookahead)
+            .map(|t| t.kind == LPAREN)
+            .unwrap_or(false)
+    }
+
     /// Check if current token is a keyword that can also be used as a function name
     fn at_keyword_as_function_name(&self) -> bool {
-        if !self.at_any(&[FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW]) {
+        if !self.at_any(&[FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW, VALUES_KW]) {
             return false;
         }
         // Only treat as function name if followed by LPAREN
@@ -1481,8 +1830,15 @@ impl<'a> Parser<'a> {
         self.is_thin_arrow_at(lookahead)
     }
 
-    /// Check if tokens at pos+offset and pos+offset+1 form -> (MINUS GT with no space)
+    /// Check if tokens at pos+offset form -> (either JSON_ARROW token or MINUS GT pair)
     fn is_thin_arrow_at(&self, offset: usize) -> bool {
+        // With the new lexer, -> is tokenized as JSON_ARROW
+        if let Some(t) = self.tokens.get(self.pos + offset) {
+            if t.kind == JSON_ARROW {
+                return true;
+            }
+        }
+        // Fallback: MINUS GT (shouldn't happen with new lexer, but keep for safety)
         let minus = self.tokens.get(self.pos + offset);
         let gt = self.tokens.get(self.pos + offset + 1);
         matches!((minus, gt), (Some(m), Some(g)) if m.kind == MINUS && g.kind == GT)
@@ -1597,9 +1953,13 @@ impl<'a> Parser<'a> {
         }
 
         self.skip_trivia();
-        // Consume -> as MINUS GT
-        self.expect(MINUS);
-        self.expect(GT);
+        // Consume -> (now tokenized as JSON_ARROW, or fallback MINUS GT)
+        if self.at(JSON_ARROW) {
+            self.advance();
+        } else {
+            self.expect(MINUS);
+            self.expect(GT);
+        }
         self.skip_trivia();
         self.parse_expression();
 
@@ -1691,6 +2051,34 @@ impl<'a> Parser<'a> {
         } else {
             // Single bound (implicit CURRENT ROW end)
             self.parse_frame_bound();
+        }
+
+        // Optional EXCLUDE clause
+        self.skip_trivia();
+        if self.at_contextual_keyword("EXCLUDE") {
+            self.start_node(FRAME_EXCLUDE);
+            self.advance(); // EXCLUDE
+            self.skip_trivia();
+            if self.at(CURRENT_KW) {
+                self.advance(); // CURRENT
+                self.skip_trivia();
+                self.expect(ROW_KW);
+            } else if self.at(GROUP_KW) || self.at_contextual_keyword("TIES") {
+                self.advance();
+            } else if self.at_contextual_keyword("NO") {
+                self.advance(); // NO
+                self.skip_trivia();
+                if self.at_contextual_keyword("OTHERS") {
+                    self.advance();
+                } else {
+                    self.error("Expected OTHERS after NO".to_string());
+                }
+            } else {
+                self.error(
+                    "Expected CURRENT ROW, GROUP, TIES, or NO OTHERS after EXCLUDE".to_string(),
+                );
+            }
+            self.finish_node();
         }
 
         self.finish_node();
@@ -1835,8 +2223,10 @@ impl<'a> Parser<'a> {
             self.start_node(SUBQUERY);
             self.parse_select_stmt();
             self.finish_node();
+        } else if self.at(VALUES_KW) {
+            self.parse_values_clause();
         } else {
-            self.error("Expected SELECT or WITH in CTE".to_string());
+            self.error("Expected SELECT, WITH, or VALUES in CTE".to_string());
         }
 
         self.expect(RPAREN);
@@ -3056,6 +3446,293 @@ LIMIT 100
     #[test]
     fn test_timestamp_literal() {
         let input = "SELECT * FROM t WHERE ts > TIMESTAMP '2024-01-01 00:00:00'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== INTERSECT / EXCEPT =====
+
+    #[test]
+    fn test_intersect() {
+        let input = "SELECT a FROM t1 INTERSECT SELECT a FROM t2";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_except() {
+        let input = "SELECT a FROM t1 EXCEPT SELECT a FROM t2";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_intersect_all() {
+        let input = "SELECT a FROM t1 INTERSECT ALL SELECT a FROM t2";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_except_all() {
+        let input = "SELECT a FROM t1 EXCEPT ALL SELECT a FROM t2";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Block Comments =====
+
+    #[test]
+    fn test_block_comment() {
+        let input = "SELECT /* comment */ a FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_nested_block_comment() {
+        let input = "SELECT /* outer /* inner */ */ a FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== ARRAY Literals =====
+
+    #[test]
+    fn test_array_literal() {
+        let input = "SELECT ARRAY[1, 2, 3] FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_array_literal_empty() {
+        let input = "SELECT ARRAY[] FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== VALUES Clause =====
+
+    #[test]
+    fn test_values_standalone() {
+        let input = "VALUES (1, 'a'), (2, 'b')";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_values_in_cte() {
+        let input = "WITH data AS (VALUES (1, 'a'), (2, 'b')) SELECT * FROM data";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== JSON Operators =====
+
+    #[test]
+    fn test_json_arrow() {
+        let input = "SELECT data->'key' FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_json_arrow_text() {
+        let input = "SELECT data->>'key' FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_json_hash_arrow() {
+        let input = "SELECT data#>'{a,b}' FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_json_containment() {
+        let input = "SELECT * FROM t WHERE data @> '{\"key\": 1}'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_json_contained_by() {
+        let input = "SELECT * FROM t WHERE data <@ '{\"key\": 1}'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Regex Operators =====
+
+    #[test]
+    fn test_regex_match() {
+        let input = "SELECT * FROM t WHERE name ~ '^A'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_regex_match_case_insensitive() {
+        let input = "SELECT * FROM t WHERE name ~* '^a'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_regex_not_match() {
+        let input = "SELECT * FROM t WHERE name !~ '^A'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_regex_not_match_case_insensitive() {
+        let input = "SELECT * FROM t WHERE name !~* '^a'";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== ROW Constructor =====
+
+    #[test]
+    fn test_row_constructor() {
+        let input = "SELECT ROW(1, 2, 3) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== ANY/ALL/SOME =====
+
+    #[test]
+    fn test_any_array() {
+        let input = "SELECT * FROM t WHERE id = ANY(ARRAY[1, 2, 3])";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_all_subquery() {
+        let input = "SELECT * FROM t WHERE x > ALL(SELECT y FROM t2)";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== WITHIN GROUP =====
+
+    #[test]
+    fn test_within_group() {
+        let input = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY val) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Window Frame EXCLUDE =====
+
+    #[test]
+    fn test_window_frame_exclude_current_row() {
+        let input = "SELECT SUM(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_window_frame_exclude_ties() {
+        let input = "SELECT SUM(x) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE TIES) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== FETCH FIRST =====
+
+    #[test]
+    fn test_fetch_first() {
+        let input = "SELECT * FROM t FETCH FIRST 10 ROWS ONLY";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_offset_fetch() {
+        let input = "SELECT * FROM t OFFSET 5 FETCH NEXT 10 ROWS ONLY";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== STRUCT Literals =====
+
+    #[test]
+    fn test_struct_literal() {
+        let input = "SELECT STRUCT(1 AS a, 2 AS b) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_struct_literal_no_names() {
+        let input = "SELECT STRUCT(1, 'hello', 3.14) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Lambda with JSON_ARROW token =====
+
+    #[test]
+    fn test_lambda_still_works() {
+        let input = "SELECT TRANSFORM(arr, x -> x + 1) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_lambda_multi_param_still_works() {
+        let input = "SELECT AGGREGATE(arr, 0, (acc, x) -> acc + x) FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Contextual keywords as identifiers =====
+
+    #[test]
+    fn test_no_as_column_name() {
+        let input = "SELECT no FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_next_as_column_name() {
+        let input = "SELECT next FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_only_as_column_name() {
+        let input = "SELECT only FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_fetch_as_column_name() {
+        let input = "SELECT fetch FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_exclude_as_column_name() {
+        let input = "SELECT exclude FROM t";
+        let parse = parse(input);
+        assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_within_as_column_name() {
+        let input = "SELECT within FROM t";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
     }

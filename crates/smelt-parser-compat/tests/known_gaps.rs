@@ -9,23 +9,6 @@ use smelt_parser_compat::{gaps, PgParseResult, SmeltParseResult, SparkSqlparserR
 
 // ===== Helper Functions =====
 
-/// Test that smelt fails but pg_query succeeds
-fn assert_smelt_fails_pg_succeeds(sql: &str, gap_id: &str) {
-    let smelt = SmeltParseResult::parse(sql);
-    let pg = PgParseResult::parse(sql);
-
-    assert!(
-        !smelt.success,
-        "{}: Expected smelt to fail, but it succeeded\nSQL: {}",
-        gap_id, sql
-    );
-    assert!(
-        pg.success,
-        "{}: Expected pg_query to succeed, but it failed: {:?}\nSQL: {}",
-        gap_id, pg.error, sql
-    );
-}
-
 /// Test that pg_query fails but smelt succeeds (smelt extension)
 fn assert_pg_fails_smelt_succeeds(sql: &str, gap_id: &str) {
     let smelt = SmeltParseResult::parse(sql);
@@ -93,26 +76,26 @@ fn test_array_subscript_now_supported() {
 }
 
 #[test]
-fn test_gap_json_operators() {
-    // JSON operators
-    assert_smelt_fails_pg_succeeds("SELECT data->>'name' FROM t", "json_operators");
-    assert_smelt_fails_pg_succeeds("SELECT data->'nested' FROM t", "json_operators");
-    assert_smelt_fails_pg_succeeds("SELECT data#>'{a,b}' FROM t", "json_operators");
-    assert_smelt_fails_pg_succeeds("SELECT data#>>'{a,b}' FROM t", "json_operators");
+fn test_json_operators_now_supported() {
+    // JSON operators are now supported (March 2026)
+    assert_both_succeed("SELECT data->>'name' FROM t", "json_operators");
+    assert_both_succeed("SELECT data->'nested' FROM t", "json_operators");
+    assert_both_succeed("SELECT data#>'{a,b}' FROM t", "json_operators");
+    assert_both_succeed("SELECT data#>>'{a,b}' FROM t", "json_operators");
 }
 
 #[test]
-fn test_gap_pattern_match_operators() {
-    // Pattern matching operators
-    assert_smelt_fails_pg_succeeds(
+fn test_pattern_match_operators_now_supported() {
+    // Pattern matching operators are now supported (March 2026)
+    assert_both_succeed(
         "SELECT * FROM t WHERE name ~ '^test'",
         "pattern_match_operators",
     );
-    assert_smelt_fails_pg_succeeds(
+    assert_both_succeed(
         "SELECT * FROM t WHERE name ~* '^test'",
         "pattern_match_operators",
     );
-    assert_smelt_fails_pg_succeeds(
+    assert_both_succeed(
         "SELECT * FROM t WHERE name !~ '^test'",
         "pattern_match_operators",
     );
@@ -130,13 +113,13 @@ fn test_string_concat_operator_fixed() {
 }
 
 #[test]
-fn test_gap_any_all_some() {
-    // ANY/ALL/SOME array comparisons
-    assert_smelt_fails_pg_succeeds(
+fn test_any_all_some_now_supported() {
+    // ANY/ALL/SOME array comparisons are now supported (March 2026)
+    assert_both_succeed(
         "SELECT * FROM t WHERE id = ANY(ARRAY[1,2,3])",
         "any_all_some",
     );
-    assert_smelt_fails_pg_succeeds(
+    assert_both_succeed(
         "SELECT * FROM t WHERE id = ALL(ARRAY[1,2,3])",
         "any_all_some",
     );
@@ -331,19 +314,21 @@ fn test_smelt_extensions_valid_pg_syntax() {
 #[test]
 fn test_gap_pattern_detection() {
     // Verify the gap detection patterns work correctly for actual gaps
-    // array_subscript removed - now supported (March 2026)
-    assert!(gaps::is_known_gap(
-        "SELECT data->>'name' FROM t",
-        "smelt_fails"
-    ));
-    // string_concat_operator gap removed - || is now supported (January 2026)
+    // All smelt_fails gaps have been resolved (March 2026)
+    // Test pg_fails gaps still work
     assert!(gaps::is_known_gap("SELECT a, b, FROM t", "pg_fails"));
+    // Test smelt_accepts_invalid gaps still work
+    assert!(gaps::is_known_gap(
+        "SELECT * + a FROM t",
+        "smelt_accepts_invalid"
+    ));
 }
 
 #[test]
 fn test_get_matching_gaps() {
-    let gaps = gaps::get_matching_gaps("SELECT data->>'name' FROM t");
-    assert!(gaps.contains(&"json_operators"));
+    // JSON operators gap removed (March 2026), test with remaining gaps
+    let gaps = gaps::get_matching_gaps("SELECT * + a FROM t");
+    assert!(gaps.contains(&"star_in_expression"));
 }
 
 // ===== Tests for features smelt supports that were initially thought to be gaps =====
@@ -381,21 +366,21 @@ fn test_smelt_supports_grouping_sets() {
 }
 
 #[test]
-fn test_gap_row_constructor() {
-    // ROW constructor is NOT supported by smelt
-    assert_smelt_fails_pg_succeeds("SELECT ROW(1, 2, 3)", "row_constructor");
+fn test_row_constructor_now_supported() {
+    // ROW constructor is now supported (March 2026)
+    assert_both_succeed("SELECT ROW(1, 2, 3)", "row_constructor");
 }
 
 #[test]
-fn test_gap_array_literal() {
-    // ARRAY literal syntax is NOT supported by smelt
-    assert_smelt_fails_pg_succeeds("SELECT ARRAY[1, 2, 3]", "array_literal");
+fn test_array_literal_now_supported() {
+    // ARRAY literal syntax is now supported (March 2026)
+    assert_both_succeed("SELECT ARRAY[1, 2, 3]", "array_literal");
 }
 
 #[test]
-fn test_gap_values_clause() {
-    // VALUES clause is NOT supported by smelt
-    assert_smelt_fails_pg_succeeds("VALUES (1, 'a'), (2, 'b')", "values_clause");
+fn test_values_clause_now_supported() {
+    // VALUES clause is now supported (March 2026)
+    assert_both_succeed("VALUES (1, 'a'), (2, 'b')", "values_clause");
 }
 
 #[test]
