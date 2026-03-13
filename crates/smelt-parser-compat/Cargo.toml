@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 smelt-parser = { path = "../smelt-parser" }
 pg_query = "6.1"              # PostgreSQL parser (vendored libpg_query)
+sqlparser = "0.61"            # SQL parser with Databricks dialect (Spark-compatible)
 regex = "1"                   # For pattern matching in gap detection
 proptest = "1.4"              # Property-based testing strategies
 

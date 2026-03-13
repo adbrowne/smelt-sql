@@ -8,7 +8,7 @@
 //! The tests are ignored by default because they require Docker.
 
 use proptest::prelude::*;
-use smelt_parser_compat::pg_generators;
+use smelt_parser_compat::generators;
 use testcontainers_modules::{postgres::Postgres, testcontainers::runners::AsyncRunner};
 use tokio_postgres::{types::Type, NoTls};
 
@@ -346,7 +346,7 @@ proptest! {
     /// Verify that generated simple SELECTs have consistent types
     #[test]
     #[ignore]
-    fn prop_simple_select_valid_types(sql in pg_generators::simple_select()) {
+    fn prop_simple_select_valid_types(sql in generators::simple_select()) {
         // This would need a runtime for async, so we just validate the SQL
         // can be generated properly
         assert!(!sql.is_empty());

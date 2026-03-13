@@ -18,8 +18,10 @@ pub struct KnownGap {
     pub id: &'static str,
     /// Human-readable description
     pub description: &'static str,
-    /// Category: smelt_fails, pg_fails, fingerprint_mismatch
+    /// Category: smelt_fails, pg_fails, spark_fails, sqlglot_fails, fingerprint_mismatch, smelt_accepts_invalid
     pub category: &'static str,
+    /// Which dialects this gap applies to: "pg", "spark", "sqlglot", "both", "all"
+    pub dialect: &'static str,
     /// Regex patterns that match SQL triggering this gap
     pub patterns: &'static [&'static str],
     /// Severity: low, medium, high
@@ -40,6 +42,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "json_operators",
         description: "JSON operators: ->, ->>, #>, #>>, @>, <@, ?, ?|, ?&",
         category: "smelt_fails",
+        dialect: "pg",
         patterns: &[r"->", r"->>", r"#>", r"#>>", r"@>", r"<@"],
         severity: "medium",
         planned_fix: true,
@@ -48,6 +51,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "array_literal",
         description: "Array literal syntax: ARRAY[1, 2, 3]",
         category: "smelt_fails",
+        dialect: "both",
         patterns: &[r"(?i)\bARRAY\s*\["],
         severity: "medium",
         planned_fix: true,
@@ -56,6 +60,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "row_constructor",
         description: "Row constructor: ROW(1, 2, 3)",
         category: "smelt_fails",
+        dialect: "pg",
         patterns: &[r"(?i)\bROW\s*\("],
         severity: "low",
         planned_fix: true,
@@ -64,6 +69,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "values_clause",
         description: "VALUES clause as standalone or in FROM",
         category: "smelt_fails",
+        dialect: "both",
         patterns: &[r"(?i)^\s*VALUES\s*\("],
         severity: "medium",
         planned_fix: true,
@@ -72,6 +78,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "pattern_match_operators",
         description: "Pattern matching operators: ~, ~*, !~, !~*",
         category: "smelt_fails",
+        dialect: "pg",
         patterns: &[r"\s~\s", r"\s~\*\s", r"\s!~\s", r"\s!~\*\s"],
         severity: "low",
         planned_fix: true,
@@ -81,6 +88,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "any_all_some",
         description: "ANY/ALL/SOME array comparisons",
         category: "smelt_fails",
+        dialect: "pg",
         patterns: &[
             r"(?i)=\s*ANY\s*\(",
             r"(?i)=\s*ALL\s*\(",
@@ -93,6 +101,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",
         category: "fingerprint_mismatch",
+        dialect: "pg",
         patterns: &[r"(?i)\bCOALESCE\s*\(", r"(?i)\bNULLIF\s*\("],
         severity: "low",
         planned_fix: false,
@@ -108,6 +117,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "star_in_expression",
         description: "smelt accepts * in expressions/comparisons which PostgreSQL rejects",
         category: "smelt_accepts_invalid",
+        dialect: "all",
         patterns: &[
             r"(?i)\bCAST\s*\(\s*\*",
             r"\*\s+[+\-/]", // * followed by space then operator
@@ -130,6 +140,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "reserved_keyword_as_identifier",
         description: "smelt accepts PostgreSQL reserved keywords as identifiers",
         category: "smelt_accepts_invalid",
+        dialect: "all",
         patterns: &[
             // PostgreSQL reserved words: do, to, in, end, etc.
             // Match these when used as identifiers (not part of valid SQL syntax)
@@ -161,6 +172,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "expression_printing",
         description: "Printer may not correctly round-trip arithmetic expressions",
         category: "fingerprint_mismatch",
+        dialect: "pg",
         patterns: &[
             r"[+\-*/]", // Any arithmetic operator may trigger printing issues
         ],
@@ -175,6 +187,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "qualify_clause",
         description: "QUALIFY clause for window function filtering (DuckDB/Spark extension)",
         category: "pg_fails",
+        dialect: "pg",
         patterns: &[r"(?i)\bQUALIFY\b"],
         severity: "low",
         planned_fix: false,
@@ -183,6 +196,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "lambda_expressions",
         description: "Lambda expressions in function arguments: x -> expr, (x, y) -> expr",
         category: "pg_fails",
+        dialect: "pg",
         patterns: &[r"(?i)\b(TRANSFORM|AGGREGATE|FILTER)\s*\([^)]*\w+\s*->"],
         severity: "low",
         planned_fix: false,
@@ -191,6 +205,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "pivot_unpivot",
         description: "PIVOT/UNPIVOT clauses (DuckDB/Spark extension)",
         category: "pg_fails",
+        dialect: "pg",
         patterns: &[r"(?i)\bPIVOT\s*\(", r"(?i)\bUNPIVOT\s*\("],
         severity: "low",
         planned_fix: false,
@@ -199,6 +214,7 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         id: "trailing_comma",
         description: "Trailing commas in SELECT list and GROUP BY (DuckDB extension)",
         category: "pg_fails",
+        dialect: "pg",
         patterns: &[
             r",\s*FROM\b",
             r",\s*WHERE\b",
@@ -207,6 +223,32 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         ],
         severity: "low",
         planned_fix: false, // This is intentional (DuckDB-friendly)
+    },
+    // ===== Spark-specific gaps =====
+    // These are differences between smelt and sqlparser-rs DatabricksDialect
+    KnownGap {
+        id: "spark_trailing_comma",
+        description: "Trailing commas not supported by sqlparser DatabricksDialect",
+        category: "spark_fails",
+        dialect: "spark",
+        patterns: &[
+            r",\s*FROM\b",
+            r",\s*WHERE\b",
+            r",\s*GROUP\b",
+            r",\s*HAVING\b",
+        ],
+        severity: "low",
+        planned_fix: false,
+    },
+    // spark_pg_cast gap removed - DatabricksDialect supports :: cast syntax
+    KnownGap {
+        id: "spark_named_params",
+        description: "Named parameters with => not supported by sqlparser DatabricksDialect",
+        category: "spark_fails",
+        dialect: "spark",
+        patterns: &[r"\w+\s*=>"],
+        severity: "low",
+        planned_fix: false,
     },
 ];
 

@@ -4,6 +4,8 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Multi-Dialect Compatibility Testing (March 13, 2026)**: Extended `smelt-parser-compat` with three-layer verification: pg_query (existing), sqlparser-rs DatabricksDialect (new, pure Rust), and sqlglot subprocess (new, Python, optional). Added Spark-specific SQL generators, dialect-aware gap tracking, Docker-based Spark integration tests, and unified `compare_all_parse_results()`. CI workflow renamed from `pg-compat.yml` to `compat.yml` with sqlglot and Spark Docker jobs.
+
 **Smelt SQL Multi-Dialect Superset (March 12, 2026)**: Defining smelt SQL as a logical SQL superset — PostgreSQL base with cherry-picked features from DuckDB and Spark. Phase 4a-4e: QUALIFY clause, lambda expressions/array functions, PIVOT/UNPIVOT, array subscript notation, DATE literal normalization. Parser-level features with backend-specific rewrite rules.
 
 **Python Model Support - Phase 3 LSP + Performance (March 9, 2026)**: Content-hash caching for Python model subprocess results (persisted to `.smelt/python_cache.json`), `.py` file watching with dynamic LSP watcher registration, Python execution error diagnostics surfaced in the editor, and background subprocess execution with last-known-good fallback on failure.
@@ -900,6 +902,43 @@ Add property-based testing infrastructure to ensure smelt's SQL dialect can hand
 ### Test Results
 
 The test suite establishes baseline compatibility and documents known gaps. Property tests run 500 cases by default, with 2000 cases in nightly extended runs.
+
+### Phase 20b: Multi-Dialect Compatibility Testing (March 13, 2026)
+
+Extended the compatibility testing infrastructure from PostgreSQL-only to a three-layer multi-dialect verification system:
+
+**Layer 1: pg_query** (existing, unchanged)
+- PostgreSQL's vendored C parser with fingerprint-based semantic equivalence
+
+**Layer 2: sqlparser-rs with DatabricksDialect** (new)
+- Pure Rust SQL parser, closest available dialect to Spark SQL
+- Added `sqlparser = "0.61"` dependency
+- `SparkSqlparserResult` type for parsing and comparison
+- Validates smelt's normalized output re-parses successfully
+
+**Layer 3: sqlglot via subprocess** (new, optional)
+- Python SQL parser/transpiler with explicit `dialect="spark"` support
+- Gated behind `SQLGLOT_AVAILABLE` env var
+- `SqlglotResult` type with cached availability check
+
+**Layer 4: Spark SQL via Docker** (new, integration)
+- `apache/spark` Docker image with `spark-sql` CLI
+- Validates SQL with `EXPLAIN <sql>` (parse + plan without executing)
+- All tests `#[ignore]` — run on schedule or labeled PRs
+
+**New files:**
+- `crates/smelt-parser-compat/src/spark_generators.rs` — proptest generators for QUALIFY, TRANSFORM/AGGREGATE lambdas, PIVOT/UNPIVOT, array subscript/slice
+- `crates/smelt-parser-compat/tests/spark_integration.rs` — Docker-based Spark SQL integration tests
+- `.github/workflows/compat.yml` — replaces `pg-compat.yml`, adds sqlglot and Spark Docker jobs
+
+**Modified files:**
+- `src/lib.rs` — `SparkSqlparserResult`, `SqlglotResult`, `compare_spark_parse_results()`, `compare_sqlglot_parse_results()`, `compare_all_parse_results()`
+- `src/gaps.rs` — `dialect` field on `KnownGap`, spark-specific gaps (`spark_trailing_comma`, `spark_named_params`)
+- `src/normalize.rs` — Spark keywords (QUALIFY, PIVOT, UNPIVOT, TRANSFORM, AGGREGATE)
+- `tests/parse_equivalence.rs` — Spark property tests and unit tests
+- `tests/known_gaps.rs` — Spark gap helpers and tests
+
+**Key discovery:** DatabricksDialect supports `::` PostgreSQL-style casts, so `spark_pg_cast` is not actually a gap.
 
 ---
 
