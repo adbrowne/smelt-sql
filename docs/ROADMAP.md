@@ -4,6 +4,14 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Optimizer: Cube Split + Incremental Materialization (March 14, 2026)**: New `smelt-optimizer` crate implementing the first two optimization rules:
+- **Cube split**: `-- smelt:cube_split` annotation on GROUP BY splits queries with multiple COUNT(DISTINCT) into parallel sub-queries joined on GROUP BY keys (NULL-safe via IS NOT DISTINCT FROM). Non-distinct aggregates (COUNT(*), SUM, etc.) are included in the first sub-query.
+- **Incremental materialization**: YAML frontmatter `incremental: { partition_column: ... }` detected by optimizer, validated against SELECT/GROUP BY, source time column extracted from expressions like `date_trunc('day', event_time)`.
+- **Composition**: Both optimizations can apply to the same model — cube split steps get time-filtered, execution uses DELETE+INSERT pattern.
+- **Mandatory time range**: CLI errors when incremental models are selected but `--event-time-start`/`--event-time-end` are missing.
+- **CLI integration**: Optimizer runs after model discovery, transformations applied via `execute_plan()` / `execute_plan_incremental()`.
+- 29 unit tests + 5 integration tests verifying correctness via EXCEPT-based comparison against naive queries.
+
 **SQL Parser Gap Fill (March 13, 2026)**: Implemented 12 features across 6 categories to close remaining SQL parser gaps:
 - **Set operations**: INTERSECT [ALL], EXCEPT [ALL] alongside existing UNION [ALL]
 - **Block comments**: `/* ... */` with nested comment support
