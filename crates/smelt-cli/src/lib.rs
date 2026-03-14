@@ -9,7 +9,7 @@ pub mod python;
 pub mod selector;
 pub mod transformer;
 
-pub use compiler::{CompiledModel, SqlCompiler};
+pub use compiler::{resolve_refs_in_sql, CompiledModel, SqlCompiler};
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
 };

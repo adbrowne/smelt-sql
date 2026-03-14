@@ -85,6 +85,198 @@ pub async fn execute_model_incremental(
         })
 }
 
+/// Execute a multi-step plan (e.g., from cube split optimization).
+///
+/// Iterates through execution steps, creating temp tables, running the final
+/// query to produce the model output, and cleaning up temp tables.
+pub async fn execute_plan(
+    backend: &dyn Backend,
+    model_name: &str,
+    steps: &[smelt_optimizer::ExecutionStep],
+    schema: &str,
+    show_results: bool,
+) -> Result<ExecutionResult> {
+    let start = std::time::Instant::now();
+
+    for step in steps {
+        match step {
+            smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
+                let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, sql);
+                backend
+                    .execute_sql(&create_sql)
+                    .await
+                    .map_err(|e| CliError::ExecutionError {
+                        model: model_name.to_string(),
+                        sql: create_sql.clone(),
+                        source: e.into(),
+                    })?;
+            }
+            smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
+                let insert_sql = format!("INSERT INTO {} {}", name, sql);
+                backend
+                    .execute_sql(&insert_sql)
+                    .await
+                    .map_err(|e| CliError::ExecutionError {
+                        model: model_name.to_string(),
+                        sql: insert_sql.clone(),
+                        source: e.into(),
+                    })?;
+            }
+            smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
+                backend
+                    .drop_table_if_exists(schema, model_name)
+                    .await
+                    .map_err(|e| CliError::ExecutionError {
+                        model: model_name.to_string(),
+                        sql: "DROP TABLE".to_string(),
+                        source: e.into(),
+                    })?;
+                backend
+                    .create_table_as(schema, model_name, sql)
+                    .await
+                    .map_err(|e| CliError::ExecutionError {
+                        model: model_name.to_string(),
+                        sql: sql.clone(),
+                        source: e.into(),
+                    })?;
+            }
+            smelt_optimizer::ExecutionStep::DropTemp { name } => {
+                let drop_sql = format!("DROP TABLE IF EXISTS {}", name);
+                // Best-effort cleanup — don't fail the whole plan if drop fails
+                let _ = backend.execute_sql(&drop_sql).await;
+            }
+        }
+    }
+
+    let duration = start.elapsed();
+    let row_count = backend.get_row_count(schema, model_name).await.unwrap_or(0);
+
+    let preview = if show_results {
+        backend.get_preview(schema, model_name, 10).await.ok()
+    } else {
+        None
+    };
+
+    Ok(ExecutionResult {
+        model_name: model_name.to_string(),
+        duration,
+        row_count,
+        preview,
+    })
+}
+
+/// Execute a multi-step plan incrementally (cube split + incremental).
+///
+/// Applies time filtering to each step's SQL before execution, and uses
+/// DELETE+INSERT pattern instead of full table replacement.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_plan_incremental(
+    backend: &dyn Backend,
+    model_name: &str,
+    steps: &[smelt_optimizer::ExecutionStep],
+    schema: &str,
+    partition: PartitionSpec,
+    event_time_column: &str,
+    time_range: &crate::transformer::TimeRange,
+    show_results: bool,
+) -> Result<ExecutionResult> {
+    use crate::transformer::inject_time_filter;
+
+    let start = std::time::Instant::now();
+
+    // Delete existing partition rows before inserting
+    let table_exists = backend
+        .table_exists(schema, model_name)
+        .await
+        .unwrap_or(false);
+    if table_exists {
+        backend
+            .delete_partitions(schema, model_name, &partition)
+            .await
+            .map_err(|e| CliError::ExecutionError {
+                model: model_name.to_string(),
+                sql: "DELETE partitions".to_string(),
+                source: e.into(),
+            })?;
+    }
+
+    for step in steps {
+        match step {
+            smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
+                // Inject time filter into the step's SQL
+                let filtered_sql = inject_time_filter(sql, event_time_column, time_range)
+                    .map_err(|e| anyhow::anyhow!("Failed to inject time filter: {}", e))?;
+                let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, filtered_sql);
+                backend
+                    .execute_sql(&create_sql)
+                    .await
+                    .map_err(|e| CliError::ExecutionError {
+                        model: model_name.to_string(),
+                        sql: create_sql.clone(),
+                        source: e.into(),
+                    })?;
+            }
+            smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
+                let filtered_sql = inject_time_filter(sql, event_time_column, time_range)
+                    .map_err(|e| anyhow::anyhow!("Failed to inject time filter: {}", e))?;
+                let insert_sql = format!("INSERT INTO {} {}", name, filtered_sql);
+                backend
+                    .execute_sql(&insert_sql)
+                    .await
+                    .map_err(|e| CliError::ExecutionError {
+                        model: model_name.to_string(),
+                        sql: insert_sql.clone(),
+                        source: e.into(),
+                    })?;
+            }
+            smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
+                // Final query joins temp tables — no time filter needed on the join itself
+                if !table_exists {
+                    // First run: create table
+                    backend
+                        .create_table_as(schema, model_name, sql)
+                        .await
+                        .map_err(|e| CliError::ExecutionError {
+                            model: model_name.to_string(),
+                            sql: sql.clone(),
+                            source: e.into(),
+                        })?;
+                } else {
+                    // Subsequent runs: insert into existing table
+                    backend
+                        .insert_into_from_query(schema, model_name, sql)
+                        .await
+                        .map_err(|e| CliError::ExecutionError {
+                            model: model_name.to_string(),
+                            sql: sql.clone(),
+                            source: e.into(),
+                        })?;
+                }
+            }
+            smelt_optimizer::ExecutionStep::DropTemp { name } => {
+                let drop_sql = format!("DROP TABLE IF EXISTS {}", name);
+                let _ = backend.execute_sql(&drop_sql).await;
+            }
+        }
+    }
+
+    let duration = start.elapsed();
+    let row_count = backend.get_row_count(schema, model_name).await.unwrap_or(0);
+
+    let preview = if show_results {
+        backend.get_preview(schema, model_name, 10).await.ok()
+    } else {
+        None
+    };
+
+    Ok(ExecutionResult {
+        model_name: model_name.to_string(),
+        duration,
+        row_count,
+        preview,
+    })
+}
+
 /// Validate that all source tables exist in the backend.
 pub async fn validate_sources(backend: &dyn Backend, sources: &SourcesConfig) -> Result<()> {
     let mut missing = Vec::new();

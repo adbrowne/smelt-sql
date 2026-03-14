@@ -15,7 +15,7 @@ pub struct CompiledModel {
 ///
 /// This function performs byte-exact replacements using TextRange positions from the parser.
 /// Refs are processed from end to start to avoid offset shifting.
-fn replace_refs_with_ranges(
+pub fn replace_refs_with_ranges(
     sql: &str,
     refs: &[(String, TextRange)], // (model_name, range)
     schema: &str,
@@ -33,6 +33,26 @@ fn replace_refs_with_ranges(
     }
 
     result
+}
+
+/// Resolve all smelt.ref() calls in arbitrary SQL text by replacing them with
+/// qualified table names (schema.model_name).
+pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
+    let parse = smelt_parser::parse(sql);
+    let Some(file) = smelt_parser::File::cast(parse.syntax()) else {
+        return sql.to_string();
+    };
+
+    let refs: Vec<(String, TextRange)> = file
+        .refs()
+        .filter_map(|ref_call| {
+            let name = ref_call.model_name()?;
+            let range = ref_call.range();
+            Some((name, range))
+        })
+        .collect();
+
+    replace_refs_with_ranges(sql, &refs, schema)
 }
 
 pub struct SqlCompiler {

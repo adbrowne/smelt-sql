@@ -6,9 +6,11 @@ use smelt_backend::{Backend, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
     discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
-    BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
+    resolve_refs_in_sql, BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig,
+    SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
+use smelt_optimizer::{Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -323,7 +325,75 @@ async fn run(args: RunArgs) -> Result<()> {
         _ => None,
     };
 
-    // 9. Compile and execute each model
+    // 9. Run optimizer on discovered models
+    let mut opt_graph = ModelGraph::new();
+    for model_name in &execution_order {
+        let model = graph.get_model(model_name)?;
+        let frontmatter = Frontmatter::parse(&model.content);
+        opt_graph.add_model(ModelInfo {
+            name: model.name.clone(),
+            sql: model.content.clone(),
+            refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
+        });
+    }
+
+    let optimizer = Optimizer::new();
+    let (transformations, opt_errors) = optimizer.optimize(&opt_graph);
+
+    for err in &opt_errors {
+        eprintln!("  Optimizer error: {}", err);
+    }
+
+    // Build lookup maps for transformations
+    let mut plan_overrides: std::collections::HashMap<String, Vec<smelt_optimizer::ExecutionStep>> =
+        std::collections::HashMap::new();
+    let mut incremental_overrides: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new(); // model -> (event_time_column, partition_column)
+
+    for t in &transformations {
+        match t {
+            Transformation::ReplaceWithPlan { model, steps } => {
+                plan_overrides.insert(model.clone(), steps.clone());
+            }
+            Transformation::SetIncremental {
+                model,
+                event_time_column,
+                partition_column,
+            } => {
+                incremental_overrides.insert(
+                    model.clone(),
+                    (event_time_column.clone(), partition_column.clone()),
+                );
+            }
+        }
+    }
+
+    if !plan_overrides.is_empty() || !incremental_overrides.is_empty() {
+        println!("\nOptimizer:");
+        for model in plan_overrides.keys() {
+            println!("  {} → cube split", model);
+        }
+        for (model, (_, partition_col)) in &incremental_overrides {
+            println!("  {} → incremental (partition: {})", model, partition_col);
+        }
+    }
+
+    // Mandatory time range check: if any model has SetIncremental and no time range provided
+    if !incremental_overrides.is_empty() && time_range.is_none() {
+        let inc_models: Vec<&String> = incremental_overrides.keys().collect();
+        return Err(anyhow::anyhow!(
+            "Incremental models selected for run ({}) but --event-time-start and --event-time-end not provided.\n\
+             These are required when running incremental models, similar to dbt's microbatch parameters.",
+            inc_models
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    // 10. Compile and execute each model
     let compiler = SqlCompiler::new(config.clone());
 
     println!("\n{}", "=".repeat(60));
@@ -335,20 +405,122 @@ async fn run(args: RunArgs) -> Result<()> {
     for model_name in &execution_order {
         let model = graph.get_model(model_name)?;
 
-        // Check if this model should be run incrementally
-        // SQL metadata takes precedence over smelt.yml
-        let inc_config = config
-            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()));
-        let is_incremental = time_range.is_some() && inc_config.is_some();
+        let has_plan = plan_overrides.contains_key(model_name.as_str());
+        let has_incremental = incremental_overrides.contains_key(model_name.as_str());
 
-        if is_incremental {
+        // Case 1: Cube split plan (with or without incremental)
+        if has_plan {
+            let steps = plan_overrides.get(model_name.as_str()).unwrap();
+
+            // Resolve refs in each step's SQL
+            let resolved_steps: Vec<smelt_optimizer::ExecutionStep> = steps
+                .iter()
+                .map(|step| match step {
+                    smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
+                        smelt_optimizer::ExecutionStep::CreateTemp {
+                            name: name.clone(),
+                            sql: resolve_refs_in_sql(sql, &target_config.schema),
+                        }
+                    }
+                    smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
+                        smelt_optimizer::ExecutionStep::AppendToTemp {
+                            name: name.clone(),
+                            sql: resolve_refs_in_sql(sql, &target_config.schema),
+                        }
+                    }
+                    smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
+                        smelt_optimizer::ExecutionStep::FinalQuery {
+                            sql: sql.clone(), // Final query references temp tables, not models
+                        }
+                    }
+                    smelt_optimizer::ExecutionStep::DropTemp { name } => {
+                        smelt_optimizer::ExecutionStep::DropTemp { name: name.clone() }
+                    }
+                })
+                .collect();
+
+            if has_incremental {
+                // Composed: cube split + incremental
+                let range = time_range.as_ref().unwrap();
+                let (event_time_col, partition_col) =
+                    incremental_overrides.get(model_name.as_str()).unwrap();
+
+                println!(
+                    "\n▶ Running model: {} (cube split + incremental)",
+                    model_name
+                );
+
+                let partition_values = generate_partition_dates(&range.start, &range.end)?;
+                let partition = PartitionSpec {
+                    column: partition_col.clone(),
+                    values: partition_values,
+                };
+
+                let result = executor::execute_plan_incremental(
+                    backend.as_ref(),
+                    model_name,
+                    &resolved_steps,
+                    &target_config.schema,
+                    partition,
+                    event_time_col,
+                    range,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
+            } else {
+                // Cube split only (full refresh)
+                println!("\n▶ Running model: {} (cube split)", model_name);
+
+                let result = executor::execute_plan(
+                    backend.as_ref(),
+                    model_name,
+                    &resolved_steps,
+                    &target_config.schema,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
+            }
+        }
+        // Case 2: Incremental only (no cube split) — use existing incremental path
+        else if has_incremental {
             let range = time_range.as_ref().unwrap();
-            let inc = inc_config.unwrap();
+            let (event_time_col, partition_col) =
+                incremental_overrides.get(model_name.as_str()).unwrap();
 
             println!("\n▶ Running model: {} (incremental)", model_name);
 
             // Transform SQL to filter by time range
-            let transformed_sql = inject_time_filter(&model.content, &inc.event_time_column, range)
+            let transformed_sql = inject_time_filter(&model.content, event_time_col, range)
                 .with_context(|| format!("Failed to transform SQL for model: {}", model_name))?;
 
             // Compile with transformed SQL
@@ -382,7 +554,7 @@ async fn run(args: RunArgs) -> Result<()> {
             );
 
             let partition = PartitionSpec {
-                column: inc.partition_column.clone(),
+                column: partition_col.clone(),
                 values: partition_values,
             };
 
@@ -402,7 +574,6 @@ async fn run(args: RunArgs) -> Result<()> {
                 result.model_name, result.row_count, result.duration
             );
 
-            // Show preview if requested
             if let Some(ref batches) = result.preview {
                 println!("\n  Preview:");
                 pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
@@ -410,54 +581,130 @@ async fn run(args: RunArgs) -> Result<()> {
             }
 
             results.push(result);
-        } else {
-            // Standard full refresh path
-            if time_range.is_some() && inc_config.is_none() {
-                println!(
-                    "\n▶ Running model: {} (full refresh - not configured for incremental)",
-                    model_name
-                );
-            } else {
-                println!("\n▶ Running model: {}", model_name);
-            }
-
-            // Compile
-            let compiled = compiler
-                .compile(model, &target_config.schema)
-                .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-            if args.verbose {
-                println!("\n  Compiled SQL:");
-                println!("  {}", "─".repeat(58));
-                for line in compiled.sql.lines() {
-                    println!("  {}", line);
-                }
-                println!("  {}", "─".repeat(58));
-            }
-
-            // Execute
-            let result = executor::execute_model(
-                backend.as_ref(),
-                &compiled,
-                &target_config.schema,
-                args.show_results,
-            )
-            .await
-            .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-            println!(
-                "  ✓ {} ({} rows, {:?})",
-                result.model_name, result.row_count, result.duration
+        }
+        // Case 3: Standard full refresh (no optimizer transformations)
+        else {
+            // Check legacy incremental config from smelt.yml
+            let inc_config = config.get_incremental_with_metadata(
+                model_name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
             );
+            let is_legacy_incremental = time_range.is_some() && inc_config.is_some();
 
-            // Show preview if requested
-            if let Some(ref batches) = result.preview {
-                println!("\n  Preview:");
-                pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
-                println!();
+            if is_legacy_incremental {
+                let range = time_range.as_ref().unwrap();
+                let inc = inc_config.unwrap();
+
+                println!("\n▶ Running model: {} (incremental)", model_name);
+
+                let transformed_sql =
+                    inject_time_filter(&model.content, &inc.event_time_column, range)
+                        .with_context(|| {
+                            format!("Failed to transform SQL for model: {}", model_name)
+                        })?;
+
+                let compiled = compiler
+                    .compile_with_sql(model, &target_config.schema, &transformed_sql)
+                    .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+                if args.verbose {
+                    println!("\n  Transformed SQL:");
+                    println!("  {}", "─".repeat(58));
+                    for line in compiled.sql.lines() {
+                        println!("  {}", line);
+                    }
+                    println!("  {}", "─".repeat(58));
+                }
+
+                let partition_values = generate_partition_dates(&range.start, &range.end)?;
+                println!(
+                    "  Partitions to update: {} ({} days)",
+                    if partition_values.len() <= 3 {
+                        partition_values.join(", ")
+                    } else {
+                        format!(
+                            "{}, ..., {}",
+                            partition_values.first().unwrap(),
+                            partition_values.last().unwrap()
+                        )
+                    },
+                    partition_values.len()
+                );
+
+                let partition = PartitionSpec {
+                    column: inc.partition_column.clone(),
+                    values: partition_values,
+                };
+
+                let result = executor::execute_model_incremental(
+                    backend.as_ref(),
+                    &compiled,
+                    &target_config.schema,
+                    partition,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
+            } else {
+                if time_range.is_some() && inc_config.is_none() {
+                    println!(
+                        "\n▶ Running model: {} (full refresh - not configured for incremental)",
+                        model_name
+                    );
+                } else {
+                    println!("\n▶ Running model: {}", model_name);
+                }
+
+                let compiled = compiler
+                    .compile(model, &target_config.schema)
+                    .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+                if args.verbose {
+                    println!("\n  Compiled SQL:");
+                    println!("  {}", "─".repeat(58));
+                    for line in compiled.sql.lines() {
+                        println!("  {}", line);
+                    }
+                    println!("  {}", "─".repeat(58));
+                }
+
+                let result = executor::execute_model(
+                    backend.as_ref(),
+                    &compiled,
+                    &target_config.schema,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
             }
-
-            results.push(result);
         }
     }
 
