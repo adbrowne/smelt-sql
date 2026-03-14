@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::types::IncrementalConfig;
 
 /// Information about a single model for the optimizer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelInfo {
     pub name: String,
     /// Raw SQL content (including any frontmatter).

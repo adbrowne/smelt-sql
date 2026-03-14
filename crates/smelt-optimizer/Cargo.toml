@@ -9,4 +9,9 @@ license.workspace = true
 smelt-parser = { path = "../smelt-parser" }
 rowan = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+pyo3 = { workspace = true, optional = true }
+
+[features]
+python = ["pyo3"]
