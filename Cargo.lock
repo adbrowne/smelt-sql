@@ -3392,6 +3392,7 @@ dependencies = [
  "arrow",
  "chrono",
  "clap",
+ "pyo3",
  "rowan",
  "serde",
  "serde_json",
@@ -3416,11 +3417,14 @@ name = "smelt-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pyo3",
  "rowan",
  "serde",
+ "serde_json",
  "serde_yaml",
  "smelt-parser",
  "smelt-types",
+ "tempfile",
  "thiserror 2.0.17",
  "walkdir",
 ]
@@ -3465,6 +3469,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lsp-types",
+ "pyo3",
  "serde",
  "serde_json",
  "sha2",

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "python"))]
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -167,6 +168,7 @@ fn build_decorator_map(content: &str) -> HashMap<String, u32> {
 }
 
 /// Find the Python interpreter (python3 or python).
+#[cfg(not(feature = "python"))]
 fn find_python() -> Option<String> {
     if let Ok(python) = std::env::var("SMELT_PYTHON") {
         return Some(python);
@@ -210,6 +212,7 @@ fn find_python_sdk(project_dir: &Path) -> Option<PathBuf> {
 
 /// Build PYTHONPATH by prepending SDK path and model file's parent directory
 /// to any existing PYTHONPATH.
+#[cfg(not(feature = "python"))]
 fn build_pythonpath(sdk_path: &Path, file_path: &Path) -> std::ffi::OsString {
     let mut paths: Vec<PathBuf> = vec![sdk_path.to_path_buf()];
     if let Some(parent) = file_path.parent() {
@@ -225,6 +228,7 @@ fn build_pythonpath(sdk_path: &Path, file_path: &Path) -> std::ffi::OsString {
 
 /// Try to extract a line number from a Python traceback string.
 /// Looks for patterns like `File "...", line N`.
+#[cfg(not(feature = "python"))]
 fn extract_line_from_traceback(stderr: &str) -> Option<u32> {
     // Find the last "line N" in the traceback (most specific frame)
     let mut last_line = None;
@@ -244,7 +248,8 @@ fn extract_line_from_traceback(stderr: &str) -> Option<u32> {
     last_line
 }
 
-/// Execute a single Python file and return results + errors.
+/// Execute a single Python file via subprocess and return results + errors.
+#[cfg(not(feature = "python"))]
 fn execute_python_file(
     python: &str,
     file_path: &Path,
@@ -299,6 +304,52 @@ fn execute_python_file(
     }
 }
 
+/// Execute a single Python file via embedded PyO3 interpreter.
+#[cfg(feature = "python")]
+fn execute_python_file(
+    _python: &str,
+    file_path: &Path,
+    context_json: &str,
+    sdk_path: &Path,
+) -> (Vec<PythonModelOutput>, Option<PythonModelError>) {
+    use pyo3::prelude::*;
+    use pyo3::types::PyTracebackMethods;
+
+    let result: Result<Vec<PythonModelOutput>, String> = Python::with_gil(|py| {
+        smelt_core::python_models::ensure_sdk_on_path(py, sdk_path)
+            .map_err(|e| format!("Failed to set up Python SDK path: {}", e))?;
+
+        let outputs = smelt_core::python_models::run_python_model_file(py, file_path, context_json)
+            .map_err(|e| {
+                let tb = e
+                    .traceback(py)
+                    .map(|tb| tb.format().unwrap_or_default())
+                    .unwrap_or_default();
+                format!("{}{}", tb, e)
+            })?;
+
+        Ok(outputs
+            .into_iter()
+            .map(|o| PythonModelOutput {
+                name: o.name,
+                sql: o.sql,
+            })
+            .collect())
+    });
+
+    match result {
+        Ok(outputs) => (outputs, None),
+        Err(msg) => (
+            Vec::new(),
+            Some(PythonModelError {
+                source_path: file_path.to_path_buf(),
+                message: format!("Python model execution failed: {}", msg),
+                line: None,
+            }),
+        ),
+    }
+}
+
 /// Scan a models directory for Python files and execute them to get SQL.
 /// Uses content-hash caching to avoid re-executing unchanged files.
 /// Returns discovered models and any errors encountered.
@@ -307,6 +358,10 @@ pub fn discover_python_models(
     project_dir: &Path,
     cache: &mut PythonModelCache,
 ) -> PythonScanResult {
+    // With PyO3, we don't need a separate Python interpreter.
+    #[cfg(feature = "python")]
+    let python = String::new();
+    #[cfg(not(feature = "python"))]
     let python = match find_python() {
         Some(p) => p,
         None => {
@@ -415,6 +470,9 @@ pub fn execute_single_python_file(
     project_dir: &Path,
     cache: &mut PythonModelCache,
 ) -> PythonScanResult {
+    #[cfg(feature = "python")]
+    let python = String::new();
+    #[cfg(not(feature = "python"))]
     let python = match find_python() {
         Some(p) => p,
         None => {
@@ -543,6 +601,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "python"))]
     fn test_extract_line_from_traceback() {
         let traceback = r#"Traceback (most recent call last):
   File "/path/to/model.py", line 42, in <module>
@@ -554,6 +613,7 @@ ValueError: bad"#;
     }
 
     #[test]
+    #[cfg(not(feature = "python"))]
     fn test_extract_line_no_traceback() {
         assert_eq!(extract_line_from_traceback("some error message"), None);
     }

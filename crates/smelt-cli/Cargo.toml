@@ -47,6 +47,7 @@ thiserror.workspace = true
 
 # File system
 walkdir = "2.4"
+pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -55,4 +56,4 @@ tempfile = "3.8"
 default = ["duckdb"]
 duckdb = []
 spark = ["smelt-backend-spark"]
-python = ["smelt-optimizer/python"]
+python = ["smelt-optimizer/python", "smelt-core/python", "pyo3"]

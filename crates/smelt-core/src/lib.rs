@@ -3,6 +3,8 @@ pub mod discovery;
 pub mod graph;
 pub mod metadata;
 pub mod project;
+#[cfg(feature = "python")]
+pub mod python_models;
 pub mod refs;
 pub mod selector;
 pub mod sources;
