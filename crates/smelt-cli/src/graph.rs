@@ -469,6 +469,7 @@ mod tests {
             name: "test".to_string(),
             version: 1,
             model_paths: vec!["models".to_string()],
+            seed_paths: vec!["seeds".to_string()],
             targets,
             default_materialization: Materialization::View,
             models,

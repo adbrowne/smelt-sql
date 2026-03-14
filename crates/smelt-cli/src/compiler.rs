@@ -11,48 +11,59 @@ pub struct CompiledModel {
     pub materialization: Materialization,
 }
 
-/// Replace smelt.ref() calls with qualified table names using AST-based ranges.
+/// Replace smelt.ref() and smelt.source() calls with qualified table names using AST-based ranges.
 ///
 /// This function performs byte-exact replacements using TextRange positions from the parser.
-/// Refs are processed from end to start to avoid offset shifting.
-pub fn replace_refs_with_ranges(
-    sql: &str,
-    refs: &[(String, TextRange)], // (model_name, range)
-    schema: &str,
-) -> String {
+/// Calls are processed from end to start to avoid offset shifting.
+///
+/// `replacements` is a list of `(replacement_text, range)` pairs.
+pub fn replace_calls_with_ranges(sql: &str, replacements: &[(String, TextRange)]) -> String {
     // Sort by position (descending) to avoid offset shifting
-    let mut sorted: Vec<_> = refs.iter().collect();
+    let mut sorted: Vec<_> = replacements.iter().collect();
     sorted.sort_by(|a, b| b.1.start().cmp(&a.1.start()));
 
     let mut result = sql.to_string();
-    for (model_name, range) in sorted {
+    for (replacement, range) in sorted {
         let start = usize::from(range.start());
         let end = usize::from(range.end());
-        let replacement = format!("{}.{}", schema, model_name);
-        result.replace_range(start..end, &replacement);
+        result.replace_range(start..end, replacement);
     }
 
     result
 }
 
-/// Resolve all smelt.ref() calls in arbitrary SQL text by replacing them with
-/// qualified table names (schema.model_name).
+/// Collect all smelt.ref() and smelt.source() replacements from parsed SQL.
+fn collect_replacements(file: &smelt_parser::File, schema: &str) -> Vec<(String, TextRange)> {
+    let mut replacements: Vec<(String, TextRange)> = Vec::new();
+
+    // smelt.ref() → schema.model_name
+    for ref_call in file.refs() {
+        if let Some(name) = ref_call.model_name() {
+            let replacement = format!("{}.{}", schema, name);
+            replacements.push((replacement, ref_call.range()));
+        }
+    }
+
+    // smelt.source() → qualified_name as-is (e.g., "raw.users")
+    for source_call in file.sources() {
+        if let Some(qualified) = source_call.qualified_name() {
+            replacements.push((qualified, source_call.range()));
+        }
+    }
+
+    replacements
+}
+
+/// Resolve all smelt.ref() and smelt.source() calls in arbitrary SQL text by replacing
+/// them with qualified table names.
 pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     let parse = smelt_parser::parse(sql);
     let Some(file) = smelt_parser::File::cast(parse.syntax()) else {
         return sql.to_string();
     };
 
-    let refs: Vec<(String, TextRange)> = file
-        .refs()
-        .filter_map(|ref_call| {
-            let name = ref_call.model_name()?;
-            let range = ref_call.range();
-            Some((name, range))
-        })
-        .collect();
-
-    replace_refs_with_ranges(sql, &refs, schema)
+    let replacements = collect_replacements(&file, schema);
+    replace_calls_with_ranges(sql, &replacements)
 }
 
 pub struct SqlCompiler {
@@ -83,15 +94,14 @@ impl SqlCompiler {
             }
         }
 
-        // Prepare refs for AST-based replacement
-        let refs: Vec<(String, TextRange)> = model
-            .refs
-            .iter()
-            .map(|r| (r.model_name.clone(), r.range))
-            .collect();
-
-        // Use AST-based replacement with precise byte offsets
-        let compiled_sql = replace_refs_with_ranges(&model.content, &refs, schema);
+        // Parse and collect all replacements (refs + sources)
+        // Strip frontmatter to avoid parse errors from YAML metadata
+        let clean_content = smelt_parser::strip_frontmatter(&model.content);
+        let parse = smelt_parser::parse(&clean_content);
+        let file = smelt_parser::File::cast(parse.syntax())
+            .ok_or_else(|| anyhow!("Failed to parse model SQL"))?;
+        let replacements = collect_replacements(&file, schema);
+        let compiled_sql = replace_calls_with_ranges(&clean_content, &replacements);
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -114,24 +124,15 @@ impl SqlCompiler {
         schema: &str,
         sql: &str,
     ) -> Result<CompiledModel> {
-        // Reparse transformed SQL to get accurate ref positions
+        // Reparse transformed SQL to get accurate positions
         // (byte offsets change after inject_time_filter transforms the SQL)
         let parse = smelt_parser::parse(sql);
         let file = smelt_parser::File::cast(parse.syntax())
             .ok_or_else(|| anyhow!("Failed to parse transformed SQL"))?;
 
-        // Extract refs with their ranges from transformed SQL
-        let refs: Vec<(String, TextRange)> = file
-            .refs()
-            .filter_map(|ref_call| {
-                let name = ref_call.model_name()?;
-                let range = ref_call.range();
-                Some((name, range))
-            })
-            .collect();
-
-        // Use AST-based replacement with precise byte offsets
-        let compiled_sql = replace_refs_with_ranges(sql, &refs, schema);
+        // Collect all replacements (refs + sources) with precise byte offsets
+        let replacements = collect_replacements(&file, schema);
+        let compiled_sql = replace_calls_with_ranges(sql, &replacements);
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -189,6 +190,7 @@ mod tests {
             name: "test".to_string(),
             version: 1,
             model_paths: vec!["models".to_string()],
+            seed_paths: vec!["seeds".to_string()],
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),

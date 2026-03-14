@@ -4,6 +4,9 @@ version: 1
 model_paths:
   - models
 
+seed_paths:
+  - seeds
+
 targets:
   dev:
     type: duckdb

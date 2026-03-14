@@ -6,7 +6,7 @@
 -- are reprocessed, dramatically reducing compute cost.
 
 SELECT
-    DATE(transaction_timestamp) as revenue_date,
+    CAST(transaction_timestamp AS DATE) as revenue_date,
     user_id,
     COUNT(*) as transaction_count,
     SUM(amount) as total_revenue,

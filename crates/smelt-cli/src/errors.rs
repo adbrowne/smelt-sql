@@ -55,4 +55,14 @@ pub enum CliError {
 
     #[error("Python model error in {file}:\n{message}")]
     PythonExecutionError { file: PathBuf, message: String },
+
+    #[error("Seed error for '{name}': {source}")]
+    SeedError {
+        name: String,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("No seed files found in seed paths: {}", paths.join(", "))]
+    NoSeedsFound { paths: Vec<String> },
 }

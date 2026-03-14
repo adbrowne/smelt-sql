@@ -6,6 +6,7 @@ pub mod executor;
 pub mod graph;
 pub mod metadata;
 pub mod python;
+pub mod seed;
 pub mod selector;
 pub mod transformer;
 
