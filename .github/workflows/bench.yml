@@ -55,3 +55,56 @@ jobs:
         with:
           name: bench-charts-${{ github.sha }}
           path: benchmarks/charts/output/*.png
+
+      - name: Add results to job summary
+        run: |
+          python3 -c "
+          import json, glob, sys
+
+          files = sorted(glob.glob('benchmarks/results/*.json'))
+          if not files:
+              print('No results found', file=sys.stderr)
+              sys.exit(0)
+
+          data = json.load(open(files[-1]))
+          b = data['build']
+          s = data['salsa']
+          p = data['parser']
+
+          lines = []
+          lines.append('## Benchmark Results')
+          lines.append('')
+          lines.append(f'**Commit:** \`{data[\"git_commit\"][:7]}\` | **Branch:** \`{data[\"git_branch\"]}\` | **Models:** {data[\"model_count\"]}')
+          lines.append('')
+          lines.append('### Build Pipeline')
+          lines.append('')
+          lines.append('| Phase | Time (ms) |')
+          lines.append('|-------|-----------|')
+          lines.append(f'| Discovery | {b[\"discovery_ms\"]:.1f} |')
+          lines.append(f'| Graph Build | {b[\"graph_build_ms\"]:.1f} |')
+          lines.append(f'| Validation | {b[\"validation_ms\"]:.2f} |')
+          lines.append(f'| Topo Sort | {b[\"topo_sort_ms\"]:.1f} |')
+          lines.append(f'| **Total** | **{b[\"total_ms\"]:.1f}** |')
+          lines.append('')
+          lines.append('### Salsa Incremental Compilation')
+          lines.append('')
+          lines.append('| Scenario | Time (ms) |')
+          lines.append('|----------|-----------|')
+          lines.append(f'| Initial Load | {s[\"initial_load_ms\"]:.1f} |')
+          lines.append(f'| Leaf Edit (L1) Diagnostics | {s[\"leaf_edit_diagnostics_ms\"]:.2f} |')
+          lines.append(f'| Mid Edit (L2) Diagnostics | {s[\"mid_edit_diagnostics_ms\"]:.2f} |')
+          lines.append(f'| Root Edit (L4) Diagnostics | {s[\"root_edit_diagnostics_ms\"]:.2f} |')
+          lines.append(f'| Add File + all_models() | {s[\"add_file_all_models_ms\"]:.1f} |')
+          lines.append(f'| Full Diagnostics (all) | {s[\"full_diagnostics_ms\"]:.1f} |')
+          lines.append('')
+          lines.append('### Parser Throughput')
+          lines.append('')
+          lines.append('| Metric | Value |')
+          lines.append('|--------|-------|')
+          lines.append(f'| Simple SQL | {p[\"single_simple_us\"]:.1f} μs |')
+          lines.append(f'| Complex SQL | {p[\"single_complex_us\"]:.1f} μs |')
+          lines.append(f'| Batch ({p[\"batch_count\"]} models) | {p[\"batch_all_ms\"]:.1f} ms |')
+          lines.append(f'| Throughput | {p[\"bytes_per_second\"]/1_000_000:.1f} MB/s |')
+
+          print('\n'.join(lines))
+          " >> $GITHUB_STEP_SUMMARY
