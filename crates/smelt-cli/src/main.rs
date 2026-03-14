@@ -35,6 +35,8 @@ enum Commands {
     Ui(UiArgs),
     /// Load seed CSV files into the database
     Seed(SeedArgs),
+    /// Seed the database then run all models (seed + run)
+    Build(BuildArgs),
 }
 
 #[derive(Parser)]
@@ -128,6 +130,41 @@ struct SeedArgs {
     select: Vec<String>,
 }
 
+#[derive(Parser)]
+struct BuildArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// DuckDB database file path
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Target environment from smelt.yml
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Display query results after execution
+    #[arg(long)]
+    show_results: bool,
+
+    /// Show compiled SQL for each model
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Start of event time range for incremental models (ISO 8601: YYYY-MM-DD)
+    #[arg(long = "event-time-start", requires = "event_time_end")]
+    event_time_start: Option<String>,
+
+    /// End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD)
+    #[arg(long = "event-time-end", requires = "event_time_start")]
+    event_time_end: Option<String>,
+
+    /// Select models to run (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -137,6 +174,7 @@ async fn main() -> Result<()> {
         Commands::Table(args) => table(args).await,
         Commands::Ui(args) => ui(args).await,
         Commands::Seed(args) => run_seed(args).await,
+        Commands::Build(args) => build(args).await,
     }
 }
 
@@ -868,6 +906,32 @@ async fn run_seed(args: SeedArgs) -> Result<()> {
     println!("  Total time: {:?}", total_duration);
 
     Ok(())
+}
+
+async fn build(args: BuildArgs) -> Result<()> {
+    // Step 1: Seed
+    let seed_args = SeedArgs {
+        project_dir: args.project_dir.clone(),
+        database: args.database.clone(),
+        target: args.target.clone(),
+        show_results: false,
+        select: Vec::new(),
+    };
+    run_seed(seed_args).await?;
+
+    // Step 2: Run
+    let run_args = RunArgs {
+        project_dir: args.project_dir,
+        database: args.database,
+        target: args.target,
+        show_results: args.show_results,
+        verbose: args.verbose,
+        dry_run: false,
+        event_time_start: args.event_time_start,
+        event_time_end: args.event_time_end,
+        select: args.select,
+    };
+    run(run_args).await
 }
 
 async fn table(args: TableArgs) -> Result<()> {
