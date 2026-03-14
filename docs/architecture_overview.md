@@ -227,16 +227,29 @@ For the "native" dialect (DuckDB, which supports the full smelt superset), the p
 
 ## Optimizer Design
 
-The optimizer is smelt's key differentiator. It works at the **model-graph level**, not at the expression level within a single query. Expression-level optimization (predicate pushdown, join reordering, cost-based plan selection) is the backend engine's job — DuckDB, Spark, and BigQuery all have mature optimizers for this.
+The optimizer is smelt's key differentiator. It inspects model SQL (via the CST) and the model dependency graph, then produces transformations: new models, redirected refs, changed materialization strategies, and multi-step execution plans.
+
+**What the optimizer does vs. what it doesn't**: The optimizer does not replicate work that backend engines already do well — predicate pushdown, join reordering, cost-based plan selection within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers for that. Instead, smelt's optimizer handles patterns that no single engine can optimize because they span multiple models or require restructuring how a query is executed.
 
 ### What the optimizer does
 
-The optimizer detects patterns across multiple models and produces **graph transformations**:
+The optimizer reads CST structure to detect patterns, then emits new SQL as strings (parsed normally) and execution instructions. It does **not** mutate existing CSTs.
+
+#### Cross-model graph transforms
 
 1. **Shared materialization**: Multiple models compute the same intermediate result (e.g., session computation). Create a single shared model and redirect refs.
-2. **Dimensional splitting**: A large GROUP BY with many dimensions can be split into smaller, cheaper aggregations when downstream models only need subsets.
-3. **Model fusion**: Two models where one is a trivial SELECT from the other can be merged.
-4. **Ref redirection**: Point a model's ref to a materialized intermediate instead of recomputing from source.
+2. **Model fusion**: Two models where one is a trivial SELECT from the other can be merged.
+3. **Ref redirection**: Point a model's ref to a materialized intermediate instead of recomputing from source.
+
+#### Single-model execution transforms
+
+The optimizer also inspects a model's SQL to decide *how* it should be executed:
+
+4. **Incremental materialization detection**: A model that aggregates by a time window (e.g., `GROUP BY date_trunc('day', timestamp)`) can be converted to an incremental model that only processes new partitions instead of full-refreshing.
+
+5. **Query splitting**: A large cube query with many COUNT DISTINCT expressions causes massive memory pressure on engines like Spark and DuckDB (hash tables for each distinct spill to disk). The optimizer can split it into N smaller queries, each computing a subset of the distincts, appending results to a temp table. This keeps intermediate state in memory and avoids spills.
+
+These transforms read CST structure (detecting GROUP BY patterns, counting DISTINCT aggregations) but output new SQL strings and execution plans — they don't modify the original CST in place.
 
 ### Transformation enum
 
@@ -263,10 +276,26 @@ enum Transformation {
         model: String,
         materialization: Materialization,
     },
+    /// Replace a model's single-query execution with a multi-step plan
+    ReplaceWithPlan {
+        model: String,
+        steps: Vec<ExecutionStep>,
+    },
+}
+
+enum ExecutionStep {
+    /// Create a temp table from a query
+    CreateTemp { name: String, sql: String },
+    /// Append query results to an existing temp table
+    AppendToTemp { name: String, sql: String },
+    /// The final query that produces the model's output
+    FinalQuery { sql: String },
+    /// Clean up a temp table
+    DropTemp { name: String },
 }
 ```
 
-Transformations produce new SQL strings (parsed normally by `smelt-parser`) and graph edits. They do **not** mutate existing CSTs. This keeps the optimizer's output easy to inspect: "the optimizer added model `_session_summary` and changed `user_sessions` to ref it."
+Transformations produce new SQL strings (parsed normally by `smelt-parser`) and execution instructions. They do **not** mutate existing CSTs. This keeps the optimizer's output easy to inspect: "the optimizer split `big_cube` into 4 queries" or "the optimizer added model `_session_summary` and redirected 3 refs to it."
 
 ### Optimizer rules
 
@@ -288,9 +317,9 @@ The optimizer runs all rules, collects opportunities, and applies transformation
 ### Scope boundary
 
 The optimizer does **not**:
-- Parse or understand SQL semantics beyond what the CST provides
+- Perform expression-level algebraic optimization (predicate pushdown, join reordering) — that's the backend engine's job
 - Perform cost estimation (future work, requires backend statistics)
-- Rewrite SQL expressions within a model (that's the dialect-aware printer or the backend engine)
+- Mutate existing CSTs — it reads them to detect patterns, then produces new SQL strings
 
 ## LSP Integration
 
