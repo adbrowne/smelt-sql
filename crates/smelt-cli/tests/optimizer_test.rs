@@ -1,3 +1,4 @@
+#![cfg(feature = "duckdb")]
 //! Integration tests for optimizer: cube split, incremental, and composed.
 
 use smelt_backend::Backend;

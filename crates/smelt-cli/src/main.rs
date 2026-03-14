@@ -3,6 +3,7 @@ use arrow::util::pretty;
 use chrono::{Duration, NaiveDate};
 use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, PartitionSpec};
+#[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
     discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
@@ -764,6 +765,7 @@ fn generate_partition_dates(start: &str, end: &str) -> Result<Vec<String>> {
     Ok(dates)
 }
 
+#[allow(unreachable_code, unused_variables)]
 async fn create_backend(
     target_config: &smelt_cli::config::Target,
     project_dir: &Path,
@@ -771,20 +773,29 @@ async fn create_backend(
 ) -> Result<Box<dyn Backend>> {
     match target_config.backend_type() {
         BackendType::DuckDB => {
-            let database = target_config
-                .database
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
+            #[cfg(feature = "duckdb")]
+            {
+                let database = target_config
+                    .database
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
 
-            let db_path = database_override.unwrap_or_else(|| project_dir.join(database));
-            println!("\nBackend: DuckDB");
-            println!("Database: {}", db_path.display());
+                let db_path = database_override.unwrap_or_else(|| project_dir.join(database));
+                println!("\nBackend: DuckDB");
+                println!("Database: {}", db_path.display());
 
-            Ok(Box::new(
-                DuckDbBackend::new(&db_path, &target_config.schema)
-                    .await
-                    .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
-            ))
+                Ok(Box::new(
+                    DuckDbBackend::new(&db_path, &target_config.schema)
+                        .await
+                        .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
+                ))
+            }
+            #[cfg(not(feature = "duckdb"))]
+            {
+                Err(anyhow::anyhow!(
+                    "DuckDB backend not available. Rebuild with --features duckdb"
+                ))
+            }
         }
         BackendType::Spark => {
             #[cfg(feature = "spark")]

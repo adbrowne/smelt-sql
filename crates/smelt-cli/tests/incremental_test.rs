@@ -1,3 +1,4 @@
+#![cfg(feature = "duckdb")]
 //! Integration test for incremental materialization
 
 use smelt_backend::{Backend, PartitionSpec};

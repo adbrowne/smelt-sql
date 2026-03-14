@@ -302,6 +302,7 @@ pub async fn validate_sources(backend: &dyn Backend, sources: &SourcesConfig) ->
 }
 
 #[cfg(test)]
+#[cfg(feature = "duckdb")]
 mod tests {
     use super::*;
     use smelt_backend_duckdb::DuckDbBackend;
