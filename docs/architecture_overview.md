@@ -1,310 +1,413 @@
-# Architecture Overview: Putting It All Together
+# Architecture Overview
 
 ## The Big Picture
 
-smelt combines three powerful ideas:
+smelt is a **SQL-to-SQL compiler and orchestrator** for data pipelines. It takes SQL models written in smelt's dialect (a PostgreSQL-base superset with cherry-picked features from DuckDB and Spark), resolves dependencies, optionally optimizes across model boundaries, and emits dialect-specific SQL for target execution engines.
 
-1. **Logical/Physical Separation**: Users write WHAT to compute, optimizer decides HOW
-2. **Cross-Model Optimization**: Detect and optimize patterns across multiple models
-3. **First-Class Editor Support**: LSP + Salsa for instant feedback and incremental compilation
+Three ideas make smelt different from dbt:
 
-## How They Work Together
+1. **Logical/Physical Separation**: Users write WHAT to compute; the optimizer and dialect-aware printer decide HOW it executes on each backend.
+2. **Cross-Model Optimization**: The optimizer operates at the model-graph level — creating shared materializations, redirecting refs, merging models — not at the expression level (that's the backend engine's job).
+3. **First-Class Editor Support**: LSP + Salsa + Rowan for incremental compilation and real-time diagnostics, including dialect-specific hints.
+
+## Compilation Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Developer Experience                      │
-│  ┌────────────┐                                                  │
-│  │   Editor   │ ← Real-time feedback via LSP                    │
-│  │  (VSCode)  │ ← Diagnostics, completions, refactoring         │
-│  └──────┬─────┘                                                  │
-│         │                                                        │
-│         │ File changes                                           │
-│         ▼                                                        │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              LSP Server + Salsa Database                 │   │
-│  │  • Incremental parsing (Rowan CST)                       │   │
-│  │  • Incremental semantic analysis                         │   │
-│  │  • Incremental optimization                              │   │
-│  └──────┬───────────────────────────────────────────────────┘   │
-└─────────┼──────────────────────────────────────────────────────┘
-          │
-          │ Model definitions + dependencies
-          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Compilation Pipeline                        │
-│  ┌────────┐    ┌────────┐    ┌──────────┐    ┌──────────────┐  │
-│  │ Parser │ →  │  AST   │ →  │ Semantic │ →  │ Logical IR   │  │
-│  │ (Rowan)│    │        │    │ Analysis │    │ (DataFusion) │  │
-│  └────────┘    └────────┘    └──────────┘    └──────┬───────┘  │
-│                                                       │          │
-│                                                       │          │
-│  ┌────────────────────────────────────────────────────┘          │
-│  │                                                               │
-│  ▼                                                               │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              Optimizer (User-Defined Rules)              │   │
-│  │                                                           │   │
-│  │  Example Rule: Common Intermediate Aggregation           │   │
-│  │  ┌────────────────────────────────────────────────────┐  │   │
-│  │  │ 1. Detect: Find models with same session logic    │  │   │
-│  │  │ 2. Analyze: Compute union of required dimensions  │  │   │
-│  │  │ 3. Rewrite: Create shared materialization         │  │   │
-│  │  │ 4. Update: Point models to shared table           │  │   │
-│  │  └────────────────────────────────────────────────────┘  │   │
-│  │                                                           │   │
-│  └──────────────────────────┬────────────────────────────────┘   │
-│                             │                                    │
-│                             ▼                                    │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │           Physical IR (Execution Plan)                   │   │
-│  │  • Which models to materialize                           │   │
-│  │  • Which backend for each operation                      │   │
-│  │  • Execution order                                       │   │
-│  └──────────────────────────┬────────────────────────────────┘   │
-└─────────────────────────────┼──────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         Code Generation                          │
-│  ┌────────────┐    ┌────────────┐    ┌────────────────────┐    │
-│  │  DuckDB    │    │ Databricks │    │  Spark / BigQuery  │    │
-│  │  Backend   │    │  Backend   │    │     (Future)       │    │
-│  └────────────┘    └────────────┘    └────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+                  ┌──────────┐
+                  │  .sql    │  smelt SQL models
+                  │  files   │  (superset dialect)
+                  └────┬─────┘
+                       │
+                  ┌────▼─────┐
+                  │  Parse   │  smelt-parser (Rowan CST)
+                  │          │  Error-recovery, lossless
+                  └────┬─────┘
+                       │ CST
+                  ┌────▼─────┐
+                  │ Analyze  │  smelt-db (Salsa queries)
+                  │          │  Refs, types, diagnostics
+                  └────┬─────┘
+                       │ CST + semantic info
+                  ┌────▼─────┐
+                  │ Optimize │  smelt-optimizer (future)
+                  │(optional)│  Model-graph transforms
+                  └────┬─────┘
+                       │ CST + graph edits
+                  ┌────▼──────┐
+                  │ Generate  │  smelt-dialect (dialect-aware printer)
+                  │           │  CST walk → target SQL string
+                  └────┬──────┘
+                       │ SQL string per dialect
+                  ┌────▼──────┐
+                  │ Execute   │  smelt-backend-* (async)
+                  │           │  Send SQL to engine
+                  └───────────┘
 ```
 
-## Example: Developer Workflow
+**Key invariant**: The Rowan CST is the single representation from parse through generation. There is no intermediate IR like DataFusion LogicalPlan. This avoids two fidelity boundaries (CST → IR → SQL) and preserves comments, formatting, and smelt extensions throughout.
 
-### 1. Developer Writes Models
+## Crate Dependency Graph
 
-```sql
--- models/user_sessions.sql
-{{ config(description="User sessions with 30-min timeout") }}
-
-SELECT
-    user_id,
-    session_id,
-    COUNT(*) as events
-FROM {{ ref('raw_events') }}
-GROUP BY user_id, session_id
+```
+                          smelt-types          (sync, data types)
+                            │
+                          smelt-parser         (sync, Rowan CST)
+                            │
+                     ┌──────┼──────┐
+                     │      │      │
+                  smelt-core │   smelt-dialect  (sync, printer + capabilities)
+                     │      │      │
+                     │   smelt-db  │            (sync, Salsa queries)
+                     │      │      │
+              ┌──────┼──────┼──────┤
+              │      │      │      │
+           smelt-lsp │   smelt-optimizer        (sync, model-graph transforms)
+              │      │      │      │             (future)
+              │      │      │      │
+              │   smelt-cli─┘      │
+              │      │             │
+              │   smelt-backend    │            (async, execution trait)
+              │      │             │
+              │   ┌──┴──────┐     │
+              │   │         │     │
+              │  duckdb   spark   │
+              │  backend  backend │
+              │      │      │     │
+              │   smelt-transpiler┘             (async, wraps backend + dialect)
+              │
+           (LSP binary)
 ```
 
-### 2. LSP Provides Instant Feedback
+### Concern → Crate → Sync/Async
 
-As they type:
-- ✅ `ref('raw_events')` → autocomplete suggests available models
-- ✅ Hover shows `raw_events` schema
-- ✅ Diagnostic: "Column `session_id` not found in `raw_events`"
-- ❌ Developer fixes: needs to compute sessions first
+| Concern | Crate | Sync/Async | Notes |
+|---------|-------|------------|-------|
+| SQL data types | `smelt-types` | sync | `DataType`, `TypedColumn` |
+| Parsing | `smelt-parser` | sync | Rowan CST, error recovery |
+| Project config & discovery | `smelt-core` | sync | `Config`, `ModelFile`, `DependencyGraph` |
+| Incremental queries | `smelt-db` | sync | Salsa: parse, refs, types, diagnostics |
+| SQL dialects & printing | `smelt-dialect` | sync | `SqlDialect`, `BackendCapabilities`, dialect-aware printer |
+| Model-graph optimization | `smelt-optimizer` | sync | Graph transforms, new model generation (future) |
+| LSP server | `smelt-lsp` | async (tower-lsp) | Thin async shell over sync Salsa queries |
+| Execution trait | `smelt-backend` | async | `Backend` trait, `ExecutionResult` |
+| DuckDB execution | `smelt-backend-duckdb` | async | `DuckDbBackend` |
+| Spark execution | `smelt-backend-spark` | async | `SparkBackend` |
+| SQL rewriting for backends | `smelt-transpiler` | sync* | Wraps backend + dialect printer |
 
-### 3. Developer Refactors (LSP-Assisted)
+\* The transpiler's core logic (CST walk + emit) is sync. The `TranspilingBackend<B>` wrapper is async because it delegates to an async `Backend`.
 
-```sql
--- Updated version
-WITH sessions AS (
-    SELECT
-        user_id,
-        SUM(CASE WHEN ... THEN 1 ELSE 0 END) OVER (...) as session_id
-    FROM {{ ref('raw_events') }}
-)
-SELECT user_id, session_id, COUNT(*) as events
-FROM sessions
-GROUP BY user_id, session_id
+### Why extract `smelt-dialect`?
+
+The current `smelt-backend` crate contains `SqlDialect` and `BackendCapabilities` alongside async execution code that depends on Arrow, Tokio, and DuckDB. The LSP needs dialect information (to show "QUALIFY will be rewritten for PostgreSQL") but must not link against heavy async/native dependencies.
+
+`smelt-dialect` is a lightweight sync crate that holds:
+- `SqlDialect` enum (DuckDB, SparkSQL, PostgreSQL)
+- `BackendCapabilities` struct (feature flags per dialect)
+- The dialect-aware printer (CST → SQL string)
+
+Both `smelt-lsp` and `smelt-transpiler` depend on it. Neither needs to depend on `smelt-backend`.
+
+## Data Flow
+
+### 1. Parse (smelt-parser)
+
+**Input**: SQL source text
+**Output**: Rowan CST (`SyntaxNode`)
+**Representation**: Lossless concrete syntax tree — every byte of input is represented, including whitespace, comments, and smelt extensions (`smelt.ref()`, `smelt.metric()`, `=>` named parameters).
+
+The parser uses recursive descent with error recovery at sync points (semicolons, keywords). Invalid input produces `ERROR` nodes in the CST rather than aborting — critical for LSP support where code is almost always incomplete.
+
+### 2. Analyze (smelt-db via Salsa)
+
+**Input**: CST + project config
+**Output**: Semantic information layered on the CST
+**Representation**: Salsa query results keyed by file/model — refs with positions, resolved types, diagnostics.
+
+Salsa provides automatic incremental recomputation. When a file changes, only affected queries are re-evaluated. The CST itself is not mutated; semantic information is computed as derived queries.
+
+Key queries:
+- `parse_file()` → CST
+- `model_refs()` → ref names + positions
+- `resolve_ref()` → target model
+- `file_diagnostics()` → errors and warnings
+- `model_schema()` → column types
+
+### 3. Optimize (smelt-optimizer, future)
+
+**Input**: Model dependency graph + CSTs
+**Output**: Graph edits (new models, redirected refs, removed models)
+**Representation**: A set of `Transformation` instructions, not mutated CSTs.
+
+See [Optimizer Design](#optimizer-design) below.
+
+### 4. Generate (smelt-dialect, dialect-aware printer)
+
+**Input**: CST + target `SqlDialect`
+**Output**: SQL string valid for the target engine
+**Representation**: Plain `String`.
+
+See [Dialect-Aware Printer](#dialect-aware-printer-design) below.
+
+### 5. Execute (smelt-backend-*)
+
+**Input**: SQL string
+**Output**: `ExecutionResult` (duration, row count, optional preview)
+**Representation**: Arrow `RecordBatch` for data interchange.
+
+The `Backend` trait is async because execution involves network I/O (Spark connect, future cloud backends). Each backend implementation handles DDL (CREATE TABLE AS, views, incremental inserts) and returns results.
+
+## Dialect-Aware Printer Design
+
+The dialect-aware printer replaces the current transpiler's text-range string replacement approach. Instead of detecting byte offsets in the CST and splicing replacement strings from end to start, the printer walks the CST in a single forward pass and emits dialect-specific SQL.
+
+### Current approach (smelt-transpiler, to be replaced)
+
+```
+Parse → detect SyntaxKind nodes → extract byte ranges → compute replacement text
+→ sort replacements descending → apply via String::replace_range()
 ```
 
-LSP updates in real-time:
-- ✅ No more diagnostic errors
-- ✅ Schema inferred correctly
-- ℹ️ Inlay hint: "3 other models use similar session logic"
+Problems:
+- **Multi-pass fragility**: Statement-level rewrites (QUALIFY) run first, then the output is re-parsed for expression-level rewrites (array literals). Rewrites can interact.
+- **Offset arithmetic**: Replacements must be sorted and applied end-to-start to avoid invalidating byte positions. Nested constructs require care.
+- **Not composable**: Each rewrite is an independent module that doesn't know about other rewrites. Combining them requires the multi-pass orchestrator.
 
-### 4. Developer Adds More Models
+### New approach (dialect-aware printer)
 
-```sql
--- models/sessions_by_country.sql
-SELECT country, COUNT(*) FROM {{ ref('user_sessions') }} ...
-
--- models/sessions_by_hour.sql
-SELECT hour, COUNT(*) FROM {{ ref('user_sessions') }} ...
-```
-
-### 5. Optimizer Detects Pattern (Via Salsa)
-
-When developer saves files, Salsa incrementally:
-1. Reparses changed files (~1ms each)
-2. Updates dependency graph (~10ms)
-3. Runs optimization queries (~50ms)
-
-Optimizer rule detects:
-- All three models need same session computation
-- Can share intermediate `session_summary` table
-
-### 6. LSP Shows Optimization Opportunity
-
-Inline diagnostic in editor:
-```
-ℹ️ Optimization available: 3 models share session computation
-   → Click to materialize 'session_summary'
-```
-
-Code action:
-```
-💡 Create shared materialization
-   • Reduces computation by 67%
-   • Estimated cost: $10 → $3.50
-```
-
-### 7. Developer Accepts Optimization
-
-LSP/Optimizer generates:
-```sql
--- Generated: models/_internal/session_summary.sql
-{{ config(materialized='table', internal=true) }}
-
-SELECT
-    user_id,
-    session_id,
-    session_day,
-    session_hour,
-    session_country,
-    COUNT(*) as events,
-    SUM(revenue) as revenue
-FROM {{ ref('raw_events') }}
-GROUP BY ...
-```
-
-And updates dependent models:
-```sql
--- models/user_sessions.sql (updated)
-SELECT user_id, session_id, events
-FROM {{ ref('_session_summary') }}
-```
-
-### 8. Execution
-
-```bash
-$ smelt run --target production
-
-Compiling pipeline...
-  ✓ Parsed 47 models (120ms)
-  ✓ Resolved dependencies (15ms)
-  ✓ Applied 3 optimizations (45ms)
-  ✓ Generated SQL (80ms)
-
-Executing on Databricks...
-  → session_summary (Spark, 45s, $2.10)
-  ↳ user_sessions (DuckDB, 0.2s, $0.00)
-  ↳ sessions_by_country (DuckDB, 0.1s, $0.00)
-  ↳ sessions_by_hour (DuckDB, 0.1s, $0.00)
-
-Total: 45.4s, $2.10 (saved $7.90 vs naive execution)
-```
-
-## Key Technical Decisions
-
-### Salsa for Incremental Compilation
-
-**Why**: Developer changes one model → only recompute affected models
-- Parse all 1000 models once: ~1s
-- Change one model: recompile only dependents: ~50ms
-- Critical for LSP responsiveness
-
-**How**: Salsa tracks query dependencies automatically
 ```rust
-fn dependency_graph(&self) -> Arc<Graph> {
-    // Automatically depends on all_models()
-    let models = self.all_models();  // Salsa query
-    build_graph(models)
+fn print(node: &SyntaxNode, dialect: &SqlDialect, caps: &BackendCapabilities) -> String {
+    let mut out = String::new();
+    print_node(node, dialect, caps, &mut out);
+    out
+}
+
+fn print_node(node: &SyntaxNode, dialect: &SqlDialect, caps: &BackendCapabilities, out: &mut String) {
+    match node.kind() {
+        // smelt extension: resolve ref to schema.model_name
+        SyntaxKind::REF_CALL => {
+            let model_name = extract_ref_name(node);
+            write!(out, "{schema}.{model_name}", schema = dialect.default_schema());
+        }
+
+        // Dialect rewrite: QUALIFY → subquery wrapper
+        SyntaxKind::SELECT_STMT if has_qualify(node) && !caps.supports_qualify => {
+            print_qualify_as_subquery(node, dialect, caps, out);
+        }
+
+        // Dialect rewrite: array literal syntax
+        SyntaxKind::ARRAY_LITERAL if !caps.supports_array_literal => {
+            // ARRAY[1, 2, 3] → ARRAY(1, 2, 3)
+            out.push_str("ARRAY(");
+            print_array_elements(node, dialect, caps, out);
+            out.push(')');
+        }
+
+        // Default: recursively print children
+        _ => {
+            for child in node.children_with_tokens() {
+                match child {
+                    NodeOrToken::Node(n) => print_node(&n, dialect, caps, out),
+                    NodeOrToken::Token(t) => out.push_str(t.text()),
+                }
+            }
+        }
+    }
 }
 ```
 
-When a file changes:
-1. Salsa marks `file_text()` query as dirty
-2. Automatically invalidates `parse_file()`, `file_ast()`, `all_models()`, `dependency_graph()`
-3. Recomputes only what's needed
+**Advantages**:
+- **Single pass**: No re-parsing, no offset arithmetic, no multi-pass coordination.
+- **Composable**: Adding a new rewrite is adding a new match arm. Nested rewrites compose naturally because the recursive walk handles inner nodes.
+- **Preserves formatting**: The default arm emits tokens verbatim, preserving whitespace and comments. Only matched constructs are rewritten.
+- **Testable**: Each match arm can be unit-tested by constructing a CST subtree and checking the emitted string.
 
-### Rowan for Error Recovery
+### Identity property
 
-**Why**: Developers type invalid code 99% of the time
-- Must provide completions even with syntax errors
-- Must show diagnostics without blocking on errors
+For the "native" dialect (DuckDB, which supports the full smelt superset), the printer should emit SQL identical to the input (modulo smelt extension resolution). This is a strong correctness invariant that can be property-tested.
 
-**How**: Rowan produces CST even with errors
-```sql
-{{ ref('user_  -- incomplete!
-```
+## Optimizer Design
 
-Parser produces:
-```
-REF_EXPR
-  ├─ REF_KW("ref")
-  ├─ LPAREN("(")
-  ├─ STRING("'user_") ← incomplete
-  └─ ERROR         ← missing closing paren and }}
-```
+The optimizer is smelt's key differentiator. It inspects model SQL (via the CST) and the model dependency graph, then produces transformations: new models, redirected refs, changed materialization strategies, and multi-step execution plans.
 
-LSP can still:
-- Suggest completions: "user_sessions", "user_events"
-- Provide diagnostic: "Unclosed string literal"
-- Show go-to-definition (even though ref is incomplete)
+**What the optimizer does vs. what it doesn't**: The optimizer does not replicate work that backend engines already do well — predicate pushdown, join reordering, cost-based plan selection within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers for that. Instead, smelt's optimizer handles patterns that no single engine can optimize because they span multiple models or require restructuring how a query is executed.
 
-### Explicit Optimization Rules
+### What the optimizer does
 
-**Why**: Transparency and debuggability
-- Developer can see what optimizations are applied
-- Can write custom rules for domain-specific patterns
-- Can disable rules that cause issues
+The optimizer reads CST structure to detect patterns, then emits new SQL as strings (parsed normally) and execution instructions. It does **not** mutate existing CSTs.
 
-**How**: Rules are first-class values
+#### Cross-model graph transforms
+
+1. **Shared materialization**: Multiple models compute the same intermediate result (e.g., session computation). Create a single shared model and redirect refs.
+2. **Model fusion**: Two models where one is a trivial SELECT from the other can be merged.
+3. **Ref redirection**: Point a model's ref to a materialized intermediate instead of recomputing from source.
+
+#### Single-model execution transforms
+
+The optimizer also inspects a model's SQL to decide *how* it should be executed:
+
+4. **Incremental materialization detection**: A model that aggregates by a time window (e.g., `GROUP BY date_trunc('day', timestamp)`) can be converted to an incremental model that only processes new partitions instead of full-refreshing.
+
+5. **Query splitting**: A large cube query with many COUNT DISTINCT expressions causes massive memory pressure on engines like Spark and DuckDB (hash tables for each distinct spill to disk). The optimizer can split it into N smaller queries, each computing a subset of the distincts, appending results to a temp table. This keeps intermediate state in memory and avoids spills.
+
+These transforms read CST structure (detecting GROUP BY patterns, counting DISTINCT aggregations) but output new SQL strings and execution plans — they don't modify the original CST in place.
+
+### Transformation enum
+
 ```rust
-let rule = OptimizationRule {
-    name: "share_sessions",
-    pattern: |ctx| ctx.find_common_cte("sessions"),
-    rewrite: |ctx| ctx.create_shared_table(...),
-    enabled: true,
-};
+enum Transformation {
+    /// Create a new model with the given SQL and config
+    CreateModel {
+        name: String,
+        sql: String,
+        materialization: Materialization,
+    },
+    /// Redirect a ref in an existing model to point to a different target
+    RedirectRef {
+        model: String,
+        old_ref: String,
+        new_ref: String,
+    },
+    /// Remove a model (after all refs redirected away)
+    RemoveModel {
+        name: String,
+    },
+    /// Change materialization strategy for an existing model
+    SetMaterialization {
+        model: String,
+        materialization: Materialization,
+    },
+    /// Replace a model's single-query execution with a multi-step plan
+    ReplaceWithPlan {
+        model: String,
+        steps: Vec<ExecutionStep>,
+    },
+}
 
-optimizer.add_rule(rule);
+enum ExecutionStep {
+    /// Create a temp table from a query
+    CreateTemp { name: String, sql: String },
+    /// Append query results to an existing temp table
+    AppendToTemp { name: String, sql: String },
+    /// The final query that produces the model's output
+    FinalQuery { sql: String },
+    /// Clean up a temp table
+    DropTemp { name: String },
+}
 ```
 
-IDE shows:
+Transformations produce new SQL strings (parsed normally by `smelt-parser`) and execution instructions. They do **not** mutate existing CSTs. This keeps the optimizer's output easy to inspect: "the optimizer split `big_cube` into 4 queries" or "the optimizer added model `_session_summary` and redirected 3 refs to it."
+
+### Optimizer rules
+
+Rules are explicit, named, and user-controllable:
+
+```rust
+struct OptimizationRule {
+    name: &'static str,
+    description: &'static str,
+    /// Detect whether this rule applies to the current model graph
+    detect: fn(&ModelGraph) -> Vec<Opportunity>,
+    /// Produce transformations for a detected opportunity
+    rewrite: fn(&Opportunity) -> Vec<Transformation>,
+}
 ```
-Applied optimizations:
-  ✓ share_sessions → session_summary (3 consumers)
-  ✗ split_large_groupby → disabled (small dataset)
+
+The optimizer runs all rules, collects opportunities, and applies transformations. Users can enable/disable rules and inspect what was applied.
+
+### Scope boundary
+
+The optimizer does **not**:
+- Perform expression-level algebraic optimization (predicate pushdown, join reordering) — that's the backend engine's job
+- Perform cost estimation (future work, requires backend statistics)
+- Mutate existing CSTs — it reads them to detect patterns, then produces new SQL strings
+
+## LSP Integration
+
+### Current state
+
+The LSP (`smelt-lsp`) depends on `smelt-db` (Salsa queries) and `smelt-parser` (CST). It provides:
+- Parse error diagnostics with accurate positions
+- Undefined ref diagnostics
+- Go-to-definition for `smelt.ref()`
+- Hover with type information
+- Column completions (including table alias completions)
+- Model name completions in `smelt.ref()`
+
+### Dialect diagnostics (via smelt-dialect)
+
+With `smelt-dialect` extracted as a lightweight sync crate, the LSP can check constructs against `BackendCapabilities` without linking to any backend:
+
+```
+smelt-lsp → smelt-dialect (sync, no Arrow/Tokio/DuckDB)
+         → smelt-db      (sync, Salsa)
+         → smelt-parser  (sync, Rowan)
 ```
 
-## What's Next
+This enables dialect-specific informational hints in the editor:
 
-1. **Finish Example 1 Analysis** ✅ (Done!)
-   - Documented insights for common intermediate aggregation
-   - API design recommendations
+- `ℹ️ QUALIFY will be rewritten to a subquery for PostgreSQL`
+- `ℹ️ ARRAY[...] will be rewritten to ARRAY(...) for Spark SQL`
+- `⚠️ DATE literal syntax not supported by Spark — will be rewritten to DATE() function`
 
-2. **Build Example 2**: Split Large GROUP BY
-   - Different optimization pattern
-   - Validate rule API generalizes
+These are informational (not errors) because the dialect-aware printer handles the rewriting. They help developers understand what will happen when their code runs on a different backend.
 
-3. **Prototype Salsa + Rowan Parser**
-   - Basic template syntax (`{{ ref() }}`, `{{ config() }}`)
-   - Error recovery
-   - Salsa queries for parsing
+### Optimizer suggestions (future)
 
-4. **Implement Basic LSP**
-   - Diagnostics (parse errors)
-   - Go-to-definition for `ref()`
-   - Model name completions
+When the optimizer detects opportunities, the LSP can surface them as code actions:
 
-5. **Design Optimization Rule API**
-   - Based on Examples 1 & 2
-   - Pattern matching primitives
-   - Rewrite operations
+```
+ℹ️ Optimization available: 3 models share session computation
+   → Create shared materialization 'session_summary'
+```
 
-6. **Build Optimizer Framework**
-   - Rule registration
-   - Pattern detection
-   - Physical plan generation
+The LSP calls the optimizer's `detect` phase (sync, no execution needed) and presents `Opportunity` values as diagnostics. If the user accepts, the LSP applies the `Transformation` list as workspace edits.
 
-This architecture gives us:
-- **Fast feedback**: Salsa + LSP = sub-100ms edit-to-diagnostic
-- **Powerful optimization**: Cross-model pattern detection
-- **Great DX**: Real-time help, no mental overhead
-- **Scalability**: Incremental compilation handles 1000s of models
+## Migration Path
+
+The architecture described above is the target state. Here is the phased migration from the current codebase:
+
+### Phase 1: Extract `smelt-dialect` (no behavior change)
+
+Move `SqlDialect`, `BackendCapabilities` from `smelt-backend` into a new `smelt-dialect` crate. Both `smelt-backend` and `smelt-transpiler` re-export or depend on `smelt-dialect`. No functional changes — pure crate extraction.
+
+### Phase 2: Dialect-aware printer in `smelt-dialect`
+
+Implement the CST-walking printer in `smelt-dialect`. Port the three existing rewrite rules (QUALIFY, array literals, DATE literals) from the transpiler's text-range approach to match arms in the printer. Verify with the transpiler's existing test suite.
+
+### Phase 3: Replace transpiler internals
+
+Replace `smelt-transpiler`'s multi-pass replacement logic with calls to the dialect-aware printer. `TranspilingBackend<B>` calls `smelt_dialect::print()` instead of the old `transpile()` function. The transpiler crate may shrink to just the `TranspilingBackend` wrapper or be absorbed into `smelt-cli`.
+
+### Phase 4: LSP dialect diagnostics
+
+Add `smelt-dialect` as a dependency of `smelt-lsp`. Walk the CST checking constructs against `BackendCapabilities` for the configured target. Emit informational diagnostics for constructs that will be rewritten.
+
+### Phase 5: Optimizer (future)
+
+Introduce `smelt-optimizer` crate. Implement the first optimization rule (shared materialization). Integrate with LSP for opportunity detection and code actions.
+
+## Key Technical Decisions
+
+### Rowan CST as single representation
+
+The CST is the single source of truth from parse to generation. This avoids the fidelity loss inherent in converting to and from an intermediate representation like DataFusion LogicalPlan. The CST preserves:
+- Comments and whitespace (important for readable generated SQL)
+- smelt extensions (`smelt.ref()`, `smelt.metric()`, named parameters)
+- Original formatting (the printer's default arm emits tokens verbatim)
+- Error nodes (the LSP works with incomplete/invalid code)
+
+### Salsa for incremental compilation
+
+Salsa tracks query dependencies automatically. When a file changes, only affected queries are recomputed. This is critical for LSP responsiveness — parsing 1000 models once takes ~1s, but re-analyzing a single changed file takes ~50ms.
+
+### Rowan for error recovery
+
+Developers write invalid code most of the time while editing. The parser must produce a usable CST even with syntax errors. Rowan's `ERROR` nodes allow the LSP to provide diagnostics, completions, and go-to-definition on incomplete code.
+
+### Expression optimization is the engine's job
+
+smelt does not attempt predicate pushdown, join reordering, or cost-based optimization within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers. smelt's value is in cross-model optimization that no single engine can do because it doesn't see the full pipeline.
+
+### Sync core, async edges
+
+All core logic (parsing, analysis, optimization, printing) is synchronous. Async is only at the execution boundary where network I/O happens. This keeps the codebase simple, testable, and compatible with Salsa (which is sync).
