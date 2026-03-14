@@ -3323,6 +3323,7 @@ dependencies = [
  "smelt-backend-spark",
  "smelt-core",
  "smelt-db",
+ "smelt-optimizer",
  "smelt-parser",
  "smelt-types",
  "smelt-ui",
@@ -3397,6 +3398,16 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "walkdir",
+]
+
+[[package]]
+name = "smelt-optimizer"
+version = "0.1.0"
+dependencies = [
+ "rowan",
+ "serde",
+ "serde_yaml",
+ "smelt-parser",
 ]
 
 [[package]]

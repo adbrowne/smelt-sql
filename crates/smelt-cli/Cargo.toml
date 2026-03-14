@@ -15,6 +15,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
 smelt-types = { path = "../smelt-types" }
+smelt-optimizer = { path = "../smelt-optimizer" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }

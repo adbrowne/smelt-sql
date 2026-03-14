@@ -6,10 +6,12 @@ use smelt_backend::{Backend, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
     discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
-    BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
+    resolve_refs_in_sql, seed, BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig,
+    SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
-use std::path::PathBuf;
+use smelt_optimizer::{Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "spark")]
@@ -31,6 +33,10 @@ enum Commands {
     Table(TableArgs),
     /// Start the web UI for visualizing the model graph
     Ui(UiArgs),
+    /// Load seed CSV files into the database
+    Seed(SeedArgs),
+    /// Seed the database then run all models (seed + run)
+    Build(BuildArgs),
 }
 
 #[derive(Parser)]
@@ -101,6 +107,64 @@ struct TableArgs {
     format: String,
 }
 
+#[derive(Parser)]
+struct SeedArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// DuckDB database file path
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Target environment from smelt.yml
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Display loaded data after seeding
+    #[arg(long)]
+    show_results: bool,
+
+    /// Select specific seeds to load (by name or schema.name)
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+}
+
+#[derive(Parser)]
+struct BuildArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// DuckDB database file path
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Target environment from smelt.yml
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Display query results after execution
+    #[arg(long)]
+    show_results: bool,
+
+    /// Show compiled SQL for each model
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Start of event time range for incremental models (ISO 8601: YYYY-MM-DD)
+    #[arg(long = "event-time-start", requires = "event_time_end")]
+    event_time_start: Option<String>,
+
+    /// End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD)
+    #[arg(long = "event-time-end", requires = "event_time_start")]
+    event_time_end: Option<String>,
+
+    /// Select models to run (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -109,6 +173,8 @@ async fn main() -> Result<()> {
         Commands::Run(args) => run(args).await,
         Commands::Table(args) => table(args).await,
         Commands::Ui(args) => ui(args).await,
+        Commands::Seed(args) => run_seed(args).await,
+        Commands::Build(args) => build(args).await,
     }
 }
 
@@ -247,54 +313,7 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 6. Create backend based on target type
-    let backend: Box<dyn Backend> = match target_config.backend_type() {
-        BackendType::DuckDB => {
-            let database = target_config
-                .database
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
-
-            let db_path = args.database.unwrap_or_else(|| project_dir.join(database));
-            println!("\nBackend: DuckDB");
-            println!("Database: {}", db_path.display());
-
-            Box::new(
-                DuckDbBackend::new(&db_path, &target_config.schema)
-                    .await
-                    .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
-            )
-        }
-        BackendType::Spark => {
-            #[cfg(feature = "spark")]
-            {
-                let connect_url = target_config
-                    .connect_url
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Spark target requires 'connect_url' field"))?;
-
-                let default_catalog = "spark_catalog".to_string();
-                let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
-
-                println!("\nBackend: Spark");
-                println!("Connect URL: {}", connect_url);
-                println!("Catalog: {}", catalog);
-
-                Box::new(
-                    SparkBackend::new(connect_url, catalog, &target_config.schema)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to connect to Spark at {}", connect_url)
-                        })?,
-                )
-            }
-            #[cfg(not(feature = "spark"))]
-            {
-                return Err(anyhow::anyhow!(
-                    "Spark backend not available. Rebuild with --features spark"
-                ));
-            }
-        }
-    };
+    let backend = create_backend(target_config, &project_dir, args.database).await?;
 
     // 7. Validate sources exist (if sources.yml present)
     if let Some(ref source_config) = sources {
@@ -323,7 +342,75 @@ async fn run(args: RunArgs) -> Result<()> {
         _ => None,
     };
 
-    // 9. Compile and execute each model
+    // 9. Run optimizer on discovered models
+    let mut opt_graph = ModelGraph::new();
+    for model_name in &execution_order {
+        let model = graph.get_model(model_name)?;
+        let frontmatter = Frontmatter::parse(&model.content);
+        opt_graph.add_model(ModelInfo {
+            name: model.name.clone(),
+            sql: model.content.clone(),
+            refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
+        });
+    }
+
+    let optimizer = Optimizer::new();
+    let (transformations, opt_errors) = optimizer.optimize(&opt_graph);
+
+    for err in &opt_errors {
+        eprintln!("  Optimizer error: {}", err);
+    }
+
+    // Build lookup maps for transformations
+    let mut plan_overrides: std::collections::HashMap<String, Vec<smelt_optimizer::ExecutionStep>> =
+        std::collections::HashMap::new();
+    let mut incremental_overrides: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new(); // model -> (event_time_column, partition_column)
+
+    for t in &transformations {
+        match t {
+            Transformation::ReplaceWithPlan { model, steps } => {
+                plan_overrides.insert(model.clone(), steps.clone());
+            }
+            Transformation::SetIncremental {
+                model,
+                event_time_column,
+                partition_column,
+            } => {
+                incremental_overrides.insert(
+                    model.clone(),
+                    (event_time_column.clone(), partition_column.clone()),
+                );
+            }
+        }
+    }
+
+    if !plan_overrides.is_empty() || !incremental_overrides.is_empty() {
+        println!("\nOptimizer:");
+        for model in plan_overrides.keys() {
+            println!("  {} → cube split", model);
+        }
+        for (model, (_, partition_col)) in &incremental_overrides {
+            println!("  {} → incremental (partition: {})", model, partition_col);
+        }
+    }
+
+    // Mandatory time range check: if any model has SetIncremental and no time range provided
+    if !incremental_overrides.is_empty() && time_range.is_none() {
+        let inc_models: Vec<&String> = incremental_overrides.keys().collect();
+        return Err(anyhow::anyhow!(
+            "Incremental models selected for run ({}) but --event-time-start and --event-time-end not provided.\n\
+             These are required when running incremental models, similar to dbt's microbatch parameters.",
+            inc_models
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    // 10. Compile and execute each model
     let compiler = SqlCompiler::new(config.clone());
 
     println!("\n{}", "=".repeat(60));
@@ -335,20 +422,123 @@ async fn run(args: RunArgs) -> Result<()> {
     for model_name in &execution_order {
         let model = graph.get_model(model_name)?;
 
-        // Check if this model should be run incrementally
-        // SQL metadata takes precedence over smelt.yml
-        let inc_config = config
-            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()));
-        let is_incremental = time_range.is_some() && inc_config.is_some();
+        let has_plan = plan_overrides.contains_key(model_name.as_str());
+        let has_incremental = incremental_overrides.contains_key(model_name.as_str());
 
-        if is_incremental {
+        // Case 1: Cube split plan (with or without incremental)
+        if has_plan {
+            let steps = plan_overrides.get(model_name.as_str()).unwrap();
+
+            // Resolve refs in each step's SQL
+            let resolved_steps: Vec<smelt_optimizer::ExecutionStep> = steps
+                .iter()
+                .map(|step| match step {
+                    smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
+                        smelt_optimizer::ExecutionStep::CreateTemp {
+                            name: name.clone(),
+                            sql: resolve_refs_in_sql(sql, &target_config.schema),
+                        }
+                    }
+                    smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
+                        smelt_optimizer::ExecutionStep::AppendToTemp {
+                            name: name.clone(),
+                            sql: resolve_refs_in_sql(sql, &target_config.schema),
+                        }
+                    }
+                    smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
+                        smelt_optimizer::ExecutionStep::FinalQuery {
+                            sql: sql.clone(), // Final query references temp tables, not models
+                        }
+                    }
+                    smelt_optimizer::ExecutionStep::DropTemp { name } => {
+                        smelt_optimizer::ExecutionStep::DropTemp { name: name.clone() }
+                    }
+                })
+                .collect();
+
+            if has_incremental {
+                // Composed: cube split + incremental
+                let range = time_range.as_ref().unwrap();
+                let (event_time_col, partition_col) =
+                    incremental_overrides.get(model_name.as_str()).unwrap();
+
+                println!(
+                    "\n▶ Running model: {} (cube split + incremental)",
+                    model_name
+                );
+
+                let partition_values = generate_partition_dates(&range.start, &range.end)?;
+                let partition = PartitionSpec {
+                    column: partition_col.clone(),
+                    values: partition_values,
+                };
+
+                let result = executor::execute_plan_incremental(
+                    backend.as_ref(),
+                    model_name,
+                    &resolved_steps,
+                    &target_config.schema,
+                    partition,
+                    event_time_col,
+                    range,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
+            } else {
+                // Cube split only (full refresh)
+                println!("\n▶ Running model: {} (cube split)", model_name);
+
+                let result = executor::execute_plan(
+                    backend.as_ref(),
+                    model_name,
+                    &resolved_steps,
+                    &target_config.schema,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
+            }
+        }
+        // Case 2: Incremental only (no cube split) — use existing incremental path
+        else if has_incremental {
             let range = time_range.as_ref().unwrap();
-            let inc = inc_config.unwrap();
+            let (event_time_col, partition_col) =
+                incremental_overrides.get(model_name.as_str()).unwrap();
 
             println!("\n▶ Running model: {} (incremental)", model_name);
 
-            // Transform SQL to filter by time range
-            let transformed_sql = inject_time_filter(&model.content, &inc.event_time_column, range)
+            // Transform SQL to filter by time range (strip frontmatter first)
+            let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+            let transformed_sql = inject_time_filter(&clean_sql, event_time_col, range)
                 .with_context(|| format!("Failed to transform SQL for model: {}", model_name))?;
 
             // Compile with transformed SQL
@@ -382,7 +572,7 @@ async fn run(args: RunArgs) -> Result<()> {
             );
 
             let partition = PartitionSpec {
-                column: inc.partition_column.clone(),
+                column: partition_col.clone(),
                 values: partition_values,
             };
 
@@ -402,7 +592,6 @@ async fn run(args: RunArgs) -> Result<()> {
                 result.model_name, result.row_count, result.duration
             );
 
-            // Show preview if requested
             if let Some(ref batches) = result.preview {
                 println!("\n  Preview:");
                 pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
@@ -410,54 +599,130 @@ async fn run(args: RunArgs) -> Result<()> {
             }
 
             results.push(result);
-        } else {
-            // Standard full refresh path
-            if time_range.is_some() && inc_config.is_none() {
-                println!(
-                    "\n▶ Running model: {} (full refresh - not configured for incremental)",
-                    model_name
-                );
-            } else {
-                println!("\n▶ Running model: {}", model_name);
-            }
-
-            // Compile
-            let compiled = compiler
-                .compile(model, &target_config.schema)
-                .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-            if args.verbose {
-                println!("\n  Compiled SQL:");
-                println!("  {}", "─".repeat(58));
-                for line in compiled.sql.lines() {
-                    println!("  {}", line);
-                }
-                println!("  {}", "─".repeat(58));
-            }
-
-            // Execute
-            let result = executor::execute_model(
-                backend.as_ref(),
-                &compiled,
-                &target_config.schema,
-                args.show_results,
-            )
-            .await
-            .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-            println!(
-                "  ✓ {} ({} rows, {:?})",
-                result.model_name, result.row_count, result.duration
+        }
+        // Case 3: Standard full refresh (no optimizer transformations)
+        else {
+            // Check legacy incremental config from smelt.yml
+            let inc_config = config.get_incremental_with_metadata(
+                model_name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
             );
+            let is_legacy_incremental = time_range.is_some() && inc_config.is_some();
 
-            // Show preview if requested
-            if let Some(ref batches) = result.preview {
-                println!("\n  Preview:");
-                pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
-                println!();
+            if is_legacy_incremental {
+                let range = time_range.as_ref().unwrap();
+                let inc = inc_config.unwrap();
+
+                println!("\n▶ Running model: {} (incremental)", model_name);
+
+                let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+                let transformed_sql = inject_time_filter(&clean_sql, &inc.event_time_column, range)
+                    .with_context(|| {
+                        format!("Failed to transform SQL for model: {}", model_name)
+                    })?;
+
+                let compiled = compiler
+                    .compile_with_sql(model, &target_config.schema, &transformed_sql)
+                    .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+                if args.verbose {
+                    println!("\n  Transformed SQL:");
+                    println!("  {}", "─".repeat(58));
+                    for line in compiled.sql.lines() {
+                        println!("  {}", line);
+                    }
+                    println!("  {}", "─".repeat(58));
+                }
+
+                let partition_values = generate_partition_dates(&range.start, &range.end)?;
+                println!(
+                    "  Partitions to update: {} ({} days)",
+                    if partition_values.len() <= 3 {
+                        partition_values.join(", ")
+                    } else {
+                        format!(
+                            "{}, ..., {}",
+                            partition_values.first().unwrap(),
+                            partition_values.last().unwrap()
+                        )
+                    },
+                    partition_values.len()
+                );
+
+                let partition = PartitionSpec {
+                    column: inc.partition_column.clone(),
+                    values: partition_values,
+                };
+
+                let result = executor::execute_model_incremental(
+                    backend.as_ref(),
+                    &compiled,
+                    &target_config.schema,
+                    partition,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
+            } else {
+                if time_range.is_some() && inc_config.is_none() {
+                    println!(
+                        "\n▶ Running model: {} (full refresh - not configured for incremental)",
+                        model_name
+                    );
+                } else {
+                    println!("\n▶ Running model: {}", model_name);
+                }
+
+                let compiled = compiler
+                    .compile(model, &target_config.schema)
+                    .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+                if args.verbose {
+                    println!("\n  Compiled SQL:");
+                    println!("  {}", "─".repeat(58));
+                    for line in compiled.sql.lines() {
+                        println!("  {}", line);
+                    }
+                    println!("  {}", "─".repeat(58));
+                }
+
+                let result = executor::execute_model(
+                    backend.as_ref(),
+                    &compiled,
+                    &target_config.schema,
+                    args.show_results,
+                )
+                .await
+                .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                println!(
+                    "  ✓ {} ({} rows, {:?})",
+                    result.model_name, result.row_count, result.duration
+                );
+
+                if let Some(ref batches) = result.preview {
+                    println!("\n  Preview:");
+                    pretty::print_batches(batches)
+                        .with_context(|| "Failed to print result preview")?;
+                    println!();
+                }
+
+                results.push(result);
             }
-
-            results.push(result);
         }
     }
 
@@ -497,6 +762,176 @@ fn generate_partition_dates(start: &str, end: &str) -> Result<Vec<String>> {
     }
 
     Ok(dates)
+}
+
+async fn create_backend(
+    target_config: &smelt_cli::config::Target,
+    project_dir: &Path,
+    database_override: Option<PathBuf>,
+) -> Result<Box<dyn Backend>> {
+    match target_config.backend_type() {
+        BackendType::DuckDB => {
+            let database = target_config
+                .database
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
+
+            let db_path = database_override.unwrap_or_else(|| project_dir.join(database));
+            println!("\nBackend: DuckDB");
+            println!("Database: {}", db_path.display());
+
+            Ok(Box::new(
+                DuckDbBackend::new(&db_path, &target_config.schema)
+                    .await
+                    .with_context(|| format!("Failed to initialize DuckDB at {:?}", db_path))?,
+            ))
+        }
+        BackendType::Spark => {
+            #[cfg(feature = "spark")]
+            {
+                let connect_url = target_config
+                    .connect_url
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Spark target requires 'connect_url' field"))?;
+
+                let default_catalog = "spark_catalog".to_string();
+                let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
+
+                println!("\nBackend: Spark");
+                println!("Connect URL: {}", connect_url);
+                println!("Catalog: {}", catalog);
+
+                Ok(Box::new(
+                    SparkBackend::new(connect_url, catalog, &target_config.schema)
+                        .await
+                        .with_context(|| {
+                            format!("Failed to connect to Spark at {}", connect_url)
+                        })?,
+                ))
+            }
+            #[cfg(not(feature = "spark"))]
+            {
+                Err(anyhow::anyhow!(
+                    "Spark backend not available. Rebuild with --features spark"
+                ))
+            }
+        }
+    }
+}
+
+async fn run_seed(args: SeedArgs) -> Result<()> {
+    // 1. Find project root and load config
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    println!("Project directory: {}", project_dir.display());
+
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    println!("Project: {} (version {})", config.name, config.version);
+
+    // 2. Get target config
+    let target_config = config.targets.get(&args.target).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Target '{}' not found in smelt.yml. Available targets: {}",
+            args.target,
+            config
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    // 3. Discover seeds
+    let mut seeds = seed::discover_seeds(&project_dir, &config.seed_paths, &target_config.schema)
+        .with_context(|| "Failed to discover seeds")?;
+
+    if seeds.is_empty() {
+        println!("No seed files found in: {}", config.seed_paths.join(", "));
+        return Ok(());
+    }
+
+    // 4. Filter by --select if provided
+    if !args.select.is_empty() {
+        seeds = seed::filter_seeds(seeds, &args.select);
+        if seeds.is_empty() {
+            println!("No seeds matched selectors: {}", args.select.join(", "));
+            return Ok(());
+        }
+    }
+
+    println!("Found {} seed(s)", seeds.len());
+
+    // 5. Create backend
+    let backend = create_backend(target_config, &project_dir, args.database).await?;
+
+    // 6. Execute seeds
+    println!("\n{}", "=".repeat(60));
+    println!("Seeding...");
+    println!("{}", "=".repeat(60));
+
+    let mut results = Vec::new();
+
+    for s in &seeds {
+        let type_label = match s.seed_type {
+            seed::SeedType::Source => "source",
+            seed::SeedType::Target => "target",
+        };
+        println!("\n▶ Seeding: {} ({})", s.qualified_name(), type_label);
+
+        let result = seed::execute_seed(backend.as_ref(), s, args.show_results)
+            .await
+            .with_context(|| format!("Failed to seed '{}'", s.qualified_name()))?;
+
+        println!(
+            "  ✓ {} ({} rows, {:?})",
+            result.qualified_name, result.row_count, result.duration
+        );
+
+        results.push(result);
+    }
+
+    // 7. Summary
+    println!("\n{}", "=".repeat(60));
+    println!("Summary");
+    println!("{}", "=".repeat(60));
+    println!("✓ Loaded {} seed(s) successfully", results.len());
+
+    let total_rows: usize = results.iter().map(|r| r.row_count).sum();
+    let total_duration: std::time::Duration = results.iter().map(|r| r.duration).sum();
+    println!("  Total rows: {}", total_rows);
+    println!("  Total time: {:?}", total_duration);
+
+    Ok(())
+}
+
+async fn build(args: BuildArgs) -> Result<()> {
+    // Step 1: Seed
+    let seed_args = SeedArgs {
+        project_dir: args.project_dir.clone(),
+        database: args.database.clone(),
+        target: args.target.clone(),
+        show_results: false,
+        select: Vec::new(),
+    };
+    run_seed(seed_args).await?;
+
+    // Step 2: Run
+    let run_args = RunArgs {
+        project_dir: args.project_dir,
+        database: args.database,
+        target: args.target,
+        show_results: args.show_results,
+        verbose: args.verbose,
+        dry_run: false,
+        event_time_start: args.event_time_start,
+        event_time_end: args.event_time_end,
+        select: args.select,
+    };
+    run(run_args).await
 }
 
 async fn table(args: TableArgs) -> Result<()> {

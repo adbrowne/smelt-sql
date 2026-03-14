@@ -1,0 +1,12 @@
+[package]
+name = "smelt-optimizer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+smelt-parser = { path = "../smelt-parser" }
+rowan = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }

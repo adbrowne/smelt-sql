@@ -4,6 +4,9 @@ version: 1
 model_paths:
   - models
 
+seed_paths:
+  - seeds
+
 targets:
   dev:
     type: duckdb
@@ -35,3 +38,5 @@ models:
       partition_column: revenue_date             # Column in OUTPUT (for DELETE)
       # For demo: process one day at a time
       # In production: would use watermarks, lookback windows, etc.
+  cube_metrics:
+    materialization: table

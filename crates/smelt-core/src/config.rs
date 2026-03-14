@@ -56,6 +56,8 @@ pub struct Config {
     pub version: u32,
     #[serde(default = "default_model_paths")]
     pub model_paths: Vec<String>,
+    #[serde(default = "default_seed_paths")]
+    pub seed_paths: Vec<String>,
     pub targets: HashMap<String, Target>,
     #[serde(default = "default_materialization")]
     pub default_materialization: Materialization,
@@ -68,6 +70,10 @@ pub struct Config {
 
 fn default_model_paths() -> Vec<String> {
     vec!["models".to_string()]
+}
+
+fn default_seed_paths() -> Vec<String> {
+    vec!["seeds".to_string()]
 }
 
 fn default_materialization() -> Materialization {

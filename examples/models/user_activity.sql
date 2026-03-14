@@ -4,7 +4,6 @@ SELECT
     u.user_name,
     u.signup_date,
     COUNT(e.event_id) as total_events
-FROM smelt.ref('users') u,
-     smelt.ref('events') e
-WHERE u.user_id = e.user_id
+FROM smelt.ref('users') u
+INNER JOIN smelt.ref('events') e ON u.user_id = e.user_id
 GROUP BY u.user_id, u.user_name, u.signup_date
