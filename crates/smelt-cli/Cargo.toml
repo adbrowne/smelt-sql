@@ -17,7 +17,7 @@ smelt-db = { path = "../smelt-db" }
 smelt-types = { path = "../smelt-types" }
 smelt-optimizer = { path = "../smelt-optimizer" }
 smelt-backend = { path = "../smelt-backend" }
-smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
+smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
 smelt-ui = { path = "../smelt-ui" }
 
@@ -28,7 +28,7 @@ rowan.workspace = true
 tokio.workspace = true
 
 # Execution
-arrow.workspace = true
+arrow = { workspace = true, features = ["prettyprint"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -53,5 +53,5 @@ tempfile = "3.8"
 
 [features]
 default = ["duckdb"]
-duckdb = []
+duckdb = ["smelt-backend-duckdb"]
 spark = ["smelt-backend-spark"]
