@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773551708015,
+  "lastUpdate": 1773552775184,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -657,6 +657,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.635157,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b48cb8499bc6552925c7af31c1be3df483f5a466",
+          "message": "Add continuous dev releases from main (R8) (#51)\n\nEvery merge to main now produces an installable dev release via\n`pip install smelt-sql --pre`. Adds dev-release.yml workflow with\nCI-patched version (0.1.0-dev.YYYYMMDDHHMM), GitHub pre-release,\nand PyPI publishing. Switches pyproject.toml to dynamic versioning\nso Cargo.toml is the single source of truth.\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-15T16:31:47+11:00",
+          "tree_id": "9f599c7d2553502096a34d102c3984a2e886c36a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b48cb8499bc6552925c7af31c1be3df483f5a466"
+        },
+        "date": 1773552774741,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.138794000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.932618,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.563274,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.305461,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002885,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 36.326405,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.022952,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013525,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011422,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.2632819999999998,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.322905,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.82493,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.86581,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.73749,
             "unit": "ms"
           }
         ]
