@@ -122,6 +122,29 @@ pub struct ModelConfig {
     pub tags: Vec<String>,
 }
 
+/// Day of the week for weekly partition start.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+/// Granularity for incremental partition generation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Granularity {
+    Hour,
+    Day,
+    Week { week_start: Weekday },
+    Month,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IncrementalConfig {
     pub enabled: bool,
@@ -129,6 +152,8 @@ pub struct IncrementalConfig {
     pub event_time_column: String,
     /// Column in output to delete by (for DELETE+INSERT)
     pub partition_column: String,
+    /// Partition granularity (hour, day, month)
+    pub granularity: Granularity,
 }
 
 impl Config {

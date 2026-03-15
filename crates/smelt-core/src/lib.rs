@@ -11,7 +11,8 @@ pub mod sources;
 pub mod text;
 
 pub use config::{
-    BackendType, Config, ConfigError, IncrementalConfig, Materialization, ModelConfig, Target,
+    BackendType, Config, ConfigError, Granularity, IncrementalConfig, Materialization, ModelConfig,
+    Target,
 };
 pub use discovery::{ModelDiscovery, ModelFile};
 pub use graph::{DependencyGraph, GraphError};

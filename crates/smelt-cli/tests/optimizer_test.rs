@@ -277,6 +277,8 @@ async fn test_incremental_full_then_partial() {
 materialized: table
 incremental:
   partition_column: event_date
+  event_time_column: event_time
+  granularity: day
 ---
 SELECT
     date_trunc('day', event_time) as event_date,
@@ -400,6 +402,8 @@ async fn test_composed_cube_split_incremental() {
 materialized: table
 incremental:
   partition_column: event_date
+  event_time_column: event_time
+  granularity: day
 ---
 SELECT
     date_trunc('day', event_time) as event_date,
@@ -541,6 +545,8 @@ fn test_mandatory_time_range_detection() {
 materialized: table
 incremental:
   partition_column: event_date
+  event_time_column: event_time
+  granularity: day
 ---
 SELECT date_trunc('day', event_time) as event_date, COUNT(*) as cnt FROM events GROUP BY 1"#;
 

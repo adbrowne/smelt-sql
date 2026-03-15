@@ -8,5 +8,6 @@ pub mod types;
 pub use graph::{ModelGraph, ModelInfo};
 pub use rules::Optimizer;
 pub use types::{
-    ExecutionStep, Frontmatter, IncrementalConfig, Opportunity, OpportunityData, Transformation,
+    ExecutionStep, Frontmatter, Granularity, IncrementalConfig, IncrementalSafetyOverrides,
+    Opportunity, OpportunityData, Transformation, Weekday,
 };

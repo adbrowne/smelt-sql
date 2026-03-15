@@ -29,7 +29,7 @@ def test_detect_incremental():
     model = ModelInfo(
         name="daily",
         sql="",
-        incremental_config=IncrementalConfig(partition_column="event_date"),
+        incremental_config=IncrementalConfig(partition_column="event_date", event_time_column="event_time", granularity="day"),
     )
     analysis = _analysis(
         items=[
@@ -60,7 +60,7 @@ def test_detect_missing_partition_column():
     model = ModelInfo(
         name="test",
         sql="",
-        incremental_config=IncrementalConfig(partition_column="nonexistent"),
+        incremental_config=IncrementalConfig(partition_column="nonexistent", event_time_column="event_time", granularity="day"),
     )
     analysis = _analysis(
         items=[GroupByKey(text="a", alias="a")],
@@ -74,7 +74,7 @@ def test_detect_partition_not_in_group_by():
     model = ModelInfo(
         name="test",
         sql="",
-        incremental_config=IncrementalConfig(partition_column="event_date"),
+        incremental_config=IncrementalConfig(partition_column="event_date", event_time_column="event_time", granularity="day"),
     )
     analysis = _analysis(
         items=[
@@ -90,7 +90,7 @@ def test_rewrite_produces_set_incremental():
     model = ModelInfo(
         name="daily",
         sql="",
-        incremental_config=IncrementalConfig(partition_column="event_date"),
+        incremental_config=IncrementalConfig(partition_column="event_date", event_time_column="event_time", granularity="day"),
     )
     analysis = _analysis(
         items=[

@@ -2,6 +2,8 @@
 materialized: table
 incremental:
   partition_column: event_date
+  event_time_column: event_timestamp
+  granularity: day
 ---
 -- Composed: cube split + incremental materialization
 -- The optimizer detects both annotations and composes them:

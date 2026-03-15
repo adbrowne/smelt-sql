@@ -338,6 +338,7 @@ incremental:
   enabled: true
   event_time_column: transaction_timestamp
   partition_column: revenue_date
+  granularity: day
 tags: [revenue, core]
 ---
 SELECT DATE(transaction_timestamp) as revenue_date, SUM(amount)
@@ -355,6 +356,7 @@ GROUP BY 1"#;
                 assert!(incremental.enabled);
                 assert_eq!(incremental.event_time_column, "transaction_timestamp");
                 assert_eq!(incremental.partition_column, "revenue_date");
+                assert_eq!(incremental.granularity, crate::config::Granularity::Day);
             }
             _ => panic!("Expected Single variant"),
         }

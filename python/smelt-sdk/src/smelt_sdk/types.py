@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 @dataclass
 class IncrementalConfig:
     partition_column: str
+    event_time_column: str
+    granularity: str  # "hour", "day", "week:<day>" (e.g. "week:monday"), or "month"
 
 
 @dataclass
@@ -96,6 +98,7 @@ class SetIncremental:
     model: str
     event_time_column: str
     partition_column: str
+    granularity: str  # "hour", "day", "week:<day>" (e.g. "week:monday"), or "month"
 
 
 Transformation = ReplaceWithPlan | SetIncremental
