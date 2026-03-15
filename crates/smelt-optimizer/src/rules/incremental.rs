@@ -218,7 +218,7 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
+    use crate::types::{Granularity, IncrementalConfig, IncrementalSafetyOverrides, Weekday};
 
     fn model(name: &str, sql: &str, partition_column: &str) -> ModelInfo {
         model_with_event_time(name, sql, partition_column, "event_timestamp")
@@ -501,6 +501,38 @@ mod tests {
                 assert_eq!(granularity, Granularity::Day);
             }
             _ => panic!("Expected SetIncremental"),
+        }
+    }
+
+    #[test]
+    fn test_detect_with_weekly_granularity() {
+        let m = ModelInfo {
+            name: "weekly".to_string(),
+            sql: "SELECT date_trunc('week', event_timestamp) as event_week, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                partition_column: "event_week".to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Week {
+                    week_start: Weekday::Monday,
+                },
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        };
+        let opp = detect(&m).unwrap().unwrap();
+        assert_eq!(opp.rule_name, "incremental");
+        match opp.data {
+            OpportunityData::Incremental {
+                ref granularity, ..
+            } => {
+                assert_eq!(
+                    granularity,
+                    &Granularity::Week {
+                        week_start: Weekday::Monday
+                    }
+                );
+            }
+            _ => panic!("Expected Incremental data"),
         }
     }
 }

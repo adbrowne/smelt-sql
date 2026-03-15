@@ -47,10 +47,24 @@ fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'
     let inc_config = match &model.incremental_config {
         Some(cfg) => {
             let ic = types.getattr("IncrementalConfig")?;
-            let granularity_str = match cfg.granularity {
-                crate::types::Granularity::Hour => "hour",
-                crate::types::Granularity::Day => "day",
-                crate::types::Granularity::Month => "month",
+            let granularity_str = match &cfg.granularity {
+                crate::types::Granularity::Hour => "hour".to_string(),
+                crate::types::Granularity::Day => "day".to_string(),
+                crate::types::Granularity::Week { week_start } => {
+                    format!(
+                        "week:{}",
+                        match week_start {
+                            crate::types::Weekday::Monday => "monday",
+                            crate::types::Weekday::Tuesday => "tuesday",
+                            crate::types::Weekday::Wednesday => "wednesday",
+                            crate::types::Weekday::Thursday => "thursday",
+                            crate::types::Weekday::Friday => "friday",
+                            crate::types::Weekday::Saturday => "saturday",
+                            crate::types::Weekday::Sunday => "sunday",
+                        }
+                    )
+                }
+                crate::types::Granularity::Month => "month".to_string(),
             };
             Some(ic.call1((
                 cfg.partition_column.as_str(),

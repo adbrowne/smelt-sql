@@ -56,12 +56,26 @@ pub enum OpportunityData {
     },
 }
 
+/// Day of the week for weekly partition start.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
 /// Granularity for incremental partition generation.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Granularity {
     Hour,
     Day,
+    Week { week_start: Weekday },
     Month,
 }
 

@@ -122,12 +122,26 @@ pub struct ModelConfig {
     pub tags: Vec<String>,
 }
 
+/// Day of the week for weekly partition start.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
 /// Granularity for incremental partition generation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Granularity {
     Hour,
     Day,
+    Week { week_start: Weekday },
     Month,
 }
 

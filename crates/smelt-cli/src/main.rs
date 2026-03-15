@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use arrow::util::pretty;
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, Weekday as ChronoWeekday};
 use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, PartitionSpec};
 #[cfg(feature = "duckdb")]
@@ -11,7 +11,9 @@ use smelt_cli::{
     SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
-use smelt_optimizer::{Frontmatter, Granularity, ModelGraph, ModelInfo, Optimizer, Transformation};
+use smelt_optimizer::{
+    Frontmatter, Granularity, ModelGraph, ModelInfo, Optimizer, Transformation, Weekday,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -570,6 +572,7 @@ async fn run(args: RunArgs) -> Result<()> {
             let granularity_label = match granularity {
                 Granularity::Hour => "hours",
                 Granularity::Day => "days",
+                Granularity::Week { .. } => "weeks",
                 Granularity::Month => "months",
             };
             println!(
@@ -653,6 +656,18 @@ async fn run(args: RunArgs) -> Result<()> {
                 let opt_granularity = match &inc.granularity {
                     smelt_core::config::Granularity::Hour => Granularity::Hour,
                     smelt_core::config::Granularity::Day => Granularity::Day,
+                    smelt_core::config::Granularity::Week { week_start } => {
+                        let ws = match week_start {
+                            smelt_core::config::Weekday::Monday => Weekday::Monday,
+                            smelt_core::config::Weekday::Tuesday => Weekday::Tuesday,
+                            smelt_core::config::Weekday::Wednesday => Weekday::Wednesday,
+                            smelt_core::config::Weekday::Thursday => Weekday::Thursday,
+                            smelt_core::config::Weekday::Friday => Weekday::Friday,
+                            smelt_core::config::Weekday::Saturday => Weekday::Saturday,
+                            smelt_core::config::Weekday::Sunday => Weekday::Sunday,
+                        };
+                        Granularity::Week { week_start: ws }
+                    }
                     smelt_core::config::Granularity::Month => Granularity::Month,
                 };
                 let partition_values =
@@ -660,6 +675,7 @@ async fn run(args: RunArgs) -> Result<()> {
                 let granularity_label = match opt_granularity {
                     Granularity::Hour => "hours",
                     Granularity::Day => "days",
+                    Granularity::Week { .. } => "weeks",
                     Granularity::Month => "months",
                 };
                 println!(
@@ -803,6 +819,22 @@ fn generate_partition_values(
                 current += Duration::days(1);
             }
         }
+        Granularity::Week { week_start } => {
+            let chrono_day = weekday_to_chrono(week_start);
+            // Find first date >= start_date that falls on the week_start day
+            let mut current = start_date;
+            let days_ahead = (chrono_day.num_days_from_monday() as i64
+                - current.weekday().num_days_from_monday() as i64
+                + 7)
+                % 7;
+            if days_ahead > 0 {
+                current += Duration::days(days_ahead);
+            }
+            while current < end_date {
+                values.push(current.format("%Y-%m-%d").to_string());
+                current += Duration::days(7);
+            }
+        }
         Granularity::Month => {
             let mut current = start_date;
             while current < end_date {
@@ -819,6 +851,19 @@ fn generate_partition_values(
     }
 
     Ok(values)
+}
+
+/// Convert smelt `Weekday` to `chrono::Weekday`.
+fn weekday_to_chrono(day: &Weekday) -> ChronoWeekday {
+    match day {
+        Weekday::Monday => ChronoWeekday::Mon,
+        Weekday::Tuesday => ChronoWeekday::Tue,
+        Weekday::Wednesday => ChronoWeekday::Wed,
+        Weekday::Thursday => ChronoWeekday::Thu,
+        Weekday::Friday => ChronoWeekday::Fri,
+        Weekday::Saturday => ChronoWeekday::Sat,
+        Weekday::Sunday => ChronoWeekday::Sun,
+    }
 }
 
 #[allow(unreachable_code, unused_variables)]
