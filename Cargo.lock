@@ -3538,6 +3538,7 @@ dependencies = [
  "smelt-backend-spark",
  "smelt-core",
  "smelt-db",
+ "smelt-dialect",
  "smelt-optimizer",
  "smelt-parser",
  "smelt-types",
