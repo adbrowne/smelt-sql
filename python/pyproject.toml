@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "smelt"
+name = "smelt-runner"
 version = "0.1.0"
-description = "Python SDK for smelt data transformation framework"
+description = "Internal Python model runner for smelt data transformation framework"
 requires-python = ">=3.8"
 license = "MIT"

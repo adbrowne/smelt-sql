@@ -1,0 +1,285 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Version check — ensure tag matches version strings in config files
+  # ---------------------------------------------------------------------------
+  version-check:
+    name: Version Check
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract tag version
+        id: tag
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check Cargo.toml version
+        run: |
+          cargo_version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$cargo_version" != "${{ steps.tag.outputs.version }}" ]; then
+            echo "::error::Cargo.toml version ($cargo_version) does not match tag (${{ steps.tag.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Check pyproject.toml version
+        run: |
+          pyproject_version=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$pyproject_version" != "${{ steps.tag.outputs.version }}" ]; then
+            echo "::error::pyproject.toml version ($pyproject_version) does not match tag (${{ steps.tag.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Check VSCode extension version
+        run: |
+          vscode_version=$(node -p "require('./editors/vscode/package.json').version")
+          if [ "$vscode_version" != "${{ steps.tag.outputs.version }}" ]; then
+            echo "::error::editors/vscode/package.json version ($vscode_version) does not match tag (${{ steps.tag.outputs.version }})"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build Python wheels via maturin
+  # ---------------------------------------------------------------------------
+  build-wheels:
+    name: Wheel / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+          - name: macos-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Build frontend
+        run: cd ui && npm ci && npm run build
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Build standalone binaries
+  # ---------------------------------------------------------------------------
+  build-standalone:
+    name: Standalone / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - name: macos-x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - name: macos-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Build frontend
+        run: cd ui && npm ci && npm run build
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} -p smelt-cli -p smelt-lsp
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          staging="smelt-${{ matrix.name }}"
+          mkdir "$staging"
+          cp target/${{ matrix.target }}/release/smelt "$staging/"
+          cp target/${{ matrix.target }}/release/smelt-lsp "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $staging = "smelt-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $staging
+          Copy-Item "target/${{ matrix.target }}/release/smelt.exe" "$staging/"
+          Copy-Item "target/${{ matrix.target }}/release/smelt-lsp.exe" "$staging/"
+          Copy-Item "LICENSE", "README.md" "$staging/"
+          Compress-Archive -Path "$staging/*" -DestinationPath "$staging.zip"
+
+      - name: Upload standalone archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-${{ matrix.name }}
+          path: smelt-${{ matrix.name }}.${{ matrix.archive }}
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs: [version-check, build-wheels, build-standalone]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir release-assets
+          find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.zip' \) \
+            -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Find previous tag
+          prev_tag=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+          if [ -n "$prev_tag" ]; then
+            echo "## Changes since ${prev_tag}" > release-notes.md
+            echo "" >> release-notes.md
+            git log "${prev_tag}..HEAD" --pretty=format:"- %s" --no-merges >> release-notes.md
+          else
+            echo "## Initial Release" > release-notes.md
+            echo "" >> release-notes.md
+            git log --pretty=format:"- %s" --no-merges -20 >> release-notes.md
+          fi
+          echo "" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "## Installation" >> release-notes.md
+          echo "" >> release-notes.md
+          echo '```bash' >> release-notes.md
+          echo "pip install smelt-sql" >> release-notes.md
+          echo '```' >> release-notes.md
+          echo "" >> release-notes.md
+          echo "Or download standalone binaries from the assets below." >> release-notes.md
+
+      - name: Determine pre-release
+        id: prerelease
+        run: |
+          if echo "${{ github.ref_name }}" | grep -qE '(-rc|-beta|-alpha)'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: release-assets/*
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
