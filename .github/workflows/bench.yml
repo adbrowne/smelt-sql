@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   benchmark:
     name: Performance Benchmarks
@@ -39,6 +43,14 @@ jobs:
         with:
           name: bench-results-${{ github.sha }}
           path: benchmarks/results/*.json
+
+      - name: Upload baseline for PR comparison
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-main
+          path: benchmarks/results/*.json
+          overwrite: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -108,3 +120,55 @@ jobs:
 
           print('\n'.join(lines))
           " >> $GITHUB_STEP_SUMMARY
+
+      # GitHub Pages dashboard via github-action-benchmark
+      - name: Export for github-action-benchmark
+        run: cargo run -p smelt-bench --bin export-action-benchmark --release
+
+      - name: Store benchmark result (latency)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Smelt Latency Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: benchmarks/output/latency.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          alert-threshold: "150%"
+          comment-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Store benchmark result (throughput)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Smelt Throughput Benchmarks
+          tool: customBiggerIsBetter
+          output-file-path: benchmarks/output/throughput.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          alert-threshold: "150%"
+          comment-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # PR benchmark comparison comment
+      - name: Download main baseline
+        id: download-baseline
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: bench.yml
+          branch: main
+          name: bench-baseline-main
+          path: benchmarks/baseline/
+        continue-on-error: true
+
+      - name: Post benchmark comparison
+        if: github.event_name == 'pull_request' && steps.download-baseline.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASELINE=$(ls benchmarks/baseline/*.json | sort | tail -1)
+          CURRENT=$(ls benchmarks/results/*.json | sort | tail -1)
+          COMMENT=$(python3 benchmarks/scripts/compare_benchmarks.py "$BASELINE" "$CURRENT")
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT"

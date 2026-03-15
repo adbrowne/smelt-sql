@@ -54,3 +54,7 @@ harness = false
 [[bin]]
 name = "save-results"
 path = "src/bin/save_results.rs"
+
+[[bin]]
+name = "export-action-benchmark"
+path = "src/bin/export_action_benchmark.rs"
