@@ -1,0 +1,10 @@
+[package]
+name = "smelt-dialect"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SQL dialect definitions, backend capabilities, and dialect-aware CST printer"
+
+[dependencies]
+smelt-parser = { path = "../smelt-parser" }

@@ -3467,6 +3467,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "smelt-dialect",
  "thiserror 2.0.17",
  "tokio",
 ]
@@ -3596,6 +3597,13 @@ dependencies = [
  "smelt-core",
  "smelt-parser",
  "smelt-types",
+]
+
+[[package]]
+name = "smelt-dialect"
+version = "0.1.0"
+dependencies = [
+ "smelt-parser",
 ]
 
 [[package]]
