@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773537075402,
+  "lastUpdate": 1773545926551,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -187,6 +187,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.825132,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6cf6c4c6031b4ae3272b4f5a6b5e7eebcdf27c71",
+          "message": "Merge pull request #48 from adbrowne/feature/dialect-rewrites-phase5\n\nAdd trailing comma removal and EXPLODE/UNNEST renaming",
+          "timestamp": "2026-03-15T14:36:53+11:00",
+          "tree_id": "6e40826e440c949b8f7fc3aceb933c9b597c9f49",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6cf6c4c6031b4ae3272b4f5a6b5e7eebcdf27c71"
+        },
+        "date": 1773545926152,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.862546,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.675699,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.577488,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.30745399999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003156,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.646692,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.018544,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012723,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010359,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.09287,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.086804,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.35142,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.25546,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.701979,
             "unit": "ms"
           }
         ]
