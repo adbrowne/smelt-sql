@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773552775184,
+  "lastUpdate": 1773552776283,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -956,6 +956,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.371308440444764,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b48cb8499bc6552925c7af31c1be3df483f5a466",
+          "message": "Add continuous dev releases from main (R8) (#51)\n\nEvery merge to main now produces an installable dev release via\n`pip install smelt-sql --pre`. Adds dev-release.yml workflow with\nCI-patched version (0.1.0-dev.YYYYMMDDHHMM), GitHub pre-release,\nand PyPI publishing. Switches pyproject.toml to dynamic versioning\nso Cargo.toml is the single source of truth.\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-15T16:31:47+11:00",
+          "tree_id": "9f599c7d2553502096a34d102c3984a2e886c36a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b48cb8499bc6552925c7af31c1be3df483f5a466"
+        },
+        "date": 1773552775941,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.158827824347455,
             "unit": "MB/s"
           }
         ]
