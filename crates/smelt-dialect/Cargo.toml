@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "SQL dialect definitions, backend capabilities, and dialect-aware CST printer"
+repository = "https://github.com/adbrowne/smelt-sql"
 
 [dependencies]
-smelt-parser = { path = "../smelt-parser" }
+smelt-parser = { path = "../smelt-parser", version = "0.1.0" }

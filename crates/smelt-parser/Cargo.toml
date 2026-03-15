@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "Error-recovery SQL parser for smelt data transformation framework"
+repository = "https://github.com/adbrowne/smelt-sql"
 
 [dependencies]
 rowan.workspace = true
