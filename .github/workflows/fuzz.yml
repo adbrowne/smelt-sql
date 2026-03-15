@@ -34,25 +34,25 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
       
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Cache cargo index
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Cache fuzz build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: crates/smelt-parser/fuzz/target
           key: ${{ runner.os }}-fuzz-target-${{ hashFiles('crates/smelt-parser/fuzz/Cargo.lock') }}
@@ -97,7 +97,7 @@ jobs:
       
       - name: Upload crash artifacts
         if: steps.check_crashes.outputs.has_crashes == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-crashes-${{ matrix.target }}
           path: crates/smelt-parser/fuzz/artifacts/${{ matrix.target }}/crash-*
@@ -105,7 +105,7 @@ jobs:
       
       - name: Upload leak artifacts
         if: steps.check_crashes.outputs.has_crashes == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-leaks-${{ matrix.target }}
           path: crates/smelt-parser/fuzz/artifacts/${{ matrix.target }}/leak-*
