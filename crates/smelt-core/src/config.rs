@@ -122,6 +122,15 @@ pub struct ModelConfig {
     pub tags: Vec<String>,
 }
 
+/// Granularity for incremental partition generation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Granularity {
+    Hour,
+    Day,
+    Month,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IncrementalConfig {
     pub enabled: bool,
@@ -129,6 +138,8 @@ pub struct IncrementalConfig {
     pub event_time_column: String,
     /// Column in output to delete by (for DELETE+INSERT)
     pub partition_column: String,
+    /// Partition granularity (hour, day, month)
+    pub granularity: Granularity,
 }
 
 impl Config {

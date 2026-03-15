@@ -47,7 +47,16 @@ fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'
     let inc_config = match &model.incremental_config {
         Some(cfg) => {
             let ic = types.getattr("IncrementalConfig")?;
-            Some(ic.call1((cfg.partition_column.as_str(),))?)
+            let granularity_str = match cfg.granularity {
+                crate::types::Granularity::Hour => "hour",
+                crate::types::Granularity::Day => "day",
+                crate::types::Granularity::Month => "month",
+            };
+            Some(ic.call1((
+                cfg.partition_column.as_str(),
+                cfg.event_time_column.as_str(),
+                granularity_str,
+            ))?)
         }
         None => None,
     };
@@ -305,6 +314,9 @@ mod tests {
                 refs: vec!["other".to_string()],
                 incremental_config: Some(IncrementalConfig {
                     partition_column: "dt".to_string(),
+                    event_time_column: "event_time".to_string(),
+                    granularity: crate::types::Granularity::Day,
+                    safety_overrides: crate::types::IncrementalSafetyOverrides::default(),
                 }),
             };
 

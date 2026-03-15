@@ -2,6 +2,18 @@ use crate::analysis::{analyze_select, SelectItemKind};
 use crate::graph::ModelInfo;
 use crate::types::{Opportunity, OpportunityData, Transformation};
 
+/// Non-deterministic function names that produce different results on each run.
+const NONDETERMINISTIC_FUNCTIONS: &[&str] = &[
+    "RANDOM",
+    "RAND",
+    "NOW",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_DATE",
+    "UUID",
+    "GEN_RANDOM_UUID",
+    "SETSEED",
+];
+
 /// Detect incremental materialization opportunity from frontmatter config.
 pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     let inc_config = match &model.incremental_config {
@@ -17,6 +29,8 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     })?;
 
     let partition_col = &inc_config.partition_column;
+    let event_time_column = &inc_config.event_time_column;
+    let overrides = &inc_config.safety_overrides;
 
     // Validate partition_column alias exists in SELECT list
     let partition_item = analysis.items.iter().find(|item| match item {
@@ -51,60 +65,133 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         ));
     }
 
-    // Extract the source time column from the expression
-    // e.g., date_trunc('day', event_time) -> event_time
-    let event_time_column = extract_time_column(&partition_expr).unwrap_or(partition_expr.clone());
+    // Validate event_time_column is referenced in the SQL
+    let stripped_sql = crate::types::Frontmatter::strip(&model.sql);
+    if !stripped_sql.contains(event_time_column.as_str()) {
+        return Err(format!(
+            "Model '{}': event_time_column '{}' not found in SQL",
+            model.name, event_time_column
+        ));
+    }
+
+    // --- Safety checks ---
+
+    // 2a: Window functions (OVER clause)
+    if !overrides.allow_window_functions {
+        let upper_sql = stripped_sql.to_uppercase();
+        if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
+            return Err(format!(
+                "Model '{}': window functions (OVER clause) are not compatible with incremental \
+                 materialization — they may produce different results on partial data",
+                model.name
+            ));
+        }
+    }
+
+    // 2b: HAVING clause
+    if !overrides.allow_having {
+        let upper_sql = stripped_sql.to_uppercase();
+        // Check for HAVING keyword at word boundary (not inside a string or identifier)
+        if has_keyword_at_boundary(&upper_sql, "HAVING") {
+            return Err(format!(
+                "Model '{}': HAVING clause is not compatible with incremental materialization \
+                 — groups may change eligibility between incremental and full runs",
+                model.name
+            ));
+        }
+    }
+
+    // 2c: LIMIT clause
+    if !overrides.allow_limit {
+        let upper_sql = stripped_sql.to_uppercase();
+        if has_keyword_at_boundary(&upper_sql, "LIMIT") {
+            return Err(format!(
+                "Model '{}': LIMIT clause is not compatible with incremental materialization \
+                 — different time ranges would produce different row subsets",
+                model.name
+            ));
+        }
+    }
+
+    // 2d: Subqueries in FROM
+    if !overrides.allow_subqueries {
+        // Check for '(' in FROM clause text (indicates subquery)
+        if analysis.from_text.contains('(')
+            && !analysis.from_text.contains("smelt.ref(")
+            && !analysis.from_text.contains("smelt.source(")
+        {
+            return Err(format!(
+                "Model '{}': subqueries in FROM clause are not yet supported with incremental \
+                 materialization",
+                model.name
+            ));
+        }
+    }
+
+    // 2e: Non-deterministic functions
+    if !overrides.allow_nondeterministic {
+        let upper_sql = stripped_sql.to_uppercase();
+        for func_name in NONDETERMINISTIC_FUNCTIONS {
+            if has_keyword_at_boundary(&upper_sql, func_name) {
+                return Err(format!(
+                    "Model '{}': non-deterministic function '{}' is not compatible with \
+                     incremental materialization — results will differ between runs",
+                    model.name, func_name
+                ));
+            }
+        }
+    }
+
+    // 2f: SELECT DISTINCT
+    if !overrides.allow_distinct {
+        let upper_sql = stripped_sql.trim().to_uppercase();
+        // Check for SELECT DISTINCT (not COUNT(DISTINCT ...))
+        if upper_sql.starts_with("SELECT DISTINCT")
+            || upper_sql.starts_with("SELECT  DISTINCT")
+            || upper_sql.contains("\nSELECT DISTINCT")
+        {
+            return Err(format!(
+                "Model '{}': SELECT DISTINCT is not compatible with incremental materialization \
+                 — deduplication results may differ on partial data",
+                model.name
+            ));
+        }
+    }
 
     Ok(Some(Opportunity {
         rule_name: "incremental".to_string(),
         model: model.name.clone(),
         description: format!(
-            "Incremental materialization on partition column '{}' (source: '{}')",
-            partition_col, event_time_column,
+            "Incremental materialization on partition column '{}' (source: '{}', granularity: {:?})",
+            partition_col, event_time_column, inc_config.granularity,
         ),
         data: OpportunityData::Incremental {
             event_time_column: event_time_column.clone(),
             partition_column: partition_col.clone(),
+            granularity: inc_config.granularity.clone(),
         },
     }))
 }
 
-/// Extract the time column argument from common time-truncation expressions.
-///
-/// Handles patterns like:
-/// - `date_trunc('day', event_time)` → `event_time`
-/// - `DATE(event_time)` → `event_time`
-/// - `event_time` → `event_time` (identity)
-fn extract_time_column(expr: &str) -> Option<String> {
-    let trimmed = expr.trim();
+/// Check if a keyword appears at a word boundary in uppercase text.
+fn has_keyword_at_boundary(upper_sql: &str, keyword: &str) -> bool {
+    let bytes = upper_sql.as_bytes();
+    let kw_bytes = keyword.as_bytes();
 
-    // date_trunc('interval', column)
-    if let Some(rest) = trimmed
-        .strip_prefix("date_trunc(")
-        .or_else(|| trimmed.strip_prefix("DATE_TRUNC("))
-    {
-        let rest = rest.strip_suffix(')')?;
-        // Skip the first argument (the interval string)
-        let comma_pos = rest.find(',')?;
-        let col = rest[comma_pos + 1..].trim();
-        return Some(col.to_string());
+    for i in 0..bytes.len() {
+        if i + kw_bytes.len() > bytes.len() {
+            break;
+        }
+        if &bytes[i..i + kw_bytes.len()] == kw_bytes {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let after_ok = i + kw_bytes.len() >= bytes.len()
+                || !bytes[i + kw_bytes.len()].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+        }
     }
-
-    // DATE(column)
-    if let Some(rest) = trimmed
-        .strip_prefix("DATE(")
-        .or_else(|| trimmed.strip_prefix("date("))
-    {
-        let col = rest.strip_suffix(')')?.trim();
-        return Some(col.to_string());
-    }
-
-    // Simple column reference (no parens)
-    if !trimmed.contains('(') {
-        return Some(trimmed.to_string());
-    }
-
-    None
+    false
 }
 
 /// Produce a SetIncremental transformation for a model.
@@ -116,10 +203,12 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
             OpportunityData::Incremental {
                 event_time_column,
                 partition_column,
+                granularity,
             } => Ok(Some(Transformation::SetIncremental {
                 model: model.name.clone(),
                 event_time_column: event_time_column.clone(),
                 partition_column: partition_column.clone(),
+                granularity: granularity.clone(),
             })),
             _ => Ok(None),
         },
@@ -129,15 +218,46 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::IncrementalConfig;
+    use crate::types::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
 
     fn model(name: &str, sql: &str, partition_column: &str) -> ModelInfo {
+        model_with_event_time(name, sql, partition_column, "event_timestamp")
+    }
+
+    fn model_with_event_time(
+        name: &str,
+        sql: &str,
+        partition_column: &str,
+        event_time_column: &str,
+    ) -> ModelInfo {
         ModelInfo {
             name: name.to_string(),
             sql: sql.to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
                 partition_column: partition_column.to_string(),
+                event_time_column: event_time_column.to_string(),
+                granularity: Granularity::Day,
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        }
+    }
+
+    fn model_with_overrides(
+        name: &str,
+        sql: &str,
+        partition_column: &str,
+        overrides: IncrementalSafetyOverrides,
+    ) -> ModelInfo {
+        ModelInfo {
+            name: name.to_string(),
+            sql: sql.to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                partition_column: partition_column.to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Day,
+                safety_overrides: overrides,
             }),
         }
     }
@@ -146,7 +266,7 @@ mod tests {
     fn test_detect_incremental() {
         let m = model(
             "daily",
-            "SELECT date_trunc('day', event_time) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
             "event_date",
         );
         let opp = detect(&m).unwrap().unwrap();
@@ -155,9 +275,68 @@ mod tests {
             OpportunityData::Incremental {
                 ref event_time_column,
                 ref partition_column,
+                ref granularity,
             } => {
-                assert_eq!(event_time_column, "event_time");
+                assert_eq!(event_time_column, "event_timestamp");
                 assert_eq!(partition_column, "event_date");
+                assert_eq!(granularity, &Granularity::Day);
+            }
+            _ => panic!("Expected Incremental data"),
+        }
+    }
+
+    #[test]
+    fn test_detect_with_explicit_event_time_column() {
+        let m = model_with_event_time(
+            "daily",
+            "SELECT date_trunc('day', my_ts) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "event_date",
+            "my_ts",
+        );
+        let opp = detect(&m).unwrap().unwrap();
+        match opp.data {
+            OpportunityData::Incremental {
+                ref event_time_column,
+                ..
+            } => {
+                assert_eq!(event_time_column, "my_ts");
+            }
+            _ => panic!("Expected Incremental data"),
+        }
+    }
+
+    #[test]
+    fn test_detect_event_time_column_not_in_sql() {
+        let m = model_with_event_time(
+            "daily",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "event_date",
+            "nonexistent_column",
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found in SQL"));
+    }
+
+    #[test]
+    fn test_detect_with_granularity() {
+        let m = ModelInfo {
+            name: "hourly".to_string(),
+            sql: "SELECT date_trunc('hour', event_timestamp) as event_hour, COUNT(*) as cnt FROM events GROUP BY 1".to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                partition_column: "event_hour".to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Hour,
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        };
+        let opp = detect(&m).unwrap().unwrap();
+        match opp.data {
+            OpportunityData::Incremental {
+                ref granularity, ..
+            } => {
+                assert_eq!(granularity, &Granularity::Hour);
             }
             _ => panic!("Expected Incremental data"),
         }
@@ -183,34 +362,129 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_time_column_date_trunc() {
-        assert_eq!(
-            extract_time_column("date_trunc('day', event_time)"),
-            Some("event_time".to_string())
+    fn test_detect_rejects_window_functions() {
+        let m = model(
+            "windowed",
+            "SELECT date_trunc('day', event_timestamp) as event_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_timestamp) as rn FROM events GROUP BY 1",
+            "event_date",
         );
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("window functions"));
     }
 
     #[test]
-    fn test_extract_time_column_date_func() {
-        assert_eq!(
-            extract_time_column("DATE(event_time)"),
-            Some("event_time".to_string())
+    fn test_detect_allows_window_functions_with_override() {
+        let m = model_with_overrides(
+            "windowed",
+            "SELECT date_trunc('day', event_timestamp) as event_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_timestamp) as rn FROM events GROUP BY 1",
+            "event_date",
+            IncrementalSafetyOverrides {
+                allow_window_functions: true,
+                ..Default::default()
+            },
         );
+        let result = detect(&m);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn test_extract_time_column_simple() {
-        assert_eq!(
-            extract_time_column("event_date"),
-            Some("event_date".to_string())
+    fn test_detect_rejects_having() {
+        let m = model(
+            "having_model",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2 HAVING COUNT(*) > 10",
+            "event_date",
         );
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("HAVING"));
+    }
+
+    #[test]
+    fn test_detect_allows_having_with_override() {
+        let m = model_with_overrides(
+            "having_model",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2 HAVING COUNT(*) > 10",
+            "event_date",
+            IncrementalSafetyOverrides {
+                allow_having: true,
+                ..Default::default()
+            },
+        );
+        let result = detect(&m);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_detect_rejects_limit() {
+        let m = model(
+            "limited",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2 LIMIT 100",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("LIMIT"));
+    }
+
+    #[test]
+    fn test_detect_rejects_subquery() {
+        let m = model(
+            "subquery_model",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM (SELECT * FROM events WHERE active = true) sub GROUP BY 1, 2",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("subqueries"));
+    }
+
+    #[test]
+    fn test_detect_rejects_nondeterministic() {
+        let m = model(
+            "random_model",
+            "SELECT date_trunc('day', event_timestamp) as event_date, RANDOM() as r, COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("non-deterministic"));
+        assert!(err.contains("RANDOM"));
+    }
+
+    #[test]
+    fn test_detect_rejects_select_distinct() {
+        let m = model(
+            "distinct_model",
+            "SELECT DISTINCT date_trunc('day', event_timestamp) as event_date, user_id FROM events GROUP BY 1, 2",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SELECT DISTINCT"));
+    }
+
+    #[test]
+    fn test_detect_allows_count_distinct() {
+        // COUNT(DISTINCT ...) inside an aggregate should NOT trigger the DISTINCT check
+        let m = model(
+            "count_distinct_model",
+            "SELECT date_trunc('day', event_timestamp) as event_date, COUNT(DISTINCT user_id) as unique_users FROM events GROUP BY 1",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
     }
 
     #[test]
     fn test_optimize_produces_transformation() {
         let m = model(
             "daily",
-            "SELECT date_trunc('day', event_time) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
             "event_date",
         );
         let t = optimize(&m).unwrap().unwrap();
@@ -219,10 +493,12 @@ mod tests {
                 model,
                 event_time_column,
                 partition_column,
+                granularity,
             } => {
                 assert_eq!(model, "daily");
-                assert_eq!(event_time_column, "event_time");
+                assert_eq!(event_time_column, "event_timestamp");
                 assert_eq!(partition_column, "event_date");
+                assert_eq!(granularity, Granularity::Day);
             }
             _ => panic!("Expected SetIncremental"),
         }
