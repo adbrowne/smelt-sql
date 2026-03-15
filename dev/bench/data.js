@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773548578725,
+  "lastUpdate": 1773548579613,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -587,6 +587,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.4660677010961,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "d0e181b8804f16f03345c6485c8faf76c2e0af81",
+          "message": "Add Release & Distribution roadmap section (R1-R7)\n\nPhased plan for maturin-based Python distribution, cross-platform\nCI builds, PyPI/VSCode Marketplace publishing, docs site, and\noptional crates.io publishing.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-15T15:21:23+11:00",
+          "tree_id": "c62c576a8d18931e61f3fb1911dba1dcd4419003",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d0e181b8804f16f03345c6485c8faf76c2e0af81"
+        },
+        "date": 1773548579388,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.013153019872227,
             "unit": "MB/s"
           }
         ]
