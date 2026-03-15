@@ -6,13 +6,14 @@
 //! - QUALIFY → subquery rewrite (when `!caps.supports_qualify`)
 //! - ARRAY[1,2,3] → ARRAY(1,2,3) (when `!caps.supports_array_literal`)
 //! - DATE '2024-01-01' → DATE('2024-01-01') (when `!caps.supports_date_literal`)
+//! - expr::type → CAST(expr AS type) (when `!caps.supports_double_colon_cast`)
 //!
 //! The default behavior is verbatim: tokens (including whitespace and comments)
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
-use smelt_parser::{FunctionCall, RefCall, SourceCall};
+use smelt_parser::{CastExpr, FunctionCall, RefCall, SourceCall};
 
 use crate::{BackendCapabilities, SqlDialect};
 
@@ -56,6 +57,9 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         }
         SyntaxKind::ARRAY_LITERAL if !ctx.capabilities.supports_array_literal => {
             print_array_rewrite(node, ctx, out);
+        }
+        SyntaxKind::CAST_EXPR if !ctx.capabilities.supports_double_colon_cast => {
+            print_cast_rewrite(node, ctx, out);
         }
         _ => {
             print_children(node, ctx, out);
@@ -109,6 +113,73 @@ fn find_string_after(children: &[SyntaxElement], start: usize) -> Option<(usize,
         }
     }
     None
+}
+
+/// Rewrite expr::type → CAST(expr AS type) when backend doesn't support ::.
+/// If it's already CAST(...) syntax, pass through verbatim.
+fn print_cast_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
+    let Some(cast) = CastExpr::cast(node.clone()) else {
+        print_children(node, ctx, out);
+        return;
+    };
+
+    if !cast.is_double_colon_cast() {
+        // Already CAST(expr AS type) syntax — pass through
+        print_children(node, ctx, out);
+        return;
+    }
+
+    // Partition children into: expr (before ::), type (TYPE_SPEC node), trailing whitespace.
+    // We emit CAST(expr AS type) followed by any trailing whitespace.
+    let children: Vec<SyntaxElement> = node.children_with_tokens().collect();
+
+    // Find the :: token index
+    let dc_idx = children
+        .iter()
+        .position(|c| matches!(c, SyntaxElement::Token(t) if t.kind() == SyntaxKind::DOUBLE_COLON));
+    let Some(dc_idx) = dc_idx else {
+        print_children(node, ctx, out);
+        return;
+    };
+
+    // Find the TYPE_SPEC node index
+    let type_idx = children
+        .iter()
+        .position(|c| matches!(c, SyntaxElement::Node(n) if n.kind() == SyntaxKind::TYPE_SPEC));
+
+    out.push_str("CAST(");
+
+    // Print expression (children before ::)
+    for child in &children[..dc_idx] {
+        match child {
+            SyntaxElement::Token(t) => out.push_str(t.text()),
+            SyntaxElement::Node(n) => print_node(n, ctx, out),
+        }
+    }
+
+    out.push_str(" AS ");
+
+    // Print TYPE_SPEC, moving any trailing whitespace outside the closing paren
+    let mut type_text = String::new();
+    if let Some(ti) = type_idx {
+        if let SyntaxElement::Node(n) = &children[ti] {
+            print_node(n, ctx, &mut type_text);
+        }
+    }
+    let trimmed = type_text.trim_end();
+    let trailing = &type_text[trimmed.len()..];
+    out.push_str(trimmed);
+    out.push(')');
+    out.push_str(trailing);
+
+    // Print any remaining children after TYPE_SPEC (unlikely but defensive)
+    let after = type_idx.map(|ti| ti + 1).unwrap_or(children.len());
+    for child in &children[after..] {
+        match child {
+            SyntaxElement::Token(t) => out.push_str(t.text()),
+            SyntaxElement::Node(n) => print_node(n, ctx, out),
+        }
+    }
 }
 
 /// Rewrite ARRAY[1,2,3] → ARRAY(1,2,3).
@@ -416,5 +487,39 @@ mod tests {
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, sql);
+    }
+
+    // ===== :: cast rewrite tests =====
+
+    #[test]
+    fn test_double_colon_rewrite_spark() {
+        let sql = "SELECT x::INTEGER FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT CAST(x AS INTEGER) FROM t");
+    }
+
+    #[test]
+    fn test_double_colon_no_rewrite_duckdb() {
+        let sql = "SELECT x::INTEGER FROM t";
+        let (d, c) = duckdb_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_cast_function_passthrough_spark() {
+        let sql = "SELECT CAST(x AS INTEGER) FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_double_colon_varchar_rewrite_spark() {
+        let sql = "SELECT name::VARCHAR FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT CAST(name AS VARCHAR) FROM t");
     }
 }

@@ -53,6 +53,9 @@ pub struct BackendCapabilities {
 
     /// Supports transactional DDL (can rollback CREATE TABLE)
     pub supports_transactional_ddl: bool,
+
+    /// Supports :: cast operator (PostgreSQL-style)
+    pub supports_double_colon_cast: bool,
 }
 
 impl BackendCapabilities {
@@ -68,6 +71,7 @@ impl BackendCapabilities {
             supports_concat_operator: true,
             supports_array_literal: true,
             supports_transactional_ddl: true,
+            supports_double_colon_cast: true,
         }
     }
 
@@ -83,6 +87,7 @@ impl BackendCapabilities {
             supports_concat_operator: true,
             supports_array_literal: false, // Uses ARRAY(a, b, c)
             supports_transactional_ddl: false,
+            supports_double_colon_cast: false, // Uses CAST(expr AS type)
         }
     }
 
@@ -98,6 +103,7 @@ impl BackendCapabilities {
             supports_concat_operator: true,
             supports_array_literal: false, // Uses ARRAY[a, b, c]
             supports_transactional_ddl: true,
+            supports_double_colon_cast: true,
         }
     }
 }
