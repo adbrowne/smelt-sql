@@ -4,7 +4,9 @@
 //! where you need programmatic model generation (e.g., dynamically union all models with a tag).
 //! Python models return SQL strings that get parsed by the existing smelt parser.
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(not(feature = "python"))]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -139,7 +141,8 @@ pub fn find_python(config_python: Option<&str>) -> Result<String> {
     Err(CliError::PythonNotFound.into())
 }
 
-/// Execute a Python model file and return the generated SQL models.
+/// Execute a Python model file and return the generated SQL models (subprocess path).
+#[cfg(not(feature = "python"))]
 fn run_python_model(
     python: &str,
     file_path: &Path,
@@ -175,6 +178,54 @@ fn run_python_model(
     })
 }
 
+/// Execute a Python model file via embedded PyO3 interpreter.
+#[cfg(feature = "python")]
+fn run_python_model(
+    _python: &str,
+    file_path: &Path,
+    project_context_json: &str,
+    python_sdk_path: &Path,
+) -> Result<Vec<PythonModelOutput>> {
+    use pyo3::prelude::*;
+    use pyo3::types::PyTracebackMethods;
+
+    Python::with_gil(|py| {
+        smelt_core::python_models::ensure_sdk_on_path(py, python_sdk_path)
+            .map_err(|e| anyhow!("Failed to set up Python SDK path: {}", e))?;
+
+        let outputs =
+            smelt_core::python_models::run_python_model_file(py, file_path, project_context_json)
+                .map_err(|e| {
+                // Get traceback for better error messages
+                let tb = e
+                    .traceback(py)
+                    .map(|tb| tb.format().unwrap_or_default())
+                    .unwrap_or_default();
+                CliError::PythonExecutionError {
+                    file: file_path.to_path_buf(),
+                    message: format!("{}{}", tb, e),
+                }
+            })?;
+
+        Ok(outputs
+            .into_iter()
+            .map(|o| PythonModelOutput {
+                name: o.name,
+                sql: o.sql,
+                queries: o
+                    .queries
+                    .into_iter()
+                    .map(|q| PythonQuery {
+                        kind: q.kind,
+                        tag: q.tag,
+                        directory: q.directory,
+                    })
+                    .collect(),
+            })
+            .collect())
+    })
+}
+
 /// Build project context JSON from existing models.
 fn build_project_context(
     sql_models: &[ModelFile],
@@ -205,6 +256,7 @@ fn build_project_context(
 
 /// Build PYTHONPATH by prepending SDK path and model file's parent directory
 /// to any existing PYTHONPATH. Uses platform-appropriate path separator.
+#[cfg(not(feature = "python"))]
 fn build_pythonpath(sdk_path: &Path, file_path: &Path) -> std::ffi::OsString {
     let mut paths: Vec<PathBuf> = vec![sdk_path.to_path_buf()];
     if let Some(parent) = file_path.parent() {
@@ -272,6 +324,14 @@ pub fn discover_python_models(
         return Ok(Vec::new());
     }
 
+    // With PyO3, we don't need a separate Python interpreter — use embedded.
+    // find_python_sdk is still needed to put the SDK on sys.path.
+    #[cfg(feature = "python")]
+    let python = {
+        let _ = config_python; // not needed with embedded interpreter
+        String::new()
+    };
+    #[cfg(not(feature = "python"))]
     let python = find_python(config_python)?;
     let python_sdk_path = find_python_sdk(project_dir)?;
 

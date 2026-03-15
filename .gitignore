@@ -6,6 +6,8 @@ datagen.duckdb
 output/
 __pycache__/
 *.pyc
+*.egg-info/
+.venv/
 
 # UI
 ui/node_modules/

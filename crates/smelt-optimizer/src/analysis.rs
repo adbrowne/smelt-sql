@@ -1,5 +1,7 @@
+use serde::Serialize;
+
 /// Classification of a SELECT item for optimization analysis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SelectItemKind {
     /// COUNT(DISTINCT expr) with alias
     CountDistinct { argument: String, alias: String },
@@ -10,7 +12,7 @@ pub enum SelectItemKind {
 }
 
 /// Analyzed structure of a SELECT statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SelectAnalysis {
     pub items: Vec<SelectItemKind>,
     /// The FROM clause text (verbatim).

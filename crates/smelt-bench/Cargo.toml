@@ -1,0 +1,60 @@
+[package]
+name = "smelt-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Core smelt dependencies
+smelt-core = { path = "../smelt-core" }
+smelt-parser = { path = "../smelt-parser" }
+smelt-db = { path = "../smelt-db" }
+smelt-optimizer = { path = "../smelt-optimizer" }
+
+# RNG (deterministic)
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Date/time
+chrono = { workspace = true }
+
+# Temp directories
+tempfile = "3"
+
+# Error handling
+anyhow = { workspace = true }
+
+# Rowan for TextRange
+rowan = { workspace = true }
+
+# Salsa traits
+salsa = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "build_performance"
+harness = false
+
+[[bench]]
+name = "salsa_incremental"
+harness = false
+
+[[bench]]
+name = "parser_throughput"
+harness = false
+
+[[bin]]
+name = "save-results"
+path = "src/bin/save_results.rs"
+
+[[bin]]
+name = "export-action-benchmark"
+path = "src/bin/export_action_benchmark.rs"

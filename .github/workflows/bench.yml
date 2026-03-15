@@ -1,0 +1,176 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main, feature/*]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks and save results
+        run: cargo run -p smelt-bench --bin save-results --release
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: benchmarks/results/*.json
+
+      - name: Upload baseline for PR comparison
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-main
+          path: benchmarks/results/*.json
+          overwrite: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate charts
+        run: |
+          pip install -r benchmarks/charts/requirements.txt
+          python benchmarks/charts/generate_charts.py benchmarks/results/ --output benchmarks/charts/output/
+
+      - name: Upload charts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-charts-${{ github.sha }}
+          path: benchmarks/charts/output/*.png
+
+      - name: Add results to job summary
+        run: |
+          python3 -c "
+          import json, glob, sys
+
+          files = sorted(glob.glob('benchmarks/results/*.json'))
+          if not files:
+              print('No results found', file=sys.stderr)
+              sys.exit(0)
+
+          data = json.load(open(files[-1]))
+          b = data['build']
+          s = data['salsa']
+          p = data['parser']
+
+          lines = []
+          lines.append('## Benchmark Results')
+          lines.append('')
+          lines.append(f'**Commit:** \`{data[\"git_commit\"][:7]}\` | **Branch:** \`{data[\"git_branch\"]}\` | **Models:** {data[\"model_count\"]}')
+          lines.append('')
+          lines.append('### Build Pipeline')
+          lines.append('')
+          lines.append('| Phase | Time (ms) |')
+          lines.append('|-------|-----------|')
+          lines.append(f'| Discovery | {b[\"discovery_ms\"]:.1f} |')
+          lines.append(f'| Graph Build | {b[\"graph_build_ms\"]:.1f} |')
+          lines.append(f'| Validation | {b[\"validation_ms\"]:.2f} |')
+          lines.append(f'| Topo Sort | {b[\"topo_sort_ms\"]:.1f} |')
+          lines.append(f'| **Total** | **{b[\"total_ms\"]:.1f}** |')
+          lines.append('')
+          lines.append('### Salsa Incremental Compilation')
+          lines.append('')
+          lines.append('| Scenario | Time (ms) |')
+          lines.append('|----------|-----------|')
+          lines.append(f'| Initial Load | {s[\"initial_load_ms\"]:.1f} |')
+          lines.append(f'| Leaf Edit (L1) Diagnostics | {s[\"leaf_edit_diagnostics_ms\"]:.2f} |')
+          lines.append(f'| Mid Edit (L2) Diagnostics | {s[\"mid_edit_diagnostics_ms\"]:.2f} |')
+          lines.append(f'| Root Edit (L4) Diagnostics | {s[\"root_edit_diagnostics_ms\"]:.2f} |')
+          lines.append(f'| Add File + all_models() | {s[\"add_file_all_models_ms\"]:.1f} |')
+          lines.append(f'| Full Diagnostics (all) | {s[\"full_diagnostics_ms\"]:.1f} |')
+          lines.append('')
+          lines.append('### Parser Throughput')
+          lines.append('')
+          lines.append('| Metric | Value |')
+          lines.append('|--------|-------|')
+          lines.append(f'| Simple SQL | {p[\"single_simple_us\"]:.1f} μs |')
+          lines.append(f'| Complex SQL | {p[\"single_complex_us\"]:.1f} μs |')
+          lines.append(f'| Batch ({p[\"batch_count\"]} models) | {p[\"batch_all_ms\"]:.1f} ms |')
+          lines.append(f'| Throughput | {p[\"bytes_per_second\"]/1_000_000:.1f} MB/s |')
+
+          print('\n'.join(lines))
+          " >> $GITHUB_STEP_SUMMARY
+
+      # GitHub Pages dashboard via github-action-benchmark
+      - name: Export for github-action-benchmark
+        run: cargo run -p smelt-bench --bin export-action-benchmark --release
+
+      - name: Store benchmark result (latency)
+        if: github.ref == 'refs/heads/main'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Smelt Latency Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: benchmarks/output/latency.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: true
+          alert-threshold: "150%"
+          comment-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Store benchmark result (throughput)
+        if: github.ref == 'refs/heads/main'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Smelt Throughput Benchmarks
+          tool: customBiggerIsBetter
+          output-file-path: benchmarks/output/throughput.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: true
+          alert-threshold: "150%"
+          comment-on-alert: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # PR benchmark comparison comment
+      - name: Download main baseline
+        id: download-baseline
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: bench.yml
+          branch: main
+          name: bench-baseline-main
+          path: benchmarks/baseline/
+        continue-on-error: true
+
+      - name: Post benchmark comparison
+        if: github.event_name == 'pull_request' && steps.download-baseline.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASELINE=$(ls benchmarks/baseline/*.json | sort | tail -1)
+          CURRENT=$(ls benchmarks/results/*.json | sort | tail -1)
+          COMMENT=$(python3 benchmarks/scripts/compare_benchmarks.py "$BASELINE" "$CURRENT")
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT"

@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A transformation the optimizer wants to apply to a model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Transformation {
     /// Replace a model's execution with a multi-step plan (e.g., cube split).
     ReplaceWithPlan {
@@ -19,7 +19,7 @@ pub enum Transformation {
 }
 
 /// A single step in a multi-step execution plan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ExecutionStep {
     /// Create a temporary table from a query.
     CreateTemp { name: String, sql: String },
@@ -32,7 +32,7 @@ pub enum ExecutionStep {
 }
 
 /// An optimization opportunity detected by a rule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Opportunity {
     pub rule_name: String,
     pub model: String,
@@ -41,7 +41,7 @@ pub struct Opportunity {
 }
 
 /// Per-rule data attached to an opportunity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum OpportunityData {
     CubeSplit {
         count_distinct_count: usize,
@@ -54,7 +54,7 @@ pub enum OpportunityData {
 }
 
 /// Incremental configuration from YAML frontmatter.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IncrementalConfig {
     pub partition_column: String,
 }

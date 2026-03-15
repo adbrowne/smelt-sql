@@ -8,6 +8,8 @@ use crate::types::Transformation;
 pub struct Optimizer {
     enable_cube_split: bool,
     enable_incremental: bool,
+    #[cfg(feature = "python")]
+    enable_python_rules: bool,
 }
 
 impl Optimizer {
@@ -16,6 +18,8 @@ impl Optimizer {
         Self {
             enable_cube_split: true,
             enable_incremental: true,
+            #[cfg(feature = "python")]
+            enable_python_rules: true,
         }
     }
 
@@ -40,6 +44,15 @@ impl Optimizer {
                     Err(e) => errors.push(e),
                 }
             }
+        }
+
+        // Run Python rules after Rust rules
+        #[cfg(feature = "python")]
+        if self.enable_python_rules {
+            let models: Vec<_> = graph.models().collect();
+            let (py_transformations, py_errors) = crate::python_bridge::run_python_rules(&models);
+            transformations.extend(py_transformations);
+            errors.extend(py_errors);
         }
 
         (transformations, errors)
