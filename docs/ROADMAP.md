@@ -2294,6 +2294,90 @@ These features require significant architectural work and are not prioritized:
 
 ---
 
+## Release & Distribution
+
+smelt uses a **Python-wrapping-Rust** distribution model (like ruff, uv, polars): Rust binaries are compiled and bundled into Python wheels via [maturin](https://github.com/PyO3/maturin). Users install with `pip install smelt-sql` and get native binaries without needing a Rust toolchain. Standalone binaries are also published for non-Python users.
+
+### 🔮 Phase R1: Maturin Build Setup
+
+Set up the local build pipeline for producing Python wheels that bundle Rust binaries.
+
+- Root `pyproject.toml` with `[build-system] requires = ["maturin"]` build backend
+- Bundle `smelt` CLI and `smelt-lsp` binaries in the wheel via `[tool.maturin.data]` scripts
+- Python helper `smelt.lsp_binary_path()` returning the path to the bundled LSP binary (used by editor extensions)
+- Local verification with `maturin develop` — install into a virtualenv and confirm `smelt` CLI and LSP work
+
+### 🔮 Phase R2: Cross-Platform CI Builds
+
+GitHub Actions workflow to build wheels and standalone binaries for all major platforms.
+
+- `.github/workflows/release.yml` triggered on `v*` tags
+- Build matrix:
+  - Linux x86_64 and aarch64 (manylinux via maturin)
+  - macOS x86_64 and aarch64 (universal2)
+  - Windows x86_64
+- maturin for Python wheels, cargo for standalone binaries
+- Upload all artifacts for downstream release/publish steps
+
+### 🔮 Phase R3: GitHub Releases
+
+Automate GitHub Release creation with attached artifacts.
+
+- `softprops/action-gh-release` creates a release from the `v*` tag
+- Attach standalone binaries, Python wheels, and SHA-256 checksums
+- Version sync check across `Cargo.toml`, `pyproject.toml`, and `editors/vscode/package.json`
+- Release notes generated from changelog or commit history
+
+### 🔮 Phase R4: PyPI Publishing
+
+Publish Python wheels to PyPI so users can `pip install smelt-sql`.
+
+- `pypa/gh-action-pypi-publish` with OIDC trusted publishing (no API tokens)
+- Package name: **`smelt-sql`** (import as `import smelt`)
+- TestPyPI publishing for pre-release tags (`v*-rc*`, `v*-beta*`)
+- Verify install-from-PyPI works on a clean environment
+
+### 🔮 Phase R5: VSCode Extension Publishing
+
+Publish the VSCode extension to the Marketplace with runtime LSP discovery.
+
+- Update `extension.ts` LSP discovery chain: user config → Python environment (`smelt.lsp_binary_path()`) → `$PATH` lookup → `cargo run` fallback
+- Publish to VS Code Marketplace via `vsce publish`
+- Publish to Open VSX Registry for open-source editors
+- Extension stays lightweight — no bundled binary, relies on runtime discovery
+
+### 🔮 Phase R6: Documentation Site
+
+Public-facing documentation site built with MkDocs Material.
+
+- `docs-site/` directory with MkDocs Material configuration
+- Content reorganized from `README.md` and `docs/` into user-facing guides
+- `.github/workflows/docs.yml` deploys to GitHub Pages on push to `main`
+- Custom domain setup
+
+### 🔮 Phase R7: Crate Publishing (optional)
+
+Publish reusable Rust crates to crates.io for Rust ecosystem consumers.
+
+- Publish `smelt-parser`, `smelt-types`, `smelt-dialect` to crates.io
+- Internal crates keep `publish = false` in their `Cargo.toml`
+- Lower priority — primary audience installs via Python or standalone binary
+
+### Dependency Diagram
+
+```
+R6 (Docs)  ─── independent, can ship anytime
+
+R1 (Maturin) → R2 (CI Builds) → R3 (GitHub Releases)  ← critical path
+                                       │
+                                       ├──→ R4 (PyPI)
+                                       └──→ R5 (VSCode Extension)
+
+R7 (Crates.io) ─── anytime after R3
+```
+
+---
+
 ## Contributing
 
 When working on the next phase:
