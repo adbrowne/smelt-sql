@@ -2374,6 +2374,21 @@ Publish reusable Rust crates to crates.io for Rust ecosystem consumers.
 - `crates-publish` CI job publishes in dependency order (smelt-types → smelt-parser → smelt-dialect) with index waits
 - Uses `CARGO_REGISTRY_TOKEN` secret, stable releases only
 
+### ✅ Phase R8: Continuous Dev Releases (March 15, 2026)
+
+Automated dev releases from every merge to `main`, so users can install the latest changes without waiting for a tagged release.
+
+- `.github/workflows/dev-release.yml` triggered on push to `main`
+- Version computed as `X.Y.Z-dev.YYYYMMDDHHMM` from `Cargo.toml` base version + timestamp
+- Maturin converts Cargo semver to PEP 440: `0.1.0-dev.202603151430` → `0.1.0.dev202603151430`
+- Git tags use `dev-YYYYMMDD-SHORTSHA` format (avoids triggering `release.yml`)
+- GitHub Releases created as pre-release with `make_latest: false`
+- Dev wheels published to real PyPI (`.devN` versions require `pip install --pre`)
+- `pyproject.toml` switched to `dynamic = ["version"]` — maturin reads version from `Cargo.toml`
+- Stable releases now only bump 2 files: `Cargo.toml` and `editors/vscode/package.json`
+- VSCode extension and crates.io skipped for dev releases (pre-release not well supported)
+- One-time OIDC setup needed: add `dev-release.yml` as trusted publisher on pypi.org
+
 ### Dependency Diagram
 
 ```
@@ -2385,6 +2400,8 @@ R1 (Maturin) → R2 (CI Builds) → R3 (GitHub Releases)  ← all ✅
                                        └──→ R5 (VSCode Ext)   ✅
 
 R7 (Crates.io) ─── ✅
+
+R8 (Dev Releases) ─── ✅  (pushes to main → PyPI dev builds)
 ```
 
 ---

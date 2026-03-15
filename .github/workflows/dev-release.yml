@@ -1,9 +1,13 @@
-name: Release
+name: Dev Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: dev-release
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -14,40 +18,38 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Version check — ensure tag matches version strings in config files
+  # Compute dev version from Cargo.toml + timestamp + SHA
   # ---------------------------------------------------------------------------
-  version-check:
-    name: Version Check
+  compute-version:
+    name: Compute Version
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    outputs:
+      dev_version: ${{ steps.version.outputs.dev_version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Extract tag version
-        id: tag
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Check Cargo.toml version
+      - name: Compute dev version
+        id: version
         run: |
-          cargo_version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          if [ "$cargo_version" != "${{ steps.tag.outputs.version }}" ]; then
-            echo "::error::Cargo.toml version ($cargo_version) does not match tag (${{ steps.tag.outputs.version }})"
-            exit 1
-          fi
-
-      - name: Check VSCode extension version
-        run: |
-          vscode_version=$(node -p "require('./editors/vscode/package.json').version")
-          if [ "$vscode_version" != "${{ steps.tag.outputs.version }}" ]; then
-            echo "::error::editors/vscode/package.json version ($vscode_version) does not match tag (${{ steps.tag.outputs.version }})"
-            exit 1
-          fi
+          base_version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          timestamp=$(date -u +%Y%m%d%H%M)
+          short_sha=$(git rev-parse --short HEAD)
+          dev_version="${base_version}-dev.${timestamp}"
+          tag_name="dev-$(date -u +%Y%m%d)-${short_sha}"
+          echo "dev_version=${dev_version}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "Dev version: ${dev_version}"
+          echo "Tag: ${tag_name}"
 
   # ---------------------------------------------------------------------------
   # Build Python wheels via maturin
   # ---------------------------------------------------------------------------
   build-wheels:
     name: Wheel / ${{ matrix.name }}
+    needs: [compute-version]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -78,6 +80,13 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
 
+      - name: Patch version in Cargo.toml
+        shell: bash
+        run: |
+          sed -i.bak 's/^version = ".*"/version = "${{ needs.compute-version.outputs.dev_version }}"/' Cargo.toml
+          echo "Patched Cargo.toml version:"
+          grep -m1 '^version' Cargo.toml
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -90,7 +99,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-dev-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -118,6 +127,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-standalone:
     name: Standalone / ${{ matrix.name }}
+    needs: [compute-version]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -153,6 +163,13 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
 
+      - name: Patch version in Cargo.toml
+        shell: bash
+        run: |
+          sed -i.bak 's/^version = ".*"/version = "${{ needs.compute-version.outputs.dev_version }}"/' Cargo.toml
+          echo "Patched Cargo.toml version:"
+          grep -m1 '^version' Cargo.toml
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -165,7 +182,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-dev-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -181,7 +198,7 @@ jobs:
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          staging="smelt-${{ matrix.name }}"
+          staging="smelt-dev-${{ matrix.name }}"
           mkdir "$staging"
           cp target/${{ matrix.target }}/release/smelt "$staging/"
           cp target/${{ matrix.target }}/release/smelt-lsp "$staging/"
@@ -192,7 +209,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $staging = "smelt-${{ matrix.name }}"
+          $staging = "smelt-dev-${{ matrix.name }}"
           New-Item -ItemType Directory -Path $staging
           Copy-Item "target/${{ matrix.target }}/release/smelt.exe" "$staging/"
           Copy-Item "target/${{ matrix.target }}/release/smelt-lsp.exe" "$staging/"
@@ -203,21 +220,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: standalone-${{ matrix.name }}
-          path: smelt-${{ matrix.name }}.${{ matrix.archive }}
+          path: smelt-dev-${{ matrix.name }}.${{ matrix.archive }}
 
   # ---------------------------------------------------------------------------
-  # Create GitHub Release
+  # Create GitHub pre-release
   # ---------------------------------------------------------------------------
-  release:
-    name: GitHub Release
-    needs: [version-check, build-wheels, build-standalone]
-    if: startsWith(github.ref, 'refs/tags/v')
+  dev-release:
+    name: Dev Release
+    needs: [compute-version, build-wheels, build-standalone]
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -237,53 +251,33 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Generate release notes
-        id: notes
-        run: |
-          # Find previous tag
-          prev_tag=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
-          if [ -n "$prev_tag" ]; then
-            echo "## Changes since ${prev_tag}" > release-notes.md
-            echo "" >> release-notes.md
-            git log "${prev_tag}..HEAD" --pretty=format:"- %s" --no-merges >> release-notes.md
-          else
-            echo "## Initial Release" > release-notes.md
-            echo "" >> release-notes.md
-            git log --pretty=format:"- %s" --no-merges -20 >> release-notes.md
-          fi
-          echo "" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "## Installation" >> release-notes.md
-          echo "" >> release-notes.md
-          echo '```bash' >> release-notes.md
-          echo "pip install smelt-sql" >> release-notes.md
-          echo '```' >> release-notes.md
-          echo "" >> release-notes.md
-          echo "Or download standalone binaries from the assets below." >> release-notes.md
-
-      - name: Determine pre-release
-        id: prerelease
-        run: |
-          if echo "${{ github.ref_name }}" | grep -qE '(-rc|-beta|-alpha)'; then
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create release
+      - name: Create dev release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: release-notes.md
+          tag_name: ${{ needs.compute-version.outputs.tag_name }}
+          name: "Dev Build ${{ needs.compute-version.outputs.dev_version }}"
+          body: |
+            Automated dev build from `main` at ${{ needs.compute-version.outputs.short_sha }}.
+
+            **Version:** `${{ needs.compute-version.outputs.dev_version }}`
+
+            ## Install
+
+            ```bash
+            pip install smelt-sql --pre
+            ```
+
+            Or download standalone binaries from the assets below.
           files: release-assets/*
-          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          prerelease: true
+          make_latest: false
 
   # ---------------------------------------------------------------------------
-  # Publish to PyPI (stable releases only)
+  # Publish dev wheels to PyPI
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish to PyPI
-    needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha')
+    needs: [dev-release]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -298,83 +292,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-
-  # ---------------------------------------------------------------------------
-  # Publish to TestPyPI (pre-releases only)
-  # ---------------------------------------------------------------------------
-  testpypi-publish:
-    name: Publish to TestPyPI
-    needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha'))
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-    steps:
-      - name: Download wheels
-        uses: actions/download-artifact@v4
-        with:
-          pattern: wheel-*
-          merge-multiple: true
-          path: dist
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
-  # ---------------------------------------------------------------------------
-  # Publish VSCode extension (stable releases only)
-  # ---------------------------------------------------------------------------
-  vscode-publish:
-    name: Publish VSCode Extension
-    needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        run: cd editors/vscode && npm ci
-
-      - name: Publish to VS Marketplace
-        run: cd editors/vscode && npx vsce publish -p ${{ secrets.VS_MARKETPLACE_TOKEN }}
-
-      - name: Publish to Open VSX
-        continue-on-error: true
-        run: cd editors/vscode && npx ovsx publish -p ${{ secrets.OPEN_VSX_TOKEN }}
-
-  # ---------------------------------------------------------------------------
-  # Publish crates to crates.io (stable releases only)
-  # ---------------------------------------------------------------------------
-  crates-publish:
-    name: Publish to crates.io
-    needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha')
-    runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish smelt-types
-        run: cargo publish -p smelt-types
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish smelt-parser
-        run: cargo publish -p smelt-parser
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish smelt-dialect
-        run: cargo publish -p smelt-dialect
