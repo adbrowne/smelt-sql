@@ -412,7 +412,7 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 10. Compile and execute each model
-    let compiler = SqlCompiler::new(config.clone());
+    let compiler = SqlCompiler::new(config.clone(), target_config);
 
     println!("\n{}", "=".repeat(60));
     println!("Executing models...");

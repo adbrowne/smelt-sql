@@ -1,8 +1,8 @@
-use crate::config::{Config, Materialization};
+use crate::config::{BackendType, Config, Materialization, Target};
 use crate::discovery::ModelFile;
 use crate::errors::{extract_snippet, text_range_to_line_col, CliError};
-use anyhow::{anyhow, Result};
-use rowan::TextRange;
+use anyhow::Result;
+use smelt_dialect::{BackendCapabilities, PrintContext, SqlDialect};
 
 #[derive(Debug, Clone)]
 pub struct CompiledModel {
@@ -11,68 +11,39 @@ pub struct CompiledModel {
     pub materialization: Materialization,
 }
 
-/// Replace smelt.ref() and smelt.source() calls with qualified table names using AST-based ranges.
-///
-/// This function performs byte-exact replacements using TextRange positions from the parser.
-/// Calls are processed from end to start to avoid offset shifting.
-///
-/// `replacements` is a list of `(replacement_text, range)` pairs.
-pub fn replace_calls_with_ranges(sql: &str, replacements: &[(String, TextRange)]) -> String {
-    // Sort by position (descending) to avoid offset shifting
-    let mut sorted: Vec<_> = replacements.iter().collect();
-    sorted.sort_by(|a, b| b.1.start().cmp(&a.1.start()));
-
-    let mut result = sql.to_string();
-    for (replacement, range) in sorted {
-        let start = usize::from(range.start());
-        let end = usize::from(range.end());
-        result.replace_range(start..end, replacement);
+fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabilities) {
+    match backend_type {
+        BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
     }
-
-    result
-}
-
-/// Collect all smelt.ref() and smelt.source() replacements from parsed SQL.
-fn collect_replacements(file: &smelt_parser::File, schema: &str) -> Vec<(String, TextRange)> {
-    let mut replacements: Vec<(String, TextRange)> = Vec::new();
-
-    // smelt.ref() → schema.model_name
-    for ref_call in file.refs() {
-        if let Some(name) = ref_call.model_name() {
-            let replacement = format!("{}.{}", schema, name);
-            replacements.push((replacement, ref_call.range()));
-        }
-    }
-
-    // smelt.source() → qualified_name as-is (e.g., "raw.users")
-    for source_call in file.sources() {
-        if let Some(qualified) = source_call.qualified_name() {
-            replacements.push((qualified, source_call.range()));
-        }
-    }
-
-    replacements
 }
 
 /// Resolve all smelt.ref() and smelt.source() calls in arbitrary SQL text by replacing
 /// them with qualified table names.
 pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     let parse = smelt_parser::parse(sql);
-    let Some(file) = smelt_parser::File::cast(parse.syntax()) else {
-        return sql.to_string();
+    let ctx = PrintContext {
+        dialect: &SqlDialect::DuckDB,
+        capabilities: &BackendCapabilities::duckdb(),
+        schema,
     };
-
-    let replacements = collect_replacements(&file, schema);
-    replace_calls_with_ranges(sql, &replacements)
+    smelt_dialect::print(&parse.syntax(), &ctx)
 }
 
 pub struct SqlCompiler {
     config: Config,
+    dialect: SqlDialect,
+    capabilities: BackendCapabilities,
 }
 
 impl SqlCompiler {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(config: Config, target: &Target) -> Self {
+        let (dialect, capabilities) = dialect_for_backend(target.backend_type());
+        Self {
+            config,
+            dialect,
+            capabilities,
+        }
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -94,14 +65,15 @@ impl SqlCompiler {
             }
         }
 
-        // Parse and collect all replacements (refs + sources)
         // Strip frontmatter to avoid parse errors from YAML metadata
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let parse = smelt_parser::parse(&clean_content);
-        let file = smelt_parser::File::cast(parse.syntax())
-            .ok_or_else(|| anyhow!("Failed to parse model SQL"))?;
-        let replacements = collect_replacements(&file, schema);
-        let compiled_sql = replace_calls_with_ranges(&clean_content, &replacements);
+        let ctx = PrintContext {
+            dialect: &self.dialect,
+            capabilities: &self.capabilities,
+            schema,
+        };
+        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -124,15 +96,13 @@ impl SqlCompiler {
         schema: &str,
         sql: &str,
     ) -> Result<CompiledModel> {
-        // Reparse transformed SQL to get accurate positions
-        // (byte offsets change after inject_time_filter transforms the SQL)
         let parse = smelt_parser::parse(sql);
-        let file = smelt_parser::File::cast(parse.syntax())
-            .ok_or_else(|| anyhow!("Failed to parse transformed SQL"))?;
-
-        // Collect all replacements (refs + sources) with precise byte offsets
-        let replacements = collect_replacements(&file, schema);
-        let compiled_sql = replace_calls_with_ranges(sql, &replacements);
+        let ctx = PrintContext {
+            dialect: &self.dialect,
+            capabilities: &self.capabilities,
+            schema,
+        };
+        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -154,6 +124,16 @@ mod tests {
     use crate::config::{ModelConfig, Target};
     use crate::discovery::RefInfo;
     use std::collections::HashMap;
+
+    fn make_test_target() -> Target {
+        Target {
+            target_type: "duckdb".to_string(),
+            database: Some("test.duckdb".to_string()),
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+        }
+    }
 
     /// Helper function to parse SQL and extract refs with real TextRange values
     fn extract_refs_from_sql(sql: &str) -> Vec<RefInfo> {
@@ -219,7 +199,7 @@ GROUP BY user_id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -246,7 +226,7 @@ JOIN smelt.ref('model_b') b ON a.id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -273,7 +253,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let result = compiler.compile(&model, "main");
         assert!(result.is_err());
@@ -305,7 +285,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             },
         );
 
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
         let compiled = compiler.compile(&model, "main").unwrap();
 
         assert!(matches!(compiled.materialization, Materialization::Table));
@@ -326,7 +306,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -349,7 +329,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -376,7 +356,7 @@ JOIN smelt.ref('model_a') b ON a.parent_id = b.id
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
@@ -406,7 +386,7 @@ WHERE event_type = 'click'
         };
 
         let config = make_test_config();
-        let compiler = SqlCompiler::new(config);
+        let compiler = SqlCompiler::new(config, &make_test_target());
 
         let compiled = compiler.compile(&model, "main").unwrap();
 
