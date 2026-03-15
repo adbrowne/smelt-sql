@@ -2298,35 +2298,37 @@ These features require significant architectural work and are not prioritized:
 
 smelt uses a **Python-wrapping-Rust** distribution model (like ruff, uv, polars): Rust binaries are compiled and bundled into Python wheels via [maturin](https://github.com/PyO3/maturin). Users install with `pip install smelt-sql` and get native binaries without needing a Rust toolchain. Standalone binaries are also published for non-Python users.
 
-### 🔮 Phase R1: Maturin Build Setup
+### ✅ Phase R1: Maturin Build Setup (March 15, 2026)
 
 Set up the local build pipeline for producing Python wheels that bundle Rust binaries.
 
-- Root `pyproject.toml` with `[build-system] requires = ["maturin"]` build backend
-- Bundle `smelt` CLI and `smelt-lsp` binaries in the wheel via `[tool.maturin.data]` scripts
-- Python helper `smelt.lsp_binary_path()` returning the path to the bundled LSP binary (used by editor extensions)
-- Local verification with `maturin develop` — install into a virtualenv and confirm `smelt` CLI and LSP work
+- Root `pyproject.toml` with `[build-system] requires = ["maturin>=1.7,<2"]` build backend
+- Package name `smelt-sql` with `bindings = "bin"` to bundle `smelt` CLI and `smelt-lsp` binaries
+- Python helper module `smelt_sql/` with `lsp_binary_path()` and `cli_binary_path()` for editor extensions
+- Renamed `python/pyproject.toml` package to `smelt-runner` to distinguish from the distribution package
+- `scripts/prepare-release.sh` helper that prints the release checklist
 
-### 🔮 Phase R2: Cross-Platform CI Builds
+### ✅ Phase R2: Cross-Platform CI Builds (March 15, 2026)
 
 GitHub Actions workflow to build wheels and standalone binaries for all major platforms.
 
-- `.github/workflows/release.yml` triggered on `v*` tags
+- `.github/workflows/release.yml` triggered on `v*` tags and `workflow_dispatch`
 - Build matrix:
-  - Linux x86_64 and aarch64 (manylinux via maturin)
-  - macOS x86_64 and aarch64 (universal2)
-  - Windows x86_64
-- maturin for Python wheels, cargo for standalone binaries
-- Upload all artifacts for downstream release/publish steps
+  - Linux x86_64 (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`)
+  - macOS x86_64 (`macos-13`) and aarch64 (`macos-latest`)
+  - Windows x86_64 (`windows-latest`)
+- `PyO3/maturin-action@v1` for Python wheels, `cargo build --release` for standalone binaries
+- Standalone archives: `.tar.gz` (Unix) and `.zip` (Windows) with LICENSE and README
 
-### 🔮 Phase R3: GitHub Releases
+### ✅ Phase R3: GitHub Releases (March 15, 2026)
 
 Automate GitHub Release creation with attached artifacts.
 
-- `softprops/action-gh-release` creates a release from the `v*` tag
-- Attach standalone binaries, Python wheels, and SHA-256 checksums
+- `softprops/action-gh-release@v2` creates a release from the `v*` tag
+- Attach standalone binaries, Python wheels, and `SHA256SUMS.txt` checksums
 - Version sync check across `Cargo.toml`, `pyproject.toml`, and `editors/vscode/package.json`
-- Release notes generated from changelog or commit history
+- Release notes auto-generated from git log (previous tag to HEAD)
+- Pre-release detection for tags containing `-rc`, `-beta`, or `-alpha`
 
 ### 🔮 Phase R4: PyPI Publishing
 
