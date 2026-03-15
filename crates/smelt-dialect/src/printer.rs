@@ -43,9 +43,32 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                         return;
                     }
                 }
-                if let Some(source_call) = SourceCall::from_function_call(fc) {
+                if let Some(source_call) = SourceCall::from_function_call(fc.clone()) {
                     if let Some(qualified) = source_call.qualified_name() {
                         out.push_str(&qualified);
+                        return;
+                    }
+                }
+                // EXPLODE/UNNEST renaming
+                if let Some(name) = fc.name() {
+                    let new_name = match ctx.dialect {
+                        SqlDialect::DuckDB | SqlDialect::PostgreSQL => {
+                            if name.eq_ignore_ascii_case("EXPLODE") {
+                                Some("UNNEST")
+                            } else {
+                                None
+                            }
+                        }
+                        SqlDialect::SparkSQL => {
+                            if name.eq_ignore_ascii_case("UNNEST") {
+                                Some("EXPLODE")
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    if let Some(new_name) = new_name {
+                        print_function_with_renamed(node, ctx, out, new_name);
                         return;
                     }
                 }
@@ -57,6 +80,11 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         }
         SyntaxKind::ARRAY_LITERAL if !ctx.capabilities.supports_array_literal => {
             print_array_rewrite(node, ctx, out);
+        }
+        SyntaxKind::SELECT_LIST | SyntaxKind::GROUP_BY_CLAUSE
+            if !ctx.capabilities.supports_trailing_commas =>
+        {
+            print_strip_trailing_commas(node, ctx, out);
         }
         SyntaxKind::CAST_EXPR if !ctx.capabilities.supports_double_colon_cast => {
             print_cast_rewrite(node, ctx, out);
@@ -284,6 +312,59 @@ fn print_children_skip_qualify(node: &SyntaxNode, ctx: &PrintContext, out: &mut 
             }
         }
         i += 1;
+    }
+}
+
+/// Print children of a SELECT_LIST or GROUP_BY_CLAUSE, stripping trailing commas.
+fn print_strip_trailing_commas(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
+    let children: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    for (i, child) in children.iter().enumerate() {
+        match child {
+            SyntaxElement::Token(token) if token.kind() == SyntaxKind::COMMA => {
+                // Look ahead: is there any non-whitespace child after this comma?
+                let has_more = children[i + 1..].iter().any(
+                    |c| !matches!(c, SyntaxElement::Token(t) if t.kind() == SyntaxKind::WHITESPACE),
+                );
+                if has_more {
+                    out.push_str(token.text());
+                }
+                // else: trailing comma — skip it (but keep any following whitespace)
+            }
+            SyntaxElement::Token(token) => {
+                out.push_str(token.text());
+            }
+            SyntaxElement::Node(child_node) => {
+                print_node(child_node, ctx, out);
+            }
+        }
+    }
+}
+
+/// Print a FUNCTION_CALL node with the function name replaced by `new_name`.
+fn print_function_with_renamed(
+    node: &SyntaxNode,
+    ctx: &PrintContext,
+    out: &mut String,
+    new_name: &str,
+) {
+    // For a simple function call, the first IDENT token is the name.
+    // For a namespaced call (smelt.ref), we'd have already handled it above,
+    // so here we only deal with simple IDENT calls.
+    let mut replaced = false;
+    for child in node.children_with_tokens() {
+        match child {
+            SyntaxElement::Token(token) => {
+                if !replaced && token.kind() == SyntaxKind::IDENT {
+                    out.push_str(new_name);
+                    replaced = true;
+                } else {
+                    out.push_str(token.text());
+                }
+            }
+            SyntaxElement::Node(child_node) => {
+                print_node(&child_node, ctx, out);
+            }
+        }
     }
 }
 
@@ -521,5 +602,84 @@ mod tests {
         let (d, c) = spark_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, "SELECT CAST(name AS VARCHAR) FROM t");
+    }
+
+    // ===== Trailing comma removal tests =====
+
+    #[test]
+    fn test_trailing_comma_stripped_spark() {
+        let sql = "SELECT a, b, FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        // The comma is removed; whitespace around it is preserved
+        assert!(!result.contains("b,"), "Trailing comma should be removed");
+        assert!(result.contains("a, b"), "Non-trailing commas preserved");
+        assert!(!result.contains(", FROM"), "Comma before FROM removed");
+    }
+
+    #[test]
+    fn test_trailing_comma_preserved_duckdb() {
+        let sql = "SELECT a, b, FROM t";
+        let (d, c) = duckdb_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_group_by_trailing_comma_stripped_spark() {
+        let sql = "SELECT a, COUNT(*) FROM t GROUP BY a,";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT a, COUNT(*) FROM t GROUP BY a");
+    }
+
+    #[test]
+    fn test_no_trailing_comma_unchanged_spark() {
+        let sql = "SELECT a, b FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    // ===== EXPLODE/UNNEST renaming tests =====
+
+    #[test]
+    fn test_explode_to_unnest_duckdb() {
+        let sql = "SELECT EXPLODE(arr) FROM t";
+        let (d, c) = duckdb_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT UNNEST(arr) FROM t");
+    }
+
+    #[test]
+    fn test_unnest_to_explode_spark() {
+        let sql = "SELECT UNNEST(arr) FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT EXPLODE(arr) FROM t");
+    }
+
+    #[test]
+    fn test_explode_unchanged_spark() {
+        let sql = "SELECT EXPLODE(arr) FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_unnest_unchanged_duckdb() {
+        let sql = "SELECT UNNEST(arr) FROM t";
+        let (d, c) = duckdb_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_explode_to_unnest_postgresql() {
+        let sql = "SELECT EXPLODE(arr) FROM t";
+        let (d, c) = postgresql_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT UNNEST(arr) FROM t");
     }
 }

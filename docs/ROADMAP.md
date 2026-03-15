@@ -1241,18 +1241,24 @@ Smelt SQL is a **logical SQL superset** built on a PostgreSQL-compatible base, c
 
 ---
 
+#### ✅ Phase 4f: Trailing comma removal + EXPLODE/UNNEST renaming (COMPLETED March 15, 2026)
+
+**What**: Two dialect rewrites in `smelt-dialect`. (1) Trailing commas in SELECT and GROUP BY lists are stripped for Spark and PostgreSQL via `supports_trailing_commas` capability flag. (2) EXPLODE↔UNNEST function renaming based on dialect: DuckDB/PostgreSQL normalize to UNNEST, Spark normalizes to EXPLODE.
+
+---
+
 ### Dialect Rewrite Summary
 
 | Feature | Smelt SQL | DuckDB | Spark | PostgreSQL |
 |---------|-----------|--------|-------|------------|
 | QUALIFY | ✅ Native | ✅ Pass-through | 🔄 Subquery wrap | 🔄 Subquery wrap |
 | Lambda `->` | ✅ Native | ✅ Pass-through | ✅ Pass-through | ❌ Error (no support) |
-| EXPLODE/UNNEST | ✅ Both accepted | 🔄 → UNNEST | 🔄 → EXPLODE | 🔄 → UNNEST |
+| EXPLODE/UNNEST | ✅ Both accepted | ✅ → UNNEST | ✅ → EXPLODE | ✅ → UNNEST |
 | PIVOT | ✅ Native | ✅ Pass-through | ✅ Pass-through | ❌ Error or crosstab |
 | Array subscript | ✅ Native | ✅ Pass-through | ✅ Pass-through | ✅ Pass-through |
 | DATE literal | ✅ Both forms | 🔄 → `DATE '...'` | 🔄 → `DATE('...')` | 🔄 → `DATE '...'` |
 | `::` cast | ✅ Native | ✅ Pass-through | 🔄 → `CAST()` | ✅ Pass-through |
-| Trailing commas | ✅ Accepted | ✅ Pass-through | ❌ Error | ❌ Error |
+| Trailing commas | ✅ Accepted | ✅ Pass-through | ✅ Stripped | ✅ Stripped |
 
 ---
 
