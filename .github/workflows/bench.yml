@@ -126,6 +126,7 @@ jobs:
         run: cargo run -p smelt-bench --bin export-action-benchmark --release
 
       - name: Store benchmark result (latency)
+        if: github.ref == 'refs/heads/main'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Smelt Latency Benchmarks
@@ -133,12 +134,13 @@ jobs:
           output-file-path: benchmarks/output/latency.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
-          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          auto-push: true
           alert-threshold: "150%"
           comment-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Store benchmark result (throughput)
+        if: github.ref == 'refs/heads/main'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Smelt Throughput Benchmarks
@@ -146,7 +148,7 @@ jobs:
           output-file-path: benchmarks/output/throughput.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
-          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          auto-push: true
           alert-threshold: "150%"
           comment-on-alert: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
