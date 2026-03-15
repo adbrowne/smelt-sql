@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773537073249,
+  "lastUpdate": 1773537075402,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.021684609963607,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "60294b5f827679b6605afd7060ac4191e3376b89",
+          "message": "Merge pull request #45 from adbrowne/chore/update-actions-node24\n\nBump GitHub Actions to Node.js 24-compatible versions",
+          "timestamp": "2026-03-15T12:09:57+11:00",
+          "tree_id": "be187364301d6fe053d6920e522a4e45b934aa88",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/60294b5f827679b6605afd7060ac4191e3376b89"
+        },
+        "date": 1773537074676,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.979774602093233,
             "unit": "MB/s"
           }
         ]
