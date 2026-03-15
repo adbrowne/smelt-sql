@@ -4,5 +4,7 @@
 //! consumer (LSP, CLI, optimizer) without pulling in heavy async/native deps.
 
 mod dialect;
+mod printer;
 
 pub use dialect::{BackendCapabilities, SqlDialect};
+pub use printer::{print, PrintContext};

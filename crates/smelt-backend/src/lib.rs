@@ -6,8 +6,8 @@
 mod error;
 mod types;
 
-pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use error::BackendError;
+pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use types::{ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec};
 
 use arrow::array::RecordBatch;
