@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -283,3 +284,105 @@ jobs:
           body_path: release-notes.md
           files: release-assets/*
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+
+  # ---------------------------------------------------------------------------
+  # Publish to PyPI (stable releases only)
+  # ---------------------------------------------------------------------------
+  pypi-publish:
+    name: Publish to PyPI
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/smelt-sql
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ---------------------------------------------------------------------------
+  # Publish to TestPyPI (pre-releases only)
+  # ---------------------------------------------------------------------------
+  testpypi-publish:
+    name: Publish to TestPyPI
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha'))
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  # ---------------------------------------------------------------------------
+  # Publish VSCode extension (stable releases only)
+  # ---------------------------------------------------------------------------
+  vscode-publish:
+    name: Publish VSCode Extension
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: cd editors/vscode && npm ci
+
+      - name: Publish to VS Marketplace
+        run: cd editors/vscode && npx vsce publish -p ${{ secrets.VS_MARKETPLACE_TOKEN }}
+
+      - name: Publish to Open VSX
+        continue-on-error: true
+        run: cd editors/vscode && npx ovsx publish -p ${{ secrets.OPEN_VSX_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Publish crates to crates.io (stable releases only)
+  # ---------------------------------------------------------------------------
+  crates-publish:
+    name: Publish to crates.io
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha')
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish smelt-types
+        run: cargo publish -p smelt-types
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish smelt-parser
+        run: cargo publish -p smelt-parser
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish smelt-dialect
+        run: cargo publish -p smelt-dialect

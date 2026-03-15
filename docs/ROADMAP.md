@@ -2330,52 +2330,61 @@ Automate GitHub Release creation with attached artifacts.
 - Release notes auto-generated from git log (previous tag to HEAD)
 - Pre-release detection for tags containing `-rc`, `-beta`, or `-alpha`
 
-### 🔮 Phase R4: PyPI Publishing
+### ✅ Phase R4: PyPI Publishing (March 15, 2026)
 
 Publish Python wheels to PyPI so users can `pip install smelt-sql`.
 
-- `pypa/gh-action-pypi-publish` with OIDC trusted publishing (no API tokens)
-- Package name: **`smelt-sql`** (import as `import smelt`)
-- TestPyPI publishing for pre-release tags (`v*-rc*`, `v*-beta*`)
-- Verify install-from-PyPI works on a clean environment
+- `pypa/gh-action-pypi-publish@release/v1` with OIDC trusted publishing (no API tokens)
+- `id-token: write` permission added to release workflow
+- Stable releases (`v*` without pre-release suffix) publish to PyPI with `environment: pypi`
+- Pre-release tags (`-rc`, `-beta`, `-alpha`) publish to TestPyPI with `environment: testpypi`
+- One-time OIDC setup documented in `scripts/prepare-release.sh`
 
-### 🔮 Phase R5: VSCode Extension Publishing
+### ✅ Phase R5: VSCode Extension Publishing (March 15, 2026)
 
 Publish the VSCode extension to the Marketplace with runtime LSP discovery.
 
-- Update `extension.ts` LSP discovery chain: user config → Python environment (`smelt.lsp_binary_path()`) → `$PATH` lookup → `cargo run` fallback
-- Publish to VS Code Marketplace via `vsce publish`
-- Publish to Open VSX Registry for open-source editors
-- Extension stays lightweight — no bundled binary, relies on runtime discovery
+- Refactored `extension.ts` with `findLspCommand()` discovery chain:
+  1. User config (`smelt.serverPath` setting)
+  2. Python environment (`pip install smelt-sql` → `smelt_sql.lsp_binary_path()`)
+  3. `$PATH` lookup (`which smelt-lsp` / `where.exe smelt-lsp`)
+  4. Cargo fallback (development mode, only if Cargo.toml found)
+- Discovery method logged to output channel for debugging
+- `vscode-publish` CI job publishes to VS Code Marketplace via `vsce publish`
+- Open VSX publishing via `ovsx` (continue-on-error for optional registry)
+- `ovsx` added as devDependency in `editors/vscode/package.json`
 
-### 🔮 Phase R6: Documentation Site
+### ✅ Phase R6: Documentation Site (March 15, 2026)
 
 Public-facing documentation site built with MkDocs Material.
 
-- `docs-site/` directory with MkDocs Material configuration
-- Content reorganized from `README.md` and `docs/` into user-facing guides
-- `.github/workflows/docs.yml` deploys to GitHub Pages on push to `main`
-- Custom domain setup
+- `docs-site/mkdocs.yml` with Material theme, search, code copy, dark/light mode toggle
+- Initial pages: home, installation, quickstart, SQL models guide, editor setup, language reference
+- Content reorganized from `README.md` and `docs/` into user-facing structure
+- `.github/workflows/docs.yml` deploys to GitHub Pages on push to `main` (paths: `docs-site/**`, `README.md`, `docs/**`)
+- Uses `actions/deploy-pages@v4` with `actions/upload-pages-artifact@v3`
 
-### 🔮 Phase R7: Crate Publishing (optional)
+### ✅ Phase R7: Crate Publishing (March 15, 2026)
 
 Publish reusable Rust crates to crates.io for Rust ecosystem consumers.
 
-- Publish `smelt-parser`, `smelt-types`, `smelt-dialect` to crates.io
-- Internal crates keep `publish = false` in their `Cargo.toml`
-- Lower priority — primary audience installs via Python or standalone binary
+- Publishable crates (`smelt-parser`, `smelt-types`, `smelt-dialect`) have `description` and `repository` metadata
+- `smelt-dialect` path dependency on `smelt-parser` includes `version = "0.1.0"` for crates.io compatibility
+- 12 internal crates marked `publish = false`: smelt-backend, smelt-backend-duckdb, smelt-backend-spark, smelt-bench, smelt-cli, smelt-core, smelt-datagen, smelt-db, smelt-lsp, smelt-optimizer, smelt-parser-compat, smelt-ui
+- `crates-publish` CI job publishes in dependency order (smelt-types → smelt-parser → smelt-dialect) with index waits
+- Uses `CARGO_REGISTRY_TOKEN` secret, stable releases only
 
 ### Dependency Diagram
 
 ```
-R6 (Docs)  ─── independent, can ship anytime
+R6 (Docs)  ─── ✅
 
-R1 (Maturin) → R2 (CI Builds) → R3 (GitHub Releases)  ← critical path
+R1 (Maturin) → R2 (CI Builds) → R3 (GitHub Releases)  ← all ✅
                                        │
-                                       ├──→ R4 (PyPI)
-                                       └──→ R5 (VSCode Extension)
+                                       ├──→ R4 (PyPI)         ✅
+                                       └──→ R5 (VSCode Ext)   ✅
 
-R7 (Crates.io) ─── anytime after R3
+R7 (Crates.io) ─── ✅
 ```
 
 ---
