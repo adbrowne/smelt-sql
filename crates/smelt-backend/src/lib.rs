@@ -3,11 +3,10 @@
 //! This crate defines the abstract interface that all smelt backends must implement,
 //! enabling multi-backend support (DuckDB, Spark, etc.).
 
-mod dialect;
 mod error;
 mod types;
 
-pub use dialect::{BackendCapabilities, SqlDialect};
+pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use error::BackendError;
 pub use types::{ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec};
 

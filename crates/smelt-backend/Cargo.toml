@@ -7,6 +7,9 @@ license.workspace = true
 description = "Backend trait and types for smelt execution engines"
 
 [dependencies]
+# Dialect types (lightweight, sync-only)
+smelt-dialect = { path = "../smelt-dialect" }
+
 # Async runtime
 tokio.workspace = true
 
