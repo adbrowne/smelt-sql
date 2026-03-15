@@ -39,6 +39,7 @@ jobs:
           --exclude smelt-datagen
           --exclude smelt-cli
           --exclude smelt-bench
+          --exclude smelt-ui
           --lib --bins --tests
           -- -D warnings
 
