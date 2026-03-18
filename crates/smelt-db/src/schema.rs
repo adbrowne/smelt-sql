@@ -122,6 +122,85 @@ impl ModelSchema {
     }
 }
 
+/// Represents a model as a function: inputs (required columns from refs) -> outputs
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFunctionType {
+    pub model_name: String,
+    pub inputs: Vec<FunctionInput>,
+    pub outputs: Vec<FunctionOutput>,
+    pub has_wildcard_output: bool,
+}
+
+/// An input ref with its required columns
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionInput {
+    pub ref_name: String,
+    pub columns: Vec<TypedField>,
+}
+
+/// A typed field in an input constraint
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedField {
+    pub name: String,
+    pub constraint: Option<TypedColumn>,
+}
+
+/// An output column with its inferred type
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionOutput {
+    pub name: String,
+    pub data_type: Option<TypedColumn>,
+}
+
+impl std::fmt::Display for ModelFunctionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}:", self.model_name)?;
+
+        // Inputs
+        if self.inputs.is_empty() {
+            write!(f, "  () -> ")?;
+        } else {
+            write!(f, "  (")?;
+            for (i, input) in self.inputs.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ",\n   ")?;
+                }
+                write!(f, "{}: {{", input.ref_name)?;
+                for (j, col) in input.columns.iter().enumerate() {
+                    if j > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", col.name)?;
+                    if let Some(constraint) = &col.constraint {
+                        write!(f, ": {}", constraint.data_type)?;
+                    }
+                }
+                write!(f, "}}")?;
+            }
+            write!(f, ")\n  -> ")?;
+        }
+
+        // Outputs
+        write!(f, "{{")?;
+        for (i, output) in self.outputs.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", output.name)?;
+            if let Some(dt) = &output.data_type {
+                write!(f, ": {}", dt.data_type)?;
+            }
+        }
+        if self.has_wildcard_output {
+            if !self.outputs.is_empty() {
+                write!(f, ", ")?;
+            }
+            write!(f, "...")?;
+        }
+        write!(f, "}}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

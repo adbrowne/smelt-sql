@@ -15,8 +15,8 @@ pub mod schema;
 pub mod type_inference;
 
 pub use schema::{
-    Column, ColumnConstraint, ColumnSource, InputConstraint, ModelSchema, ResolvedSchema,
-    RowExtension,
+    Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
+    ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
 };
 pub use type_inference::{
     infer_cte_columns, infer_expression_type, infer_select_column_types, TypeContext,
@@ -121,6 +121,9 @@ pub trait TypeChecking: Schema {
 
     /// Extract input constraints from a model's SQL
     fn model_input_constraints(&self, path: PathBuf) -> Arc<Vec<InputConstraint>>;
+
+    /// Get the function type signature of a model (inputs -> outputs)
+    fn model_function_type(&self, path: PathBuf) -> Arc<schema::ModelFunctionType>;
 }
 
 /// The main database that combines all query groups
@@ -1226,11 +1229,13 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
         };
 
     // Extract column references from expressions recursively
+    // `type_hint` is an optional type constraint inferred from the expression context
     #[allow(clippy::type_complexity)]
     fn collect_column_refs(
         expr: &smelt_parser::ast::Expr,
         alias_to_ref: &HashMap<String, String>,
         ctx: &TypeContext,
+        type_hint: Option<&TypedColumn>,
         record: &mut dyn FnMut(&str, &str, Option<TypedColumn>, TextRange),
     ) {
         if let Some(col_ref) = expr.as_column_ref() {
@@ -1239,37 +1244,91 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
                 return;
             }
 
+            // Use type_hint first, then fall back to ctx lookup
+            let inferred_type = type_hint.cloned();
+
             if let Some(qualifier) = col_ref.qualifier() {
                 // Qualified: t.column_name -> look up qualifier in alias map
                 let resolved = ctx
                     .resolve_alias(qualifier)
                     .unwrap_or_else(|| qualifier.to_string());
                 if let Some(ref_name) = alias_to_ref.get(&resolved) {
-                    let inferred = ctx.lookup_column(Some(qualifier), &col_name).cloned();
-                    record(ref_name, &col_name, inferred, expr.text_range());
+                    let final_type = inferred_type
+                        .or_else(|| ctx.lookup_column(Some(qualifier), &col_name).cloned());
+                    record(ref_name, &col_name, final_type, expr.text_range());
                 }
             } else if alias_to_ref.len() == 1 {
                 // Unqualified with single ref: assume it comes from that ref
                 let ref_name = alias_to_ref.values().next().unwrap();
-                let inferred = ctx.lookup_column(None, &col_name).cloned();
-                record(ref_name, &col_name, inferred, expr.text_range());
+                let final_type =
+                    inferred_type.or_else(|| ctx.lookup_column(None, &col_name).cloned());
+                record(ref_name, &col_name, final_type, expr.text_range());
             }
+            return;
         }
 
-        // Recurse into function arguments
+        // Recurse into function arguments with type hints for aggregates
         if let Some(func) = expr.as_function_call() {
+            let func_name = func.name().map(|n| n.to_uppercase()).unwrap_or_default();
+            let arg_hint = match func_name.as_str() {
+                // SUM/AVG require numeric arguments
+                "SUM" | "AVG" => Some(TypedColumn {
+                    data_type: DataType::Double,
+                    nullable: true,
+                }),
+                // COUNT doesn't constrain argument type
+                _ => None,
+            };
             for arg in func.arguments() {
-                collect_column_refs(&arg, alias_to_ref, ctx, record);
+                collect_column_refs(&arg, alias_to_ref, ctx, arg_hint.as_ref(), record);
             }
+            return;
         }
 
-        // Recurse into binary expressions
+        // Recurse into binary expressions with cross-side type inference
         if let Some(bin) = expr.as_binary() {
-            if let Some(lhs) = bin.left() {
-                collect_column_refs(&lhs, alias_to_ref, ctx, record);
+            let lhs = bin.left();
+            let rhs = bin.right();
+
+            // Try to infer type from each side to hint the other
+            let lhs_type = lhs.as_ref().and_then(|e| infer_expression_type(e, ctx));
+            let rhs_type = rhs.as_ref().and_then(|e| infer_expression_type(e, ctx));
+
+            // If one side is a non-column typed expression, use it as hint for the other
+            let lhs_is_col = lhs.as_ref().and_then(|e| e.as_column_ref()).is_some();
+            let rhs_is_col = rhs.as_ref().and_then(|e| e.as_column_ref()).is_some();
+
+            if let Some(l) = &lhs {
+                let hint = if lhs_is_col && !rhs_is_col {
+                    rhs_type.as_ref()
+                } else {
+                    None
+                };
+                collect_column_refs(l, alias_to_ref, ctx, hint, record);
             }
-            if let Some(rhs) = bin.right() {
-                collect_column_refs(&rhs, alias_to_ref, ctx, record);
+            if let Some(r) = &rhs {
+                let hint = if rhs_is_col && !lhs_is_col {
+                    lhs_type.as_ref()
+                } else {
+                    None
+                };
+                collect_column_refs(r, alias_to_ref, ctx, hint, record);
+            }
+            return;
+        }
+
+        // Recurse into CASE expressions
+        if let Some(case_expr) = expr.as_case() {
+            for when_clause in case_expr.when_clauses() {
+                if let Some(cond) = when_clause.condition() {
+                    collect_column_refs(&cond, alias_to_ref, ctx, None, record);
+                }
+                if let Some(result) = when_clause.result() {
+                    collect_column_refs(&result, alias_to_ref, ctx, None, record);
+                }
+            }
+            if let Some(else_expr) = case_expr.else_expr() {
+                collect_column_refs(&else_expr, alias_to_ref, ctx, None, record);
             }
         }
     }
@@ -1278,7 +1337,7 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
     if let Some(select_list) = select_stmt.select_list() {
         for item in select_list.items() {
             if let Some(expr) = item.expression() {
-                collect_column_refs(&expr, &alias_to_ref, &ctx, &mut record_constraint);
+                collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
             }
         }
     }
@@ -1286,7 +1345,7 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
     // Collect from WHERE clause
     if let Some(where_clause) = select_stmt.where_clause() {
         if let Some(expr) = where_clause.expression() {
-            collect_column_refs(&expr, &alias_to_ref, &ctx, &mut record_constraint);
+            collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
         }
     }
 
@@ -1295,8 +1354,37 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
         for join in from_clause.joins() {
             if let Some(condition) = join.condition() {
                 if let Some(on_expr) = condition.on_expression() {
-                    collect_column_refs(&on_expr, &alias_to_ref, &ctx, &mut record_constraint);
+                    collect_column_refs(
+                        &on_expr,
+                        &alias_to_ref,
+                        &ctx,
+                        None,
+                        &mut record_constraint,
+                    );
                 }
+            }
+        }
+    }
+
+    // Collect from GROUP BY clause
+    if let Some(group_by) = select_stmt.group_by_clause() {
+        for expr in group_by.expressions() {
+            collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
+        }
+    }
+
+    // Collect from HAVING clause
+    if let Some(having) = select_stmt.having_clause() {
+        if let Some(expr) = having.expression() {
+            collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
+        }
+    }
+
+    // Collect from ORDER BY clause
+    if let Some(order_by) = select_stmt.order_by_clause() {
+        for item in order_by.items() {
+            if let Some(expr) = item.expression() {
+                collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
             }
         }
     }
@@ -1311,6 +1399,63 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
         .collect();
 
     Arc::new(constraints)
+}
+
+fn model_function_type(db: &dyn TypeChecking, path: PathBuf) -> Arc<schema::ModelFunctionType> {
+    use schema::{FunctionInput, FunctionOutput, TypedField};
+
+    // Get model name from file stem
+    let model_name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Get input constraints
+    let input_constraints = db.model_input_constraints(path.clone());
+
+    // Build inputs from constraints
+    let mut inputs: Vec<FunctionInput> = input_constraints
+        .iter()
+        .map(|ic| {
+            let mut columns: Vec<TypedField> = ic
+                .required_columns
+                .iter()
+                .map(|(col_name, constraint)| TypedField {
+                    name: col_name.clone(),
+                    constraint: constraint.expected_type.clone(),
+                })
+                .collect();
+            columns.sort_by(|a, b| a.name.cmp(&b.name));
+            FunctionInput {
+                ref_name: ic.ref_name.clone(),
+                columns,
+            }
+        })
+        .collect();
+    inputs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+
+    // Get typed output schema
+    let typed_schema = db.typed_model_schema(path.clone());
+
+    // Build outputs
+    let outputs: Vec<FunctionOutput> = typed_schema
+        .columns
+        .iter()
+        .filter(|col| col.name != "*")
+        .map(|col| FunctionOutput {
+            name: col.name.clone(),
+            data_type: col.data_type.clone(),
+        })
+        .collect();
+
+    let has_wildcard_output = !typed_schema.row_extensions.is_empty();
+
+    Arc::new(schema::ModelFunctionType {
+        model_name,
+        inputs,
+        outputs,
+        has_wildcard_output,
+    })
 }
 
 #[cfg(test)]
@@ -3235,5 +3380,273 @@ sources:
             model.is_some(),
             "Model with frontmatter should parse successfully"
         );
+    }
+
+    // Helper to set up a DB with a single model for function type tests
+    fn setup_single_model(sql: &str) -> (Database, PathBuf) {
+        let mut db = Database::default();
+        let path = PathBuf::from("test_model.sql");
+        db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+        db.set_all_files(Arc::new(vec![path.clone()]));
+        db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+        (db, path)
+    }
+
+    // Helper to set up a DB with multiple models for function type tests
+    fn setup_multi_model(models: &[(&str, &str)]) -> (Database, Vec<PathBuf>) {
+        let mut db = Database::default();
+        let mut paths = Vec::new();
+        for (name, sql) in models {
+            let path = PathBuf::from(format!("models/{}.sql", name));
+            db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+            db.set_file_project_root(path.clone(), PathBuf::from("."));
+            paths.push(path);
+        }
+        db.set_all_files(Arc::new(paths.clone()));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+        (db, paths)
+    }
+
+    #[test]
+    fn test_function_type_single_ref_with_group_by() {
+        let (db, path) = setup_single_model(
+            "SELECT user_id, COUNT(*) as total_events\nFROM smelt.ref('events')\nGROUP BY user_id",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.model_name, "test_model");
+        assert_eq!(ft.inputs.len(), 1);
+        assert_eq!(ft.inputs[0].ref_name, "events");
+
+        // user_id should be in inputs (from SELECT + GROUP BY)
+        let user_id_col = ft.inputs[0].columns.iter().find(|c| c.name == "user_id");
+        assert!(user_id_col.is_some(), "user_id should be in inputs");
+
+        // Outputs
+        assert_eq!(ft.outputs.len(), 2);
+        assert_eq!(ft.outputs[0].name, "user_id");
+        assert_eq!(ft.outputs[1].name, "total_events");
+
+        // COUNT(*) -> BIGINT
+        assert_eq!(
+            ft.outputs[1].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::BigInt
+        );
+
+        assert!(!ft.has_wildcard_output);
+    }
+
+    #[test]
+    fn test_function_type_with_joins() {
+        let (db, paths) = setup_multi_model(&[
+            ("users", "SELECT user_id, user_name FROM source.users"),
+            (
+                "orders",
+                "SELECT order_id, user_id, amount FROM source.orders",
+            ),
+            (
+                "joined",
+                "SELECT u.user_id, u.user_name, SUM(o.amount) as total\nFROM smelt.ref('users') u\nINNER JOIN smelt.ref('orders') o ON u.user_id = o.user_id\nGROUP BY u.user_id, u.user_name",
+            ),
+        ]);
+
+        let ft = db.model_function_type(paths[2].clone());
+
+        assert_eq!(ft.model_name, "joined");
+        assert_eq!(ft.inputs.len(), 2);
+
+        // Should have both refs as inputs
+        let users_input = ft.inputs.iter().find(|i| i.ref_name == "users");
+        let orders_input = ft.inputs.iter().find(|i| i.ref_name == "orders");
+        assert!(users_input.is_some(), "inputs: {:?}", ft.inputs);
+        assert!(orders_input.is_some(), "inputs: {:?}", ft.inputs);
+
+        let users_input = users_input.unwrap();
+        assert!(users_input.columns.iter().any(|c| c.name == "user_id"));
+        assert!(users_input.columns.iter().any(|c| c.name == "user_name"));
+
+        let orders_input = orders_input.unwrap();
+        // Note: o.user_id from ON clause may not be collected due to parser limitation
+        // (BinaryExpr in ON conditions doesn't wrap operands in EXPRESSION nodes)
+        assert!(
+            orders_input.columns.iter().any(|c| c.name == "amount"),
+            "orders columns: {:?}",
+            orders_input.columns
+        );
+
+        // Outputs
+        assert_eq!(ft.outputs.len(), 3);
+    }
+
+    #[test]
+    fn test_input_constraint_where_clause() {
+        let (db, path) = setup_single_model(
+            "SELECT user_id, event_type\nFROM smelt.ref('events')\nWHERE event_type = 'click'",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.inputs.len(), 1);
+        let events = &ft.inputs[0];
+
+        // event_type should be in the inputs (collected from WHERE clause)
+        let event_type_col = events.columns.iter().find(|c| c.name == "event_type");
+        assert!(
+            event_type_col.is_some(),
+            "event_type from WHERE should appear in inputs"
+        );
+        // Note: type constraint from literal comparison (e.g., = 'click' -> VARCHAR)
+        // is limited by parser structure where binary expression children aren't
+        // wrapped in EXPRESSION nodes, so the whole WHERE expr is seen as a column ref.
+    }
+
+    #[test]
+    fn test_input_constraint_sum_numeric() {
+        let (db, path) = setup_single_model(
+            "SELECT user_id, SUM(amount) as total\nFROM smelt.ref('orders')\nGROUP BY user_id",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.inputs.len(), 1);
+        let orders = &ft.inputs[0];
+
+        // amount should have numeric constraint from SUM()
+        let amount_col = orders.columns.iter().find(|c| c.name == "amount");
+        assert!(amount_col.is_some());
+        let constraint = &amount_col.unwrap().constraint;
+        assert!(
+            constraint.is_some(),
+            "SUM argument should have numeric constraint"
+        );
+        assert_eq!(
+            constraint.as_ref().unwrap().data_type,
+            smelt_types::DataType::Double
+        );
+    }
+
+    #[test]
+    fn test_output_count_bigint() {
+        let (db, path) = setup_single_model(
+            "SELECT user_id, COUNT(*) as cnt\nFROM smelt.ref('events')\nGROUP BY user_id",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.outputs.len(), 2);
+        assert_eq!(ft.outputs[0].name, "user_id");
+        assert_eq!(ft.outputs[1].name, "cnt");
+
+        // COUNT(*) -> BIGINT
+        assert_eq!(
+            ft.outputs[1].data_type.as_ref().unwrap().data_type,
+            smelt_types::DataType::BigInt
+        );
+    }
+
+    #[test]
+    fn test_wildcard_output_marking() {
+        let (db, path) = setup_single_model("SELECT *\nFROM smelt.ref('events')");
+
+        let ft = db.model_function_type(path);
+
+        assert!(
+            ft.has_wildcard_output,
+            "SELECT * should set has_wildcard_output"
+        );
+        // No explicit columns in outputs
+        assert!(ft.outputs.is_empty());
+    }
+
+    #[test]
+    fn test_function_type_group_by_columns_collected() {
+        // Ensure GROUP BY columns that don't appear in SELECT are still in inputs
+        let (db, path) = setup_single_model(
+            "SELECT COUNT(*) as cnt\nFROM smelt.ref('events')\nGROUP BY category",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.inputs.len(), 1);
+        let events = &ft.inputs[0];
+        assert!(
+            events.columns.iter().any(|c| c.name == "category"),
+            "GROUP BY column should appear in inputs"
+        );
+    }
+
+    #[test]
+    fn test_function_type_having_columns_collected() {
+        let (db, path) = setup_single_model(
+            "SELECT user_id, COUNT(*) as cnt\nFROM smelt.ref('events')\nGROUP BY user_id\nHAVING COUNT(*) > 5",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.inputs.len(), 1);
+        // user_id should be in inputs (from SELECT + GROUP BY)
+        assert!(ft.inputs[0].columns.iter().any(|c| c.name == "user_id"));
+    }
+
+    #[test]
+    fn test_function_type_order_by_columns_collected() {
+        let (db, path) =
+            setup_single_model("SELECT user_id\nFROM smelt.ref('events')\nORDER BY event_time");
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.inputs.len(), 1);
+        let events = &ft.inputs[0];
+        assert!(
+            events.columns.iter().any(|c| c.name == "event_time"),
+            "ORDER BY column should appear in inputs"
+        );
+        assert!(
+            events.columns.iter().any(|c| c.name == "user_id"),
+            "SELECT column should appear in inputs"
+        );
+    }
+
+    #[test]
+    fn test_function_type_display() {
+        let ft = schema::ModelFunctionType {
+            model_name: "user_stats".to_string(),
+            inputs: vec![schema::FunctionInput {
+                ref_name: "events".to_string(),
+                columns: vec![
+                    schema::TypedField {
+                        name: "event_id".to_string(),
+                        constraint: None,
+                    },
+                    schema::TypedField {
+                        name: "user_id".to_string(),
+                        constraint: None,
+                    },
+                ],
+            }],
+            outputs: vec![
+                schema::FunctionOutput {
+                    name: "user_id".to_string(),
+                    data_type: None,
+                },
+                schema::FunctionOutput {
+                    name: "total_events".to_string(),
+                    data_type: Some(TypedColumn {
+                        data_type: smelt_types::DataType::BigInt,
+                        nullable: false,
+                    }),
+                },
+            ],
+            has_wildcard_output: false,
+        };
+
+        let display = format!("{}", ft);
+        assert!(display.contains("user_stats:"));
+        assert!(display.contains("events: {event_id, user_id}"));
+        assert!(display.contains("total_events: BIGINT"));
     }
 }

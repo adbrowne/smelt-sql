@@ -72,6 +72,10 @@ impl SelectStmt {
         self.0.children().find_map(WhereClause::cast)
     }
 
+    pub fn group_by_clause(&self) -> Option<GroupByClause> {
+        self.0.children().find_map(GroupByClause::cast)
+    }
+
     pub fn having_clause(&self) -> Option<HavingClause> {
         self.0.children().find_map(HavingClause::cast)
     }
@@ -1495,6 +1499,25 @@ impl ExistsExpr {
 }
 
 // ===== Phase 11: SQL Clause AST Wrappers =====
+
+/// GROUP BY clause
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupByClause(SyntaxNode);
+
+impl GroupByClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == GROUP_BY_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the expressions in the GROUP BY clause
+    pub fn expressions(&self) -> impl Iterator<Item = Expr> + '_ {
+        self.0.children().filter_map(Expr::cast)
+    }
+}
 
 /// HAVING clause
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

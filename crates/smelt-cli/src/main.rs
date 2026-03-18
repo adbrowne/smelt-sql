@@ -38,6 +38,8 @@ enum Commands {
     Seed(SeedArgs),
     /// Seed the database then run all models (seed + run)
     Build(BuildArgs),
+    /// Show the function type signature of models (inputs -> outputs)
+    Type(TypeArgs),
 }
 
 #[derive(Parser)]
@@ -166,6 +168,16 @@ struct BuildArgs {
     select: Vec<String>,
 }
 
+#[derive(Parser)]
+struct TypeArgs {
+    /// Name of the model to inspect (omit to show all models)
+    model_name: Option<String>,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -176,6 +188,7 @@ async fn main() -> Result<()> {
         Commands::Ui(args) => ui(args).await,
         Commands::Seed(args) => run_seed(args).await,
         Commands::Build(args) => build(args).await,
+        Commands::Type(args) => show_type(args).await,
     }
 }
 
@@ -1171,4 +1184,76 @@ async fn ui(args: UiArgs) -> Result<()> {
         &args.host,
     )
     .await
+}
+
+async fn show_type(args: TypeArgs) -> Result<()> {
+    // 1. Find project root
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    // 2. Load configuration and discover models
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    // 3. Initialize Salsa database
+    let mut db = smelt_db::Database::default();
+
+    // Load sources.yml or sources.yaml
+    let sources_yaml = {
+        let yml_path = project_dir.join("sources.yml");
+        let yaml_path = project_dir.join("sources.yaml");
+        match (yml_path.exists(), yaml_path.exists()) {
+            (true, true) => {
+                eprintln!(
+                    "Warning: Both sources.yml and sources.yaml exist in {}",
+                    project_dir.display()
+                );
+                std::fs::read_to_string(&yml_path).unwrap_or_default()
+            }
+            (true, false) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
+            (false, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
+            (false, false) => String::new(),
+        }
+    };
+    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
+    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
+
+    // Register all model files
+    let mut file_paths = Vec::new();
+    for model in &models {
+        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+        db.set_file_project_root(model.path.clone(), project_dir.clone());
+        file_paths.push(model.path.clone());
+    }
+    db.set_all_files(Arc::new(file_paths));
+
+    // 4. Show function types
+    if let Some(model_name) = &args.model_name {
+        // Show single model
+        let model = models
+            .iter()
+            .find(|m| m.name == *model_name)
+            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", model_name))?;
+        let ft = db.model_function_type(model.path.clone());
+        println!("{}", ft);
+    } else {
+        // Show all models sorted by name
+        let mut model_list: Vec<_> = models.iter().collect();
+        model_list.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for (i, model) in model_list.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            let ft = db.model_function_type(model.path.clone());
+            println!("{}", ft);
+        }
+    }
+
+    Ok(())
 }
