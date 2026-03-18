@@ -1176,7 +1176,7 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
     if let Some(from_clause) = select_stmt.from_clause() {
         for table_ref in from_clause.table_refs() {
             if let Some(func) = table_ref.function_call() {
-                if let Some(ref_call) = RefCall::from_function_call(func) {
+                if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
                     if let Some(model_name) = ref_call.model_name() {
                         // Register the model name itself
                         alias_to_ref.insert(model_name.clone(), model_name.clone());
@@ -1186,16 +1186,54 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
                         }
                     }
                 }
+                if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
+                    let input_name = source_call
+                        .table_name()
+                        .or_else(|| source_call.qualified_name())
+                        .unwrap_or_default();
+                    if !input_name.is_empty() {
+                        alias_to_ref.insert(input_name.clone(), input_name.clone());
+                        // Map qualified name so alias resolution works
+                        // (ctx resolves alias -> qualified_name, we need qualified_name -> input_name)
+                        if let Some(qn) = source_call.qualified_name() {
+                            if qn != input_name {
+                                alias_to_ref.insert(qn, input_name.clone());
+                            }
+                        }
+                        if let Some(alias) = table_ref.alias() {
+                            alias_to_ref.insert(alias, input_name);
+                        }
+                    }
+                }
             }
         }
         for join in from_clause.joins() {
             if let Some(table_ref) = join.table_ref() {
                 if let Some(func) = table_ref.function_call() {
-                    if let Some(ref_call) = RefCall::from_function_call(func) {
+                    if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
                         if let Some(model_name) = ref_call.model_name() {
                             alias_to_ref.insert(model_name.clone(), model_name.clone());
                             if let Some(alias) = table_ref.alias() {
                                 alias_to_ref.insert(alias, model_name);
+                            }
+                        }
+                    }
+                    if let Some(source_call) =
+                        smelt_parser::ast::SourceCall::from_function_call(func)
+                    {
+                        let input_name = source_call
+                            .table_name()
+                            .or_else(|| source_call.qualified_name())
+                            .unwrap_or_default();
+                        if !input_name.is_empty() {
+                            alias_to_ref.insert(input_name.clone(), input_name.clone());
+                            if let Some(qn) = source_call.qualified_name() {
+                                if qn != input_name {
+                                    alias_to_ref.insert(qn, input_name.clone());
+                                }
+                            }
+                            if let Some(alias) = table_ref.alias() {
+                                alias_to_ref.insert(alias, input_name);
                             }
                         }
                     }
@@ -1257,12 +1295,16 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
                         .or_else(|| ctx.lookup_column(Some(qualifier), &col_name).cloned());
                     record(ref_name, &col_name, final_type, expr.text_range());
                 }
-            } else if alias_to_ref.len() == 1 {
-                // Unqualified with single ref: assume it comes from that ref
-                let ref_name = alias_to_ref.values().next().unwrap();
-                let final_type =
-                    inferred_type.or_else(|| ctx.lookup_column(None, &col_name).cloned());
-                record(ref_name, &col_name, final_type, expr.text_range());
+            } else {
+                let unique_refs: std::collections::HashSet<&String> =
+                    alias_to_ref.values().collect();
+                if unique_refs.len() == 1 {
+                    // Unqualified with single ref: assume it comes from that ref
+                    let ref_name = alias_to_ref.values().next().unwrap();
+                    let final_type =
+                        inferred_type.or_else(|| ctx.lookup_column(None, &col_name).cloned());
+                    record(ref_name, &col_name, final_type, expr.text_range());
+                }
             }
             return;
         }
@@ -3608,6 +3650,60 @@ sources:
         assert!(
             events.columns.iter().any(|c| c.name == "user_id"),
             "SELECT column should appear in inputs"
+        );
+    }
+
+    #[test]
+    fn test_function_type_with_source() {
+        let (db, path) =
+            setup_single_model("SELECT user_id, event_timestamp\nFROM smelt.source('raw.events')");
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.model_name, "test_model");
+        assert_eq!(ft.inputs.len(), 1);
+        assert_eq!(ft.inputs[0].ref_name, "events");
+
+        let col_names: Vec<&str> = ft.inputs[0]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(
+            col_names.contains(&"user_id"),
+            "user_id should be in inputs"
+        );
+        assert!(
+            col_names.contains(&"event_timestamp"),
+            "event_timestamp should be in inputs"
+        );
+
+        assert_eq!(ft.outputs.len(), 2);
+    }
+
+    #[test]
+    fn test_function_type_source_with_alias() {
+        let (db, path) = setup_single_model(
+            "SELECT e.user_id, e.event_timestamp\nFROM smelt.source('raw.events') e",
+        );
+
+        let ft = db.model_function_type(path);
+
+        assert_eq!(ft.inputs.len(), 1);
+        assert_eq!(ft.inputs[0].ref_name, "events");
+
+        let col_names: Vec<&str> = ft.inputs[0]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(
+            col_names.contains(&"user_id"),
+            "user_id should be in inputs"
+        );
+        assert!(
+            col_names.contains(&"event_timestamp"),
+            "event_timestamp should be in inputs"
         );
     }
 
