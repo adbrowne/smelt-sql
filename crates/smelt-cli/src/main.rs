@@ -6,14 +6,13 @@ use smelt_backend::{Backend, PartitionSpec};
 #[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    discover_python_models, executor, find_project_root, inject_time_filter, parse_selector,
-    resolve_refs_in_sql, seed, BackendType, Config, DependencyGraph, ModelDiscovery, SourcesConfig,
-    SqlCompiler, TimeRange,
+    discover_python_models, executor, find_project_root, init_db, inject_time_filter,
+    parse_selector, resolve_refs_in_sql, seed, BackendType, Config, DependencyGraph,
+    ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
-use smelt_db::{ColumnSource, Inputs, ModelSchema, TypeChecking};
+use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
 use smelt_optimizer::{Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[cfg(feature = "spark")]
 use smelt_backend_spark::SparkBackend;
@@ -989,37 +988,8 @@ async fn table(args: TableArgs) -> Result<()> {
         models.extend(python_models);
     }
 
-    // 3. Initialize Salsa database (same pattern as LSP)
-    let mut db = smelt_db::Database::default();
-
-    // Load sources.yml or sources.yaml
-    let sources_yaml = {
-        let yml_path = project_dir.join("sources.yml");
-        let yaml_path = project_dir.join("sources.yaml");
-        match (yml_path.exists(), yaml_path.exists()) {
-            (true, true) => {
-                eprintln!(
-                    "Warning: Both sources.yml and sources.yaml exist in {}",
-                    project_dir.display()
-                );
-                std::fs::read_to_string(&yml_path).unwrap_or_default()
-            }
-            (true, false) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
-            (false, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
-            (false, false) => String::new(),
-        }
-    };
-    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
-    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
-
-    // Register all model files
-    let mut file_paths = Vec::new();
-    for model in &models {
-        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
-        db.set_file_project_root(model.path.clone(), project_dir.clone());
-        file_paths.push(model.path.clone());
-    }
-    db.set_all_files(Arc::new(file_paths));
+    // 3. Initialize Salsa database
+    let db = init_db(&project_dir, &models);
 
     // 4. Find the model path
     let model = models
@@ -1134,26 +1104,7 @@ async fn ui(args: UiArgs) -> Result<()> {
     println!("Found {} models", models.len());
 
     // Initialize smelt-db for schema queries
-    let mut db = smelt_db::Database::default();
-    let sources_yaml = {
-        let yml_path = project_dir.join("sources.yml");
-        let yaml_path = project_dir.join("sources.yaml");
-        match (yml_path.exists(), yaml_path.exists()) {
-            (true, _) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
-            (_, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
-            _ => String::new(),
-        }
-    };
-    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
-    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
-
-    let mut file_paths = Vec::new();
-    for model in &models {
-        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
-        db.set_file_project_root(model.path.clone(), project_dir.clone());
-        file_paths.push(model.path.clone());
-    }
-    db.set_all_files(Arc::new(file_paths));
+    let db = init_db(&project_dir, &models);
 
     // Build a smelt-core DependencyGraph for UI builders (they use smelt-core types)
     let core_models: Vec<smelt_core::ModelFile> = models
@@ -1196,41 +1147,29 @@ async fn show_type(args: TypeArgs) -> Result<()> {
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
-    let models = discovery
+    let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    // 3. Initialize Salsa database
-    let mut db = smelt_db::Database::default();
+    // Discover Python models
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
 
-    // Load sources.yml or sources.yaml
-    let sources_yaml = {
-        let yml_path = project_dir.join("sources.yml");
-        let yaml_path = project_dir.join("sources.yaml");
-        match (yml_path.exists(), yaml_path.exists()) {
-            (true, true) => {
-                eprintln!(
-                    "Warning: Both sources.yml and sources.yaml exist in {}",
-                    project_dir.display()
-                );
-                std::fs::read_to_string(&yml_path).unwrap_or_default()
-            }
-            (true, false) => std::fs::read_to_string(&yml_path).unwrap_or_default(),
-            (false, true) => std::fs::read_to_string(&yaml_path).unwrap_or_default(),
-            (false, false) => String::new(),
-        }
-    };
-    db.set_project_sources_yaml(project_dir.clone(), Arc::new(sources_yaml));
-    db.set_all_project_roots(Arc::new(vec![project_dir.clone()]));
-
-    // Register all model files
-    let mut file_paths = Vec::new();
-    for model in &models {
-        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
-        db.set_file_project_root(model.path.clone(), project_dir.clone());
-        file_paths.push(model.path.clone());
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
     }
-    db.set_all_files(Arc::new(file_paths));
+
+    // 3. Initialize Salsa database
+    let db = init_db(&project_dir, &models);
 
     // 4. Show function types
     if let Some(model_name) = &args.model_name {
