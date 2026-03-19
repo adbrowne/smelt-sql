@@ -10,7 +10,21 @@
 //!
 //! Requires Docker to be available.
 
+use smelt_dialect::{BackendCapabilities, PrintContext, SqlDialect};
 use std::process::Command;
+
+/// Rewrite SQL for Spark dialect using smelt-dialect's rewrite system
+fn rewrite_for_spark(sql: &str) -> String {
+    let parse = smelt_parser::parse(sql);
+    let dialect = SqlDialect::SparkSQL;
+    let capabilities = BackendCapabilities::spark();
+    let ctx = PrintContext {
+        dialect: &dialect,
+        capabilities: &capabilities,
+        schema: "default",
+    };
+    smelt_dialect::print(&parse.syntax(), &ctx)
+}
 
 /// Check if Docker is available and the Spark image can be used
 fn spark_docker_available() -> bool {
@@ -67,13 +81,21 @@ fn test_spark_basic_select() {
 #[test]
 #[ignore]
 fn test_spark_qualify() {
+    // Spark doesn't support QUALIFY natively — smelt-dialect rewrites it to a subquery
     let sql =
         "SELECT * FROM (SELECT 1 AS id, 'a' AS name) t QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1";
-    let result = spark_explain(sql);
+    let rewritten = rewrite_for_spark(sql);
+    assert!(
+        !rewritten.contains("QUALIFY"),
+        "QUALIFY should be rewritten for Spark, got: {}",
+        rewritten
+    );
+    let result = spark_explain(&rewritten);
     assert!(
         result.is_ok(),
-        "QUALIFY should be valid in Spark: {:?}",
-        result.err()
+        "Rewritten QUALIFY should be valid in Spark: {:?}\nRewritten SQL: {}",
+        result.err(),
+        rewritten
     );
 }
 

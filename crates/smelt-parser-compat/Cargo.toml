@@ -13,6 +13,7 @@ regex = "1"                   # For pattern matching in gap detection
 proptest = "1.4"              # Property-based testing strategies
 
 [dev-dependencies]
+smelt-dialect = { path = "../smelt-dialect" }
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"        # PostgreSQL client for type checking
