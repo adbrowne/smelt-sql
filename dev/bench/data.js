@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774019116387,
+  "lastUpdate": 1774019117694,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1817,6 +1817,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.423570187058687,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3cd5a2a34f3ae57b96d322b32f5b959a67d6726e",
+          "message": "Drop macos-x86_64 builds: macos-13 runner deprecated\n\nGitHub Actions no longer supports the macos-13 runner. Remove\nmacos-x86_64 from build matrices in release and dev-release workflows.\nmacOS ARM64 (Apple Silicon) is the only supported macOS target; x86_64\nusers can run via Rosetta 2.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T02:03:36+11:00",
+          "tree_id": "48804c926af8d0dd2a6dcba9106e4de54a7d6e92",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3cd5a2a34f3ae57b96d322b32f5b959a67d6726e"
+        },
+        "date": 1774019117486,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.40641670726312,
             "unit": "MB/s"
           }
         ]
