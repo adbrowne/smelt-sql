@@ -1,4 +1,5 @@
 use serde::Serialize;
+use smelt_types::SqlFunction;
 
 /// Classification of a SELECT item for optimization analysis.
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +50,9 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
 
         if let Some(func) = expr.as_function_call() {
             let name = func.name().unwrap_or_default().to_uppercase();
-            if name == "COUNT" && has_distinct_keyword(&func) {
+            if SqlFunction::from_name(&name) == Some(SqlFunction::Count)
+                && has_distinct_keyword(&func)
+            {
                 let arg = extract_distinct_argument(&func);
                 items.push(SelectItemKind::CountDistinct {
                     argument: arg,
@@ -58,7 +61,7 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
                 continue;
             }
             // Check if it's any aggregate function
-            if is_aggregate_function(&name) {
+            if SqlFunction::from_name(&name).is_some_and(|f| f.is_aggregate()) {
                 items.push(SelectItemKind::OtherAggregate {
                     text: expr_text,
                     alias,
@@ -122,45 +125,6 @@ fn extract_distinct_argument(func: &smelt_parser::FunctionCall) -> String {
     } else {
         String::new()
     }
-}
-
-/// Check if a function name is a known aggregate.
-fn is_aggregate_function(name: &str) -> bool {
-    matches!(
-        name,
-        "COUNT"
-            | "SUM"
-            | "AVG"
-            | "MIN"
-            | "MAX"
-            | "STDDEV"
-            | "VARIANCE"
-            | "STDDEV_POP"
-            | "STDDEV_SAMP"
-            | "VAR_POP"
-            | "VAR_SAMP"
-            | "ARRAY_AGG"
-            | "STRING_AGG"
-            | "GROUP_CONCAT"
-            | "LISTAGG"
-            | "MEDIAN"
-            | "MODE"
-            | "PERCENTILE_CONT"
-            | "PERCENTILE_DISC"
-            | "APPROX_COUNT_DISTINCT"
-            | "ANY_VALUE"
-            | "FIRST"
-            | "LAST"
-            | "BOOL_AND"
-            | "BOOL_OR"
-            | "BIT_AND"
-            | "BIT_OR"
-            | "BIT_XOR"
-            | "CORR"
-            | "COVAR_POP"
-            | "COVAR_SAMP"
-            | "REGR_SLOPE"
-    )
 }
 
 /// Extract GROUP BY expressions from raw SQL text, resolving ordinal references.

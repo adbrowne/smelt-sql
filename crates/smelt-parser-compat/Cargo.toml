@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }
 pg_query = "6.1"              # PostgreSQL parser (vendored libpg_query)
 sqlparser = "0.61"            # SQL parser with Databricks dialect (Spark-compatible)
 regex = "1"                   # For pattern matching in gap detection

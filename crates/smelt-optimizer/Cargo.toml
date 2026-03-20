@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 smelt-parser = { path = "../smelt-parser" }
+smelt-types = { path = "../smelt-types" }
 rowan = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

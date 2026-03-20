@@ -3637,6 +3637,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "smelt-parser",
+ "smelt-types",
 ]
 
 [[package]]
@@ -3656,6 +3657,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "smelt-parser",
+ "smelt-types",
  "sqlparser",
  "testcontainers-modules",
  "tokio",

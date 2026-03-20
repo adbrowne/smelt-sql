@@ -5,7 +5,7 @@
 use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, SelectStmt, Subquery,
 };
-use smelt_types::{parse_type, DataType, TypedColumn};
+use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
 
 /// Context for type inference - provides source and upstream model schemas
@@ -333,304 +333,250 @@ fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) ->
 /// Infer the type of a function call (aggregates, etc.)
 fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedColumn> {
     let name = func.name()?.to_uppercase();
+    let sql_func = SqlFunction::from_name(&name)?;
 
-    match name.as_str() {
-        // Count functions always return BigInt
-        "COUNT" => Some(TypedColumn {
-            data_type: DataType::BigInt,
-            nullable: false, // COUNT never returns NULL (returns 0 for empty sets)
-        }),
-
-        // SUM - returns same numeric type or wider
-        "SUM" => {
-            // For now, default to Decimal for flexibility
-            // A more sophisticated implementation would look at the argument type
-            Some(TypedColumn {
-                data_type: DataType::Decimal {
-                    precision: 38,
-                    scale: 10,
-                },
-                nullable: true, // SUM of empty set is NULL
-            })
-        }
-
-        // AVG always returns floating point
-        "AVG" => Some(TypedColumn {
-            data_type: DataType::Double,
-            nullable: true, // AVG of empty set is NULL
-        }),
-
-        // MIN/MAX preserve the argument type
-        "MIN" | "MAX" => {
-            // Try to infer from the first argument
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: true, // MIN/MAX of empty set is NULL
-                    });
-                }
+    /// Helper: infer type from first argument, with a fallback
+    fn first_arg_type_or(
+        func: &FunctionCall,
+        ctx: &TypeContext,
+        fallback: DataType,
+        nullable: bool,
+    ) -> Option<TypedColumn> {
+        if let Some(arg) = func.arguments().first() {
+            if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                return Some(TypedColumn {
+                    data_type: arg_type.data_type,
+                    nullable,
+                });
             }
-            Some(TypedColumn {
-                data_type: DataType::Unknown,
-                nullable: true,
-            })
         }
+        Some(TypedColumn {
+            data_type: fallback,
+            nullable,
+        })
+    }
 
-        // COALESCE - returns first non-null, type is type of first argument
-        "COALESCE" => {
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: true, // Could be null if all args are null
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Unknown,
-                nullable: true,
-            })
-        }
-
-        // NULLIF - returns first arg type, always nullable
-        "NULLIF" => {
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: true, // NULLIF can always return null
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Unknown,
-                nullable: true,
-            })
-        }
-
-        // Window ranking functions - return BigInt
-        "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "NTILE" => Some(TypedColumn {
+    match sql_func {
+        SqlFunction::Count => Some(TypedColumn {
             data_type: DataType::BigInt,
             nullable: false,
         }),
 
-        // Window distribution functions - return Double (0.0 to 1.0)
-        "CUME_DIST" | "PERCENT_RANK" => Some(TypedColumn {
+        SqlFunction::Sum => Some(TypedColumn {
+            data_type: DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+            nullable: true,
+        }),
+
+        SqlFunction::Avg => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+
+        SqlFunction::Min | SqlFunction::Max => {
+            first_arg_type_or(func, ctx, DataType::Unknown, true)
+        }
+
+        SqlFunction::Coalesce => first_arg_type_or(func, ctx, DataType::Unknown, true),
+
+        SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::Unknown, true),
+
+        SqlFunction::RowNumber
+        | SqlFunction::Rank
+        | SqlFunction::DenseRank
+        | SqlFunction::Ntile => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: false,
+        }),
+
+        SqlFunction::CumeDist | SqlFunction::PercentRank => Some(TypedColumn {
             data_type: DataType::Double,
             nullable: false,
         }),
 
-        // Window navigation functions - preserve argument type
-        "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "NTH_VALUE" => {
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: true, // Window functions can return NULL at boundaries
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Unknown,
-                nullable: true,
-            })
-        }
+        SqlFunction::Lag
+        | SqlFunction::Lead
+        | SqlFunction::FirstValue
+        | SqlFunction::LastValue
+        | SqlFunction::NthValue => first_arg_type_or(func, ctx, DataType::Unknown, true),
 
-        // Date functions
-        "NOW" | "CURRENT_TIMESTAMP" => Some(TypedColumn {
+        SqlFunction::Now | SqlFunction::CurrentTimestamp => Some(TypedColumn {
             data_type: DataType::Timestamp {
                 with_timezone: false,
             },
             nullable: false,
         }),
 
-        "CURRENT_DATE" => Some(TypedColumn {
+        SqlFunction::CurrentDate => Some(TypedColumn {
             data_type: DataType::Date,
             nullable: false,
         }),
 
-        "DATE" | "DATE_TRUNC" => Some(TypedColumn {
+        SqlFunction::Date | SqlFunction::DateTrunc => Some(TypedColumn {
             data_type: DataType::Date,
             nullable: true,
         }),
 
-        // String functions
-        "CONCAT" | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "SUBSTRING" | "SUBSTR" => {
-            Some(TypedColumn {
-                data_type: DataType::Text,
-                nullable: true,
-            })
-        }
-
-        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => Some(TypedColumn {
-            data_type: DataType::Integer,
-            nullable: true,
-        }),
-
-        // Type conversion
-        "TO_CHAR" => Some(TypedColumn {
+        SqlFunction::Concat
+        | SqlFunction::Upper
+        | SqlFunction::Lower
+        | SqlFunction::Trim
+        | SqlFunction::Ltrim
+        | SqlFunction::Rtrim
+        | SqlFunction::Substring
+        | SqlFunction::Substr => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
         }),
 
-        // Boolean functions
-        "BOOL_AND" | "BOOL_OR" | "EVERY" => Some(TypedColumn {
-            data_type: DataType::Boolean,
-            nullable: true,
-        }),
-
-        // Math functions - preserve numeric type or return specific type
-        "ABS" | "SIGN" => {
-            // Preserve argument type
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: arg_type.nullable,
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Double,
-                nullable: true,
-            })
-        }
-
-        "ROUND" | "TRUNC" | "TRUNCATE" => {
-            // Preserve argument type (might become Integer if precision is 0)
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: arg_type.nullable,
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Double,
-                nullable: true,
-            })
-        }
-
-        "CEIL" | "CEILING" | "FLOOR" => {
-            // These return the same numeric type (might be Integer for integer input)
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: arg_type.nullable,
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Double,
-                nullable: true,
-            })
-        }
-
-        "POWER" | "POW" | "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" => Some(TypedColumn {
-            data_type: DataType::Double,
-            nullable: true,
-        }),
-
-        "MOD" => {
-            // MOD preserves integer types, returns Double for floats
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: true,
-                    });
-                }
-            }
+        SqlFunction::Length | SqlFunction::CharLength | SqlFunction::CharacterLength => {
             Some(TypedColumn {
                 data_type: DataType::Integer,
                 nullable: true,
             })
         }
 
-        // Trigonometric functions - always return Double
-        "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "SINH" | "COSH" | "TANH" => {
+        SqlFunction::ToChar => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        SqlFunction::BoolAnd | SqlFunction::BoolOr | SqlFunction::Every => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: true,
+        }),
+
+        SqlFunction::Abs | SqlFunction::Sign => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(arg_type);
+                }
+            }
             Some(TypedColumn {
                 data_type: DataType::Double,
                 nullable: true,
             })
         }
 
-        "PI" | "RANDOM" => Some(TypedColumn {
+        SqlFunction::Round | SqlFunction::Trunc | SqlFunction::Truncate => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(arg_type);
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        SqlFunction::Ceil | SqlFunction::Ceiling | SqlFunction::Floor => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    return Some(arg_type);
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        SqlFunction::Power
+        | SqlFunction::Pow
+        | SqlFunction::Sqrt
+        | SqlFunction::Exp
+        | SqlFunction::Ln
+        | SqlFunction::Log
+        | SqlFunction::Log10
+        | SqlFunction::Log2 => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+
+        SqlFunction::Mod => first_arg_type_or(func, ctx, DataType::Integer, true),
+
+        SqlFunction::Sin
+        | SqlFunction::Cos
+        | SqlFunction::Tan
+        | SqlFunction::Asin
+        | SqlFunction::Acos
+        | SqlFunction::Atan
+        | SqlFunction::Atan2
+        | SqlFunction::Sinh
+        | SqlFunction::Cosh
+        | SqlFunction::Tanh => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+
+        SqlFunction::Pi | SqlFunction::Random => Some(TypedColumn {
             data_type: DataType::Double,
             nullable: false,
         }),
 
-        // Date/time extraction - EXTRACT returns numeric
-        "EXTRACT" | "DATE_PART" => Some(TypedColumn {
-            data_type: DataType::Double, // PostgreSQL returns double precision
+        SqlFunction::Extract | SqlFunction::DatePart => Some(TypedColumn {
+            data_type: DataType::Double,
             nullable: true,
         }),
 
-        "MAKE_DATE" => Some(TypedColumn {
+        SqlFunction::MakeDate => Some(TypedColumn {
             data_type: DataType::Date,
             nullable: true,
         }),
 
-        "MAKE_TIME" => Some(TypedColumn {
+        SqlFunction::MakeTime => Some(TypedColumn {
             data_type: DataType::Time,
             nullable: true,
         }),
 
-        "MAKE_TIMESTAMP" | "MAKE_TIMESTAMPTZ" => Some(TypedColumn {
+        SqlFunction::MakeTimestamp | SqlFunction::MakeTimestamptz => Some(TypedColumn {
             data_type: DataType::Timestamp {
                 with_timezone: false,
             },
             nullable: true,
         }),
 
-        "AGE" => Some(TypedColumn {
+        SqlFunction::Age => Some(TypedColumn {
             data_type: DataType::Interval,
             nullable: true,
         }),
 
-        // Additional string functions
-        "REPLACE" | "TRANSLATE" | "REVERSE" | "REPEAT" | "LPAD" | "RPAD" | "INITCAP"
-        | "QUOTE_IDENT" | "QUOTE_LITERAL" => Some(TypedColumn {
+        SqlFunction::Replace
+        | SqlFunction::Translate
+        | SqlFunction::Reverse
+        | SqlFunction::Repeat
+        | SqlFunction::Lpad
+        | SqlFunction::Rpad
+        | SqlFunction::Initcap
+        | SqlFunction::QuoteIdent
+        | SqlFunction::QuoteLiteral => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
         }),
 
-        "LEFT" | "RIGHT" => Some(TypedColumn {
+        SqlFunction::Left | SqlFunction::Right => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
         }),
 
-        "POSITION" | "STRPOS" => Some(TypedColumn {
+        SqlFunction::Position | SqlFunction::Strpos => Some(TypedColumn {
             data_type: DataType::Integer,
             nullable: true,
         }),
 
-        "SPLIT_PART" => Some(TypedColumn {
+        SqlFunction::SplitPart => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
         }),
 
-        // GREATEST/LEAST - type of first argument (all args should be same type)
-        "GREATEST" | "LEAST" => {
-            if let Some(arg) = func.arguments().first() {
-                if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(TypedColumn {
-                        data_type: arg_type.data_type,
-                        nullable: true, // Could be NULL if any arg is NULL
-                    });
-                }
-            }
-            Some(TypedColumn {
-                data_type: DataType::Unknown,
-                nullable: true,
-            })
+        SqlFunction::Greatest | SqlFunction::Least => {
+            first_arg_type_or(func, ctx, DataType::Unknown, true)
         }
 
-        // Array aggregate
-        "ARRAY_AGG" => {
+        SqlFunction::ArrayAgg => {
             if let Some(arg) = func.arguments().first() {
                 if let Some(arg_type) = infer_expression_type(arg, ctx) {
                     return Some(TypedColumn {
@@ -645,22 +591,61 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             })
         }
 
-        // String aggregates
-        "STRING_AGG" | "LISTAGG" => Some(TypedColumn {
+        SqlFunction::StringAgg | SqlFunction::Listagg => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
         }),
 
-        // JSON functions (basic support)
-        "JSON_BUILD_OBJECT" | "JSON_BUILD_ARRAY" | "TO_JSON" | "TO_JSONB" | "ROW_TO_JSON" => {
-            Some(TypedColumn {
-                data_type: DataType::Text, // JSON stored as text
-                nullable: true,
-            })
+        SqlFunction::JsonBuildObject
+        | SqlFunction::JsonBuildArray
+        | SqlFunction::ToJson
+        | SqlFunction::ToJsonb
+        | SqlFunction::RowToJson => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        // Aggregate functions from optimizer that don't have specialized type inference yet
+        SqlFunction::Stddev
+        | SqlFunction::Variance
+        | SqlFunction::StddevPop
+        | SqlFunction::StddevSamp
+        | SqlFunction::VarPop
+        | SqlFunction::VarSamp
+        | SqlFunction::Corr
+        | SqlFunction::CovarPop
+        | SqlFunction::CovarSamp
+        | SqlFunction::RegrSlope => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+
+        SqlFunction::Median => first_arg_type_or(func, ctx, DataType::Double, true),
+
+        SqlFunction::Mode => first_arg_type_or(func, ctx, DataType::Unknown, true),
+
+        SqlFunction::PercentileCont | SqlFunction::PercentileDisc => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+
+        SqlFunction::ApproxCountDistinct => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: false,
+        }),
+
+        SqlFunction::AnyValue | SqlFunction::First | SqlFunction::Last => {
+            first_arg_type_or(func, ctx, DataType::Unknown, true)
         }
 
-        // Default - unknown function type
-        _ => None,
+        SqlFunction::GroupConcat => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+
+        SqlFunction::BitAnd | SqlFunction::BitOr | SqlFunction::BitXor => {
+            first_arg_type_or(func, ctx, DataType::BigInt, true)
+        }
     }
 }
 

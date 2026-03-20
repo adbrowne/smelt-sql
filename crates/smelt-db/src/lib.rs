@@ -541,52 +541,6 @@ fn count_from_sources(select_stmt: &smelt_parser::ast::SelectStmt) -> usize {
     count
 }
 
-/// Known SQL functions for type inference
-const KNOWN_FUNCTIONS: &[&str] = &[
-    // Aggregate functions
-    "COUNT",
-    "SUM",
-    "AVG",
-    "MIN",
-    "MAX",
-    // Null handling
-    "COALESCE",
-    "NULLIF",
-    // Date functions
-    "NOW",
-    "CURRENT_TIMESTAMP",
-    "CURRENT_DATE",
-    "DATE",
-    "DATE_TRUNC",
-    // String functions
-    "CONCAT",
-    "UPPER",
-    "LOWER",
-    "TRIM",
-    "LTRIM",
-    "RTRIM",
-    "SUBSTRING",
-    "SUBSTR",
-    "LENGTH",
-    "CHAR_LENGTH",
-    "CHARACTER_LENGTH",
-    "TO_CHAR",
-    // Boolean functions
-    "BOOL_AND",
-    "BOOL_OR",
-    "EVERY",
-    // Window functions
-    "ROW_NUMBER",
-    "RANK",
-    "DENSE_RANK",
-    "NTILE",
-    "LAG",
-    "LEAD",
-    "FIRST_VALUE",
-    "LAST_VALUE",
-    "NTH_VALUE",
-];
-
 /// Check an expression for invalid CAST types and unknown functions
 fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<Diagnostic>) {
     // Default range for diagnostics (position tracking would require more AST work)
@@ -621,7 +575,9 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<
         if let Some(name) = func.name() {
             let upper_name = name.to_uppercase();
             // Skip smelt.ref and smelt.source - they're handled separately
-            if func.namespace().is_none() && !KNOWN_FUNCTIONS.contains(&upper_name.as_str()) {
+            if func.namespace().is_none()
+                && smelt_types::SqlFunction::from_name(&upper_name).is_none()
+            {
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Info,
                     message: format!(
@@ -1312,12 +1268,14 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
         // Recurse into function arguments with type hints for aggregates
         if let Some(func) = expr.as_function_call() {
             let func_name = func.name().map(|n| n.to_uppercase()).unwrap_or_default();
-            let arg_hint = match func_name.as_str() {
+            let arg_hint = match smelt_types::SqlFunction::from_name(&func_name) {
                 // SUM/AVG require numeric arguments
-                "SUM" | "AVG" => Some(TypedColumn {
-                    data_type: DataType::Double,
-                    nullable: true,
-                }),
+                Some(smelt_types::SqlFunction::Sum | smelt_types::SqlFunction::Avg) => {
+                    Some(TypedColumn {
+                        data_type: DataType::Double,
+                        nullable: true,
+                    })
+                }
                 // COUNT doesn't constrain argument type
                 _ => None,
             };
