@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774019036028,
+  "lastUpdate": 1774019037183,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1694,6 +1694,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.16945312653156,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1a90ac78eecc630a6fc5b6d4c110a49f384e000d",
+          "message": "Add docs link to README (#55)\n\n* Add link to GitHub Pages documentation in README\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Configure smeltsql.com custom domain for GitHub Pages\n\n- Add CNAME file for GitHub Pages custom domain\n- Update site_url in mkdocs.yml to smeltsql.com\n- Update documentation link in README.md\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T02:02:16+11:00",
+          "tree_id": "5335151d9b32ac1b34ff1b7513ae71c96ef3bb96",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/1a90ac78eecc630a6fc5b6d4c110a49f384e000d"
+        },
+        "date": 1774019036794,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.423570187058687,
             "unit": "MB/s"
           }
         ]
