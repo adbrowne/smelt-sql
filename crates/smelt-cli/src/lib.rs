@@ -22,3 +22,39 @@ pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
 pub use transformer::{inject_time_filter, TimeRange, TransformError};
+
+use std::path::Path;
+use std::sync::Arc;
+
+/// Initialize a Salsa database from discovered models and a project directory.
+///
+/// Loads sources.yml/sources.yaml, registers all model files, and returns a
+/// ready-to-query database.
+pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
+    use smelt_core::find_config_file;
+    use smelt_db::Inputs;
+
+    let mut db = smelt_db::Database::default();
+
+    // Load sources.yml or sources.yaml
+    let sources_yaml = match find_config_file(project_dir, "sources") {
+        Ok(Some(path)) => std::fs::read_to_string(&path).unwrap_or_default(),
+        Ok(None) => String::new(),
+        Err(msg) => {
+            eprintln!("Warning: {}", msg);
+            String::new()
+        }
+    };
+    db.set_project_sources_yaml(project_dir.to_path_buf(), Arc::new(sources_yaml));
+    db.set_all_project_roots(Arc::new(vec![project_dir.to_path_buf()]));
+
+    let mut file_paths = Vec::with_capacity(models.len());
+    for model in models {
+        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+        db.set_file_project_root(model.path.clone(), project_dir.to_path_buf());
+        file_paths.push(model.path.clone());
+    }
+    db.set_all_files(Arc::new(file_paths));
+
+    db
+}

@@ -431,7 +431,7 @@ pub fn compare_all_parse_results(sql: &str) -> Result<bool, String> {
 
     // Layer 3: sqlglot (if available)
     // If sqlglot not available, consider it a pass
-    let sqlglot_result = compare_sqlglot_parse_results(sql).unwrap_or(Ok(true))?; 
+    let sqlglot_result = compare_sqlglot_parse_results(sql).unwrap_or(Ok(true))?;
 
     Ok(pg_result && spark_result && sqlglot_result)
 }
