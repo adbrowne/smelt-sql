@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774014272124,
+  "lastUpdate": 1774014273078,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1325,6 +1325,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.047270928509562,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec8081753c9fdabbf5e2a72c6ceb8419272da609",
+          "message": "Add smelt type CLI command (#52)\n\n* Add `smelt type` CLI command to show model function signatures\n\nView each model as a function: what columns it requires from input refs\n(with type constraints) and what columns it produces (with inferred types).\nTypes are derived purely from the SQL structure.\n\n- Add GroupByClause AST wrapper to smelt-parser\n- Enhance model_input_constraints to cover GROUP BY, HAVING, ORDER BY\n- Add context-based type hints in collect_column_refs (SUM/AVG → numeric)\n- Add ModelFunctionType, FunctionInput, FunctionOutput, TypedField types\n- Add model_function_type() Salsa query combining inputs and outputs\n- Add `smelt type [model] --project-dir` CLI command\n- Add 11 new tests for function type inference\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Support smelt.source() inputs in model function signatures\n\nModels using smelt.source() now show their source table columns as\ninputs in `smelt type` output, matching the existing smelt.ref() behavior.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Extract init_db() to deduplicate Salsa database setup in CLI commands\n\nThe table, ui, and show_type commands all repeated the same pattern:\nload sources.yml, create database, register models. Extract this into\na shared init_db() function. Also fixes show_type missing Python model\ndiscovery.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Fix trailing whitespace in parser-compat lib.rs\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T00:42:48+11:00",
+          "tree_id": "ac236257c38bd03d839476663a915eafb698d4ed",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ec8081753c9fdabbf5e2a72c6ceb8419272da609"
+        },
+        "date": 1774014272834,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.333882660096254,
             "unit": "MB/s"
           }
         ]
