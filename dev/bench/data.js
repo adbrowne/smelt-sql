@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774012711141,
+  "lastUpdate": 1774014272124,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -939,6 +939,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.791941,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec8081753c9fdabbf5e2a72c6ceb8419272da609",
+          "message": "Add smelt type CLI command (#52)\n\n* Add `smelt type` CLI command to show model function signatures\n\nView each model as a function: what columns it requires from input refs\n(with type constraints) and what columns it produces (with inferred types).\nTypes are derived purely from the SQL structure.\n\n- Add GroupByClause AST wrapper to smelt-parser\n- Enhance model_input_constraints to cover GROUP BY, HAVING, ORDER BY\n- Add context-based type hints in collect_column_refs (SUM/AVG → numeric)\n- Add ModelFunctionType, FunctionInput, FunctionOutput, TypedField types\n- Add model_function_type() Salsa query combining inputs and outputs\n- Add `smelt type [model] --project-dir` CLI command\n- Add 11 new tests for function type inference\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Support smelt.source() inputs in model function signatures\n\nModels using smelt.source() now show their source table columns as\ninputs in `smelt type` output, matching the existing smelt.ref() behavior.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Extract init_db() to deduplicate Salsa database setup in CLI commands\n\nThe table, ui, and show_type commands all repeated the same pattern:\nload sources.yml, create database, register models. Extract this into\na shared init_db() function. Also fixes show_type missing Python model\ndiscovery.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Fix trailing whitespace in parser-compat lib.rs\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T00:42:48+11:00",
+          "tree_id": "ac236257c38bd03d839476663a915eafb698d4ed",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ec8081753c9fdabbf5e2a72c6ceb8419272da609"
+        },
+        "date": 1774014271788,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.75801,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.526483000000006,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.606151,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.31244299999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0026850000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.770573999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.017302,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.010529,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008166,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.897144,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.4091400000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.73163,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.72433,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.653052,
             "unit": "ms"
           }
         ]
