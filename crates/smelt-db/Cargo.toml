@@ -15,3 +15,8 @@ serde_yaml = "0.9"
 smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
+
+[dev-dependencies]
+duckdb = { workspace = true, features = ["bundled"] }
+arrow = { workspace = true }
+proptest = { workspace = true }

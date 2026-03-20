@@ -56,3 +56,5 @@ serde_yaml = "0.9"
 indexmap = { version = "2", features = ["serde"] }
 # Python embedding (abi3-py39 = stable ABI, works with any Python 3.9+)
 pyo3 = { version = "0.24", features = ["auto-initialize", "abi3-py39"] }
+# Property-based testing
+proptest = "1.4"

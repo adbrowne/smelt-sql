@@ -1,0 +1,162 @@
+//! Known type divergences between smelt inference and actual databases.
+//!
+//! When proptest finds a mismatch that is already registered here, the test
+//! passes with a warning instead of failing.  Unknown mismatches still fail
+//! and print the full SQL for debugging.
+
+use smelt_types::DataType;
+
+/// Why this divergence exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DivergenceStatus {
+    /// A bug in smelt's inference that we plan to fix.
+    KnownBug,
+    /// Intentional design choice in smelt.
+    ByDesign,
+    /// Database-specific behavior we can't fully model.
+    BackendSpecific,
+}
+
+/// A registered divergence between smelt and a backend.
+#[derive(Debug)]
+pub struct TypeDivergence {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub smelt_type: DataType,
+    pub actual_type: DataType,
+    pub backend: &'static str,
+    pub status: DivergenceStatus,
+}
+
+/// All known divergences.  Add new entries here when proptest surfaces expected mismatches.
+pub fn known_divergences() -> Vec<TypeDivergence> {
+    vec![
+        TypeDivergence {
+            id: "sum_integer_to_decimal",
+            description: "SUM(INTEGER) — smelt infers Decimal(38,10), DuckDB returns BigInt (HUGEINT mapped to BigInt)",
+            smelt_type: DataType::Decimal { precision: 38, scale: 10 },
+            actual_type: DataType::BigInt,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "sum_double_to_decimal",
+            description: "SUM(DOUBLE) — smelt infers Decimal(38,10), DuckDB returns Double",
+            smelt_type: DataType::Decimal { precision: 38, scale: 10 },
+            actual_type: DataType::Double,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "extract_double_vs_bigint",
+            description: "EXTRACT(...) — smelt infers Double, DuckDB returns BigInt",
+            smelt_type: DataType::Double,
+            actual_type: DataType::BigInt,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "date_trunc_returns_timestamp",
+            description: "DATE_TRUNC(...) — smelt infers Date, DuckDB returns Timestamp",
+            smelt_type: DataType::Date,
+            actual_type: DataType::Timestamp { with_timezone: false },
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "length_integer_vs_bigint",
+            description: "LENGTH(...) — smelt infers Integer, DuckDB returns BigInt",
+            smelt_type: DataType::Integer,
+            actual_type: DataType::BigInt,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "string_concat_text_vs_varchar",
+            description: "|| operator — smelt infers Text, DuckDB returns Varchar",
+            smelt_type: DataType::Text,
+            actual_type: DataType::Varchar { max_length: None },
+            backend: "duckdb",
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "string_functions_text_vs_varchar",
+            description: "UPPER/LOWER/etc — smelt infers Text, DuckDB returns Varchar",
+            smelt_type: DataType::Text,
+            actual_type: DataType::Varchar { max_length: None },
+            backend: "duckdb",
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "ceil_floor_integer_to_double",
+            description: "CEIL/FLOOR(INTEGER) — smelt preserves arg type, DuckDB returns Double",
+            smelt_type: DataType::Integer,
+            actual_type: DataType::Double,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "ceil_floor_bigint_to_double",
+            description: "CEIL/FLOOR(BIGINT) — smelt preserves arg type, DuckDB returns Double",
+            smelt_type: DataType::BigInt,
+            actual_type: DataType::Double,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "ceil_floor_decimal_to_double",
+            description: "CEIL/FLOOR(DECIMAL) — smelt preserves arg type, DuckDB returns Double",
+            smelt_type: DataType::Decimal { precision: 10, scale: 2 },
+            actual_type: DataType::Double,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "position_integer_vs_bigint",
+            description: "STRPOS/POSITION — smelt infers Integer, DuckDB returns BigInt",
+            smelt_type: DataType::Integer,
+            actual_type: DataType::BigInt,
+            backend: "duckdb",
+            status: DivergenceStatus::KnownBug,
+        },
+    ]
+}
+
+/// Check if a (smelt_type, actual_type) pair matches a known divergence.
+/// Returns the divergence if found.
+pub fn find_divergence<'a>(
+    smelt: &DataType,
+    actual: &DataType,
+    divergences: &'a [TypeDivergence],
+) -> Option<&'a TypeDivergence> {
+    divergences
+        .iter()
+        .find(|d| d.smelt_type == *smelt && d.actual_type == *actual && d.backend == "duckdb")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_known_sum_divergence() {
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+            &DataType::BigInt,
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "sum_integer_to_decimal");
+    }
+
+    #[test]
+    fn returns_none_for_unknown() {
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::Boolean, &DataType::Date, &divs);
+        assert!(found.is_none());
+    }
+}
