@@ -2,7 +2,7 @@
 
 Modern data transformation framework.
 
-[Documentation](https://adbrowne.github.io/smelt-sql/)
+[Documentation](https://smeltsql.com/)
 
 Andrew's Christmas 2025 holiday project.
 
