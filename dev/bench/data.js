@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774019037183,
+  "lastUpdate": 1774019116387,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1315,6 +1315,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.61026,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3cd5a2a34f3ae57b96d322b32f5b959a67d6726e",
+          "message": "Drop macos-x86_64 builds: macos-13 runner deprecated\n\nGitHub Actions no longer supports the macos-13 runner. Remove\nmacos-x86_64 from build matrices in release and dev-release workflows.\nmacOS ARM64 (Apple Silicon) is the only supported macOS target; x86_64\nusers can run via Rosetta 2.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T02:03:36+11:00",
+          "tree_id": "48804c926af8d0dd2a6dcba9106e4de54a7d6e92",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3cd5a2a34f3ae57b96d322b32f5b959a67d6726e"
+        },
+        "date": 1774019116108,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.754832,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.540278,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.59563,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.306917,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002745,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.259871,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.02679,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014427,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.022062,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.274325,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.161133,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.846369999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 46.87732,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.61842,
             "unit": "ms"
           }
         ]
