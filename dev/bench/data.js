@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774012710062,
+  "lastUpdate": 1774012711141,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1202,6 +1202,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.870324173559723,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c5fc1e209ad6576c6d3e6f151dc57e5713704218",
+          "message": "Remove qualify spark tests - spark doesn't support qualify",
+          "timestamp": "2026-03-21T00:16:53+11:00",
+          "tree_id": "4c38e3ca22f4de1fea87b049790c12833503461a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c5fc1e209ad6576c6d3e6f151dc57e5713704218"
+        },
+        "date": 1774012710806,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.047270928509562,
             "unit": "MB/s"
           }
         ]
