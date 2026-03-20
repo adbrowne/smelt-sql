@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use arrow::util::pretty;
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, Weekday as ChronoWeekday};
 use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, PartitionSpec};
 #[cfg(feature = "duckdb")]
@@ -11,7 +11,9 @@ use smelt_cli::{
     ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
-use smelt_optimizer::{Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation};
+use smelt_optimizer::{
+    Frontmatter, Granularity, ModelGraph, ModelInfo, Optimizer, Transformation, Weekday,
+};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "spark")]
@@ -378,8 +380,10 @@ async fn run(args: RunArgs) -> Result<()> {
     // Build lookup maps for transformations
     let mut plan_overrides: std::collections::HashMap<String, Vec<smelt_optimizer::ExecutionStep>> =
         std::collections::HashMap::new();
-    let mut incremental_overrides: std::collections::HashMap<String, (String, String)> =
-        std::collections::HashMap::new(); // model -> (event_time_column, partition_column)
+    let mut incremental_overrides: std::collections::HashMap<
+        String,
+        (String, String, Granularity),
+    > = std::collections::HashMap::new(); // model -> (event_time_column, partition_column, granularity)
 
     for t in &transformations {
         match t {
@@ -390,10 +394,15 @@ async fn run(args: RunArgs) -> Result<()> {
                 model,
                 event_time_column,
                 partition_column,
+                granularity,
             } => {
                 incremental_overrides.insert(
                     model.clone(),
-                    (event_time_column.clone(), partition_column.clone()),
+                    (
+                        event_time_column.clone(),
+                        partition_column.clone(),
+                        granularity.clone(),
+                    ),
                 );
             }
         }
@@ -404,7 +413,7 @@ async fn run(args: RunArgs) -> Result<()> {
         for model in plan_overrides.keys() {
             println!("  {} → cube split", model);
         }
-        for (model, (_, partition_col)) in &incremental_overrides {
+        for (model, (_, partition_col, _)) in &incremental_overrides {
             println!("  {} → incremental (partition: {})", model, partition_col);
         }
     }
@@ -472,7 +481,7 @@ async fn run(args: RunArgs) -> Result<()> {
             if has_incremental {
                 // Composed: cube split + incremental
                 let range = time_range.as_ref().unwrap();
-                let (event_time_col, partition_col) =
+                let (event_time_col, partition_col, granularity) =
                     incremental_overrides.get(model_name.as_str()).unwrap();
 
                 println!(
@@ -480,7 +489,8 @@ async fn run(args: RunArgs) -> Result<()> {
                     model_name
                 );
 
-                let partition_values = generate_partition_dates(&range.start, &range.end)?;
+                let partition_values =
+                    generate_partition_values(&range.start, &range.end, granularity)?;
                 let partition = PartitionSpec {
                     column: partition_col.clone(),
                     values: partition_values,
@@ -544,7 +554,7 @@ async fn run(args: RunArgs) -> Result<()> {
         // Case 2: Incremental only (no cube split) — use existing incremental path
         else if has_incremental {
             let range = time_range.as_ref().unwrap();
-            let (event_time_col, partition_col) =
+            let (event_time_col, partition_col, granularity) =
                 incremental_overrides.get(model_name.as_str()).unwrap();
 
             println!("\n▶ Running model: {} (incremental)", model_name);
@@ -569,9 +579,16 @@ async fn run(args: RunArgs) -> Result<()> {
             }
 
             // Generate partition values for DELETE
-            let partition_values = generate_partition_dates(&range.start, &range.end)?;
+            let partition_values =
+                generate_partition_values(&range.start, &range.end, granularity)?;
+            let granularity_label = match granularity {
+                Granularity::Hour => "hours",
+                Granularity::Day => "days",
+                Granularity::Week { .. } => "weeks",
+                Granularity::Month => "months",
+            };
             println!(
-                "  Partitions to update: {} ({} days)",
+                "  Partitions to update: {} ({} {})",
                 if partition_values.len() <= 3 {
                     partition_values.join(", ")
                 } else {
@@ -581,7 +598,8 @@ async fn run(args: RunArgs) -> Result<()> {
                         partition_values.last().unwrap()
                     )
                 },
-                partition_values.len()
+                partition_values.len(),
+                granularity_label,
             );
 
             let partition = PartitionSpec {
@@ -647,9 +665,33 @@ async fn run(args: RunArgs) -> Result<()> {
                     println!("  {}", "─".repeat(58));
                 }
 
-                let partition_values = generate_partition_dates(&range.start, &range.end)?;
+                let opt_granularity = match &inc.granularity {
+                    smelt_core::config::Granularity::Hour => Granularity::Hour,
+                    smelt_core::config::Granularity::Day => Granularity::Day,
+                    smelt_core::config::Granularity::Week { week_start } => {
+                        let ws = match week_start {
+                            smelt_core::config::Weekday::Monday => Weekday::Monday,
+                            smelt_core::config::Weekday::Tuesday => Weekday::Tuesday,
+                            smelt_core::config::Weekday::Wednesday => Weekday::Wednesday,
+                            smelt_core::config::Weekday::Thursday => Weekday::Thursday,
+                            smelt_core::config::Weekday::Friday => Weekday::Friday,
+                            smelt_core::config::Weekday::Saturday => Weekday::Saturday,
+                            smelt_core::config::Weekday::Sunday => Weekday::Sunday,
+                        };
+                        Granularity::Week { week_start: ws }
+                    }
+                    smelt_core::config::Granularity::Month => Granularity::Month,
+                };
+                let partition_values =
+                    generate_partition_values(&range.start, &range.end, &opt_granularity)?;
+                let granularity_label = match opt_granularity {
+                    Granularity::Hour => "hours",
+                    Granularity::Day => "days",
+                    Granularity::Week { .. } => "weeks",
+                    Granularity::Month => "months",
+                };
                 println!(
-                    "  Partitions to update: {} ({} days)",
+                    "  Partitions to update: {} ({} {})",
                     if partition_values.len() <= 3 {
                         partition_values.join(", ")
                     } else {
@@ -659,7 +701,8 @@ async fn run(args: RunArgs) -> Result<()> {
                             partition_values.last().unwrap()
                         )
                     },
-                    partition_values.len()
+                    partition_values.len(),
+                    granularity_label,
                 );
 
                 let partition = PartitionSpec {
@@ -751,9 +794,12 @@ async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-/// Generate partition date values from a time range.
-/// Returns a list of date strings in YYYY-MM-DD format.
-fn generate_partition_dates(start: &str, end: &str) -> Result<Vec<String>> {
+/// Generate partition values from a time range based on granularity.
+fn generate_partition_values(
+    start: &str,
+    end: &str,
+    granularity: &Granularity,
+) -> Result<Vec<String>> {
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .with_context(|| format!("Invalid start date: {}", start))?;
     let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
@@ -767,14 +813,69 @@ fn generate_partition_dates(start: &str, end: &str) -> Result<Vec<String>> {
         ));
     }
 
-    let mut dates = Vec::new();
-    let mut current = start_date;
-    while current < end_date {
-        dates.push(current.format("%Y-%m-%d").to_string());
-        current += Duration::days(1);
+    let mut values = Vec::new();
+
+    match granularity {
+        Granularity::Hour => {
+            let mut current = start_date.and_hms_opt(0, 0, 0).unwrap();
+            let end_dt = end_date.and_hms_opt(0, 0, 0).unwrap();
+            while current < end_dt {
+                values.push(current.format("%Y-%m-%d %H:00:00").to_string());
+                current += Duration::hours(1);
+            }
+        }
+        Granularity::Day => {
+            let mut current = start_date;
+            while current < end_date {
+                values.push(current.format("%Y-%m-%d").to_string());
+                current += Duration::days(1);
+            }
+        }
+        Granularity::Week { week_start } => {
+            let chrono_day = weekday_to_chrono(week_start);
+            // Find first date >= start_date that falls on the week_start day
+            let mut current = start_date;
+            let days_ahead = (chrono_day.num_days_from_monday() as i64
+                - current.weekday().num_days_from_monday() as i64
+                + 7)
+                % 7;
+            if days_ahead > 0 {
+                current += Duration::days(days_ahead);
+            }
+            while current < end_date {
+                values.push(current.format("%Y-%m-%d").to_string());
+                current += Duration::days(7);
+            }
+        }
+        Granularity::Month => {
+            let mut current = start_date;
+            while current < end_date {
+                values.push(current.format("%Y-%m").to_string());
+                // Advance to next month
+                let (y, m) = if current.month() == 12 {
+                    (current.year() + 1, 1)
+                } else {
+                    (current.year(), current.month() + 1)
+                };
+                current = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+            }
+        }
     }
 
-    Ok(dates)
+    Ok(values)
+}
+
+/// Convert smelt `Weekday` to `chrono::Weekday`.
+fn weekday_to_chrono(day: &Weekday) -> ChronoWeekday {
+    match day {
+        Weekday::Monday => ChronoWeekday::Mon,
+        Weekday::Tuesday => ChronoWeekday::Tue,
+        Weekday::Wednesday => ChronoWeekday::Wed,
+        Weekday::Thursday => ChronoWeekday::Thu,
+        Weekday::Friday => ChronoWeekday::Fri,
+        Weekday::Saturday => ChronoWeekday::Sat,
+        Weekday::Sunday => ChronoWeekday::Sun,
+    }
 }
 
 #[allow(unreachable_code, unused_variables)]

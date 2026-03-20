@@ -430,11 +430,10 @@ pub fn compare_all_parse_results(sql: &str) -> Result<bool, String> {
     let spark_result = compare_spark_parse_results(sql)?;
 
     // Layer 3: sqlglot (if available)
-    if let Some(sqlglot_result) = compare_sqlglot_parse_results(sql) {
-        sqlglot_result?;
-    }
+    // If sqlglot not available, consider it a pass
+    let sqlglot_result = compare_sqlglot_parse_results(sql).unwrap_or(Ok(true))?; 
 
-    Ok(pg_result && spark_result)
+    Ok(pg_result && spark_result && sqlglot_result)
 }
 
 /// Semantic equivalence check using fingerprints

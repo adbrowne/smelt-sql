@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Type system definitions for smelt"
+repository = "https://github.com/adbrowne/smelt-sql"
 
 [dependencies]
 thiserror.workspace = true

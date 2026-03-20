@@ -1241,18 +1241,24 @@ Smelt SQL is a **logical SQL superset** built on a PostgreSQL-compatible base, c
 
 ---
 
+#### ✅ Phase 4f: Trailing comma removal + EXPLODE/UNNEST renaming (COMPLETED March 15, 2026)
+
+**What**: Two dialect rewrites in `smelt-dialect`. (1) Trailing commas in SELECT and GROUP BY lists are stripped for Spark and PostgreSQL via `supports_trailing_commas` capability flag. (2) EXPLODE↔UNNEST function renaming based on dialect: DuckDB/PostgreSQL normalize to UNNEST, Spark normalizes to EXPLODE.
+
+---
+
 ### Dialect Rewrite Summary
 
 | Feature | Smelt SQL | DuckDB | Spark | PostgreSQL |
 |---------|-----------|--------|-------|------------|
 | QUALIFY | ✅ Native | ✅ Pass-through | 🔄 Subquery wrap | 🔄 Subquery wrap |
 | Lambda `->` | ✅ Native | ✅ Pass-through | ✅ Pass-through | ❌ Error (no support) |
-| EXPLODE/UNNEST | ✅ Both accepted | 🔄 → UNNEST | 🔄 → EXPLODE | 🔄 → UNNEST |
+| EXPLODE/UNNEST | ✅ Both accepted | ✅ → UNNEST | ✅ → EXPLODE | ✅ → UNNEST |
 | PIVOT | ✅ Native | ✅ Pass-through | ✅ Pass-through | ❌ Error or crosstab |
 | Array subscript | ✅ Native | ✅ Pass-through | ✅ Pass-through | ✅ Pass-through |
 | DATE literal | ✅ Both forms | 🔄 → `DATE '...'` | 🔄 → `DATE('...')` | 🔄 → `DATE '...'` |
 | `::` cast | ✅ Native | ✅ Pass-through | 🔄 → `CAST()` | ✅ Pass-through |
-| Trailing commas | ✅ Accepted | ✅ Pass-through | ❌ Error | ❌ Error |
+| Trailing commas | ✅ Accepted | ✅ Pass-through | ✅ Stripped | ✅ Stripped |
 
 ---
 
@@ -2285,6 +2291,118 @@ These features require significant architectural work and are not prioritized:
 
 - **Python import dependency tracking**: Cache only hashes the model file itself, not its imports. If a Python model imports from a sibling module, changes to that module won't invalidate the cache. Acceptable for now.
 - **Phase 2 (PyO3 AST bindings)**: Still deferred — Phase 1 SQL strings remain sufficient.
+
+---
+
+## Release & Distribution
+
+smelt uses a **Python-wrapping-Rust** distribution model (like ruff, uv, polars): Rust binaries are compiled and bundled into Python wheels via [maturin](https://github.com/PyO3/maturin). Users install with `pip install smelt-sql` and get native binaries without needing a Rust toolchain. Standalone binaries are also published for non-Python users.
+
+### ✅ Phase R1: Maturin Build Setup (March 15, 2026)
+
+Set up the local build pipeline for producing Python wheels that bundle Rust binaries.
+
+- Root `pyproject.toml` with `[build-system] requires = ["maturin>=1.7,<2"]` build backend
+- Package name `smelt-sql` with `bindings = "bin"` to bundle `smelt` CLI and `smelt-lsp` binaries
+- Python helper module `smelt_sql/` with `lsp_binary_path()` and `cli_binary_path()` for editor extensions
+- Renamed `python/pyproject.toml` package to `smelt-runner` to distinguish from the distribution package
+- `scripts/prepare-release.sh` helper that prints the release checklist
+
+### ✅ Phase R2: Cross-Platform CI Builds (March 15, 2026)
+
+GitHub Actions workflow to build wheels and standalone binaries for all major platforms.
+
+- `.github/workflows/release.yml` triggered on `v*` tags and `workflow_dispatch`
+- Build matrix:
+  - Linux x86_64 (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`)
+  - macOS x86_64 (`macos-13`) and aarch64 (`macos-latest`)
+  - Windows x86_64 (`windows-latest`)
+- `PyO3/maturin-action@v1` for Python wheels, `cargo build --release` for standalone binaries
+- Standalone archives: `.tar.gz` (Unix) and `.zip` (Windows) with LICENSE and README
+
+### ✅ Phase R3: GitHub Releases (March 15, 2026)
+
+Automate GitHub Release creation with attached artifacts.
+
+- `softprops/action-gh-release@v2` creates a release from the `v*` tag
+- Attach standalone binaries, Python wheels, and `SHA256SUMS.txt` checksums
+- Version sync check across `Cargo.toml`, `pyproject.toml`, and `editors/vscode/package.json`
+- Release notes auto-generated from git log (previous tag to HEAD)
+- Pre-release detection for tags containing `-rc`, `-beta`, or `-alpha`
+
+### ✅ Phase R4: PyPI Publishing (March 15, 2026)
+
+Publish Python wheels to PyPI so users can `pip install smelt-sql`.
+
+- `pypa/gh-action-pypi-publish@release/v1` with OIDC trusted publishing (no API tokens)
+- `id-token: write` permission added to release workflow
+- Stable releases (`v*` without pre-release suffix) publish to PyPI with `environment: pypi`
+- Pre-release tags (`-rc`, `-beta`, `-alpha`) publish to TestPyPI with `environment: testpypi`
+- One-time OIDC setup documented in `scripts/prepare-release.sh`
+
+### ✅ Phase R5: VSCode Extension Publishing (March 15, 2026)
+
+Publish the VSCode extension to the Marketplace with runtime LSP discovery.
+
+- Refactored `extension.ts` with `findLspCommand()` discovery chain:
+  1. User config (`smelt.serverPath` setting)
+  2. Python environment (`pip install smelt-sql` → `smelt_sql.lsp_binary_path()`)
+  3. `$PATH` lookup (`which smelt-lsp` / `where.exe smelt-lsp`)
+  4. Cargo fallback (development mode, only if Cargo.toml found)
+- Discovery method logged to output channel for debugging
+- `vscode-publish` CI job publishes to VS Code Marketplace via `vsce publish`
+- Open VSX publishing via `ovsx` (continue-on-error for optional registry)
+- `ovsx` added as devDependency in `editors/vscode/package.json`
+
+### ✅ Phase R6: Documentation Site (March 15, 2026)
+
+Public-facing documentation site built with MkDocs Material.
+
+- `docs-site/mkdocs.yml` with Material theme, search, code copy, dark/light mode toggle
+- Initial pages: home, installation, quickstart, SQL models guide, editor setup, language reference
+- Content reorganized from `README.md` and `docs/` into user-facing structure
+- `.github/workflows/docs.yml` deploys to GitHub Pages on push to `main` (paths: `docs-site/**`, `README.md`, `docs/**`)
+- Uses `actions/deploy-pages@v4` with `actions/upload-pages-artifact@v3`
+
+### ✅ Phase R7: Crate Publishing (March 15, 2026)
+
+Publish reusable Rust crates to crates.io for Rust ecosystem consumers.
+
+- Publishable crates (`smelt-parser`, `smelt-types`, `smelt-dialect`) have `description` and `repository` metadata
+- `smelt-dialect` path dependency on `smelt-parser` includes `version = "0.1.0"` for crates.io compatibility
+- 12 internal crates marked `publish = false`: smelt-backend, smelt-backend-duckdb, smelt-backend-spark, smelt-bench, smelt-cli, smelt-core, smelt-datagen, smelt-db, smelt-lsp, smelt-optimizer, smelt-parser-compat, smelt-ui
+- `crates-publish` CI job publishes in dependency order (smelt-types → smelt-parser → smelt-dialect) with index waits
+- Uses `CARGO_REGISTRY_TOKEN` secret, stable releases only
+
+### ✅ Phase R8: Continuous Dev Releases (March 15, 2026)
+
+Automated dev releases from every merge to `main`, so users can install the latest changes without waiting for a tagged release.
+
+- `.github/workflows/dev-release.yml` triggered on push to `main`
+- Version computed as `X.Y.Z-dev.YYYYMMDDHHMM` from `Cargo.toml` base version + timestamp
+- Maturin converts Cargo semver to PEP 440: `0.1.0-dev.202603151430` → `0.1.0.dev202603151430`
+- Git tags use `dev-YYYYMMDD-SHORTSHA` format (avoids triggering `release.yml`)
+- GitHub Releases created as pre-release with `make_latest: false`
+- Dev wheels published to real PyPI (`.devN` versions require `pip install --pre`)
+- `pyproject.toml` switched to `dynamic = ["version"]` — maturin reads version from `Cargo.toml`
+- Stable releases now only bump 2 files: `Cargo.toml` and `editors/vscode/package.json`
+- VSCode extension and crates.io skipped for dev releases (pre-release not well supported)
+- One-time OIDC setup needed: add `dev-release.yml` as trusted publisher on pypi.org
+
+### Dependency Diagram
+
+```
+R6 (Docs)  ─── ✅
+
+R1 (Maturin) → R2 (CI Builds) → R3 (GitHub Releases)  ← all ✅
+                                       │
+                                       ├──→ R4 (PyPI)         ✅
+                                       └──→ R5 (VSCode Ext)   ✅
+
+R7 (Crates.io) ─── ✅
+
+R8 (Dev Releases) ─── ✅  (pushes to main → PyPI dev builds)
+```
 
 ---
 

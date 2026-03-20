@@ -56,6 +56,9 @@ pub struct BackendCapabilities {
 
     /// Supports :: cast operator (PostgreSQL-style)
     pub supports_double_colon_cast: bool,
+
+    /// Supports trailing commas in SELECT and GROUP BY lists
+    pub supports_trailing_commas: bool,
 }
 
 impl BackendCapabilities {
@@ -72,6 +75,7 @@ impl BackendCapabilities {
             supports_array_literal: true,
             supports_transactional_ddl: true,
             supports_double_colon_cast: true,
+            supports_trailing_commas: true,
         }
     }
 
@@ -88,6 +92,7 @@ impl BackendCapabilities {
             supports_array_literal: false, // Uses ARRAY(a, b, c)
             supports_transactional_ddl: false,
             supports_double_colon_cast: false, // Uses CAST(expr AS type)
+            supports_trailing_commas: false,
         }
     }
 
@@ -104,6 +109,7 @@ impl BackendCapabilities {
             supports_array_literal: false, // Uses ARRAY[a, b, c]
             supports_transactional_ddl: true,
             supports_double_colon_cast: true,
+            supports_trailing_commas: false,
         }
     }
 }
