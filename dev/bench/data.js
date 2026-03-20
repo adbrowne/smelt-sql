@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774017795237,
+  "lastUpdate": 1774017796423,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1571,6 +1571,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.78078245352556,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "cb22c6ac9973fdbbf144dd232aa36f812a06aebc",
+          "message": "Fix maturin workspace build: add manifest-path and bundle smelt-lsp\n\nMaturin failed with \"missing field `package`\" because the root Cargo.toml\nis a workspace without a [package] section. Fix by:\n- Adding manifest-path to point maturin at crates/smelt-cli/Cargo.toml\n- Pre-building smelt-lsp and placing it in smelt_sql.data/scripts/ so\n  both binaries are included in the wheel\n- Using before-script-linux for manylinux container builds\n- Using a separate step for macOS/Windows builds\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T01:41:58+11:00",
+          "tree_id": "e549a513b0aec6f26e82711edabd0b4831a48846",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/cb22c6ac9973fdbbf144dd232aa36f812a06aebc"
+        },
+        "date": 1774017796082,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.16945312653156,
             "unit": "MB/s"
           }
         ]
