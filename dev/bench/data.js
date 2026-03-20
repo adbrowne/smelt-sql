@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774017614730,
+  "lastUpdate": 1774017616571,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1448,6 +1448,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.333882660096254,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6f7d609c7a2939a8894d235f974325a4327a6063",
+          "message": "Centralize SQL function names into SqlFunction enum in smelt-types (#54)\n\nReplace scattered string literals for SQL function names across smelt-db,\nsmelt-optimizer, and smelt-parser-compat with a single SqlFunction enum.\nThis eliminates duplication and makes it easy to find all references to a\nfunction, with exhaustive matching ensuring new variants are handled everywhere.\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T01:38:14+11:00",
+          "tree_id": "aecace191512464f31268a9c9b03cef01377fdce",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6f7d609c7a2939a8894d235f974325a4327a6063"
+        },
+        "date": 1774017616157,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.78078245352556,
             "unit": "MB/s"
           }
         ]
