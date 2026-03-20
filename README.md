@@ -2,6 +2,8 @@
 
 Modern data transformation framework.
 
+[Documentation](https://adbrowne.github.io/smelt-sql/)
+
 Andrew's Christmas 2025 holiday project.
 
 ## What is smelt?
