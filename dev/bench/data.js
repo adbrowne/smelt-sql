@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774014273078,
+  "lastUpdate": 1774017614730,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1033,6 +1033,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.653052,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6f7d609c7a2939a8894d235f974325a4327a6063",
+          "message": "Centralize SQL function names into SqlFunction enum in smelt-types (#54)\n\nReplace scattered string literals for SQL function names across smelt-db,\nsmelt-optimizer, and smelt-parser-compat with a single SqlFunction enum.\nThis eliminates duplication and makes it easy to find all references to a\nfunction, with exhaustive matching ensuring new variants are handled everywhere.\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T01:38:14+11:00",
+          "tree_id": "aecace191512464f31268a9c9b03cef01377fdce",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6f7d609c7a2939a8894d235f974325a4327a6063"
+        },
+        "date": 1774017614187,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.586629,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.319278000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6505620000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.30571,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0033859999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 36.866823,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.03185,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015368,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011141,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.397273,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.385035,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.35969,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.06828,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.924082,
             "unit": "ms"
           }
         ]
