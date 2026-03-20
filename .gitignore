@@ -12,3 +12,6 @@ __pycache__/
 # UI
 ui/node_modules/
 ui/dist/
+
+# Maturin wheel data (created in CI)
+smelt_sql.data/

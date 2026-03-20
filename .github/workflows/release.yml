@@ -100,12 +100,28 @@ jobs:
       - name: Build frontend
         run: cd ui && npm ci && npm run build
 
+      - name: Build smelt-lsp for wheel (non-Linux)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p smelt-lsp
+          mkdir -p smelt_sql.data/scripts
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/smelt-lsp.exe smelt_sql.data/scripts/
+          else
+            cp target/${{ matrix.target }}/release/smelt-lsp smelt_sql.data/scripts/
+          fi
+
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
           manylinux: auto
+          before-script-linux: |
+            cargo build --release -p smelt-lsp
+            mkdir -p smelt_sql.data/scripts
+            cp target/release/smelt-lsp smelt_sql.data/scripts/
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

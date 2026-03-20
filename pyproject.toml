@@ -19,6 +19,8 @@ classifiers = [
 Repository = "https://github.com/adbrowne/smelt-sql"
 
 [tool.maturin]
+manifest-path = "crates/smelt-cli/Cargo.toml"
 bindings = "bin"
 strip = true
 python-packages = ["smelt_sql"]
+data = "smelt_sql.data"
