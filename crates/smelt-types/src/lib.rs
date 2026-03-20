@@ -9,8 +9,10 @@
 //! - smelt-cli for source configuration
 //! - smelt-lsp for type-aware editor features
 
+mod functions;
 mod parse;
 
+pub use functions::{FunctionCategory, SqlFunction};
 pub use parse::{parse_type, TypeParseError};
 
 /// SQL data types supported by smelt

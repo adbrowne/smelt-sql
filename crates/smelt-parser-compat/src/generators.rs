@@ -7,6 +7,7 @@
 //! the subset they support.
 
 use proptest::prelude::*;
+use smelt_types::SqlFunction;
 
 // ===== Primitive generators =====
 
@@ -223,15 +224,15 @@ pub fn comparison_expr() -> impl Strategy<Value = String> {
 /// Generate a function call
 pub fn function_call() -> impl Strategy<Value = String> {
     let funcs = prop_oneof![
-        Just("COUNT".to_string()),
-        Just("SUM".to_string()),
-        Just("AVG".to_string()),
-        Just("MIN".to_string()),
-        Just("MAX".to_string()),
-        Just("COALESCE".to_string()),
-        Just("UPPER".to_string()),
-        Just("LOWER".to_string()),
-        Just("LENGTH".to_string()),
+        Just(SqlFunction::Count.name().to_string()),
+        Just(SqlFunction::Sum.name().to_string()),
+        Just(SqlFunction::Avg.name().to_string()),
+        Just(SqlFunction::Min.name().to_string()),
+        Just(SqlFunction::Max.name().to_string()),
+        Just(SqlFunction::Coalesce.name().to_string()),
+        Just(SqlFunction::Upper.name().to_string()),
+        Just(SqlFunction::Lower.name().to_string()),
+        Just(SqlFunction::Length.name().to_string()),
     ];
 
     (funcs, expression()).prop_map(|(func, arg)| format!("{}({})", func, arg))
