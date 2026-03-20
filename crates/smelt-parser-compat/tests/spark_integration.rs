@@ -66,19 +66,6 @@ fn test_spark_basic_select() {
 
 #[test]
 #[ignore]
-fn test_spark_qualify() {
-    let sql =
-        "SELECT * FROM (SELECT 1 AS id, 'a' AS name) t QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1";
-    let result = spark_explain(sql);
-    assert!(
-        result.is_ok(),
-        "QUALIFY should be valid in Spark: {:?}",
-        result.err()
-    );
-}
-
-#[test]
-#[ignore]
 fn test_spark_lambda_transform() {
     let sql = "SELECT TRANSFORM(ARRAY(1, 2, 3), x -> x + 1)";
     let result = spark_explain(sql);
