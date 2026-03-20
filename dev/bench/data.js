@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774017616571,
+  "lastUpdate": 1774017795237,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1127,6 +1127,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.924082,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "cb22c6ac9973fdbbf144dd232aa36f812a06aebc",
+          "message": "Fix maturin workspace build: add manifest-path and bundle smelt-lsp\n\nMaturin failed with \"missing field `package`\" because the root Cargo.toml\nis a workspace without a [package] section. Fix by:\n- Adding manifest-path to point maturin at crates/smelt-cli/Cargo.toml\n- Pre-building smelt-lsp and placing it in smelt_sql.data/scripts/ so\n  both binaries are included in the wheel\n- Using before-script-linux for manylinux container builds\n- Using a separate step for macOS/Windows builds\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T01:41:58+11:00",
+          "tree_id": "e549a513b0aec6f26e82711edabd0b4831a48846",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/cb22c6ac9973fdbbf144dd232aa36f812a06aebc"
+        },
+        "date": 1774017794720,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.723429,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.560217,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.554831,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.304185,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003356,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.016462999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.020608,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012574,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008415,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.0493499999999998,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.9294529999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.40475,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.74094,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.73233,
             "unit": "ms"
           }
         ]
