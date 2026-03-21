@@ -534,6 +534,31 @@ pub fn core_functions() -> Vec<FuncDesc> {
             extra_args: &[ExtraArg::SameAsFirst],
             output_type: DataType::Double,
         },
+        // Multi-arg string functions
+        FuncDesc {
+            name: "SUBSTRING",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("1"), ExtraArg::IntLiteral("3")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "SUBSTR",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("1"), ExtraArg::IntLiteral("3")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "SPLIT_PART",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral(","), ExtraArg::IntLiteral("1")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "STRPOS",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral("l")],
+            output_type: DataType::BigInt,
+        },
     ]
 }
 
@@ -584,7 +609,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         }
         "BOOL_AND" | "BOOL_OR" | "EVERY" => DataType::Boolean,
         "BIT_AND" | "BIT_OR" | "BIT_XOR" => arg_type.clone(),
-        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
+        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "STRPOS" | "POSITION" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "SINH" | "COSH" | "TANH" | "PI" => {
             DataType::Double
