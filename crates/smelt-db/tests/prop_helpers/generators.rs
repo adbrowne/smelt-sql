@@ -12,7 +12,7 @@
 //! can compare smelt's inference against DuckDB's actual type.
 
 use proptest::prelude::*;
-use smelt_types::DataType;
+use smelt_types::{DataType, SqlFunction};
 
 /// A typed column in the CTE source.
 #[derive(Debug, Clone)]
@@ -342,6 +342,37 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyScalar,
             output_type: DataType::Unknown, // arg-dependent
         },
+        // Statistical aggregates -> return Double
+        FuncDesc {
+            name: "STDDEV",
+            input: FuncInput::NumericAggregate,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "VARIANCE",
+            input: FuncInput::NumericAggregate,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "STDDEV_POP",
+            input: FuncInput::NumericAggregate,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "STDDEV_SAMP",
+            input: FuncInput::NumericAggregate,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "VAR_POP",
+            input: FuncInput::NumericAggregate,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "VAR_SAMP",
+            input: FuncInput::NumericAggregate,
+            output_type: DataType::Double,
+        },
     ]
 }
 
@@ -382,7 +413,9 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             precision: 38,
             scale: 10,
         },
-        "AVG" => DataType::Double,
+        "AVG" | "STDDEV" | "VARIANCE" | "STDDEV_POP" | "STDDEV_SAMP" | "VAR_POP" | "VAR_SAMP" => {
+            DataType::Double
+        }
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" => DataType::Double,
@@ -533,6 +566,17 @@ fn smelt_type_to_base(dt: &DataType) -> Option<BaseType> {
     }
 }
 
+/// Check if a SQL expression string is an aggregate function call.
+fn is_aggregate_expr(sql: &str) -> bool {
+    let upper = sql.to_uppercase();
+    if let Some(paren_pos) = upper.find('(') {
+        let name = upper[..paren_pos].trim();
+        SqlFunction::from_name(name).is_some_and(|f| f.is_aggregate())
+    } else {
+        false
+    }
+}
+
 /// Assemble a CTE query from columns and expressions.
 ///
 /// If any expression uses aggregate functions, we wrap the whole SELECT in a
@@ -550,33 +594,17 @@ pub fn assemble_cte_query(columns: &[TypedSource], exprs: &[TypedExpr]) -> Strin
         .map(|e| format!("{} AS {}", e.sql, e.alias))
         .collect();
 
-    // Check if any expression is an aggregate
-    let has_aggregate = exprs.iter().any(|e| {
-        let upper = e.sql.to_uppercase();
-        upper.starts_with("COUNT(")
-            || upper.starts_with("SUM(")
-            || upper.starts_with("AVG(")
-            || upper.starts_with("MIN(")
-            || upper.starts_with("MAX(")
-    });
+    let has_aggregate = exprs.iter().any(|e| is_aggregate_expr(&e.sql));
 
     if has_aggregate {
         // For queries with aggregates, only include aggregate expressions
         let agg_exprs: Vec<String> = exprs
             .iter()
-            .filter(|e| {
-                let upper = e.sql.to_uppercase();
-                upper.starts_with("COUNT(")
-                    || upper.starts_with("SUM(")
-                    || upper.starts_with("AVG(")
-                    || upper.starts_with("MIN(")
-                    || upper.starts_with("MAX(")
-            })
+            .filter(|e| is_aggregate_expr(&e.sql))
             .map(|e| format!("{} AS {}", e.sql, e.alias))
             .collect();
 
         if agg_exprs.is_empty() {
-            // Shouldn't happen, but fallback
             format!(
                 "WITH data AS (SELECT {}) SELECT {} FROM data",
                 cte_cols.join(", "),
