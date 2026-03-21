@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774077374707,
+  "lastUpdate": 1774077375782,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2555,6 +2555,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.44425786138691,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7dea6f891a5a7ff5e8177d8c4df65d86d6fd6741",
+          "message": "Add type conformance casts to ensure backend output matches smelt inference (#60)",
+          "timestamp": "2026-03-21T18:14:16+11:00",
+          "tree_id": "7ac78aad2e63dea039db3aad37705267204b5f09",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/7dea6f891a5a7ff5e8177d8c4df65d86d6fd6741"
+        },
+        "date": 1774077375392,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.38044443557909,
             "unit": "MB/s"
           }
         ]
