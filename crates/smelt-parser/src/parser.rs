@@ -1159,6 +1159,12 @@ impl<'a> Parser<'a> {
     fn parse_primary_expr(&mut self) {
         self.skip_trivia();
 
+        if self.at(NULL_KW) {
+            // NULL literal
+            self.advance();
+            return;
+        }
+
         if self.at(ARRAY_KW) && self.is_keyword_followed_by_lbracket() {
             self.parse_array_literal();
         } else if self.at(ARRAY_KW) && self.is_keyword_followed_by_lparen() {

@@ -124,6 +124,9 @@ pub trait TypeChecking: Schema {
 
     /// Get the function type signature of a model (inputs -> outputs)
     fn model_function_type(&self, path: PathBuf) -> Arc<schema::ModelFunctionType>;
+
+    /// Get type-level diagnostics for a model (Unknown types, uninferrable columns)
+    fn type_diagnostics(&self, path: PathBuf) -> Arc<Vec<Diagnostic>>;
 }
 
 /// The main database that combines all query groups
@@ -523,6 +526,10 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
         }
     }
 
+    // Check for columns with Unknown or missing types in the output schema
+    // This needs TypeChecking, but file_diagnostics only has Semantic access.
+    // We check via a separate query below.
+
     Arc::new(diagnostics)
 }
 
@@ -579,7 +586,7 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<
                 && smelt_types::SqlFunction::from_name(&upper_name).is_none()
             {
                 diagnostics.push(Diagnostic {
-                    severity: DiagnosticSeverity::Info,
+                    severity: DiagnosticSeverity::Warning,
                     message: format!(
                         "Function '{}' is not a recognized SQL function. Type inference unavailable.",
                         name
@@ -915,11 +922,14 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
                     // Use resolved schema to get columns through wildcards
                     let resolved = db.resolved_model_schema(upstream_path);
 
-                    // Add all resolved columns to context
+                    // Add all resolved columns to context (use Unknown for untyped
+                    // columns so they remain visible for column reference resolution)
                     for col in &resolved.columns {
-                        if let Some(typed_col) = &col.data_type {
-                            ctx.add_model_column(&model_name, &col.name, typed_col.clone());
-                        }
+                        let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        });
+                        ctx.add_model_column(&model_name, &col.name, typed_col);
                     }
 
                     // Register alias if present
@@ -1456,6 +1466,62 @@ fn model_function_type(db: &dyn TypeChecking, path: PathBuf) -> Arc<schema::Mode
         outputs,
         has_wildcard_output,
     })
+}
+
+fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>> {
+    let mut diagnostics = Vec::new();
+
+    // Only check models (files in models/ directory)
+    if !path
+        .to_str()
+        .map(|s| s.contains("models/"))
+        .unwrap_or(false)
+    {
+        return Arc::new(diagnostics);
+    }
+
+    // Skip if file doesn't parse as a model
+    if db.parse_model(path.clone()).is_none() {
+        return Arc::new(diagnostics);
+    }
+
+    let text = db.file_text(path.clone());
+    let typed_schema = db.typed_model_schema(path.clone());
+
+    for col in &typed_schema.columns {
+        // Skip wildcard markers
+        if col.name == "*" {
+            continue;
+        }
+
+        match &col.data_type {
+            Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown) => {
+                let range = smelt_parser::ast::text_range_to_range(&text, col.range);
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: format!(
+                        "Could not infer type for column '{}'. Consider adding an explicit CAST.",
+                        col.name
+                    ),
+                    range,
+                });
+            }
+            None => {
+                let range = smelt_parser::ast::text_range_to_range(&text, col.range);
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: format!(
+                        "Could not infer type for column '{}'. Consider adding an explicit CAST.",
+                        col.name
+                    ),
+                    range,
+                });
+            }
+            _ => {} // Type successfully inferred
+        }
+    }
+
+    Arc::new(diagnostics)
 }
 
 #[cfg(test)]
@@ -4144,6 +4210,159 @@ sources:
             ),
             "value should be Decimal through SELECT * chain, got {:?}",
             value.data_type.as_ref().unwrap().data_type
+        );
+    }
+
+    // ============================================================
+    // Unknown type handling and diagnostics tests
+    // ============================================================
+
+    #[test]
+    fn test_upstream_unknown_columns_visible_downstream() {
+        // Upstream model has a column from an external table (no type info).
+        // Downstream should still be able to reference it.
+        let (db, paths) = setup_multi_model(&[
+            ("upstream", "SELECT mystery_col FROM some_external_table"),
+            (
+                "downstream",
+                "SELECT mystery_col FROM smelt.ref('upstream')",
+            ),
+        ]);
+
+        // The downstream model should have the column (even if type is Unknown)
+        let schema = db.typed_model_schema(paths[1].clone());
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "mystery_col");
+    }
+
+    #[test]
+    fn test_coalesce_uses_second_arg_type() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: value
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "model",
+                "SELECT COALESCE(NULL, value) AS result FROM smelt.source('raw.data')",
+            )],
+        );
+
+        let schema = db.typed_model_schema(paths[0].clone());
+        let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        let result = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "result")
+            .unwrap_or_else(|| panic!("Column 'result' not found, columns: {:?}", col_names));
+        assert_eq!(
+            result.data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "COALESCE(NULL, integer_col) should infer INTEGER from second arg"
+        );
+    }
+
+    #[test]
+    fn test_coalesce_first_arg_known() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: value
+            type: DECIMAL(10,2)
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "model",
+                "SELECT COALESCE(value, 0) as result FROM smelt.source('raw.data')",
+            )],
+        );
+
+        let schema = db.typed_model_schema(paths[0].clone());
+        let result = schema.columns.iter().find(|c| c.name == "result").unwrap();
+        assert!(
+            matches!(
+                result.data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "COALESCE(decimal_col, 0) should infer Decimal from first arg"
+        );
+    }
+
+    #[test]
+    fn test_type_diagnostic_for_unknown_column() {
+        let (db, paths) = setup_multi_model(&[("model", "SELECT unknown_col FROM some_table")]);
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("Could not infer type")
+                    && d.message.contains("unknown_col")),
+            "Should produce a diagnostic for column with unknown type, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_no_type_diagnostic_for_known_columns() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: id
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "model",
+                "SELECT id, COUNT(*) as cnt FROM smelt.source('raw.data') GROUP BY id",
+            )],
+        );
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        assert!(
+            diags.is_empty(),
+            "Should not produce type diagnostics when all types are known, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_unknown_function_diagnostic() {
+        let (db, paths) = setup_multi_model(&[(
+            "model",
+            "SELECT my_custom_func(42) as result FROM some_table",
+        )]);
+
+        let diags = db.file_diagnostics(paths[0].clone());
+        assert!(
+            diags.iter().any(|d| d.message.contains("my_custom_func")
+                && d.message.contains("not a recognized SQL function")),
+            "Should warn about unrecognized function, got: {:?}",
+            diags
+        );
+        // Should be Warning severity
+        let func_diag = diags
+            .iter()
+            .find(|d| d.message.contains("my_custom_func"))
+            .unwrap();
+        assert_eq!(
+            func_diag.severity,
+            DiagnosticSeverity::Warning,
+            "Unknown function diagnostic should be Warning"
         );
     }
 }
