@@ -104,6 +104,22 @@ impl BaseType {
     }
 }
 
+/// The shape of the generated query — controls GROUP BY and HAVING generation.
+#[derive(Debug, Clone)]
+pub enum QueryShape {
+    /// `SELECT scalar_exprs FROM data`
+    Scalar,
+    /// `SELECT group_cols, agg_exprs FROM data GROUP BY group_cols`
+    GroupBy { group_columns: Vec<String> },
+    /// `SELECT group_cols, agg_exprs FROM data GROUP BY group_cols HAVING predicate`
+    GroupByHaving {
+        group_columns: Vec<String>,
+        having_predicate: String,
+    },
+    /// `SELECT window_exprs FROM data`
+    Window,
+}
+
 /// An expression kind the generator can produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExprKind {
@@ -1140,73 +1156,160 @@ fn is_window_expr(sql: &str) -> bool {
     sql.to_uppercase().contains(" OVER ")
 }
 
-/// Assemble a CTE query from columns and expressions.
+/// Assemble a CTE query from columns, expressions, and a query shape.
 ///
 /// Handles three expression categories that cannot be freely mixed:
 /// - Aggregates: require GROUP BY or single-row output
 /// - Window functions: valid without GROUP BY, but conflict with bare aggregates
 /// - Scalar expressions: column refs, casts, binary ops, etc.
 ///
-/// Strategy: emit only one category per query to avoid complex interactions.
-pub fn assemble_cte_query(columns: &[TypedSource], exprs: &[TypedExpr]) -> String {
+/// When `QueryShape::GroupBy` or `GroupByHaving`, the SELECT list includes
+/// group columns and aggregate expressions, with appropriate GROUP BY / HAVING clauses.
+pub fn assemble_cte_query(
+    columns: &[TypedSource],
+    exprs: &[TypedExpr],
+    shape: &QueryShape,
+) -> String {
     // Build the CTE
     let cte_cols: Vec<String> = columns
         .iter()
         .map(|c| format!("{} AS {}", c.cast_sql, c.name))
         .collect();
 
-    let has_aggregate = exprs.iter().any(|e| is_aggregate_expr(&e.sql));
-    let has_window = exprs.iter().any(|e| is_window_expr(&e.sql));
+    match shape {
+        QueryShape::GroupBy { group_columns } | QueryShape::GroupByHaving { group_columns, .. } => {
+            // For GROUP BY queries: include group columns + aggregate expressions only
+            let mut select_items: Vec<String> = Vec::new();
 
-    // Pick which expressions to include based on what's present.
-    // Window and aggregate expressions don't mix well without GROUP BY,
-    // so we prioritize one category.
-    let selected_exprs: Vec<&TypedExpr> = if has_aggregate && has_window {
-        // When both present, prefer window expressions + scalar expressions
-        // (aggregates would need GROUP BY which complicates window semantics)
-        exprs
-            .iter()
-            .filter(|e| !is_aggregate_expr(&e.sql))
-            .collect()
-    } else if has_aggregate {
-        // Only aggregates: filter to just aggregate expressions
-        exprs.iter().filter(|e| is_aggregate_expr(&e.sql)).collect()
-    } else {
-        // Scalar + window expressions coexist fine
-        exprs.iter().collect()
-    };
+            // Add group columns to SELECT
+            for (i, gc) in group_columns.iter().enumerate() {
+                select_items.push(format!("{gc} AS grp_{i}"));
+            }
 
-    // Fallback: if filtering removed everything, use all expressions
-    let selected_exprs = if selected_exprs.is_empty() {
-        exprs.iter().collect()
-    } else {
-        selected_exprs
-    };
+            // Filter to only aggregate expressions
+            let agg_exprs: Vec<&TypedExpr> =
+                exprs.iter().filter(|e| is_aggregate_expr(&e.sql)).collect();
 
-    let select_list: Vec<String> = selected_exprs
+            if agg_exprs.is_empty() {
+                // No aggregates generated — use COUNT(*) as fallback
+                select_items.push("COUNT(*) AS expr_0".to_string());
+            } else {
+                for e in &agg_exprs {
+                    select_items.push(format!("{} AS {}", e.sql, e.alias));
+                }
+            }
+
+            let group_by_clause = format!("GROUP BY {}", group_columns.join(", "));
+
+            let having_clause = if let QueryShape::GroupByHaving {
+                having_predicate, ..
+            } = shape
+            {
+                format!(" HAVING {having_predicate}")
+            } else {
+                String::new()
+            };
+
+            format!(
+                "WITH data AS (SELECT {}) SELECT {} FROM data {group_by_clause}{having_clause}",
+                cte_cols.join(", "),
+                select_items.join(", ")
+            )
+        }
+        QueryShape::Scalar | QueryShape::Window => {
+            let has_aggregate = exprs.iter().any(|e| is_aggregate_expr(&e.sql));
+            let has_window = exprs.iter().any(|e| is_window_expr(&e.sql));
+
+            let selected_exprs: Vec<&TypedExpr> = if has_aggregate && has_window {
+                exprs
+                    .iter()
+                    .filter(|e| !is_aggregate_expr(&e.sql))
+                    .collect()
+            } else if has_aggregate {
+                exprs.iter().filter(|e| is_aggregate_expr(&e.sql)).collect()
+            } else {
+                exprs.iter().collect()
+            };
+
+            let selected_exprs = if selected_exprs.is_empty() {
+                exprs.iter().collect()
+            } else {
+                selected_exprs
+            };
+
+            let select_list: Vec<String> = selected_exprs
+                .iter()
+                .map(|e| format!("{} AS {}", e.sql, e.alias))
+                .collect();
+
+            format!(
+                "WITH data AS (SELECT {}) SELECT {} FROM data",
+                cte_cols.join(", "),
+                select_list.join(", ")
+            )
+        }
+    }
+}
+
+/// Generate a HAVING predicate for GROUP BY queries.
+/// Returns a boolean-valued aggregate predicate string.
+fn generate_having_predicate(columns: &[TypedSource], group_columns: &[String]) -> String {
+    // Find a non-group column for aggregate predicates
+    let agg_col = columns
         .iter()
-        .map(|e| format!("{} AS {}", e.sql, e.alias))
-        .collect();
+        .find(|c| !group_columns.contains(&c.name))
+        .map(|c| c.name.as_str());
 
-    format!(
-        "WITH data AS (SELECT {}) SELECT {} FROM data",
-        cte_cols.join(", "),
-        select_list.join(", ")
-    )
+    match agg_col {
+        Some(col) => format!("COUNT({col}) > 0"),
+        None => "COUNT(*) > 0".to_string(),
+    }
+}
+
+/// Strategy that picks a query shape for the given column pool.
+pub fn query_shape_strategy(
+    columns: Vec<TypedSource>,
+) -> impl Strategy<Value = (Vec<TypedSource>, QueryShape)> {
+    let num_cols = columns.len();
+    // Pick how many columns to use for GROUP BY (1..=min(3, num_cols))
+    let max_group = num_cols.min(3);
+
+    let cols_for_gb = columns.clone();
+    let cols_for_gbh = columns.clone();
+
+    // Weighted choice: Scalar 60%, GroupBy 20%, GroupByHaving 15%, Window 5%
+    prop_oneof![
+        60 => Just((columns.clone(), QueryShape::Scalar)),
+        5 => Just((columns.clone(), QueryShape::Window)),
+        20 => (1..=max_group).prop_map(move |n_group| {
+            let group_cols: Vec<String> = cols_for_gb.iter().take(n_group).map(|c| c.name.clone()).collect();
+            (cols_for_gb.clone(), QueryShape::GroupBy { group_columns: group_cols })
+        }),
+        15 => (1..=max_group).prop_map(move |n_group| {
+            let group_cols: Vec<String> = cols_for_gbh.iter().take(n_group).map(|c| c.name.clone()).collect();
+            let having = generate_having_predicate(&cols_for_gbh, &group_cols);
+            (cols_for_gbh.clone(), QueryShape::GroupByHaving { group_columns: group_cols, having_predicate: having })
+        }),
+    ]
 }
 
 /// Strategy for generating complete test scenarios.
 pub fn test_scenario_strategy(
-) -> impl Strategy<Value = (Vec<TypedSource>, Vec<ExprKind>, Vec<usize>)> {
-    column_pool_strategy().prop_flat_map(|cols| {
-        let num_exprs = 1..=4usize;
-        (
-            Just(cols),
-            prop::collection::vec(expr_kind_strategy(), num_exprs.clone()),
-            prop::collection::vec(0..100usize, 1..=4),
-        )
-            .prop_filter("need at least one expr", |(_, kinds, _)| !kinds.is_empty())
-    })
+) -> impl Strategy<Value = (Vec<TypedSource>, QueryShape, Vec<ExprKind>, Vec<usize>)> {
+    column_pool_strategy()
+        .prop_flat_map(query_shape_strategy)
+        .prop_flat_map(|(cols, shape)| {
+            let num_exprs = 1..=4usize;
+            (
+                Just(cols),
+                Just(shape),
+                prop::collection::vec(expr_kind_strategy(), num_exprs.clone()),
+                prop::collection::vec(0..100usize, 1..=4),
+            )
+                .prop_filter("need at least one expr", |(_, _, kinds, _)| {
+                    !kinds.is_empty()
+                })
+        })
 }
 
 #[cfg(test)]
@@ -1225,7 +1328,7 @@ mod tests {
             alias: "expr_0".into(),
             expected_smelt_type: DataType::Integer,
         }];
-        let sql = assemble_cte_query(&cols, &exprs);
+        let sql = assemble_cte_query(&cols, &exprs, &QueryShape::Scalar);
         assert!(sql.contains("WITH data AS"));
         assert!(sql.contains("CAST(42 AS INTEGER) AS int_col_0"));
         assert!(sql.contains("int_col_0 AS expr_0"));
@@ -1243,7 +1346,7 @@ mod tests {
             alias: "expr_0".into(),
             expected_smelt_type: DataType::BigInt,
         }];
-        let sql = assemble_cte_query(&cols, &exprs);
+        let sql = assemble_cte_query(&cols, &exprs, &QueryShape::Scalar);
         assert!(sql.contains("COUNT(int_col_0) AS expr_0"));
     }
 
@@ -1257,5 +1360,86 @@ mod tests {
         let expr = generate_expr(&cols, ExprKind::ColumnRef, 0, 0).unwrap();
         assert_eq!(expr.sql, "x");
         assert_eq!(expr.expected_smelt_type, DataType::Integer);
+    }
+
+    #[test]
+    fn assemble_group_by_query() {
+        let cols = vec![
+            TypedSource {
+                name: "str_col_0".into(),
+                data_type: DataType::Varchar { max_length: None },
+                cast_sql: "CAST('hello' AS STRING)".into(),
+            },
+            TypedSource {
+                name: "int_col_1".into(),
+                data_type: DataType::Integer,
+                cast_sql: "CAST(42 AS INTEGER)".into(),
+            },
+        ];
+        let exprs = vec![TypedExpr {
+            sql: "COUNT(int_col_1)".into(),
+            alias: "expr_0".into(),
+            expected_smelt_type: DataType::BigInt,
+        }];
+        let shape = QueryShape::GroupBy {
+            group_columns: vec!["str_col_0".into()],
+        };
+        let sql = assemble_cte_query(&cols, &exprs, &shape);
+        assert!(sql.contains("GROUP BY str_col_0"));
+        assert!(sql.contains("str_col_0 AS grp_0"));
+        assert!(sql.contains("COUNT(int_col_1) AS expr_0"));
+        assert!(!sql.contains("HAVING"));
+    }
+
+    #[test]
+    fn assemble_group_by_having_query() {
+        let cols = vec![
+            TypedSource {
+                name: "str_col_0".into(),
+                data_type: DataType::Varchar { max_length: None },
+                cast_sql: "CAST('hello' AS STRING)".into(),
+            },
+            TypedSource {
+                name: "int_col_1".into(),
+                data_type: DataType::Integer,
+                cast_sql: "CAST(42 AS INTEGER)".into(),
+            },
+        ];
+        let exprs = vec![TypedExpr {
+            sql: "SUM(int_col_1)".into(),
+            alias: "expr_0".into(),
+            expected_smelt_type: DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+        }];
+        let shape = QueryShape::GroupByHaving {
+            group_columns: vec!["str_col_0".into()],
+            having_predicate: "COUNT(int_col_1) > 0".into(),
+        };
+        let sql = assemble_cte_query(&cols, &exprs, &shape);
+        assert!(sql.contains("GROUP BY str_col_0"));
+        assert!(sql.contains("HAVING COUNT(int_col_1) > 0"));
+    }
+
+    #[test]
+    fn assemble_group_by_all_columns_uses_count_star() {
+        let cols = vec![TypedSource {
+            name: "int_col_0".into(),
+            data_type: DataType::Integer,
+            cast_sql: "CAST(42 AS INTEGER)".into(),
+        }];
+        // No aggregate expressions provided
+        let exprs = vec![TypedExpr {
+            sql: "int_col_0".into(),
+            alias: "expr_0".into(),
+            expected_smelt_type: DataType::Integer,
+        }];
+        let shape = QueryShape::GroupBy {
+            group_columns: vec!["int_col_0".into()],
+        };
+        let sql = assemble_cte_query(&cols, &exprs, &shape);
+        assert!(sql.contains("GROUP BY int_col_0"));
+        assert!(sql.contains("COUNT(*) AS expr_0"));
     }
 }
