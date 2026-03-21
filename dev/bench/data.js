@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774084499943,
+  "lastUpdate": 1774084500739,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3170,6 +3170,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.723815049551504,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f26726e256331c2064b29801a01cf6f6af4e3e49",
+          "message": "Add property test generator coverage gaps to TODO\n\nAudit of generators vs parser/type inference support revealed extensive\ngaps: ~80% of string/math functions, all window functions, temporal\nfunctions, advanced aggregates, and several expression types untested.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T20:13:56+11:00",
+          "tree_id": "5d7b2bbbe1acc9eb6fdcc87cf5012ac8308d3fc8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f26726e256331c2064b29801a01cf6f6af4e3e49"
+        },
+        "date": 1774084500526,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.30423092156357,
             "unit": "MB/s"
           }
         ]
