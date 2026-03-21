@@ -362,13 +362,27 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             nullable: false,
         }),
 
-        SqlFunction::Sum => Some(TypedColumn {
-            data_type: DataType::Decimal {
-                precision: 38,
-                scale: 10,
-            },
-            nullable: true,
-        }),
+        SqlFunction::Sum => {
+            if let Some(arg) = func.arguments().first() {
+                if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    let result_type = match &arg_type.data_type {
+                        DataType::SmallInt | DataType::Integer => DataType::BigInt,
+                        DataType::BigInt => DataType::BigInt,
+                        DataType::Float | DataType::Double => DataType::Double,
+                        dt @ DataType::Decimal { .. } => dt.clone(),
+                        _ => DataType::BigInt,
+                    };
+                    return Some(TypedColumn {
+                        data_type: result_type,
+                        nullable: true,
+                    });
+                }
+            }
+            Some(TypedColumn {
+                data_type: DataType::BigInt,
+                nullable: true,
+            })
+        }
 
         SqlFunction::Avg => Some(TypedColumn {
             data_type: DataType::Double,
@@ -414,8 +428,15 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             nullable: false,
         }),
 
-        SqlFunction::Date | SqlFunction::DateTrunc => Some(TypedColumn {
+        SqlFunction::Date => Some(TypedColumn {
             data_type: DataType::Date,
+            nullable: true,
+        }),
+
+        SqlFunction::DateTrunc => Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: false,
+            },
             nullable: true,
         }),
 

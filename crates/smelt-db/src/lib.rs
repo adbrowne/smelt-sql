@@ -2054,13 +2054,13 @@ SELECT inner_total FROM outer_cte
         // Should have 1 column: inner_total
         assert_eq!(schema.columns.len(), 1);
 
-        // Check that inner_total has Decimal type (from SUM() in nested CTE)
+        // Check that inner_total has BigInt type (SUM(INTEGER) returns BigInt)
         let result_col = schema.columns.iter().find(|c| c.name == "inner_total");
         assert!(result_col.is_some(), "Column 'inner_total' not found");
         if let Some(typed_col) = &result_col.unwrap().data_type {
             assert!(
-                matches!(typed_col.data_type, DataType::Decimal { .. }),
-                "Expected Decimal type for 'inner_total' (from SUM in nested CTE), got {:?}",
+                matches!(typed_col.data_type, DataType::BigInt),
+                "Expected BigInt type for 'inner_total' (from SUM(INTEGER) in nested CTE), got {:?}",
                 typed_col.data_type
             );
         }

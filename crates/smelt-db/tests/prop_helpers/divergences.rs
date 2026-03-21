@@ -38,25 +38,14 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
     vec![
         TypeDivergence {
             id: "sum_integer",
-            description: "SUM(INTEGER) — smelt infers Decimal(38,10), backends return BigInt",
-            smelt_type: DataType::Decimal {
+            description: "SUM(INTEGER/BIGINT) — smelt infers BigInt, DuckDB returns Decimal(38,0) (HUGEINT via Arrow)",
+            smelt_type: DataType::BigInt,
+            duckdb_type: Some(DataType::Decimal {
                 precision: 38,
-                scale: 10,
-            },
-            duckdb_type: Some(DataType::BigInt),
-            spark_type: Some(DataType::BigInt),
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "sum_double",
-            description: "SUM(DOUBLE) — smelt infers Decimal(38,10), backends return Double",
-            smelt_type: DataType::Decimal {
-                precision: 38,
-                scale: 10,
-            },
-            duckdb_type: Some(DataType::Double),
-            spark_type: Some(DataType::Double),
-            status: DivergenceStatus::KnownBug,
+                scale: 0,
+            }),
+            spark_type: None, // Spark also returns BigInt, matches smelt
+            status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
             id: "extract",
@@ -65,18 +54,6 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::BigInt),
             spark_type: Some(DataType::Integer),
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "date_trunc",
-            description: "DATE_TRUNC(...) — smelt infers Date, backends return Timestamp",
-            smelt_type: DataType::Date,
-            duckdb_type: Some(DataType::Timestamp {
-                with_timezone: false,
-            }),
-            spark_type: Some(DataType::Timestamp {
-                with_timezone: false,
-            }),
             status: DivergenceStatus::KnownBug,
         },
         TypeDivergence {
@@ -205,35 +182,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_sum_divergence_duckdb() {
+    fn finds_extract_divergence_duckdb() {
         let divs = known_divergences();
-        let found = find_divergence(
-            &DataType::Decimal {
-                precision: 38,
-                scale: 10,
-            },
-            &DataType::BigInt,
-            "duckdb",
-            &divs,
-        );
+        let found = find_divergence(&DataType::Double, &DataType::BigInt, "duckdb", &divs);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().id, "sum_integer");
+        assert_eq!(found.unwrap().id, "extract");
     }
 
     #[test]
-    fn finds_sum_divergence_spark() {
+    fn finds_extract_divergence_spark() {
         let divs = known_divergences();
-        let found = find_divergence(
-            &DataType::Decimal {
-                precision: 38,
-                scale: 10,
-            },
-            &DataType::BigInt,
-            "spark",
-            &divs,
-        );
+        let found = find_divergence(&DataType::Double, &DataType::Integer, "spark", &divs);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().id, "sum_integer");
+        assert_eq!(found.unwrap().id, "extract");
     }
 
     #[test]
