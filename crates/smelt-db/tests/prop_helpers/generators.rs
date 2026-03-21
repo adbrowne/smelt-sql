@@ -199,6 +199,83 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::Numeric,
             output_type: DataType::Double, // fallback
         },
+        // Math functions -> always return Double
+        FuncDesc {
+            name: "POWER",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "EXP",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "LN",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "LOG",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "LOG10",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "LOG2",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        // Trigonometric functions -> always return Double
+        FuncDesc {
+            name: "SIN",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "COS",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "TAN",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "ASIN",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "ACOS",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "ATAN",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "SINH",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "COSH",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "TANH",
+            input: FuncInput::Numeric,
+            output_type: DataType::Double,
+        },
         // Aggregates
         FuncDesc {
             name: "COUNT",
@@ -269,7 +346,8 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         },
         "AVG" => DataType::Double,
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
-        "SQRT" | "EXP" | "LN" | "LOG" | "POWER" => DataType::Double,
+        "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
+        | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" => DataType::Double,
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "REVERSE" | "CONCAT" | "REPLACE" | "REPEAT" | "LPAD"
         | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" => {
