@@ -48,23 +48,6 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
-            id: "extract",
-            description:
-                "EXTRACT(...) — smelt infers Double, DuckDB returns BigInt, Spark returns Integer",
-            smelt_type: DataType::Double,
-            duckdb_type: Some(DataType::BigInt),
-            spark_type: Some(DataType::Integer),
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "length",
-            description: "LENGTH(...) — smelt infers Integer, DuckDB returns BigInt",
-            smelt_type: DataType::Integer,
-            duckdb_type: Some(DataType::BigInt),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
             id: "string_concat",
             description: "|| operator — smelt infers Text, backends return Varchar/String",
             smelt_type: DataType::Text,
@@ -81,52 +64,17 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::ByDesign,
         },
         TypeDivergence {
-            id: "ceil_floor_integer",
-            description: "CEIL/FLOOR(INTEGER) — smelt preserves Integer, DuckDB returns Double",
-            smelt_type: DataType::Integer,
-            duckdb_type: Some(DataType::Double),
-            spark_type: None, // Spark returns BigInt, compatible via integer width
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "ceil_floor_bigint",
-            description: "CEIL/FLOOR(BIGINT) — smelt preserves BigInt, DuckDB returns Double",
-            smelt_type: DataType::BigInt,
-            duckdb_type: Some(DataType::Double),
-            spark_type: None, // Spark returns BigInt, exact match
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "ceil_floor_decimal",
-            description: "CEIL/FLOOR(DECIMAL) — smelt preserves Decimal, DuckDB returns Double",
-            smelt_type: DataType::Decimal {
-                precision: 10,
-                scale: 2,
-            },
-            duckdb_type: Some(DataType::Double),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
             id: "ceil_floor_double",
-            description: "CEIL/FLOOR(DOUBLE) — smelt preserves Double, Spark returns BigInt",
+            description: "CEIL/FLOOR(DOUBLE) — smelt returns Double (matches DuckDB), Spark returns BigInt",
             smelt_type: DataType::Double,
-            duckdb_type: None, // DuckDB also returns Double, matches smelt
+            duckdb_type: None,
             spark_type: Some(DataType::BigInt),
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "position",
-            description: "STRPOS/POSITION — smelt infers Integer, DuckDB returns BigInt",
-            smelt_type: DataType::Integer,
-            duckdb_type: Some(DataType::BigInt),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
+            status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
             id: "avg_decimal",
             description:
-                "AVG(DECIMAL) — smelt infers Double, Spark returns Decimal (varying precision)",
+                "AVG(DECIMAL) — smelt infers Double (matches DuckDB), Spark returns Decimal (varying precision)",
             smelt_type: DataType::Double,
             duckdb_type: None,
             // Wildcard: Decimal(0,0) matches any Decimal precision/scale
@@ -134,7 +82,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 precision: 0,
                 scale: 0,
             }),
-            status: DivergenceStatus::KnownBug,
+            status: DivergenceStatus::BackendSpecific,
         },
     ]
 }
@@ -182,26 +130,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_extract_divergence_duckdb() {
+    fn finds_sum_integer_divergence_duckdb() {
         let divs = known_divergences();
-        let found = find_divergence(&DataType::Double, &DataType::BigInt, "duckdb", &divs);
+        let found = find_divergence(
+            &DataType::BigInt,
+            &DataType::Decimal {
+                precision: 38,
+                scale: 0,
+            },
+            "duckdb",
+            &divs,
+        );
         assert!(found.is_some());
-        assert_eq!(found.unwrap().id, "extract");
+        assert_eq!(found.unwrap().id, "sum_integer");
     }
 
     #[test]
-    fn finds_extract_divergence_spark() {
+    fn finds_ceil_floor_double_divergence_spark() {
         let divs = known_divergences();
-        let found = find_divergence(&DataType::Double, &DataType::Integer, "spark", &divs);
+        let found = find_divergence(&DataType::Double, &DataType::BigInt, "spark", &divs);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().id, "extract");
+        assert_eq!(found.unwrap().id, "ceil_floor_double");
     }
 
     #[test]
     fn backend_none_prevents_match() {
         let divs = known_divergences();
-        // length divergence has spark_type: None — should not match spark
-        let found = find_divergence(&DataType::Integer, &DataType::BigInt, "spark", &divs);
+        // sum_integer has spark_type: None — should not match spark
+        let found = find_divergence(
+            &DataType::BigInt,
+            &DataType::Decimal {
+                precision: 38,
+                scale: 0,
+            },
+            "spark",
+            &divs,
+        );
         assert!(found.is_none());
     }
 
