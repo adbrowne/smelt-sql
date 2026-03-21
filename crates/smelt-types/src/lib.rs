@@ -100,6 +100,17 @@ impl DataType {
         )
     }
 
+    /// Format as SQL type string for backend compilation.
+    ///
+    /// Translates smelt-internal types to what backends actually support:
+    /// - `Text` → `"VARCHAR"` (backends don't distinguish Text from VARCHAR)
+    pub fn to_backend_sql(&self) -> String {
+        match self {
+            DataType::Text => "VARCHAR".to_string(),
+            other => other.to_sql(),
+        }
+    }
+
     /// Format as SQL type string for the default dialect
     pub fn to_sql(&self) -> String {
         match self {
@@ -226,6 +237,16 @@ mod tests {
         assert_eq!(
             DataType::Array(Box::new(DataType::Integer)).to_string(),
             "INTEGER[]"
+        );
+    }
+
+    #[test]
+    fn test_to_backend_sql_text_becomes_varchar() {
+        assert_eq!(DataType::Text.to_backend_sql(), "VARCHAR");
+        assert_eq!(DataType::Integer.to_backend_sql(), "INTEGER");
+        assert_eq!(
+            DataType::Varchar { max_length: None }.to_backend_sql(),
+            "VARCHAR"
         );
     }
 

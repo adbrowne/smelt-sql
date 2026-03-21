@@ -5,6 +5,8 @@
 
 mod dialect;
 mod printer;
+mod type_conformance;
 
 pub use dialect::{BackendCapabilities, SqlDialect};
 pub use printer::{print, PrintContext};
+pub use type_conformance::wrap_with_type_casts;

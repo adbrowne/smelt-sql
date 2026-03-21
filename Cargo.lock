@@ -3727,6 +3727,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "smelt-core",
+ "smelt-dialect",
  "smelt-parser",
  "smelt-types",
 ]
@@ -3736,6 +3737,7 @@ name = "smelt-dialect"
 version = "0.1.0"
 dependencies = [
  "smelt-parser",
+ "smelt-types",
 ]
 
 [[package]]
