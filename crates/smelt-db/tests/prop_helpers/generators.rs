@@ -141,6 +141,8 @@ pub enum FuncInput {
     AnyAggregate,
     /// Aggregate on numeric.
     NumericAggregate,
+    /// Non-aggregate function that takes any type.
+    AnyScalar,
 }
 
 /// Core functions we test. Expand this list over time.
@@ -177,11 +179,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::String,
             output_type: DataType::Text,
         },
-        FuncDesc {
-            name: "INITCAP",
-            input: FuncInput::String,
-            output_type: DataType::Text,
-        },
+        // INITCAP omitted: not available in DuckDB
         FuncDesc {
             name: "CONCAT",
             input: FuncInput::String,
@@ -327,6 +325,12 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyAggregate,
             output_type: DataType::Unknown, // arg-dependent
         },
+        // Null-handling / scalar functions that accept any type
+        FuncDesc {
+            name: "COALESCE",
+            input: FuncInput::AnyScalar,
+            output_type: DataType::Unknown, // arg-dependent
+        },
     ]
 }
 
@@ -339,7 +343,7 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
             BaseType::Integer | BaseType::BigInt | BaseType::Double | BaseType::Decimal
         ),
         FuncInput::Temporal => matches!(base, BaseType::Date | BaseType::Timestamp),
-        FuncInput::AnyAggregate => true,
+        FuncInput::AnyScalar | FuncInput::AnyAggregate => true,
         FuncInput::NumericAggregate => matches!(
             base,
             BaseType::Integer | BaseType::BigInt | BaseType::Double | BaseType::Decimal
@@ -361,7 +365,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             },
             _ => DataType::Double,
         },
-        "MIN" | "MAX" => arg_type.clone(),
+        "MIN" | "MAX" | "COALESCE" | "NULLIF" | "GREATEST" | "LEAST" => arg_type.clone(),
         "COUNT" => DataType::BigInt,
         "SUM" => DataType::Decimal {
             precision: 38,
