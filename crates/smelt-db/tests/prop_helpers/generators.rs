@@ -121,11 +121,23 @@ pub enum ExprKind {
 
 // ---- Function descriptors ----
 
+/// Additional arguments beyond the first column argument.
+#[derive(Debug, Clone, Copy)]
+pub enum ExtraArg {
+    /// Re-use the same column as the first argument.
+    SameAsFirst,
+    /// An integer literal.
+    IntLiteral(&'static str),
+    /// A string literal (will be single-quoted).
+    StringLiteral(&'static str),
+}
+
 /// A function we can generate, with its required input type and output type.
 #[derive(Debug, Clone)]
 pub struct FuncDesc {
     pub name: &'static str,
     pub input: FuncInput,
+    pub extra_args: &'static [ExtraArg],
     pub output_type: DataType,
 }
 
@@ -158,84 +170,100 @@ pub fn core_functions() -> Vec<FuncDesc> {
         FuncDesc {
             name: "UPPER",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         FuncDesc {
             name: "LOWER",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         FuncDesc {
             name: "TRIM",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         FuncDesc {
             name: "REVERSE",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         FuncDesc {
             name: "LTRIM",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         FuncDesc {
             name: "RTRIM",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         // INITCAP omitted: not available in DuckDB
         FuncDesc {
             name: "CONCAT",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::Text,
         },
         // String functions -> return integer in smelt
         FuncDesc {
             name: "LENGTH",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::BigInt,
         },
         FuncDesc {
             name: "CHAR_LENGTH",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::BigInt,
         },
         FuncDesc {
             name: "CHARACTER_LENGTH",
             input: FuncInput::String,
+            extra_args: &[],
             output_type: DataType::BigInt,
         },
         // Numeric functions
         FuncDesc {
             name: "ABS",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double, // fallback; actual is arg-dependent
         },
         FuncDesc {
             name: "CEIL",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double, // fallback
         },
         FuncDesc {
             name: "FLOOR",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double, // fallback
         },
         FuncDesc {
             name: "SQRT",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "ROUND",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double, // fallback
         },
         FuncDesc {
             name: "SIGN",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::SmallInt,
         },
         // POWER/POW omitted: requires 2 args (added in multi-arg step)
@@ -243,74 +271,88 @@ pub fn core_functions() -> Vec<FuncDesc> {
         FuncDesc {
             name: "EXP",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "LN",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "LOG",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "LOG10",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "LOG2",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         // Trigonometric functions -> always return Double
         FuncDesc {
             name: "SIN",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "COS",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "TAN",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         // ASIN and ACOS omitted: require input in [-1,1], sample values cause domain errors
         FuncDesc {
             name: "ATAN",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "SINH",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "COSH",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "TANH",
             input: FuncInput::Numeric,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         // Aggregates
         FuncDesc {
             name: "COUNT",
             input: FuncInput::AnyAggregate,
+            extra_args: &[],
             output_type: DataType::BigInt,
         },
         FuncDesc {
             name: "SUM",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Decimal {
                 precision: 38,
                 scale: 10,
@@ -319,75 +361,89 @@ pub fn core_functions() -> Vec<FuncDesc> {
         FuncDesc {
             name: "AVG",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "MIN",
             input: FuncInput::AnyAggregate,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         FuncDesc {
             name: "MAX",
             input: FuncInput::AnyAggregate,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         // Null-handling / scalar functions that accept any type
         FuncDesc {
             name: "COALESCE",
             input: FuncInput::AnyScalar,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         // Comparison functions
         FuncDesc {
             name: "GREATEST",
             input: FuncInput::AnyScalar,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         FuncDesc {
             name: "LEAST",
             input: FuncInput::AnyScalar,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         // Statistical aggregates -> return Double
         FuncDesc {
             name: "STDDEV",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "VARIANCE",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "STDDEV_POP",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "STDDEV_SAMP",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "VAR_POP",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "VAR_SAMP",
             input: FuncInput::NumericAggregate,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         // Boolean aggregates
         FuncDesc {
             name: "BOOL_AND",
             input: FuncInput::BooleanAggregate,
+            extra_args: &[],
             output_type: DataType::Boolean,
         },
         FuncDesc {
             name: "BOOL_OR",
             input: FuncInput::BooleanAggregate,
+            extra_args: &[],
             output_type: DataType::Boolean,
         },
         // EVERY omitted: not available in DuckDB
@@ -395,23 +451,88 @@ pub fn core_functions() -> Vec<FuncDesc> {
         FuncDesc {
             name: "PI",
             input: FuncInput::NoArg,
+            extra_args: &[],
             output_type: DataType::Double,
         },
         // Bit aggregates
         FuncDesc {
             name: "BIT_AND",
             input: FuncInput::IntegerAggregate,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         FuncDesc {
             name: "BIT_OR",
             input: FuncInput::IntegerAggregate,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
         },
         FuncDesc {
             name: "BIT_XOR",
             input: FuncInput::IntegerAggregate,
+            extra_args: &[],
             output_type: DataType::Unknown, // arg-dependent
+        },
+        // Multi-arg functions
+        FuncDesc {
+            name: "REPLACE",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral("l"), ExtraArg::StringLiteral("r")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "LPAD",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("10"), ExtraArg::StringLiteral("x")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "RPAD",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("10"), ExtraArg::StringLiteral("x")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "LEFT",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("3")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "RIGHT",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("3")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "REPEAT",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("2")],
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "NULLIF",
+            input: FuncInput::AnyScalar,
+            extra_args: &[ExtraArg::SameAsFirst],
+            output_type: DataType::Unknown, // arg-dependent
+        },
+        FuncDesc {
+            name: "POWER",
+            input: FuncInput::Numeric,
+            extra_args: &[ExtraArg::IntLiteral("2")],
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "MOD",
+            input: FuncInput::Numeric,
+            extra_args: &[ExtraArg::SameAsFirst],
+            output_type: DataType::Unknown, // arg-dependent
+        },
+        FuncDesc {
+            name: "ATAN2",
+            input: FuncInput::Numeric,
+            extra_args: &[ExtraArg::SameAsFirst],
+            output_type: DataType::Double,
         },
     ]
 }
@@ -465,7 +586,10 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         "BIT_AND" | "BIT_OR" | "BIT_XOR" => arg_type.clone(),
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
-        | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" | "PI" => DataType::Double,
+        | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "SINH" | "COSH" | "TANH" | "PI" => {
+            DataType::Double
+        }
+        "MOD" => arg_type.clone(),
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
         | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
@@ -563,7 +687,16 @@ pub fn generate_expr(
 
             let return_type = function_return_type(func.name, &compatible_col.data_type);
 
-            let sql = format!("{}({})", func.name, compatible_col.name);
+            // Build argument list
+            let mut args = vec![compatible_col.name.clone()];
+            for extra in func.extra_args {
+                match extra {
+                    ExtraArg::SameAsFirst => args.push(compatible_col.name.clone()),
+                    ExtraArg::IntLiteral(v) => args.push(v.to_string()),
+                    ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
+                }
+            }
+            let sql = format!("{}({})", func.name, args.join(", "));
 
             Some(TypedExpr {
                 sql,
