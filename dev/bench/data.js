@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774054474480,
+  "lastUpdate": 1774059447723,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1597,6 +1597,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.705661,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b14ac0591883cdace08076b46efdc397794bda0f",
+          "message": "Fix dev release: patch inter-crate dependency versions (#58)\n\nThe dev version patching only updated the workspace root Cargo.toml,\nbut smelt-dialect has a hardcoded `version = \"0.1.0\"` dependency on\nsmelt-parser. Semver pre-release versions (0.1.0-dev.xxx) don't match\n^0.1.0, causing all builds to fail with \"failed to select a version\".\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T13:15:41+11:00",
+          "tree_id": "be5f50e8b512360bd92c2241e35a750250dadb95",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b14ac0591883cdace08076b46efdc397794bda0f"
+        },
+        "date": 1774059447280,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.148177000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.912971999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.619451,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.30414,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002705,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.390051,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.025358,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013365,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.01029,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.225256,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.144324,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.70258,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.69251,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.613997,
             "unit": "ms"
           }
         ]
