@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774019117694,
+  "lastUpdate": 1774054161555,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1409,6 +1409,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.61842,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "604e86e495a5e13c72d14df116910b13c9019148",
+          "message": "Update duckdb to 1.4.4 and arrow/parquet to 57 (#56)\n\nMatches the system-installed DuckDB version (1.4.4) and updates\narrow/parquet to stay in sync with duckdb's arrow dependency.\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T11:47:15+11:00",
+          "tree_id": "cfd6f53f926ff32e710941c43cf899490ff2a3a3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/604e86e495a5e13c72d14df116910b13c9019148"
+        },
+        "date": 1774054160706,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.890899000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.667904,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6031120000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.31430400000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004849,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 36.587225,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028753,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015679,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008365000000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.144028,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.011743,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.60303,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.645730000000004,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.773252,
             "unit": "ms"
           }
         ]
