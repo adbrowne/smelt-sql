@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774099138395,
+  "lastUpdate": 1774099139222,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3539,6 +3539,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.629752435252634,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b62ad6fbd08755466fdb41698444dcfe8e4f1082",
+          "message": "Canonicalize JSON functions and add type inference (#67)\n\n* Canonicalize JSON functions and add type inference (#67)\n\nRedesign JSON function support to accept all dialect variants (PostgreSQL,\nDuckDB, Spark) and map them to canonical smelt functions internally:\n\n- JsonObject (json_build_object, json_object)\n- JsonArray (json_build_array, json_array)\n- ToJson (to_json, to_jsonb, row_to_json)\n- JsonExtract (json_extract, json_extract_path)\n- JsonExtractText (json_extract_string, json_extract_path_text, get_json_object, json_value)\n- JsonArrayLength, JsonObjectKeys (json_keys), JsonContains\n\nAdd type inference for JSON operators: ->, ->>, #>, #>> (Text), @>, <@ (Boolean).\nAdd JSON functions and -> / ->> operators to property test generators.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Address review: add comments for JSON type collapse, update ROADMAP\n\n- Add comment explaining why -> and ->> both return Text (no DataType::Json)\n- Update ROADMAP.md with JSON canonicalization entry\n- Note generator coverage gap for JSON_EXTRACT etc. in TODO.md\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add JSON example model for event property extraction\n\nDemonstrates canonical JSON functions (->>, ->, json_array_length)\nin a realistic model that extracts structured fields from JSON event\nproperties.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-22T00:17:24+11:00",
+          "tree_id": "910441dccd7fed7f086976e255be64a029565e68",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b62ad6fbd08755466fdb41698444dcfe8e4f1082"
+        },
+        "date": 1774099139019,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.045034027703466,
             "unit": "MB/s"
           }
         ]
