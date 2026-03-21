@@ -282,6 +282,7 @@ Plans are committed to the repo under `docs/plans/` as markdown files.
 - Create a plan before starting non-trivial implementation work
 - Plans should be committed alongside or before the implementation they describe
 - Use markdown format
+- **Always commit the plan file to `docs/plans/`** as part of the implementation work — do not leave it only in `.claude/plans/`
 
 ## License
 
