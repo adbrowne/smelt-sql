@@ -49,25 +49,9 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                         return;
                     }
                 }
-                // EXPLODE/UNNEST renaming
+                // Function name remapping per dialect
                 if let Some(name) = fc.name() {
-                    let new_name = match ctx.dialect {
-                        SqlDialect::DuckDB | SqlDialect::PostgreSQL => {
-                            if name.eq_ignore_ascii_case("EXPLODE") {
-                                Some("UNNEST")
-                            } else {
-                                None
-                            }
-                        }
-                        SqlDialect::SparkSQL => {
-                            if name.eq_ignore_ascii_case("UNNEST") {
-                                Some("EXPLODE")
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    if let Some(new_name) = new_name {
+                    if let Some(new_name) = remap_function_name(ctx.dialect, &name) {
                         print_function_with_renamed(node, ctx, out, new_name);
                         return;
                     }
@@ -341,6 +325,40 @@ fn print_strip_trailing_commas(node: &SyntaxNode, ctx: &PrintContext, out: &mut 
 }
 
 /// Print a FUNCTION_CALL node with the function name replaced by `new_name`.
+/// Remap a function name for a specific dialect.
+/// Returns `Some(new_name)` if the function should be renamed, `None` to keep as-is.
+fn remap_function_name<'a>(dialect: &SqlDialect, name: &str) -> Option<&'a str> {
+    match dialect {
+        SqlDialect::DuckDB => {
+            if name.eq_ignore_ascii_case("EXPLODE") {
+                Some("UNNEST")
+            } else if name.eq_ignore_ascii_case("EVERY") {
+                Some("BOOL_AND")
+            } else {
+                None
+            }
+        }
+        SqlDialect::PostgreSQL => {
+            if name.eq_ignore_ascii_case("EXPLODE") {
+                Some("UNNEST")
+            } else {
+                None
+            }
+        }
+        SqlDialect::SparkSQL => {
+            if name.eq_ignore_ascii_case("UNNEST") {
+                Some("EXPLODE")
+            } else if name.eq_ignore_ascii_case("BOOL_AND") {
+                Some("EVERY")
+            } else if name.eq_ignore_ascii_case("BOOL_OR") {
+                Some("SOME")
+            } else {
+                None
+            }
+        }
+    }
+}
+
 fn print_function_with_renamed(
     node: &SyntaxNode,
     ctx: &PrintContext,
@@ -681,5 +699,48 @@ mod tests {
         let (d, c) = postgresql_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, "SELECT UNNEST(arr) FROM t");
+    }
+
+    // ===== EVERY/BOOL_AND/BOOL_OR remapping tests =====
+
+    #[test]
+    fn test_every_to_bool_and_duckdb() {
+        let sql = "SELECT EVERY(b) FROM t";
+        let (d, c) = duckdb_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT BOOL_AND(b) FROM t");
+    }
+
+    #[test]
+    fn test_every_unchanged_postgresql() {
+        // PostgreSQL natively supports EVERY — no remapping needed
+        let sql = "SELECT EVERY(b) FROM t";
+        let (d, c) = postgresql_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_bool_and_to_every_spark() {
+        let sql = "SELECT BOOL_AND(b) FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT EVERY(b) FROM t");
+    }
+
+    #[test]
+    fn test_bool_or_to_some_spark() {
+        let sql = "SELECT BOOL_OR(b) FROM t";
+        let (d, c) = spark_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, "SELECT SOME(b) FROM t");
+    }
+
+    #[test]
+    fn test_bool_and_unchanged_duckdb() {
+        let sql = "SELECT BOOL_AND(b) FROM t";
+        let (d, c) = duckdb_ctx();
+        let result = print_with(sql, &d, &c, "main");
+        assert_eq!(result, sql);
     }
 }

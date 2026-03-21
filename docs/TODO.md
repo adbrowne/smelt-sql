@@ -14,18 +14,18 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 ### Functions
 
-- [ ] **String functions** — Add SUBSTRING, REPLACE, LPAD, RPAD, SPLIT_PART, CONCAT, LTRIM, RTRIM, TRANSLATE, REPEAT, INITCAP, QUOTE_IDENT, QUOTE_LITERAL, LEFT, RIGHT, POSITION, STRPOS, SUBSTR, TO_CHAR, CHAR_LENGTH, CHARACTER_LENGTH (21 missing, only 4 of 25 covered)
-- [ ] **Math functions** — Add POWER/POW, EXP, LN, LOG, LOG10, LOG2, MOD, SIGN, SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, SINH, COSH, TANH, PI (18 missing, only 5 of 23 covered)
-- [ ] **Temporal functions** — Add EXTRACT, DATE_PART, DATE_TRUNC, MAKE_DATE, MAKE_TIME, MAKE_TIMESTAMP, MAKE_TIMESTAMPTZ, AGE (none covered)
-- [ ] **Statistical/advanced aggregates** — Add STDDEV, VARIANCE, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP, MEDIAN, MODE, PERCENTILE_CONT, PERCENTILE_DISC, APPROX_COUNT_DISTINCT, ANY_VALUE, FIRST, LAST, BOOL_AND, BOOL_OR, BIT_AND, BIT_OR, BIT_XOR, CORR, COVAR_POP, COVAR_SAMP, REGR_SLOPE, EVERY (24 untested aggregates)
-- [ ] **Null handling functions** — Add COALESCE, NULLIF (none covered)
-- [ ] **Comparison functions** — Add GREATEST, LEAST (none covered)
+- [x] **String functions** — Added LTRIM, RTRIM, CONCAT, CHAR_LENGTH, CHARACTER_LENGTH, REPLACE, LPAD, RPAD, REPEAT, SUBSTRING, SUBSTR, SPLIT_PART, STRPOS, LEFT, RIGHT. Omitted: INITCAP (not in DuckDB, no simple equivalent), TRANSLATE, QUOTE_IDENT, QUOTE_LITERAL, POSITION (STRPOS covers same path), TO_CHAR
+- [x] **Math functions** — Added POWER, EXP, LN, LOG, LOG10, LOG2, MOD, SIGN, SIN, COS, TAN, ATAN, ATAN2, SINH, COSH, TANH, PI. Omitted: ASIN/ACOS (domain-restricted, sample values cause errors)
+- [x] **Temporal functions** — Added DATE_PART, DATE_TRUNC. Omitted: EXTRACT (special syntax, DATE_PART covers same path), MAKE_DATE/MAKE_TIME/MAKE_TIMESTAMP/MAKE_TIMESTAMPTZ/AGE (complex multi-arg with specific value requirements)
+- [x] **Statistical/advanced aggregates** — Added STDDEV, VARIANCE, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP, BOOL_AND, BOOL_OR, EVERY (via dialect remapping), BIT_AND, BIT_OR, BIT_XOR. Omitted: MEDIAN/MODE/PERCENTILE_CONT/PERCENTILE_DISC (DuckDB syntax differences), APPROX_COUNT_DISTINCT/ANY_VALUE/FIRST/LAST (limited DuckDB support), CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE (need 2-column aggregates)
+- [x] **Null handling functions** — Added COALESCE, NULLIF
+- [x] **Comparison functions** — Added GREATEST, LEAST
 - [ ] **JSON functions** — Add JSON_BUILD_OBJECT, JSON_BUILD_ARRAY, TO_JSON, TO_JSONB, ROW_TO_JSON (none covered)
 
 ### Expressions and Operators
 
 - [ ] **Window functions** — Add ROW_NUMBER, RANK, DENSE_RANK, NTILE, CUME_DIST, PERCENT_RANK, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE with OVER clauses (none covered)
-- [ ] **BETWEEN / IN / EXISTS expressions** — Generate these comparison expressions (none covered, all return Boolean)
+- [x] **BETWEEN / IN expressions** — Added BETWEEN and IN for numeric columns (both return Boolean). EXISTS not yet covered.
 - [ ] **Scalar subqueries** — Generate `(SELECT ...)` in expression position (none covered)
 - [ ] **Regex operators** — Add `~`, `~*`, `!~`, `!~*` PostgreSQL regex operators (none covered, type inference also missing)
 - [ ] **JSON operators** — Add `->`, `->>`, `#>`, `#>>`, `@>`, `<@` (none covered, type inference also missing)
@@ -41,6 +41,14 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 ### Syntax Variants
 
 - [ ] **PostgreSQL `::` cast syntax** — Generate `expr::type` in addition to `CAST(expr AS type)`
-- [ ] **CAST to more types** — Currently only DOUBLE and STRING targets; add Date, Timestamp, Boolean, Decimal(p,s)
+- [x] **CAST to more types** — Added INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN, DATE, TIMESTAMP targets
 - [ ] **GROUP BY / HAVING** — Generate multi-column GROUP BY with HAVING predicates
 - [ ] **DISTINCT / DISTINCT ON** — Generate DISTINCT expressions
+
+### Known DuckDB Incompatibilities (discovered during generator expansion)
+
+- **INITCAP**: Not available in DuckDB (no simple equivalent)
+- **EVERY**: Not natively in DuckDB; dialect printer remaps to BOOL_AND (now tested)
+- **LEFT/RIGHT**: Parser keyword conflict fixed; now tested
+- **ASIN/ACOS**: Domain-restricted to [-1,1]; sample values (42, 100, etc.) cause errors
+- **SIGN**: DuckDB and Spark both return TINYINT (SmallInt) regardless of input type; fixed smelt inference to match

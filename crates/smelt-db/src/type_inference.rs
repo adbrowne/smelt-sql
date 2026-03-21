@@ -484,7 +484,7 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             nullable: true,
         }),
 
-        SqlFunction::Abs | SqlFunction::Sign => {
+        SqlFunction::Abs => {
             if let Some(arg) = func.arguments().first() {
                 if let Some(arg_type) = infer_expression_type(arg, ctx) {
                     return Some(arg_type);
@@ -495,6 +495,11 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
                 nullable: true,
             })
         }
+
+        SqlFunction::Sign => Some(TypedColumn {
+            data_type: DataType::SmallInt,
+            nullable: true,
+        }),
 
         SqlFunction::Round | SqlFunction::Trunc | SqlFunction::Truncate => {
             if let Some(arg) = func.arguments().first() {
