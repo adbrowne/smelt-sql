@@ -3756,7 +3756,11 @@ sources:
 
         assert_eq!(schema.columns.len(), 4);
 
-        let event_id = schema.columns.iter().find(|c| c.name == "event_id").unwrap();
+        let event_id = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_id")
+            .unwrap();
         assert_eq!(
             event_id.data_type.as_ref().unwrap().data_type,
             DataType::Integer,
@@ -3829,7 +3833,11 @@ sources:
 
         assert_eq!(schema.columns.len(), 2);
 
-        let event_id = schema.columns.iter().find(|c| c.name == "event_id").unwrap();
+        let event_id = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_id")
+            .unwrap();
         assert_eq!(
             event_id.data_type.as_ref().unwrap().data_type,
             DataType::Integer,
@@ -4109,10 +4117,7 @@ sources:
         let (db, paths) = setup_multi_model_with_sources(
             sources_yaml,
             &[
-                (
-                    "base",
-                    "SELECT id, value FROM smelt.source('raw.data')",
-                ),
+                ("base", "SELECT id, value FROM smelt.source('raw.data')"),
                 ("mid", "SELECT * FROM smelt.ref('base')"),
                 ("top", "SELECT * FROM smelt.ref('mid')"),
             ],
