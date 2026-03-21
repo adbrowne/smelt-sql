@@ -187,6 +187,33 @@ The `examples/` directory contains SQL model examples demonstrating smelt capabi
    - Error-recovery parser handles partial/invalid code
    - Incremental recompilation for fast feedback
 
+## Type Property Tests
+
+Property-based tests in `crates/smelt-db/tests/type_property_tests.rs` verify smelt's type inference against DuckDB:
+
+```bash
+# Run all property tests (256 cases + smoke tests)
+cargo test -p smelt-db --test type_property_tests
+
+# Run only the property test
+cargo test -p smelt-db --test type_property_tests prop_type_inference
+
+# Deeper coverage (local only)
+PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference
+```
+
+**Structure:**
+- `tests/prop_helpers/generators.rs` — Type-aware SQL expression generators
+- `tests/prop_helpers/arrow_mapping.rs` — Arrow → smelt DataType mapping
+- `tests/prop_helpers/duckdb_oracle.rs` — DuckDB execution oracle (trait-based for future PG/Spark)
+- `tests/prop_helpers/type_comparison.rs` — Exact/Compatible/Mismatch comparison
+- `tests/prop_helpers/divergences.rs` — Known type divergence registry
+
+**When a proptest failure occurs:**
+1. Check if it's a known divergence → add to `divergences.rs`
+2. Check if types are compatible (Text/Varchar, Decimal precision) → add to `type_comparison.rs`
+3. Otherwise fix the inference in `smelt-db/src/type_inference.rs`
+
 ## Development Workflow
 
 **IMPORTANT: Always Work on a Branch**

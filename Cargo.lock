@@ -3719,6 +3719,9 @@ name = "smelt-db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow",
+ "duckdb",
+ "proptest",
  "rowan",
  "salsa",
  "serde",
