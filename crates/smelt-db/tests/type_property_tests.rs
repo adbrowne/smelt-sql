@@ -126,7 +126,7 @@ proptest! {
     /// Spark's) actual types for randomly generated SQL expressions.
     #[test]
     fn prop_type_inference(
-        (columns, expr_kinds, func_indices) in test_scenario_strategy()
+        (columns, shape, expr_kinds, func_indices) in test_scenario_strategy()
     ) {
         let duckdb = DuckDbOracle::new();
         let divergences = known_divergences();
@@ -143,7 +143,7 @@ proptest! {
         // Need at least one expression
         prop_assume!(!exprs.is_empty());
 
-        let sql = assemble_cte_query(&columns, &exprs);
+        let sql = assemble_cte_query(&columns, &exprs, &shape);
 
         // Always check DuckDB
         if let Err(msg) = check_types_against_oracle(&duckdb, "duckdb", &sql, &columns, &divergences) {
@@ -288,4 +288,74 @@ fn smoke_case_expression() {
         let divergences = known_divergences();
         check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
     }
+}
+
+#[test]
+fn smoke_group_by_count() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('hello' AS STRING) AS s, CAST(42 AS INTEGER) AS x) \
+               SELECT s AS grp_0, COUNT(x) AS expr_0 FROM data GROUP BY s";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![
+        generators::TypedSource {
+            name: "s".into(),
+            data_type: DataType::Varchar { max_length: None },
+            cast_sql: "CAST('hello' AS STRING)".into(),
+        },
+        generators::TypedSource {
+            name: "x".into(),
+            data_type: DataType::Integer,
+            cast_sql: "CAST(42 AS INTEGER)".into(),
+        },
+    ];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    // grp_0 should be Varchar
+    let match_grp = compare_types(&inferred[0].1, &actual[0].1);
+    assert!(
+        matches!(match_grp, TypeMatch::Exact | TypeMatch::Compatible { .. }),
+        "grp_0: smelt={:?}, duckdb={:?}",
+        inferred[0].1,
+        actual[0].1
+    );
+
+    // expr_0 (COUNT) should be BigInt
+    assert_eq!(inferred[1].1, DataType::BigInt);
+    assert_eq!(actual[1].1, DataType::BigInt);
+}
+
+#[test]
+fn smoke_group_by_having() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('hello' AS STRING) AS s, CAST(42 AS INTEGER) AS x) \
+               SELECT s AS grp_0, COUNT(x) AS expr_0 FROM data GROUP BY s HAVING COUNT(x) > 0";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![
+        generators::TypedSource {
+            name: "s".into(),
+            data_type: DataType::Varchar { max_length: None },
+            cast_sql: "CAST('hello' AS STRING)".into(),
+        },
+        generators::TypedSource {
+            name: "x".into(),
+            data_type: DataType::Integer,
+            cast_sql: "CAST(42 AS INTEGER)".into(),
+        },
+    ];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    // grp_0 should be Varchar
+    let match_grp = compare_types(&inferred[0].1, &actual[0].1);
+    assert!(
+        matches!(match_grp, TypeMatch::Exact | TypeMatch::Compatible { .. }),
+        "grp_0: smelt={:?}, duckdb={:?}",
+        inferred[0].1,
+        actual[0].1
+    );
+
+    // expr_0 (COUNT) should be BigInt
+    assert_eq!(inferred[1].1, DataType::BigInt);
+    assert_eq!(actual[1].1, DataType::BigInt);
 }

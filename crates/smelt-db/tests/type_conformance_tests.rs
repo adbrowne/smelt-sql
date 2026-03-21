@@ -147,7 +147,7 @@ proptest! {
     /// Verify that cast-wrapped SQL produces exact type matches against DuckDB.
     #[test]
     fn prop_type_conformance_duckdb(
-        (columns, expr_kinds, func_indices) in test_scenario_strategy()
+        (columns, shape, expr_kinds, func_indices) in test_scenario_strategy()
     ) {
         let duckdb = DuckDbOracle::new();
 
@@ -160,7 +160,7 @@ proptest! {
         }
         prop_assume!(!exprs.is_empty());
 
-        let sql = assemble_cte_query(&columns, &exprs);
+        let sql = assemble_cte_query(&columns, &exprs, &shape);
         let inferred = run_smelt_inference(&sql, &columns);
 
         if let Err(msg) = check_conformance(&duckdb, "duckdb", &sql, &columns, &inferred) {
