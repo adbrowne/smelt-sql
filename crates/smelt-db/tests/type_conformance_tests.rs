@@ -14,7 +14,7 @@ use prop_helpers::generators::{
 use prop_helpers::spark_oracle::SparkOracle;
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
-use smelt_dialect::wrap_with_type_casts;
+use smelt_dialect::{wrap_with_type_casts, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 
@@ -68,6 +68,23 @@ fn run_smelt_inference(sql: &str, columns: &[generators::TypedSource]) -> Vec<(S
         .collect()
 }
 
+/// Translate SQL through the dialect printer for a specific backend.
+/// This remaps function names (e.g. EVERY -> BOOL_AND for DuckDB).
+fn translate_for_backend(sql: &str, backend: &str) -> String {
+    let (dialect, capabilities) = match backend {
+        "duckdb" => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        "spark" => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
+        _ => return sql.to_string(),
+    };
+    let parse = smelt_parser::parse(sql);
+    let ctx = PrintContext {
+        dialect: &dialect,
+        capabilities: &capabilities,
+        schema: "main",
+    };
+    smelt_dialect::print(&parse.syntax(), &ctx)
+}
+
 /// Wrap SQL with type casts and verify the oracle returns exact type matches.
 fn check_conformance(
     oracle: &dyn TypeOracle,
@@ -76,10 +93,13 @@ fn check_conformance(
     _columns: &[generators::TypedSource],
     inferred: &[(String, DataType)],
 ) -> Result<(), String> {
+    // Translate through dialect printer (remaps function names)
+    let backend_sql = translate_for_backend(sql, backend);
+
     // Build the cast-wrapped SQL
     let col_names: Vec<&str> = inferred.iter().map(|(name, _)| name.as_str()).collect();
     let col_types: Vec<DataType> = inferred.iter().map(|(_, dt)| dt.clone()).collect();
-    let cast_sql = wrap_with_type_casts(sql, &col_names, &col_types);
+    let cast_sql = wrap_with_type_casts(&backend_sql, &col_names, &col_types);
 
     let actual_types = match oracle.query_types(&cast_sql) {
         Ok(types) => types,
