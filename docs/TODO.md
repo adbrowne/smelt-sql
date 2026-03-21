@@ -14,10 +14,10 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 ### Functions
 
-- [x] **String functions** — Added LTRIM, RTRIM, CONCAT, CHAR_LENGTH, CHARACTER_LENGTH, REPLACE, LPAD, RPAD, REPEAT, SUBSTRING, SUBSTR, SPLIT_PART, STRPOS. Omitted: INITCAP (not in DuckDB), LEFT/RIGHT (SQL keyword conflicts), TRANSLATE, QUOTE_IDENT, QUOTE_LITERAL, POSITION (STRPOS covers same path), TO_CHAR
+- [x] **String functions** — Added LTRIM, RTRIM, CONCAT, CHAR_LENGTH, CHARACTER_LENGTH, REPLACE, LPAD, RPAD, REPEAT, SUBSTRING, SUBSTR, SPLIT_PART, STRPOS, LEFT, RIGHT. Omitted: INITCAP (not in DuckDB, no simple equivalent), TRANSLATE, QUOTE_IDENT, QUOTE_LITERAL, POSITION (STRPOS covers same path), TO_CHAR
 - [x] **Math functions** — Added POWER, EXP, LN, LOG, LOG10, LOG2, MOD, SIGN, SIN, COS, TAN, ATAN, ATAN2, SINH, COSH, TANH, PI. Omitted: ASIN/ACOS (domain-restricted, sample values cause errors)
 - [x] **Temporal functions** — Added DATE_PART, DATE_TRUNC. Omitted: EXTRACT (special syntax, DATE_PART covers same path), MAKE_DATE/MAKE_TIME/MAKE_TIMESTAMP/MAKE_TIMESTAMPTZ/AGE (complex multi-arg with specific value requirements)
-- [x] **Statistical/advanced aggregates** — Added STDDEV, VARIANCE, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP, BOOL_AND, BOOL_OR, BIT_AND, BIT_OR, BIT_XOR. Omitted: EVERY (not in DuckDB), MEDIAN/MODE/PERCENTILE_CONT/PERCENTILE_DISC (DuckDB syntax differences), APPROX_COUNT_DISTINCT/ANY_VALUE/FIRST/LAST (limited DuckDB support), CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE (need 2-column aggregates)
+- [x] **Statistical/advanced aggregates** — Added STDDEV, VARIANCE, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP, BOOL_AND, BOOL_OR, EVERY (via dialect remapping), BIT_AND, BIT_OR, BIT_XOR. Omitted: MEDIAN/MODE/PERCENTILE_CONT/PERCENTILE_DISC (DuckDB syntax differences), APPROX_COUNT_DISTINCT/ANY_VALUE/FIRST/LAST (limited DuckDB support), CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE (need 2-column aggregates)
 - [x] **Null handling functions** — Added COALESCE, NULLIF
 - [x] **Comparison functions** — Added GREATEST, LEAST
 - [ ] **JSON functions** — Add JSON_BUILD_OBJECT, JSON_BUILD_ARRAY, TO_JSON, TO_JSONB, ROW_TO_JSON (none covered)
@@ -47,8 +47,9 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 ### Known DuckDB Incompatibilities (discovered during generator expansion)
 
-- **INITCAP**: Not available in DuckDB
-- **EVERY**: Not available in DuckDB (BOOL_AND covers same semantics)
-- **LEFT/RIGHT**: SQL keywords conflict with function parsing in smelt's parser
+- **INITCAP**: Not available in DuckDB (no simple equivalent)
+- **EVERY**: Not natively in DuckDB; dialect printer remaps to BOOL_AND (now tested)
+- **LEFT/RIGHT**: Parser keyword conflict fixed; now tested
 - **ASIN/ACOS**: Domain-restricted to [-1,1]; sample values (42, 100, etc.) cause errors
+- **SIGN**: DuckDB returns TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
 - **SIGN**: DuckDB returns TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
