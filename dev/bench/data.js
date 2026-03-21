@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774091281040,
+  "lastUpdate": 1774099138395,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2631,6 +2631,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.000295,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b62ad6fbd08755466fdb41698444dcfe8e4f1082",
+          "message": "Canonicalize JSON functions and add type inference (#67)\n\n* Canonicalize JSON functions and add type inference (#67)\n\nRedesign JSON function support to accept all dialect variants (PostgreSQL,\nDuckDB, Spark) and map them to canonical smelt functions internally:\n\n- JsonObject (json_build_object, json_object)\n- JsonArray (json_build_array, json_array)\n- ToJson (to_json, to_jsonb, row_to_json)\n- JsonExtract (json_extract, json_extract_path)\n- JsonExtractText (json_extract_string, json_extract_path_text, get_json_object, json_value)\n- JsonArrayLength, JsonObjectKeys (json_keys), JsonContains\n\nAdd type inference for JSON operators: ->, ->>, #>, #>> (Text), @>, <@ (Boolean).\nAdd JSON functions and -> / ->> operators to property test generators.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Address review: add comments for JSON type collapse, update ROADMAP\n\n- Add comment explaining why -> and ->> both return Text (no DataType::Json)\n- Update ROADMAP.md with JSON canonicalization entry\n- Note generator coverage gap for JSON_EXTRACT etc. in TODO.md\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add JSON example model for event property extraction\n\nDemonstrates canonical JSON functions (->>, ->, json_array_length)\nin a realistic model that extracts structured fields from JSON event\nproperties.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-22T00:17:24+11:00",
+          "tree_id": "910441dccd7fed7f086976e255be64a029565e68",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b62ad6fbd08755466fdb41698444dcfe8e4f1082"
+        },
+        "date": 1774099138125,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.20843,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 32.987131000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.610946,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.304361,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0029349999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.580056,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028704,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.01067,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008446,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.852748,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.293364,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.25915,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.60214,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.793038,
             "unit": "ms"
           }
         ]
