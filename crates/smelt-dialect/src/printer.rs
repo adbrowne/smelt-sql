@@ -329,11 +329,18 @@ fn print_strip_trailing_commas(node: &SyntaxNode, ctx: &PrintContext, out: &mut 
 /// Returns `Some(new_name)` if the function should be renamed, `None` to keep as-is.
 fn remap_function_name<'a>(dialect: &SqlDialect, name: &str) -> Option<&'a str> {
     match dialect {
-        SqlDialect::DuckDB | SqlDialect::PostgreSQL => {
+        SqlDialect::DuckDB => {
             if name.eq_ignore_ascii_case("EXPLODE") {
                 Some("UNNEST")
             } else if name.eq_ignore_ascii_case("EVERY") {
                 Some("BOOL_AND")
+            } else {
+                None
+            }
+        }
+        SqlDialect::PostgreSQL => {
+            if name.eq_ignore_ascii_case("EXPLODE") {
+                Some("UNNEST")
             } else {
                 None
             }
@@ -705,11 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn test_every_to_bool_and_postgresql() {
+    fn test_every_unchanged_postgresql() {
+        // PostgreSQL natively supports EVERY — no remapping needed
         let sql = "SELECT EVERY(b) FROM t";
         let (d, c) = postgresql_ctx();
         let result = print_with(sql, &d, &c, "main");
-        assert_eq!(result, "SELECT BOOL_AND(b) FROM t");
+        assert_eq!(result, sql);
     }
 
     #[test]

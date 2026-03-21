@@ -578,8 +578,8 @@ pub fn core_functions() -> Vec<FuncDesc> {
         },
         FuncDesc {
             name: "NULLIF",
-            input: FuncInput::AnyScalar,
-            extra_args: &[ExtraArg::SameAsFirst],
+            input: FuncInput::Numeric,
+            extra_args: &[ExtraArg::IntLiteral("0")],
             prepend_literal: None,
             output_type: DataType::Unknown, // arg-dependent
         },
@@ -783,7 +783,6 @@ pub fn generate_expr(
                     ("INTEGER", DataType::Integer),
                     ("BIGINT", DataType::BigInt),
                     ("VARCHAR", DataType::Varchar { max_length: None }),
-                    ("BOOLEAN", DataType::Boolean),
                 ]
             } else if col.data_type.is_string() {
                 &[("VARCHAR", DataType::Varchar { max_length: None })]

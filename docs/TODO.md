@@ -51,5 +51,4 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - **EVERY**: Not natively in DuckDB; dialect printer remaps to BOOL_AND (now tested)
 - **LEFT/RIGHT**: Parser keyword conflict fixed; now tested
 - **ASIN/ACOS**: Domain-restricted to [-1,1]; sample values (42, 100, etc.) cause errors
-- **SIGN**: DuckDB returns TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
-- **SIGN**: DuckDB returns TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
+- **SIGN**: DuckDB and Spark both return TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
