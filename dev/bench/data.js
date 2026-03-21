@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774072029106,
+  "lastUpdate": 1774072030106,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2432,6 +2432,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.273024358538567,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0343c12f4ade278b6bfff90e8a8de76dc9e036f8",
+          "message": "Add end-of-conversation checklist to CLAUDE.md\n\nInstructs Claude to write unfinished work and open decisions to\ndocs/TODO.md and update CLAUDE.md before ending a conversation.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T16:45:09+11:00",
+          "tree_id": "43e10f771a9fc9cce96222b8ea03d24791fc94a0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0343c12f4ade278b6bfff90e8a8de76dc9e036f8"
+        },
+        "date": 1774072029792,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.44425786138691,
             "unit": "MB/s"
           }
         ]
