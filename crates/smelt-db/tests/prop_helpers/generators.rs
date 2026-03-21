@@ -199,12 +199,13 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::Numeric,
             output_type: DataType::Double, // fallback
         },
-        // Math functions -> always return Double
         FuncDesc {
-            name: "POWER",
+            name: "SIGN",
             input: FuncInput::Numeric,
-            output_type: DataType::Double,
+            output_type: DataType::SmallInt,
         },
+        // POWER/POW omitted: requires 2 args (added in multi-arg step)
+        // Math functions -> always return Double
         FuncDesc {
             name: "EXP",
             input: FuncInput::Numeric,
@@ -246,16 +247,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::Numeric,
             output_type: DataType::Double,
         },
-        FuncDesc {
-            name: "ASIN",
-            input: FuncInput::Numeric,
-            output_type: DataType::Double,
-        },
-        FuncDesc {
-            name: "ACOS",
-            input: FuncInput::Numeric,
-            output_type: DataType::Double,
-        },
+        // ASIN and ACOS omitted: require input in [-1,1], sample values cause domain errors
         FuncDesc {
             name: "ATAN",
             input: FuncInput::Numeric,
@@ -331,6 +323,7 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
 pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
     match func_name {
         "ABS" | "ROUND" | "TRUNC" => arg_type.clone(),
+        "SIGN" => DataType::SmallInt,
         "CEIL" | "CEILING" | "FLOOR" => match arg_type {
             DataType::Decimal { precision, .. } => DataType::Decimal {
                 precision: *precision,
