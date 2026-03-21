@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774054161555,
+  "lastUpdate": 1774054163775,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1940,6 +1940,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.40641670726312,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "604e86e495a5e13c72d14df116910b13c9019148",
+          "message": "Update duckdb to 1.4.4 and arrow/parquet to 57 (#56)\n\nMatches the system-installed DuckDB version (1.4.4) and updates\narrow/parquet to stay in sync with duckdb's arrow dependency.\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T11:47:15+11:00",
+          "tree_id": "cfd6f53f926ff32e710941c43cf899490ff2a3a3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/604e86e495a5e13c72d14df116910b13c9019148"
+        },
+        "date": 1774054163145,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.08544385187712,
             "unit": "MB/s"
           }
         ]
