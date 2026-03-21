@@ -147,6 +147,8 @@ pub enum FuncInput {
     BooleanAggregate,
     /// Aggregate on integer columns (Integer/BigInt).
     IntegerAggregate,
+    /// Function takes no arguments.
+    NoArg,
 }
 
 /// Core functions we test. Expand this list over time.
@@ -389,6 +391,12 @@ pub fn core_functions() -> Vec<FuncDesc> {
             output_type: DataType::Boolean,
         },
         // EVERY omitted: not available in DuckDB
+        // Zero-arg functions
+        FuncDesc {
+            name: "PI",
+            input: FuncInput::NoArg,
+            output_type: DataType::Double,
+        },
         // Bit aggregates
         FuncDesc {
             name: "BIT_AND",
@@ -422,6 +430,7 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
         FuncInput::IntegerAggregate => {
             matches!(base, BaseType::Integer | BaseType::BigInt)
         }
+        FuncInput::NoArg => true,
         FuncInput::NumericAggregate => matches!(
             base,
             BaseType::Integer | BaseType::BigInt | BaseType::Double | BaseType::Decimal
@@ -456,7 +465,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         "BIT_AND" | "BIT_OR" | "BIT_XOR" => arg_type.clone(),
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
-        | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" => DataType::Double,
+        | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" | "PI" => DataType::Double,
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
         | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
@@ -537,6 +546,15 @@ pub fn generate_expr(
         ExprKind::Function => {
             let funcs = core_functions();
             let func = &funcs[func_idx % funcs.len()];
+
+            // Handle zero-arg functions
+            if matches!(func.input, FuncInput::NoArg) {
+                return Some(TypedExpr {
+                    sql: format!("{}()", func.name),
+                    alias,
+                    expected_smelt_type: func.output_type.clone(),
+                });
+            }
 
             // Find a compatible column
             let compatible_col = columns.iter().find(|c| {
