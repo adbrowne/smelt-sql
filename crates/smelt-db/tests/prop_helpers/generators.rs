@@ -83,7 +83,7 @@ impl BaseType {
             BaseType::Integer => "CAST(42 AS INTEGER)",
             BaseType::BigInt => "CAST(100 AS BIGINT)",
             BaseType::Double => "CAST(3.14 AS DOUBLE)",
-            BaseType::Varchar => "CAST('hello' AS VARCHAR)",
+            BaseType::Varchar => "CAST('hello' AS STRING)",
             BaseType::Date => "CAST('2024-01-01' AS DATE)",
             BaseType::Timestamp => "CAST('2024-01-01 12:00:00' AS TIMESTAMP)",
             BaseType::Decimal => "CAST(99.99 AS DECIMAL(10,2))",
@@ -332,7 +332,7 @@ pub fn generate_expr(
             let (cast_type, smelt_type) = if col.data_type.is_numeric() {
                 ("DOUBLE", DataType::Double)
             } else {
-                ("VARCHAR", DataType::Varchar { max_length: None })
+                ("STRING", DataType::Varchar { max_length: None })
             };
             Some(TypedExpr {
                 sql: format!("CAST({} AS {})", col.name, cast_type),

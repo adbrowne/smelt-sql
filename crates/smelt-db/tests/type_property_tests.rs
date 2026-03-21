@@ -6,18 +6,20 @@
 //! - Placing tests in `smelt-types` would create a circular dependency
 //!
 //! The strategy: generate random SQL expressions with known types via CTEs, run them
-//! against DuckDB to get actual types, and compare against smelt's type inference.
+//! against DuckDB (always) and Spark (if `SPARK_CONTAINER_ID` is set) to get actual types,
+//! and compare against smelt's type inference.
 //! Mismatches are either bugs (to fix), known divergences (registered in `divergences.rs`),
 //! or compatible type differences (Text vs Varchar, Decimal precision differences).
 
 #[allow(dead_code)]
 mod prop_helpers;
 
-use prop_helpers::divergences::{find_divergence, known_divergences};
+use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
     self, assemble_cte_query, generate_expr, test_scenario_strategy, TypedExpr,
 };
+use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
@@ -25,6 +27,15 @@ use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 
 use proptest::prelude::*;
+use std::sync::LazyLock;
+
+/// Shared SparkOracle instance — created once on first access.
+/// The JVM startup is expensive (~5-10s), so we reuse across all test cases.
+static SPARK: LazyLock<Option<SparkOracle>> = LazyLock::new(|| {
+    std::env::var("SPARK_CONTAINER_ID")
+        .ok()
+        .map(|id| SparkOracle::new(&id))
+});
 
 /// Parse SQL with smelt and run type inference on each select column.
 fn run_smelt_inference(sql: &str, columns: &[generators::TypedSource]) -> Vec<(String, DataType)> {
@@ -59,18 +70,65 @@ fn run_smelt_inference(sql: &str, columns: &[generators::TypedSource]) -> Vec<(S
         .collect()
 }
 
+/// Compare smelt inference against one oracle backend, returning an error message on mismatch.
+fn check_types_against_oracle(
+    oracle: &dyn TypeOracle,
+    backend: &str,
+    sql: &str,
+    columns: &[generators::TypedSource],
+    divergences: &[TypeDivergence],
+) -> Result<(), String> {
+    let actual_types = match oracle.query_types(sql) {
+        Ok(types) => types,
+        Err(_) => return Ok(()), // Skip invalid SQL for this backend
+    };
+
+    let inferred_types = run_smelt_inference(sql, columns);
+
+    for (i, actual) in actual_types.iter().enumerate() {
+        let inferred = if i < inferred_types.len() {
+            &inferred_types[i]
+        } else {
+            continue;
+        };
+
+        let smelt_type = &inferred.1;
+        let actual_type = &actual.1;
+
+        if *smelt_type == DataType::Unknown {
+            continue;
+        }
+
+        match compare_types(smelt_type, actual_type) {
+            TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
+            TypeMatch::Mismatch => {
+                if find_divergence(smelt_type, actual_type, backend, divergences).is_none() {
+                    return Err(format!(
+                        "Type mismatch for column {} ({}) against {backend}:\n  \
+                         smelt inferred: {smelt_type:?}\n  \
+                         {backend} actual:  {actual_type:?}\n  \
+                         SQL: {sql}",
+                        i, actual.0
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---- Property tests ----
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Core property test: smelt's inferred types should match DuckDB's actual types
-    /// for randomly generated SQL expressions.
+    /// Core property test: smelt's inferred types should match DuckDB's (and optionally
+    /// Spark's) actual types for randomly generated SQL expressions.
     #[test]
-    fn prop_type_inference_matches_duckdb(
+    fn prop_type_inference(
         (columns, expr_kinds, func_indices) in test_scenario_strategy()
     ) {
-        let oracle = DuckDbOracle::new();
+        let duckdb = DuckDbOracle::new();
         let divergences = known_divergences();
 
         // Generate expressions from the column pool
@@ -87,50 +145,15 @@ proptest! {
 
         let sql = assemble_cte_query(&columns, &exprs);
 
-        // Run against DuckDB
-        let actual_types = match oracle.query_types(&sql) {
-            Ok(types) => types,
-            Err(_e) => {
-                // Some generated SQL may be invalid (e.g. type mismatches DuckDB rejects).
-                // Skip those rather than failing.
-                // Skip invalid SQL rather than failing
-                return Ok(());
-            }
-        };
+        // Always check DuckDB
+        if let Err(msg) = check_types_against_oracle(&duckdb, "duckdb", &sql, &columns, &divergences) {
+            prop_assert!(false, "{}", msg);
+        }
 
-        // Run smelt inference
-        let inferred_types = run_smelt_inference(&sql, &columns);
-
-        // Compare each column
-        for (i, actual) in actual_types.iter().enumerate() {
-            let inferred = if i < inferred_types.len() {
-                &inferred_types[i]
-            } else {
-                continue;
-            };
-
-            let smelt_type = &inferred.1;
-            let actual_type = &actual.1;
-
-            // Skip Unknown types — smelt couldn't determine the type
-            if *smelt_type == DataType::Unknown {
-                continue;
-            }
-
-            match compare_types(smelt_type, actual_type) {
-                TypeMatch::Exact => {}
-                TypeMatch::Compatible { .. } => {}
-                TypeMatch::Mismatch => {
-                    if find_divergence(smelt_type, actual_type, &divergences).is_some() {
-                        // Known divergence — pass
-                    } else {
-                        prop_assert!(
-                            false,
-                            "Type mismatch for column {} ({}):\n  smelt inferred: {:?}\n  DuckDB actual:  {:?}\n  SQL: {}",
-                            i, actual.0, smelt_type, actual_type, sql
-                        );
-                    }
-                }
+        // Check Spark if available (shared session, one JVM for all cases)
+        if let Some(spark) = SPARK.as_ref() {
+            if let Err(msg) = check_types_against_oracle(spark, "spark", &sql, &columns, &divergences) {
+                prop_assert!(false, "{}", msg);
             }
         }
     }
@@ -152,6 +175,11 @@ fn smoke_cast_integer() {
     }];
     let inferred = run_smelt_inference(sql, &columns);
     assert_eq!(inferred[0].1, DataType::Integer);
+
+    if let Some(spark) = SPARK.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+    }
 }
 
 #[test]
@@ -174,6 +202,11 @@ fn smoke_upper_function() {
         match_result,
         TypeMatch::Exact | TypeMatch::Compatible { .. }
     ));
+
+    if let Some(spark) = SPARK.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+    }
 }
 
 #[test]
@@ -191,6 +224,11 @@ fn smoke_count_aggregate() {
 
     assert_eq!(inferred[0].1, DataType::BigInt);
     assert_eq!(actual[0].1, DataType::BigInt);
+
+    if let Some(spark) = SPARK.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+    }
 }
 
 #[test]
@@ -220,6 +258,11 @@ fn smoke_binary_add() {
             actual[0].1
         );
     }
+
+    if let Some(spark) = SPARK.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+    }
 }
 
 #[test]
@@ -240,4 +283,9 @@ fn smoke_case_expression() {
         match_result,
         TypeMatch::Exact | TypeMatch::Compatible { .. }
     ));
+
+    if let Some(spark) = SPARK.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+    }
 }

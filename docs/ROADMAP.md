@@ -4,12 +4,18 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
-**Property-Based Type Inference Tests (March 21, 2026)**: New integration test suite in `smelt-db/tests/` that uses proptest + DuckDB to verify smelt's type inference against real database behavior:
+**Spark Type Oracle for Property Tests (March 21, 2026)**: Extended type property tests to verify smelt's inference against Spark SQL (in addition to DuckDB):
+- **SparkOracle**: New `TypeOracle` implementation that runs `DESCRIBE QUERY` via `docker exec` against a Spark container
+- **Multi-backend divergences**: `find_divergence()` now accepts a `backend` parameter; DuckDB and Spark divergences are registered independently
+- **Unified test flow**: Each proptest case checks DuckDB (always) + Spark (when `SPARK_CONTAINER_ID` env var is set), gracefully skipping Spark-invalid queries
+- **CI integration**: New `type-property-spark` job in `compat.yml` (nightly / `run-docker-tests` label) runs 500 proptest cases against both backends
+- 27 tests: 256-case proptest + 5 smoke tests + unit tests across modules (up from 21)
+
+**Property-Based Type Inference Tests (March 21, 2026)**: Integration test suite in `smelt-db/tests/` that uses proptest + DuckDB to verify smelt's type inference against real database behavior:
 - **Property tests**: Generate random typed CTE queries, run against DuckDB, compare inferred vs actual column types
 - **Type oracle**: Trait-based design (`TypeOracle`) for future PostgreSQL/Spark backends
 - **Divergence registry**: Known mismatches (e.g., `SUM(DOUBLE)` → Decimal vs Double, `CEIL(INTEGER)` → Integer vs Double) registered with status (KnownBug/ByDesign/BackendSpecific)
 - **Compatible type handling**: Text/Varchar, Decimal precision, integer width differences marked Compatible rather than failures
-- 21 tests: 256-case proptest + 5 smoke tests + unit tests across modules
 
 **Optimizer: Cube Split + Incremental Materialization (March 14, 2026)**: New `smelt-optimizer` crate implementing the first two optimization rules:
 - **Cube split**: `-- smelt:cube_split` annotation on GROUP BY splits queries with multiple COUNT(DISTINCT) into parallel sub-queries joined on GROUP BY keys (NULL-safe via IS NOT DISTINCT FROM). Non-distinct aggregates (COUNT(*), SUM, etc.) are included in the first sub-query.
