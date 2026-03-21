@@ -143,6 +143,8 @@ pub enum FuncInput {
     NumericAggregate,
     /// Non-aggregate function that takes any type.
     AnyScalar,
+    /// Aggregate on boolean columns.
+    BooleanAggregate,
 }
 
 /// Core functions we test. Expand this list over time.
@@ -373,6 +375,22 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::NumericAggregate,
             output_type: DataType::Double,
         },
+        // Boolean aggregates
+        FuncDesc {
+            name: "BOOL_AND",
+            input: FuncInput::BooleanAggregate,
+            output_type: DataType::Boolean,
+        },
+        FuncDesc {
+            name: "BOOL_OR",
+            input: FuncInput::BooleanAggregate,
+            output_type: DataType::Boolean,
+        },
+        FuncDesc {
+            name: "EVERY",
+            input: FuncInput::BooleanAggregate,
+            output_type: DataType::Boolean,
+        },
     ]
 }
 
@@ -386,6 +404,7 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
         ),
         FuncInput::Temporal => matches!(base, BaseType::Date | BaseType::Timestamp),
         FuncInput::AnyScalar | FuncInput::AnyAggregate => true,
+        FuncInput::BooleanAggregate => base == BaseType::Boolean,
         FuncInput::NumericAggregate => matches!(
             base,
             BaseType::Integer | BaseType::BigInt | BaseType::Double | BaseType::Decimal
@@ -416,6 +435,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         "AVG" | "STDDEV" | "VARIANCE" | "STDDEV_POP" | "STDDEV_SAMP" | "VAR_POP" | "VAR_SAMP" => {
             DataType::Double
         }
+        "BOOL_AND" | "BOOL_OR" | "EVERY" => DataType::Boolean,
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" => DataType::Double,
