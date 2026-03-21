@@ -331,6 +331,17 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::AnyScalar,
             output_type: DataType::Unknown, // arg-dependent
         },
+        // Comparison functions
+        FuncDesc {
+            name: "GREATEST",
+            input: FuncInput::AnyScalar,
+            output_type: DataType::Unknown, // arg-dependent
+        },
+        FuncDesc {
+            name: "LEAST",
+            input: FuncInput::AnyScalar,
+            output_type: DataType::Unknown, // arg-dependent
+        },
     ]
 }
 
