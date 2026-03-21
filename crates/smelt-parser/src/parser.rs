@@ -1779,7 +1779,9 @@ impl<'a> Parser<'a> {
 
     /// Check if current token is a keyword that can also be used as a function name
     fn at_keyword_as_function_name(&self) -> bool {
-        if !self.at_any(&[FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW, VALUES_KW]) {
+        if !self.at_any(&[
+            FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW, VALUES_KW, LEFT_KW, RIGHT_KW,
+        ]) {
             return false;
         }
         // Only treat as function name if followed by LPAREN

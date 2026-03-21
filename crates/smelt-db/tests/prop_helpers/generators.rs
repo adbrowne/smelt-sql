@@ -555,8 +555,20 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::Text,
         },
-        // LEFT/RIGHT omitted: conflict with SQL keywords (LEFT JOIN, RIGHT JOIN),
-        // causing parser to fail alias extraction
+        FuncDesc {
+            name: "LEFT",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("3")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "RIGHT",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::IntLiteral("3")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
         FuncDesc {
             name: "REPEAT",
             input: FuncInput::String,
