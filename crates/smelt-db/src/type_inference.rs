@@ -957,7 +957,10 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             }
         }
 
-        // JSON operators
+        // JSON operators — both return Text because smelt represents JSON as Text
+        // internally (no DataType::Json variant). Semantically, -> returns JSON
+        // (navigable further) while ->> returns plain text. We keep separate arms
+        // to preserve this distinction for future DataType::Json support.
         "->" | "#>" => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
