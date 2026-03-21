@@ -121,6 +121,8 @@ pub enum ExprKind {
     Between,
     /// col IN (val1, val2, ...).
     InList,
+    /// JSON operator (-> or ->>).
+    JsonOp,
 }
 
 // ---- Function descriptors ----
@@ -650,6 +652,28 @@ pub fn core_functions() -> Vec<FuncDesc> {
                 with_timezone: false,
             },
         },
+        // JSON functions (using DuckDB-compatible names for testing)
+        FuncDesc {
+            name: "TO_JSON",
+            input: FuncInput::AnyScalar,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "JSON_ARRAY",
+            input: FuncInput::AnyScalar,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "JSON_OBJECT",
+            input: FuncInput::AnyScalar,
+            extra_args: &[],
+            prepend_literal: Some("key"),
+            output_type: DataType::Text,
+        },
     ]
 }
 
@@ -715,6 +739,14 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
         | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
         | "SPLIT_PART" => DataType::Text,
+        // JSON functions
+        "TO_JSON"
+        | "JSON_OBJECT"
+        | "JSON_ARRAY"
+        | "JSON_EXTRACT"
+        | "JSON_EXTRACT_STRING"
+        | "JSON_EXTRACT_TEXT" => DataType::Text,
+        "JSON_ARRAY_LENGTH" => DataType::BigInt,
         _ => DataType::Unknown,
     }
 }
@@ -751,6 +783,7 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::Cast),
         1 => Just(ExprKind::Between),
         1 => Just(ExprKind::InList),
+        1 => Just(ExprKind::JsonOp),
     ]
 }
 
@@ -902,6 +935,24 @@ pub fn generate_expr(
                 sql: format!("{} IN (1, 2, 3)", num_col.name),
                 alias,
                 expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::JsonOp => {
+            // Generate JSON -> or ->> operator expressions
+            // Use a JSON literal and pick an operator based on func_idx
+            let json_literal = r#"CAST('{"a":1,"b":"hello","c":true}' AS JSON)"#;
+            let keys = ["a", "b", "c"];
+            let key = keys[expr_idx % keys.len()];
+            let op = if func_idx.is_multiple_of(2) {
+                "->"
+            } else {
+                "->>"
+            };
+            Some(TypedExpr {
+                sql: format!("{json_literal} {op} '{key}'"),
+                alias,
+                expected_smelt_type: DataType::Text,
             })
         }
     }
