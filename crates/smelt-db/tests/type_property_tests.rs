@@ -17,17 +17,20 @@ mod prop_helpers;
 use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
-    self, assemble_cte_query, generate_expr, test_scenario_strategy, TypedExpr,
+    self, assemble_cte_query, generate_expr, multi_model_scenario_strategy, test_scenario_strategy,
+    TypedExpr,
 };
 use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+use smelt_db::{Database, Inputs, TypeChecking};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 
 use proptest::prelude::*;
-use std::sync::LazyLock;
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 
 /// Shared SparkOracle instance — created once on first access.
 /// The JVM startup is expensive (~5-10s), so we reuse across all test cases.
@@ -358,4 +361,129 @@ fn smoke_group_by_having() {
     // expr_0 (COUNT) should be BigInt
     assert_eq!(inferred[1].1, DataType::BigInt);
     assert_eq!(actual[1].1, DataType::BigInt);
+}
+
+// ---- Multi-model property tests ----
+
+/// Set up a Salsa Database with two models: model_A and model_B.
+fn setup_multi_model_db(model_a_sql: &str, model_b_sql: &str) -> (Database, PathBuf) {
+    let mut db = Database::default();
+    let model_a_path = PathBuf::from("models/model_A.sql");
+    let model_b_path = PathBuf::from("models/model_B.sql");
+
+    db.set_file_text(model_a_path.clone(), Arc::new(model_a_sql.to_string()));
+    db.set_file_text(model_b_path.clone(), Arc::new(model_b_sql.to_string()));
+    db.set_all_files(Arc::new(vec![model_a_path.clone(), model_b_path.clone()]));
+    db.set_file_project_root(model_a_path, PathBuf::from("."));
+    db.set_file_project_root(model_b_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    (db, model_b_path)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn prop_multi_model_type_inference(scenario in multi_model_scenario_strategy()) {
+        let duckdb = DuckDbOracle::new();
+        let divergences = known_divergences();
+
+        // Get DuckDB actual types via flattened query
+        let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
+            Ok(types) => types,
+            Err(_) => return Ok(()),  // Skip invalid SQL
+        };
+
+        // Get smelt inferred types via Salsa pipeline
+        let (db, model_b_path) = setup_multi_model_db(
+            &scenario.model_a_sql,
+            &scenario.model_b_sql,
+        );
+        let typed_schema = db.typed_model_schema(model_b_path);
+
+        // Compare each column
+        for (i, actual) in actual_types.iter().enumerate() {
+            let smelt_type = typed_schema.columns.get(i)
+                .and_then(|c| c.data_type.as_ref())
+                .map(|tc| &tc.data_type);
+
+            if let Some(smelt_type) = smelt_type {
+                if *smelt_type == DataType::Unknown { continue; }
+                match compare_types(smelt_type, &actual.1) {
+                    TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
+                    TypeMatch::Mismatch => {
+                        if find_divergence(smelt_type, &actual.1, "duckdb", &divergences).is_none() {
+                            prop_assert!(false,
+                                "Multi-model type mismatch col {} ({}):\n  \
+                                 smelt: {:?}\n  duckdb: {:?}\n  \
+                                 model_A: {}\n  model_B: {}",
+                                i, actual.0, smelt_type, actual.1,
+                                scenario.model_a_sql, scenario.model_b_sql
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn smoke_multi_model_integer_passthrough() {
+    let duckdb = DuckDbOracle::new();
+
+    let model_a_sql = "SELECT CAST(42 AS INTEGER) AS x";
+    let model_b_sql = "SELECT x FROM smelt.ref('model_A')";
+    let duckdb_sql = "WITH model_A AS (SELECT CAST(42 AS INTEGER) AS x) SELECT x FROM model_A";
+
+    // Verify DuckDB returns Integer
+    let actual = duckdb.query_types(duckdb_sql).unwrap();
+    assert_eq!(actual[0].1, DataType::Integer);
+
+    // Verify smelt infers Integer via Salsa pipeline
+    let (db, model_b_path) = setup_multi_model_db(model_a_sql, model_b_sql);
+    let typed_schema = db.typed_model_schema(model_b_path);
+
+    assert_eq!(typed_schema.columns.len(), 1);
+    let smelt_type = typed_schema.columns[0]
+        .data_type
+        .as_ref()
+        .map(|tc| &tc.data_type);
+    assert_eq!(smelt_type, Some(&DataType::Integer));
+}
+
+#[test]
+fn smoke_multi_model_function_on_ref() {
+    let duckdb = DuckDbOracle::new();
+
+    let model_a_sql = "SELECT CAST('hello' AS VARCHAR) AS s";
+    let model_b_sql = "SELECT UPPER(s) AS expr_0 FROM smelt.ref('model_A')";
+    let duckdb_sql =
+        "WITH model_A AS (SELECT CAST('hello' AS VARCHAR) AS s) SELECT UPPER(s) AS expr_0 FROM model_A";
+
+    let actual = duckdb.query_types(duckdb_sql).unwrap();
+
+    let (db, model_b_path) = setup_multi_model_db(model_a_sql, model_b_sql);
+    let typed_schema = db.typed_model_schema(model_b_path);
+
+    let smelt_type = typed_schema.columns[0]
+        .data_type
+        .as_ref()
+        .map(|tc| &tc.data_type);
+
+    // Both should be string-compatible
+    if let Some(st) = smelt_type {
+        let match_result = compare_types(st, &actual[0].1);
+        assert!(
+            matches!(
+                match_result,
+                TypeMatch::Exact | TypeMatch::Compatible { .. }
+            ),
+            "smelt={:?}, duckdb={:?}",
+            st,
+            actual[0].1
+        );
+    }
 }

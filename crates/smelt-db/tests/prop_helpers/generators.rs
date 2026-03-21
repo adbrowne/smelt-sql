@@ -1312,6 +1312,99 @@ pub fn test_scenario_strategy(
         })
 }
 
+// ---- Multi-model generators ----
+
+/// A two-model test scenario: model_A provides columns, model_B consumes them via ref.
+#[derive(Debug, Clone)]
+pub struct MultiModelScenario {
+    /// model_A columns (with CAST expressions)
+    pub model_a_columns: Vec<TypedSource>,
+    /// model_A SQL (smelt syntax): SELECT cast_col AS name, ...
+    pub model_a_sql: String,
+    /// model_B SQL (smelt syntax): SELECT expr AS alias, ... FROM smelt.ref('model_A')
+    pub model_b_sql: String,
+    /// Flattened DuckDB SQL: WITH model_A AS (...) SELECT expr AS alias, ... FROM model_A
+    pub duckdb_sql: String,
+    /// Expected column names in model_B output
+    pub model_b_expr_aliases: Vec<String>,
+}
+
+/// Assemble multi-model queries from model_A columns and model_B expressions.
+pub fn assemble_multi_model_queries(
+    columns: &[TypedSource],
+    exprs: &[TypedExpr],
+) -> MultiModelScenario {
+    // model_A SQL: SELECT CAST(...) AS name, ...
+    let cast_cols: Vec<String> = columns
+        .iter()
+        .map(|c| format!("{} AS {}", c.cast_sql, c.name))
+        .collect();
+    let model_a_sql = format!("SELECT {}", cast_cols.join(", "));
+
+    // model_B SQL: SELECT expr AS alias, ... FROM smelt.ref('model_A')
+    let select_items: Vec<String> = exprs
+        .iter()
+        .map(|e| format!("{} AS {}", e.sql, e.alias))
+        .collect();
+    let model_b_sql = format!(
+        "SELECT {} FROM smelt.ref('model_A')",
+        select_items.join(", ")
+    );
+
+    // DuckDB SQL: WITH model_A AS (SELECT ...) SELECT expr AS alias, ... FROM model_A
+    let duckdb_sql = format!(
+        "WITH model_A AS (SELECT {}) SELECT {} FROM model_A",
+        cast_cols.join(", "),
+        select_items.join(", ")
+    );
+
+    let aliases: Vec<String> = exprs.iter().map(|e| e.alias.clone()).collect();
+
+    MultiModelScenario {
+        model_a_columns: columns.to_vec(),
+        model_a_sql,
+        model_b_sql,
+        duckdb_sql,
+        model_b_expr_aliases: aliases,
+    }
+}
+
+/// Expression kinds safe for multi-model ref context (no CTE-specific patterns).
+fn multi_model_expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
+    prop_oneof![
+        3 => Just(ExprKind::ColumnRef),
+        3 => Just(ExprKind::Function),
+        2 => Just(ExprKind::BinaryOp),
+        2 => Just(ExprKind::Cast),
+    ]
+}
+
+/// Strategy that generates a complete multi-model test scenario.
+pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenario> {
+    column_pool_strategy()
+        .prop_flat_map(|cols| {
+            let num_exprs = 1..=4usize;
+            (
+                Just(cols),
+                prop::collection::vec(multi_model_expr_kind_strategy(), num_exprs.clone()),
+                prop::collection::vec(0..100usize, 1..=4),
+            )
+        })
+        .prop_filter_map("need valid exprs", |(cols, kinds, func_indices)| {
+            let mut exprs: Vec<TypedExpr> = Vec::new();
+            for (i, kind) in kinds.iter().enumerate() {
+                let func_idx = func_indices.get(i).copied().unwrap_or(0);
+                if let Some(expr) = generate_expr(&cols, *kind, i, func_idx) {
+                    exprs.push(expr);
+                }
+            }
+            if exprs.is_empty() {
+                return None;
+            }
+            Some(assemble_multi_model_queries(&cols, &exprs))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
