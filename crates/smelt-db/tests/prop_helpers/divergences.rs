@@ -119,19 +119,69 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             backend: "duckdb",
             status: DivergenceStatus::KnownBug,
         },
+        // ---- Spark divergences ----
+        TypeDivergence {
+            id: "spark_sum_integer_to_decimal",
+            description: "SUM(INTEGER) — smelt infers Decimal(38,10), Spark returns BigInt",
+            smelt_type: DataType::Decimal { precision: 38, scale: 10 },
+            actual_type: DataType::BigInt,
+            backend: "spark",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "spark_sum_double_to_decimal",
+            description: "SUM(DOUBLE) — smelt infers Decimal(38,10), Spark returns Double",
+            smelt_type: DataType::Decimal { precision: 38, scale: 10 },
+            actual_type: DataType::Double,
+            backend: "spark",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "spark_string_concat_text_vs_string",
+            description: "|| operator — smelt infers Text, Spark returns Varchar (string)",
+            smelt_type: DataType::Text,
+            actual_type: DataType::Varchar { max_length: None },
+            backend: "spark",
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "spark_string_functions_text_vs_string",
+            description: "UPPER/LOWER/etc — smelt infers Text, Spark returns Varchar (string)",
+            smelt_type: DataType::Text,
+            actual_type: DataType::Varchar { max_length: None },
+            backend: "spark",
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "spark_extract_double_vs_integer",
+            description: "EXTRACT(...) — smelt infers Double, Spark returns Integer",
+            smelt_type: DataType::Double,
+            actual_type: DataType::Integer,
+            backend: "spark",
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "spark_date_trunc_returns_timestamp",
+            description: "DATE_TRUNC(...) — smelt infers Date, Spark returns Timestamp",
+            smelt_type: DataType::Date,
+            actual_type: DataType::Timestamp { with_timezone: false },
+            backend: "spark",
+            status: DivergenceStatus::KnownBug,
+        },
     ]
 }
 
-/// Check if a (smelt_type, actual_type) pair matches a known divergence.
+/// Check if a (smelt_type, actual_type) pair matches a known divergence for the given backend.
 /// Returns the divergence if found.
 pub fn find_divergence<'a>(
     smelt: &DataType,
     actual: &DataType,
+    backend: &str,
     divergences: &'a [TypeDivergence],
 ) -> Option<&'a TypeDivergence> {
     divergences
         .iter()
-        .find(|d| d.smelt_type == *smelt && d.actual_type == *actual && d.backend == "duckdb")
+        .find(|d| d.smelt_type == *smelt && d.actual_type == *actual && d.backend == backend)
 }
 
 #[cfg(test)]
@@ -139,7 +189,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_known_sum_divergence() {
+    fn finds_known_sum_divergence_duckdb() {
         let divs = known_divergences();
         let found = find_divergence(
             &DataType::Decimal {
@@ -147,6 +197,7 @@ mod tests {
                 scale: 10,
             },
             &DataType::BigInt,
+            "duckdb",
             &divs,
         );
         assert!(found.is_some());
@@ -154,9 +205,33 @@ mod tests {
     }
 
     #[test]
+    fn finds_known_sum_divergence_spark() {
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+            &DataType::BigInt,
+            "spark",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "spark_sum_integer_to_decimal");
+    }
+
+    #[test]
+    fn backend_filter_prevents_cross_match() {
+        let divs = known_divergences();
+        // DuckDB's extract divergence shouldn't match spark backend
+        let found = find_divergence(&DataType::Double, &DataType::BigInt, "spark", &divs);
+        assert!(found.is_none());
+    }
+
+    #[test]
     fn returns_none_for_unknown() {
         let divs = known_divergences();
-        let found = find_divergence(&DataType::Boolean, &DataType::Date, &divs);
+        let found = find_divergence(&DataType::Boolean, &DataType::Date, "duckdb", &divs);
         assert!(found.is_none());
     }
 }

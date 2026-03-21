@@ -190,6 +190,49 @@ jobs:
       - name: Run Spark integration tests
         run: cargo test -p smelt-parser-compat --test spark_integration -- --ignored
 
+  type-property-spark:
+    name: Type Property Tests (DuckDB + Spark)
+    runs-on: ubuntu-latest
+    # Only run on schedule (nightly) or when explicitly labeled
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-type-prop-spark-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Pull Spark Docker image
+        run: docker pull apache/spark:latest
+
+      - name: Start Spark container
+        run: |
+          docker run -d --name spark-type-test apache/spark:latest tail -f /dev/null
+          echo "SPARK_CONTAINER_ID=spark-type-test" >> $GITHUB_ENV
+
+      - name: Build smelt-db
+        run: cargo build -p smelt-db
+
+      - name: Run type property tests (DuckDB + Spark)
+        run: cargo test -p smelt-db --test type_property_tests
+        env:
+          SPARK_CONTAINER_ID: spark-type-test
+          PROPTEST_CASES: 500
+
+      - name: Cleanup Spark container
+        if: always()
+        run: docker rm -f spark-type-test
+
   gap-report:
     name: Generate Gap Report
     runs-on: ubuntu-latest
