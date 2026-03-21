@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774071629101,
+  "lastUpdate": 1774071630101,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2309,6 +2309,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.41571149019584,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5f3fe31be16e25eaa3f7d5c3044225b0d9b4a62a",
+          "message": "Add Spark SQL oracle for type property tests (#59)",
+          "timestamp": "2026-03-21T16:39:17+11:00",
+          "tree_id": "38a3435dd312337bca4c5fc4b8bcae7f8691a4e0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5f3fe31be16e25eaa3f7d5c3044225b0d9b4a62a"
+        },
+        "date": 1774071629775,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.273024358538567,
             "unit": "MB/s"
           }
         ]
