@@ -8,7 +8,10 @@ use super::duckdb_oracle::TypeOracle;
 use smelt_types::DataType;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Spark-backed oracle using a persistent `spark-sql` process inside a Docker container.
 pub struct SparkOracle {
@@ -87,7 +90,11 @@ impl TypeOracle for SparkOracle {
         let mut session = self.inner.lock().map_err(|e| format!("lock: {e}"))?;
 
         // Use a unique sentinel so we know when output for this query ends
-        let sentinel = format!("__SMELT_SENTINEL_{}", std::process::id());
+        let sentinel = format!(
+            "__SMELT_SENTINEL_{}_{}",
+            std::process::id(),
+            CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let describe_sql = format!("DESCRIBE QUERY {sql}");
 
         // Send the DESCRIBE QUERY, then a sentinel query
