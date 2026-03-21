@@ -496,7 +496,13 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::Boolean,
         },
-        // EVERY omitted: not available in DuckDB
+        FuncDesc {
+            name: "EVERY",
+            input: FuncInput::BooleanAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Boolean,
+        },
         // Zero-arg functions
         FuncDesc {
             name: "PI",
