@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774054473599,
+  "lastUpdate": 1774054474480,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2063,6 +2063,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.08544385187712,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "eb17b3761f37fe19dcd3b9c14e44884956e57731",
+          "message": "Add property-based type inference tests against DuckDB (#57)\n\nVerify smelt's type inference matches real database behavior using proptest\nto generate random typed CTE queries and compare inferred types against\nDuckDB's actual Arrow schema output.\n\n- 256-case proptest + 5 deterministic smoke tests + unit tests (21 total)\n- TypeOracle trait for future PostgreSQL/Spark backends\n- Known divergence registry for expected mismatches (SUM, CEIL, EXTRACT, etc.)\n- Compatible type handling (Text/Varchar, Decimal precision, integer widths)\n- Arrow-to-smelt type mapping module\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T11:52:39+11:00",
+          "tree_id": "1a197a65de48c0d46493e68dd46d64fcb93c57a3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/eb17b3761f37fe19dcd3b9c14e44884956e57731"
+        },
+        "date": 1774054474239,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.22451837619422,
             "unit": "MB/s"
           }
         ]
