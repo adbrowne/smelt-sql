@@ -145,6 +145,8 @@ pub enum FuncInput {
     AnyScalar,
     /// Aggregate on boolean columns.
     BooleanAggregate,
+    /// Aggregate on integer columns (Integer/BigInt).
+    IntegerAggregate,
 }
 
 /// Core functions we test. Expand this list over time.
@@ -386,10 +388,22 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::BooleanAggregate,
             output_type: DataType::Boolean,
         },
+        // EVERY omitted: not available in DuckDB
+        // Bit aggregates
         FuncDesc {
-            name: "EVERY",
-            input: FuncInput::BooleanAggregate,
-            output_type: DataType::Boolean,
+            name: "BIT_AND",
+            input: FuncInput::IntegerAggregate,
+            output_type: DataType::Unknown, // arg-dependent
+        },
+        FuncDesc {
+            name: "BIT_OR",
+            input: FuncInput::IntegerAggregate,
+            output_type: DataType::Unknown, // arg-dependent
+        },
+        FuncDesc {
+            name: "BIT_XOR",
+            input: FuncInput::IntegerAggregate,
+            output_type: DataType::Unknown, // arg-dependent
         },
     ]
 }
@@ -405,6 +419,9 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
         FuncInput::Temporal => matches!(base, BaseType::Date | BaseType::Timestamp),
         FuncInput::AnyScalar | FuncInput::AnyAggregate => true,
         FuncInput::BooleanAggregate => base == BaseType::Boolean,
+        FuncInput::IntegerAggregate => {
+            matches!(base, BaseType::Integer | BaseType::BigInt)
+        }
         FuncInput::NumericAggregate => matches!(
             base,
             BaseType::Integer | BaseType::BigInt | BaseType::Double | BaseType::Decimal
@@ -436,6 +453,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             DataType::Double
         }
         "BOOL_AND" | "BOOL_OR" | "EVERY" => DataType::Boolean,
+        "BIT_AND" | "BIT_OR" | "BIT_XOR" => arg_type.clone(),
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" => DataType::Double,
