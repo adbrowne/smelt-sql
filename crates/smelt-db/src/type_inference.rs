@@ -659,13 +659,28 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             nullable: true,
         }),
 
-        SqlFunction::JsonBuildObject
-        | SqlFunction::JsonBuildArray
+        SqlFunction::JsonObject
+        | SqlFunction::JsonArray
         | SqlFunction::ToJson
-        | SqlFunction::ToJsonb
-        | SqlFunction::RowToJson => Some(TypedColumn {
+        | SqlFunction::JsonExtract
+        | SqlFunction::JsonExtractText => Some(TypedColumn {
             data_type: DataType::Text,
             nullable: true,
+        }),
+
+        SqlFunction::JsonArrayLength => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: true,
+        }),
+
+        SqlFunction::JsonObjectKeys => Some(TypedColumn {
+            data_type: DataType::Array(Box::new(DataType::Text)),
+            nullable: true,
+        }),
+
+        SqlFunction::JsonContains => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: false,
         }),
 
         // Aggregate functions from optimizer that don't have specialized type inference yet
@@ -941,6 +956,23 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
                 }
             }
         }
+
+        // JSON operators — both return Text because smelt represents JSON as Text
+        // internally (no DataType::Json variant). Semantically, -> returns JSON
+        // (navigable further) while ->> returns plain text. We keep separate arms
+        // to preserve this distinction for future DataType::Json support.
+        "->" | "#>" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+        "->>" | "#>>" => Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: true,
+        }),
+        "@>" | "<@" => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: false,
+        }),
 
         _ => None,
     }

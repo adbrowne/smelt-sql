@@ -161,12 +161,23 @@ pub enum SqlFunction {
     Greatest,
     Least,
 
-    // JSON functions
-    JsonBuildObject,
-    JsonBuildArray,
+    // JSON functions (canonical names — accept dialect aliases via from_name)
+    /// json_object / json_build_object — construct JSON object from key-value pairs
+    JsonObject,
+    /// json_array / json_build_array — construct JSON array from values
+    JsonArray,
+    /// to_json / to_jsonb / row_to_json — convert value to JSON
     ToJson,
-    ToJsonb,
-    RowToJson,
+    /// json_extract / json_extract_path — extract JSON subtree (returns JSON)
+    JsonExtract,
+    /// json_extract_string / json_extract_text / json_extract_path_text / get_json_object — extract as text
+    JsonExtractText,
+    /// json_array_length — number of elements in JSON array
+    JsonArrayLength,
+    /// json_object_keys / json_keys — keys of JSON object
+    JsonObjectKeys,
+    /// json_contains — JSON containment check
+    JsonContains,
     // Boolean aggregate (also listed under aggregate)
     // (BoolAnd, BoolOr, Every already above)
 }
@@ -288,20 +299,52 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::Random,
     SqlFunction::Greatest,
     SqlFunction::Least,
-    SqlFunction::JsonBuildObject,
-    SqlFunction::JsonBuildArray,
+    SqlFunction::JsonObject,
+    SqlFunction::JsonArray,
     SqlFunction::ToJson,
-    SqlFunction::ToJsonb,
-    SqlFunction::RowToJson,
+    SqlFunction::JsonExtract,
+    SqlFunction::JsonExtractText,
+    SqlFunction::JsonArrayLength,
+    SqlFunction::JsonObjectKeys,
+    SqlFunction::JsonContains,
 ];
 
 impl SqlFunction {
     /// Look up a function by name (case-insensitive).
+    ///
+    /// Accepts both canonical smelt names and dialect-specific aliases
+    /// (e.g., `JSON_BUILD_OBJECT` → `JsonObject`, `GET_JSON_OBJECT` → `JsonExtractText`).
     pub fn from_name(name: &str) -> Option<Self> {
-        // Compare against uppercase canonical names
         let upper = name.to_uppercase();
-        // Linear scan is fine for ~100 variants; called infrequently per-expression.
+
+        // Check dialect aliases first
+        if let Some(canonical) = Self::resolve_alias(&upper) {
+            return Some(canonical);
+        }
+
+        // Linear scan for canonical names; fine for ~100 variants.
         ALL_FUNCTIONS.iter().find(|f| f.name() == upper).copied()
+    }
+
+    /// Resolve dialect-specific function name aliases to canonical smelt functions.
+    fn resolve_alias(upper_name: &str) -> Option<Self> {
+        match upper_name {
+            // JSON object construction
+            "JSON_BUILD_OBJECT" => Some(Self::JsonObject),
+            // JSON array construction
+            "JSON_BUILD_ARRAY" => Some(Self::JsonArray),
+            // JSON conversion aliases
+            "TO_JSONB" | "ROW_TO_JSON" => Some(Self::ToJson),
+            // JSON extraction aliases
+            "JSON_EXTRACT_PATH" => Some(Self::JsonExtract),
+            // JSON text extraction aliases
+            "JSON_EXTRACT_STRING" | "JSON_EXTRACT_PATH_TEXT" | "GET_JSON_OBJECT" | "JSON_VALUE" => {
+                Some(Self::JsonExtractText)
+            }
+            // JSON keys alias (DuckDB)
+            "JSON_KEYS" => Some(Self::JsonObjectKeys),
+            _ => None,
+        }
     }
 
     /// Canonical uppercase SQL name.
@@ -422,11 +465,14 @@ impl SqlFunction {
             Self::Random => "RANDOM",
             Self::Greatest => "GREATEST",
             Self::Least => "LEAST",
-            Self::JsonBuildObject => "JSON_BUILD_OBJECT",
-            Self::JsonBuildArray => "JSON_BUILD_ARRAY",
+            Self::JsonObject => "JSON_OBJECT",
+            Self::JsonArray => "JSON_ARRAY",
             Self::ToJson => "TO_JSON",
-            Self::ToJsonb => "TO_JSONB",
-            Self::RowToJson => "ROW_TO_JSON",
+            Self::JsonExtract => "JSON_EXTRACT",
+            Self::JsonExtractText => "JSON_EXTRACT_TEXT",
+            Self::JsonArrayLength => "JSON_ARRAY_LENGTH",
+            Self::JsonObjectKeys => "JSON_OBJECT_KEYS",
+            Self::JsonContains => "JSON_CONTAINS",
         }
     }
 
@@ -552,11 +598,14 @@ impl SqlFunction {
 
             Self::Greatest | Self::Least => FunctionCategory::Comparison,
 
-            Self::JsonBuildObject
-            | Self::JsonBuildArray
+            Self::JsonObject
+            | Self::JsonArray
             | Self::ToJson
-            | Self::ToJsonb
-            | Self::RowToJson => FunctionCategory::Json,
+            | Self::JsonExtract
+            | Self::JsonExtractText
+            | Self::JsonArrayLength
+            | Self::JsonObjectKeys
+            | Self::JsonContains => FunctionCategory::Json,
         }
     }
 
@@ -640,5 +689,60 @@ mod tests {
         for f in SqlFunction::all() {
             let _ = f.category();
         }
+    }
+
+    #[test]
+    fn json_dialect_aliases() {
+        // PostgreSQL names
+        assert_eq!(
+            SqlFunction::from_name("json_build_object"),
+            Some(SqlFunction::JsonObject)
+        );
+        assert_eq!(
+            SqlFunction::from_name("json_build_array"),
+            Some(SqlFunction::JsonArray)
+        );
+        assert_eq!(
+            SqlFunction::from_name("to_jsonb"),
+            Some(SqlFunction::ToJson)
+        );
+        assert_eq!(
+            SqlFunction::from_name("row_to_json"),
+            Some(SqlFunction::ToJson)
+        );
+        assert_eq!(
+            SqlFunction::from_name("json_extract_path_text"),
+            Some(SqlFunction::JsonExtractText)
+        );
+
+        // DuckDB names
+        assert_eq!(
+            SqlFunction::from_name("json_extract_string"),
+            Some(SqlFunction::JsonExtractText)
+        );
+        assert_eq!(
+            SqlFunction::from_name("json_keys"),
+            Some(SqlFunction::JsonObjectKeys)
+        );
+
+        // Spark names
+        assert_eq!(
+            SqlFunction::from_name("get_json_object"),
+            Some(SqlFunction::JsonExtractText)
+        );
+
+        // Canonical names
+        assert_eq!(
+            SqlFunction::from_name("json_object"),
+            Some(SqlFunction::JsonObject)
+        );
+        assert_eq!(
+            SqlFunction::from_name("json_extract"),
+            Some(SqlFunction::JsonExtract)
+        );
+        assert_eq!(
+            SqlFunction::from_name("json_contains"),
+            Some(SqlFunction::JsonContains)
+        );
     }
 }

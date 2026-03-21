@@ -78,4 +78,14 @@ mod tests {
         assert_eq!(types[0].1, DataType::Integer);
         assert_eq!(types[1].1, DataType::Varchar { max_length: None });
     }
+
+    #[test]
+    fn json_type_check() {
+        let oracle = DuckDbOracle::new();
+        // DuckDB JSON maps to Varchar via Arrow
+        let types = oracle
+            .query_types("SELECT json_object('a', 1) AS j")
+            .unwrap();
+        assert_eq!(types[0].1, DataType::Varchar { max_length: None });
+    }
 }

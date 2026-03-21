@@ -4,6 +4,13 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**JSON Function Canonicalization (March 21, 2026)**: Redesigned JSON function support to accept all dialect variants and map to canonical internal functions:
+- **Canonical functions**: JsonObject, JsonArray, ToJson, JsonExtract, JsonExtractText, JsonArrayLength, JsonObjectKeys, JsonContains
+- **Dialect aliases**: `json_build_object` (PG) and `json_object` (DuckDB) both resolve to `JsonObject`; `get_json_object` (Spark), `json_extract_string` (DuckDB), and `json_extract_path_text` (PG) all resolve to `JsonExtractText`
+- **JSON operator type inference**: `->`, `->>`, `#>`, `#>>` return Text; `@>`, `<@` return Boolean
+- **Property test generators**: TO_JSON, JSON_ARRAY, JSON_OBJECT functions and `->` / `->>` operators tested against DuckDB
+- JSON represented as Text internally (no DataType::Json); DuckDB JSON maps to Varchar via Arrow
+
 **Spark Type Oracle for Property Tests (March 21, 2026)**: Extended type property tests to verify smelt's inference against Spark SQL (in addition to DuckDB):
 - **SparkOracle**: New `TypeOracle` implementation that runs `DESCRIBE QUERY` via `docker exec` against a Spark container
 - **Multi-backend divergences**: `find_divergence()` now accepts a `backend` parameter; DuckDB and Spark divergences are registered independently

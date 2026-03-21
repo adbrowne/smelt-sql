@@ -20,7 +20,7 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - [x] **Statistical/advanced aggregates** — Added STDDEV, VARIANCE, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP, BOOL_AND, BOOL_OR, EVERY (via dialect remapping), BIT_AND, BIT_OR, BIT_XOR. Omitted: MEDIAN/MODE/PERCENTILE_CONT/PERCENTILE_DISC (DuckDB syntax differences), APPROX_COUNT_DISTINCT/ANY_VALUE/FIRST/LAST (limited DuckDB support), CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE (need 2-column aggregates)
 - [x] **Null handling functions** — Added COALESCE, NULLIF
 - [x] **Comparison functions** — Added GREATEST, LEAST
-- [ ] **JSON functions** — Add JSON_BUILD_OBJECT, JSON_BUILD_ARRAY, TO_JSON, TO_JSONB, ROW_TO_JSON (none covered)
+- [x] **JSON functions** — Canonicalized JSON functions: JSON_OBJECT (accepts json_build_object, json_object), JSON_ARRAY (accepts json_build_array, json_array), TO_JSON (accepts to_jsonb, row_to_json), JSON_EXTRACT, JSON_EXTRACT_TEXT (accepts json_extract_string, get_json_object, json_value), JSON_ARRAY_LENGTH, JSON_OBJECT_KEYS (accepts json_keys), JSON_CONTAINS. Added TO_JSON, JSON_ARRAY, JSON_OBJECT to property test generators. Not yet generated: JSON_EXTRACT, JSON_EXTRACT_TEXT, JSON_ARRAY_LENGTH (require JSON input column which the generator framework doesn't produce yet).
 
 ### Expressions and Operators
 
@@ -29,7 +29,7 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - [ ] **GROUP BY + window functions combined** — Generate queries that use window functions over aggregated results (e.g., `RANK() OVER (ORDER BY SUM(x))`), or window functions alongside GROUP BY columns. Currently window and aggregate expressions are separated into different queries.
 - [ ] **Scalar subqueries** — Generate `(SELECT ...)` in expression position (none covered)
 - [ ] **Regex operators** — Add `~`, `~*`, `!~`, `!~*` PostgreSQL regex operators (none covered, type inference also missing)
-- [ ] **JSON operators** — Add `->`, `->>`, `#>`, `#>>`, `@>`, `<@` (none covered, type inference also missing)
+- [x] **JSON operators** — Added type inference for `->`, `->>` (Text), `#>`, `#>>` (Text), `@>`, `<@` (Boolean). Added `->` and `->>` to property test generators against DuckDB.
 - [ ] **Mixed-type binary operations** — Generate cross-type arithmetic (INTEGER + BIGINT, DECIMAL + DOUBLE) to test type promotion rules
 
 ### Types
