@@ -6,7 +6,15 @@
 
 - [ ] **Cross-model type mismatch diagnostics** — When a downstream model uses a column in a type-incompatible way (e.g., `SUM(col)` where upstream infers `col` as VARCHAR), produce a warning diagnostic in the LSP. Compare `model_input_constraints` against actual upstream `typed_model_schema`.
 
-- [ ] **Multi-model property tests** — Extend `type_property_tests.rs` to generate two-model chains (model_A with typed CTE columns, model_B refs model_A) and verify types match DuckDB output. Requires setting up Salsa Database with multiple models in the property test.
+- [x] **Multi-model property tests** — Two-model chain property tests (model_A → model_B via `smelt.ref()`) verifying cross-model type inference through the full Salsa pipeline. Implemented in PR #83.
+
+- [ ] **Three-model chains** — Extend multi-model property tests to model_A → model_B → model_C, testing transitive type propagation
+
+- [ ] **Type narrowing through CAST in multi-model chains** — model_B casts a column to a different type, model_C refs model_B and should see the cast type
+
+- [ ] **JOIN between two refs** — model_C refs both model_A and model_B, testing multi-source type contexts
+
+- [ ] **Wildcard passthrough in multi-model** — model_B does `SELECT * FROM smelt.ref('model_A')`, testing that all columns and types propagate
 
 ## Property Test Generator Coverage Gaps
 
@@ -43,7 +51,7 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 - [ ] **PostgreSQL `::` cast syntax** — Generate `expr::type` in addition to `CAST(expr AS type)`
 - [x] **CAST to more types** — Added INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN, DATE, TIMESTAMP targets
-- [ ] **GROUP BY / HAVING** — Generate multi-column GROUP BY with HAVING predicates
+- [x] **GROUP BY / HAVING** — Generate multi-column GROUP BY with HAVING predicates (PR #82)
 - [ ] **DISTINCT / DISTINCT ON** — Generate DISTINCT expressions
 
 ### Known DuckDB Incompatibilities (discovered during generator expansion)
