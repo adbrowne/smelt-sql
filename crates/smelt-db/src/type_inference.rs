@@ -454,7 +454,7 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
 
         SqlFunction::Length | SqlFunction::CharLength | SqlFunction::CharacterLength => {
             Some(TypedColumn {
-                data_type: DataType::Integer,
+                data_type: DataType::BigInt,
                 nullable: true,
             })
         }
@@ -494,9 +494,20 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         }
 
         SqlFunction::Ceil | SqlFunction::Ceiling | SqlFunction::Floor => {
+            // DuckDB: CEIL/FLOOR(DECIMAL(p,s)) → Decimal(p,0), all others → Double
             if let Some(arg) = func.arguments().first() {
                 if let Some(arg_type) = infer_expression_type(arg, ctx) {
-                    return Some(arg_type);
+                    let result_type = match &arg_type.data_type {
+                        DataType::Decimal { precision, .. } => DataType::Decimal {
+                            precision: *precision,
+                            scale: 0,
+                        },
+                        _ => DataType::Double,
+                    };
+                    return Some(TypedColumn {
+                        data_type: result_type,
+                        nullable: arg_type.nullable,
+                    });
                 }
             }
             Some(TypedColumn {
@@ -539,7 +550,7 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         }),
 
         SqlFunction::Extract | SqlFunction::DatePart => Some(TypedColumn {
-            data_type: DataType::Double,
+            data_type: DataType::BigInt,
             nullable: true,
         }),
 
@@ -584,7 +595,7 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         }),
 
         SqlFunction::Position | SqlFunction::Strpos => Some(TypedColumn {
-            data_type: DataType::Integer,
+            data_type: DataType::BigInt,
             nullable: true,
         }),
 
@@ -1302,7 +1313,7 @@ mod tests {
             }),
             // Date/time functions
             "EXTRACT" | "DATE_PART" => Some(TypedColumn {
-                data_type: DataType::Double,
+                data_type: DataType::BigInt,
                 nullable: true,
             }),
             "MAKE_DATE" => Some(TypedColumn {
@@ -1319,7 +1330,7 @@ mod tests {
                 nullable: true,
             }),
             "POSITION" | "STRPOS" => Some(TypedColumn {
-                data_type: DataType::Integer,
+                data_type: DataType::BigInt,
                 nullable: true,
             }),
             "STRING_AGG" | "LISTAGG" => Some(TypedColumn {
@@ -1430,7 +1441,7 @@ mod tests {
 
         // Date/time functions
         let extract = infer_function_type_by_name("EXTRACT", &ctx).unwrap();
-        assert_eq!(extract.data_type, DataType::Double);
+        assert_eq!(extract.data_type, DataType::BigInt);
 
         let make_date = infer_function_type_by_name("MAKE_DATE", &ctx).unwrap();
         assert_eq!(make_date.data_type, DataType::Date);
@@ -1443,7 +1454,7 @@ mod tests {
         assert_eq!(replace.data_type, DataType::Text);
 
         let position = infer_function_type_by_name("POSITION", &ctx).unwrap();
-        assert_eq!(position.data_type, DataType::Integer);
+        assert_eq!(position.data_type, DataType::BigInt);
 
         let split_part = infer_function_type_by_name("SPLIT_PART", &ctx).unwrap();
         assert_eq!(split_part.data_type, DataType::Text);

@@ -171,7 +171,7 @@ pub fn core_functions() -> Vec<FuncDesc> {
         FuncDesc {
             name: "LENGTH",
             input: FuncInput::String,
-            output_type: DataType::Integer,
+            output_type: DataType::BigInt,
         },
         // Numeric functions
         FuncDesc {
@@ -253,7 +253,14 @@ pub fn is_compatible(base: BaseType, input: FuncInput) -> bool {
 /// use the argument type.
 pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
     match func_name {
-        "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" | "TRUNC" => arg_type.clone(),
+        "ABS" | "ROUND" | "TRUNC" => arg_type.clone(),
+        "CEIL" | "CEILING" | "FLOOR" => match arg_type {
+            DataType::Decimal { precision, .. } => DataType::Decimal {
+                precision: *precision,
+                scale: 0,
+            },
+            _ => DataType::Double,
+        },
         "MIN" | "MAX" => arg_type.clone(),
         "COUNT" => DataType::BigInt,
         "SUM" => DataType::Decimal {
@@ -261,7 +268,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             scale: 10,
         },
         "AVG" => DataType::Double,
-        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::Integer,
+        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::BigInt,
         "SQRT" | "EXP" | "LN" | "LOG" | "POWER" => DataType::Double,
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "REVERSE" | "CONCAT" | "REPLACE" | "REPEAT" | "LPAD"
