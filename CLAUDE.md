@@ -247,6 +247,10 @@ If you find yourself on `main` with uncommitted changes, create a branch immedia
 4. Extract API patterns from successful optimizations
 5. Generalize into optimizer framework
 
+### Before Ending a Conversation
+
+Before wrapping up, write any unfinished work and open decisions to `docs/TODO.md` and update this `CLAUDE.md` with anything a fresh context should know.
+
 ## Maintaining docs/ROADMAP.md
 
 **When to update:**
