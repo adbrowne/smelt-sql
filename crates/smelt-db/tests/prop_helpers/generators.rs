@@ -167,9 +167,39 @@ pub fn core_functions() -> Vec<FuncDesc> {
             input: FuncInput::String,
             output_type: DataType::Text,
         },
+        FuncDesc {
+            name: "LTRIM",
+            input: FuncInput::String,
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "RTRIM",
+            input: FuncInput::String,
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "INITCAP",
+            input: FuncInput::String,
+            output_type: DataType::Text,
+        },
+        FuncDesc {
+            name: "CONCAT",
+            input: FuncInput::String,
+            output_type: DataType::Text,
+        },
         // String functions -> return integer in smelt
         FuncDesc {
             name: "LENGTH",
+            input: FuncInput::String,
+            output_type: DataType::BigInt,
+        },
+        FuncDesc {
+            name: "CHAR_LENGTH",
+            input: FuncInput::String,
+            output_type: DataType::BigInt,
+        },
+        FuncDesc {
+            name: "CHARACTER_LENGTH",
             input: FuncInput::String,
             output_type: DataType::BigInt,
         },
@@ -342,10 +372,9 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" | "LOG2" | "POWER" | "POW" | "SIN" | "COS"
         | "TAN" | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" => DataType::Double,
         // String functions
-        "UPPER" | "LOWER" | "TRIM" | "REVERSE" | "CONCAT" | "REPLACE" | "REPEAT" | "LPAD"
-        | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" => {
-            DataType::Text
-        }
+        "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
+        | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
+        | "SPLIT_PART" => DataType::Text,
         _ => DataType::Unknown,
     }
 }
