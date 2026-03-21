@@ -43,6 +43,10 @@ A next-generation data pipeline tool designed to improve upon dbt by:
   - `example1_insights.md`, `example2_insights.md`: Optimization pattern analysis
   - `optimization_rule_api_design.md`: Future optimizer API design
 
+- **docs/plans/**: Implementation plans committed to the repo
+  - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-optimizer-api.md`)
+  - Created before non-trivial implementation work
+
 ## Commands
 
 ### Build and Test
@@ -268,6 +272,16 @@ Before wrapping up, write any unfinished work and open decisions to `docs/TODO.m
 - Always explain why work is deferred
 
 **Note:** Use dates instead of commit hashes to avoid requiring a follow-up commit just to document the hash.
+
+## Plans
+
+Plans are committed to the repo under `docs/plans/` as markdown files.
+
+**Naming convention:** `YYYYMMDD-short-name.md` (e.g., `20260321-optimizer-api.md`)
+
+- Create a plan before starting non-trivial implementation work
+- Plans should be committed alongside or before the implementation they describe
+- Use markdown format
 
 ## License
 
