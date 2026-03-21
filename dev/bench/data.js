@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774090111226,
+  "lastUpdate": 1774090112153,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3293,6 +3293,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.30423092156357,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "535a42cdea105276d505f5c642039cf9832b6736",
+          "message": "Expand property test generator coverage (#65)\n\n* Add trig and log math functions to property test generators\n\nAdd 16 single-arg math functions: POWER, POW, EXP, LN, LOG, LOG10,\nLOG2, SIN, COS, TAN, ASIN, ACOS, ATAN, SINH, COSH, TANH.\nAll take numeric input and return Double.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add SIGN function to generators and fix SIGN type inference\n\nSIGN always returns a small integer (-1, 0, 1) in DuckDB (TINYINT).\nFix smelt's type inference to return SmallInt instead of arg type.\nRemove POWER/POW (needs 2 args) and ASIN/ACOS (domain-restricted)\nfrom single-arg generators; they'll be added in multi-arg step.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add single-arg string functions to property test generators\n\nAdd LTRIM, RTRIM, INITCAP, CONCAT (single-arg), CHAR_LENGTH, and\nCHARACTER_LENGTH to the generator function list.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add COALESCE and AnyScalar input variant to generators\n\nAdd FuncInput::AnyScalar for non-aggregate functions that accept any\ntype. Add COALESCE (single-arg, returns arg type). Remove INITCAP\n(not available in DuckDB).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add GREATEST and LEAST to property test generators\n\nBoth use AnyScalar input and return the argument type.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add statistical aggregates and refactor aggregate detection\n\nAdd STDDEV, VARIANCE, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP\nto generators. Refactor assemble_cte_query() to use SqlFunction::\nfrom_name + is_aggregate() instead of fragile starts_with() checks.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add boolean aggregate functions to property test generators\n\nAdd BOOL_AND, BOOL_OR, EVERY with new FuncInput::BooleanAggregate\nvariant that only accepts Boolean columns.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add bit and boolean aggregates to property test generators\n\nAdd BIT_AND, BIT_OR, BIT_XOR with new FuncInput::IntegerAggregate.\nAdd BOOL_AND, BOOL_OR with FuncInput::BooleanAggregate.\nRemove EVERY (not available in DuckDB).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add PI() zero-arg function to property test generators\n\nAdd FuncInput::NoArg variant and PI() function. Update generate_expr()\nto emit function calls without arguments for NoArg functions.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add multi-arg function infrastructure and functions\n\nAdd ExtraArg enum (SameAsFirst, IntLiteral, StringLiteral) and\nextra_args field to FuncDesc. Update generate_expr() to build\nmulti-arg function calls.\n\nNew functions: REPLACE, LPAD, RPAD, LEFT, RIGHT, REPEAT (string),\nNULLIF (any-type), POWER, MOD, ATAN2 (numeric).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add SUBSTRING, SUBSTR, SPLIT_PART, STRPOS to generators\n\nMulti-arg string functions using the ExtraArg infrastructure.\nSTRPOS covers the same inference path as POSITION (special syntax).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add DATE_PART, DATE_TRUNC and prepend_literal support\n\nAdd prepend_literal field to FuncDesc for functions where a string\nliteral must come before the column argument (e.g. DATE_PART('year', col)).\nAdd DATE_PART (returns BigInt) and DATE_TRUNC (returns Timestamp).\nRemove LEFT/RIGHT (SQL keyword conflicts cause parser issues).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add expanded CAST targets and BETWEEN/IN expressions\n\nExpand CAST to target INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN,\nDATE, and TIMESTAMP (based on source type compatibility).\nAdd ExprKind::Between and ExprKind::InList for numeric columns,\nboth returning Boolean.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update TODO.md with completed generator coverage items\n\nMark completed items and document DuckDB incompatibilities discovered\nduring the generator expansion work.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add implementation plan for property test generator expansion\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Clarify that plans must be committed to docs/plans/\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add function name remapping to dialect printer\n\nReplace ad-hoc EXPLODE/UNNEST if-else chain with a general\nremap_function_name() lookup. Add new mappings:\n- DuckDB/PostgreSQL: EVERY -> BOOL_AND\n- SparkSQL: BOOL_AND -> EVERY, BOOL_OR -> SOME\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Wire conformance tests through dialect printer\n\nPass generated SQL through smelt_dialect::print() before executing\nagainst DuckDB, so function name remappings (EVERY->BOOL_AND, etc.)\nare applied. Type inference still runs on the original SQL.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Add EVERY back to generators (remapped via dialect printer)\n\nNow that the dialect printer remaps EVERY -> BOOL_AND for DuckDB,\nwe can test EVERY in the generators. The conformance tests pass\nbecause they go through the printer before executing.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Fix LEFT/RIGHT keyword-as-function parsing and add to generators\n\nAdd LEFT_KW and RIGHT_KW to at_keyword_as_function_name() so the\nparser treats LEFT(...) and RIGHT(...) as function calls when\nfollowed by '(', while still handling LEFT JOIN / RIGHT JOIN as\nkeywords.\n\nRe-add LEFT and RIGHT string functions to the property test\ngenerators now that the parser handles them correctly.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update TODO.md and add dialect remapping plan\n\nUpdate coverage status: EVERY now tested via dialect remapping,\nLEFT/RIGHT now tested after parser fix. Add implementation plan.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Fix review findings: EVERY remap, NULLIF args, CAST boolean, TODO dup\n\n- Split PostgreSQL from DuckDB in EVERY remapping — PostgreSQL\n  natively supports EVERY, only DuckDB needs BOOL_AND remap\n- Change NULLIF to use Numeric input with IntLiteral(\"0\") instead\n  of SameAsFirst (which always returned NULL)\n- Remove CAST(numeric AS BOOLEAN) — non-standard, not portable\n- Fix duplicate SIGN line in TODO.md\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T21:46:59+11:00",
+          "tree_id": "2e8a94c9d0bd99928d0fd18ab6ea1ce30cdd1fdd",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/535a42cdea105276d505f5c642039cf9832b6736"
+        },
+        "date": 1774090111872,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.992719366647172,
             "unit": "MB/s"
           }
         ]
