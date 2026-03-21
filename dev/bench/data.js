@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774131432580,
+  "lastUpdate": 1774131434168,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3662,6 +3662,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.045034027703466,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c79c8e9665b1b4b07e5a91743a37ba0327d23fc4",
+          "message": "Add plan: GROUP BY / HAVING property test generators (#81)",
+          "timestamp": "2026-03-22T09:16:08+11:00",
+          "tree_id": "6979fe69ae2dafaf911c9acf88ed4fd7de4a9978",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c79c8e9665b1b4b07e5a91743a37ba0327d23fc4"
+        },
+        "date": 1774131433794,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.608397197603892,
             "unit": "MB/s"
           }
         ]
