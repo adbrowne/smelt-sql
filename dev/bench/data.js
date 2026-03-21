@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774059447723,
+  "lastUpdate": 1774059448757,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2186,6 +2186,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.22451837619422,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b14ac0591883cdace08076b46efdc397794bda0f",
+          "message": "Fix dev release: patch inter-crate dependency versions (#58)\n\nThe dev version patching only updated the workspace root Cargo.toml,\nbut smelt-dialect has a hardcoded `version = \"0.1.0\"` dependency on\nsmelt-parser. Semver pre-release versions (0.1.0-dev.xxx) don't match\n^0.1.0, causing all builds to fail with \"failed to select a version\".\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-21T13:15:41+11:00",
+          "tree_id": "be5f50e8b512360bd92c2241e35a750250dadb95",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b14ac0591883cdace08076b46efdc397794bda0f"
+        },
+        "date": 1774059448400,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.41571149019584,
             "unit": "MB/s"
           }
         ]
