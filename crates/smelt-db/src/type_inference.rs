@@ -335,7 +335,9 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
     let name = func.name()?.to_uppercase();
     let sql_func = SqlFunction::from_name(&name)?;
 
-    /// Helper: infer type from first argument, with a fallback
+    /// Helper: return the type of the first argument, or `fallback` if inference fails.
+    /// For COALESCE and similar, this intentionally only checks the first arg —
+    /// using a later arg's type would risk being incorrect if earlier args are Unknown.
     fn first_arg_type_or(
         func: &FunctionCall,
         ctx: &TypeContext,
