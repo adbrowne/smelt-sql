@@ -117,6 +117,10 @@ pub enum ExprKind {
     BinaryOp,
     /// CASE WHEN ... THEN ... ELSE ... END.
     CaseExpr,
+    /// col BETWEEN val AND val.
+    Between,
+    /// col IN (val1, val2, ...).
+    InList,
 }
 
 // ---- Function descriptors ----
@@ -727,6 +731,8 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         2 => Just(ExprKind::BinaryOp),
         1 => Just(ExprKind::CaseExpr),
         1 => Just(ExprKind::Cast),
+        1 => Just(ExprKind::Between),
+        1 => Just(ExprKind::InList),
     ]
 }
 
@@ -751,18 +757,41 @@ pub fn generate_expr(
         }
 
         ExprKind::Cast => {
-            // Cast first column to a different type
             let col = &columns[expr_idx % columns.len()];
-            // Cast numerics to DOUBLE, strings to VARCHAR, others to VARCHAR
-            let (cast_type, smelt_type) = if col.data_type.is_numeric() {
-                ("DOUBLE", DataType::Double)
+            // Pick a cast target based on func_idx to get variety
+            let cast_options: &[(&str, DataType)] = if col.data_type.is_numeric() {
+                &[
+                    ("DOUBLE", DataType::Double),
+                    ("INTEGER", DataType::Integer),
+                    ("BIGINT", DataType::BigInt),
+                    ("VARCHAR", DataType::Varchar { max_length: None }),
+                    ("BOOLEAN", DataType::Boolean),
+                ]
+            } else if col.data_type.is_string() {
+                &[("VARCHAR", DataType::Varchar { max_length: None })]
+            } else if matches!(col.data_type, DataType::Date) {
+                &[
+                    (
+                        "TIMESTAMP",
+                        DataType::Timestamp {
+                            with_timezone: false,
+                        },
+                    ),
+                    ("VARCHAR", DataType::Varchar { max_length: None }),
+                ]
+            } else if matches!(col.data_type, DataType::Timestamp { .. }) {
+                &[
+                    ("DATE", DataType::Date),
+                    ("VARCHAR", DataType::Varchar { max_length: None }),
+                ]
             } else {
-                ("STRING", DataType::Varchar { max_length: None })
+                &[("VARCHAR", DataType::Varchar { max_length: None })]
             };
+            let (cast_type, smelt_type) = &cast_options[func_idx % cast_options.len()];
             Some(TypedExpr {
-                sql: format!("CAST({} AS {})", col.name, cast_type),
+                sql: format!("CAST({} AS {cast_type})", col.name),
                 alias,
-                expected_smelt_type: smelt_type,
+                expected_smelt_type: smelt_type.clone(),
             })
         }
 
@@ -836,6 +865,26 @@ pub fn generate_expr(
                 sql: format!("CASE WHEN TRUE THEN {} ELSE {} END", col.name, col.name),
                 alias,
                 expected_smelt_type: col.data_type.clone(),
+            })
+        }
+
+        ExprKind::Between => {
+            // Find a numeric column for BETWEEN
+            let num_col = columns.iter().find(|c| c.data_type.is_numeric())?;
+            Some(TypedExpr {
+                sql: format!("{} BETWEEN 0 AND 100", num_col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::InList => {
+            // Find a numeric column for IN
+            let num_col = columns.iter().find(|c| c.data_type.is_numeric())?;
+            Some(TypedExpr {
+                sql: format!("{} IN (1, 2, 3)", num_col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
             })
         }
     }
