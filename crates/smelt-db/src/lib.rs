@@ -3703,4 +3703,447 @@ sources:
         assert!(display.contains("events: {event_id, user_id}"));
         assert!(display.contains("total_events: BIGINT"));
     }
+
+    // Helper to set up a DB with multiple models and a sources.yml
+    fn setup_multi_model_with_sources(
+        sources_yaml: &str,
+        models: &[(&str, &str)],
+    ) -> (Database, Vec<PathBuf>) {
+        let mut db = Database::default();
+        let mut paths = Vec::new();
+        for (name, sql) in models {
+            let path = PathBuf::from(format!("models/{}.sql", name));
+            db.set_file_text(path.clone(), Arc::new(sql.to_string()));
+            db.set_file_project_root(path.clone(), PathBuf::from("."));
+            paths.push(path);
+        }
+        db.set_all_files(Arc::new(paths.clone()));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(sources_yaml.to_string()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+        (db, paths)
+    }
+
+    // ============================================================
+    // Cross-model type propagation tests
+    // ============================================================
+
+    #[test]
+    fn test_type_propagation_source_to_model() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: user_id
+            type: BIGINT
+          - name: event_time
+            type: TIMESTAMP
+          - name: event_type
+            type: VARCHAR
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "raw_events",
+                "SELECT event_id, user_id, event_time, event_type FROM smelt.source('raw.events')",
+            )],
+        );
+
+        let schema = db.typed_model_schema(paths[0].clone());
+
+        assert_eq!(schema.columns.len(), 4);
+
+        let event_id = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_id")
+            .unwrap();
+        assert_eq!(
+            event_id.data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "event_id should be INTEGER from source"
+        );
+
+        let user_id = schema.columns.iter().find(|c| c.name == "user_id").unwrap();
+        assert_eq!(
+            user_id.data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "user_id should be BIGINT from source"
+        );
+
+        let event_time = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_time")
+            .unwrap();
+        assert_eq!(
+            event_time.data_type.as_ref().unwrap().data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            },
+            "event_time should be TIMESTAMP from source"
+        );
+
+        let event_type = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_type")
+            .unwrap();
+        assert_eq!(
+            event_type.data_type.as_ref().unwrap().data_type,
+            DataType::Varchar { max_length: None },
+            "event_type should be VARCHAR from source"
+        );
+    }
+
+    #[test]
+    fn test_type_propagation_through_ref_chain() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: user_id
+            type: BIGINT
+          - name: event_type
+            type: VARCHAR
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                (
+                    "raw_events",
+                    "SELECT event_id, user_id, event_type FROM smelt.source('raw.events')",
+                ),
+                (
+                    "clicks",
+                    "SELECT event_id, user_id FROM smelt.ref('raw_events') WHERE event_type = 'click'",
+                ),
+            ],
+        );
+
+        // Verify types propagate from source → raw_events → clicks
+        let schema = db.typed_model_schema(paths[1].clone());
+
+        assert_eq!(schema.columns.len(), 2);
+
+        let event_id = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_id")
+            .unwrap();
+        assert_eq!(
+            event_id.data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "event_id should propagate as INTEGER through ref chain"
+        );
+
+        let user_id = schema.columns.iter().find(|c| c.name == "user_id").unwrap();
+        assert_eq!(
+            user_id.data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "user_id should propagate as BIGINT through ref chain"
+        );
+    }
+
+    #[test]
+    fn test_type_propagation_with_aggregation() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: user_id
+            type: BIGINT
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                (
+                    "raw_events",
+                    "SELECT event_id, user_id FROM smelt.source('raw.events')",
+                ),
+                (
+                    "user_counts",
+                    "SELECT user_id, COUNT(*) as event_count FROM smelt.ref('raw_events') GROUP BY user_id",
+                ),
+                (
+                    "totals",
+                    "SELECT SUM(event_count) as total_events FROM smelt.ref('user_counts')",
+                ),
+            ],
+        );
+
+        // Check user_counts: COUNT(*) → BigInt
+        let user_counts_schema = db.typed_model_schema(paths[1].clone());
+        let event_count = user_counts_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "event_count")
+            .unwrap();
+        assert_eq!(
+            event_count.data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "COUNT(*) should be BigInt"
+        );
+
+        // Check totals: SUM(BigInt) should propagate
+        let totals_schema = db.typed_model_schema(paths[2].clone());
+        let total_events = totals_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "total_events")
+            .unwrap();
+        assert!(
+            total_events.data_type.is_some(),
+            "SUM(event_count) should have a type inferred from upstream BigInt"
+        );
+        // SUM of BigInt should remain BigInt or be promoted to Decimal
+        let total_type = &total_events.data_type.as_ref().unwrap().data_type;
+        assert!(
+            matches!(total_type, DataType::BigInt | DataType::Decimal { .. }),
+            "SUM(BigInt) should be BigInt or Decimal, got {:?}",
+            total_type
+        );
+    }
+
+    #[test]
+    fn test_type_propagation_three_hop() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      transactions:
+        columns:
+          - name: amount
+            type: DECIMAL(10,2)
+          - name: user_id
+            type: INTEGER
+          - name: created_at
+            type: TIMESTAMP
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                (
+                    "base",
+                    "SELECT amount, user_id, created_at FROM smelt.source('raw.transactions')",
+                ),
+                (
+                    "daily",
+                    "SELECT user_id, CAST(created_at AS DATE) as day, SUM(amount) as daily_total FROM smelt.ref('base') GROUP BY user_id, CAST(created_at AS DATE)",
+                ),
+                (
+                    "summary",
+                    "SELECT user_id, COUNT(*) as active_days, SUM(daily_total) as grand_total FROM smelt.ref('daily') GROUP BY user_id",
+                ),
+            ],
+        );
+
+        // Check base: types from source
+        let base_schema = db.typed_model_schema(paths[0].clone());
+        let amount = base_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "amount")
+            .unwrap();
+        assert!(
+            matches!(
+                amount.data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "amount should be Decimal from source"
+        );
+
+        // Check daily: CAST AS DATE, SUM(Decimal)
+        let daily_schema = db.typed_model_schema(paths[1].clone());
+        let day = daily_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "day")
+            .unwrap();
+        assert_eq!(
+            day.data_type.as_ref().unwrap().data_type,
+            DataType::Date,
+            "CAST(timestamp AS DATE) should produce Date"
+        );
+
+        let daily_total = daily_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "daily_total")
+            .unwrap();
+        assert!(
+            matches!(
+                daily_total.data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM(Decimal) should be Decimal"
+        );
+
+        // Check summary: COUNT(*) → BigInt, SUM(Decimal) → Decimal
+        let summary_schema = db.typed_model_schema(paths[2].clone());
+        let active_days = summary_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "active_days")
+            .unwrap();
+        assert_eq!(
+            active_days.data_type.as_ref().unwrap().data_type,
+            DataType::BigInt,
+            "COUNT(*) should be BigInt"
+        );
+
+        let grand_total = summary_schema
+            .columns
+            .iter()
+            .find(|c| c.name == "grand_total")
+            .unwrap();
+        assert!(
+            grand_total.data_type.is_some(),
+            "SUM(daily_total) should have a type inferred through the 3-hop chain"
+        );
+        assert!(
+            matches!(
+                grand_total.data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM(Decimal) through 3 hops should still be Decimal, got {:?}",
+            grand_total.data_type.as_ref().unwrap().data_type
+        );
+    }
+
+    #[test]
+    fn test_type_propagation_with_joins() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: user_id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+      orders:
+        columns:
+          - name: order_id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+          - name: amount
+            type: DECIMAL(10,2)
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                (
+                    "users",
+                    "SELECT user_id, name FROM smelt.source('raw.users')",
+                ),
+                (
+                    "orders",
+                    "SELECT order_id, user_id, amount FROM smelt.source('raw.orders')",
+                ),
+                (
+                    "user_orders",
+                    "SELECT u.user_id, u.name, SUM(o.amount) as total_spent \
+                     FROM smelt.ref('users') u \
+                     INNER JOIN smelt.ref('orders') o ON u.user_id = o.user_id \
+                     GROUP BY u.user_id, u.name",
+                ),
+            ],
+        );
+
+        let schema = db.typed_model_schema(paths[2].clone());
+
+        assert_eq!(schema.columns.len(), 3);
+
+        let user_id = schema.columns.iter().find(|c| c.name == "user_id").unwrap();
+        assert_eq!(
+            user_id.data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "user_id should be INTEGER from users source via ref"
+        );
+
+        let name = schema.columns.iter().find(|c| c.name == "name").unwrap();
+        assert_eq!(
+            name.data_type.as_ref().unwrap().data_type,
+            DataType::Varchar { max_length: None },
+            "name should be VARCHAR from users source via ref"
+        );
+
+        let total_spent = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "total_spent")
+            .unwrap();
+        assert!(
+            total_spent.data_type.is_some(),
+            "SUM(amount) should have a type inferred from orders Decimal"
+        );
+        assert!(
+            matches!(
+                total_spent.data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "SUM(Decimal) should be Decimal, got {:?}",
+            total_spent.data_type.as_ref().unwrap().data_type
+        );
+    }
+
+    #[test]
+    fn test_resolved_schema_chain_preserves_types() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: value
+            type: DECIMAL(10,2)
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                ("base", "SELECT id, value FROM smelt.source('raw.data')"),
+                ("mid", "SELECT * FROM smelt.ref('base')"),
+                ("top", "SELECT * FROM smelt.ref('mid')"),
+            ],
+        );
+
+        // Check types propagate through SELECT * chain: source → base → mid → top
+        let resolved = db.resolved_model_schema(paths[2].clone());
+
+        assert!(resolved.is_fully_resolved);
+        assert_eq!(resolved.columns.len(), 2);
+
+        let id = resolved.columns.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(
+            id.data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "id should be INTEGER through SELECT * chain"
+        );
+
+        let value = resolved.columns.iter().find(|c| c.name == "value").unwrap();
+        assert!(
+            matches!(
+                value.data_type.as_ref().unwrap().data_type,
+                DataType::Decimal { .. }
+            ),
+            "value should be Decimal through SELECT * chain, got {:?}",
+            value.data_type.as_ref().unwrap().data_type
+        );
+    }
 }
