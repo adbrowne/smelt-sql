@@ -121,6 +121,8 @@ pub enum ExprKind {
     Between,
     /// col IN (val1, val2, ...).
     InList,
+    /// Window function with OVER clause.
+    WindowFunc,
 }
 
 // ---- Function descriptors ----
@@ -751,6 +753,7 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::Cast),
         1 => Just(ExprKind::Between),
         1 => Just(ExprKind::InList),
+        2 => Just(ExprKind::WindowFunc),
     ]
 }
 
@@ -904,7 +907,153 @@ pub fn generate_expr(
                 expected_smelt_type: DataType::Boolean,
             })
         }
+
+        ExprKind::WindowFunc => generate_window_expr(columns, expr_idx, func_idx, alias),
     }
+}
+
+/// Window function descriptors organized by category.
+#[derive(Debug, Clone, Copy)]
+enum WindowFuncKind {
+    /// No arguments, returns BigInt (ROW_NUMBER, RANK, DENSE_RANK).
+    RankingBigInt,
+    /// Takes an integer argument, returns BigInt (NTILE).
+    NtileBigInt,
+    /// No arguments, returns Double (CUME_DIST, PERCENT_RANK).
+    RankingDouble,
+    /// Takes a column argument, returns the column's type (LAG, LEAD, FIRST_VALUE, LAST_VALUE).
+    ValueFunc,
+    /// Takes a column + integer argument, returns the column's type (NTH_VALUE).
+    NthValueFunc,
+}
+
+struct WindowFuncDesc {
+    name: &'static str,
+    kind: WindowFuncKind,
+    /// Whether ORDER BY is required for correct semantics.
+    requires_order_by: bool,
+}
+
+const WINDOW_FUNCTIONS: &[WindowFuncDesc] = &[
+    WindowFuncDesc {
+        name: "ROW_NUMBER",
+        kind: WindowFuncKind::RankingBigInt,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "RANK",
+        kind: WindowFuncKind::RankingBigInt,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "DENSE_RANK",
+        kind: WindowFuncKind::RankingBigInt,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "NTILE",
+        kind: WindowFuncKind::NtileBigInt,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "CUME_DIST",
+        kind: WindowFuncKind::RankingDouble,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "PERCENT_RANK",
+        kind: WindowFuncKind::RankingDouble,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "LAG",
+        kind: WindowFuncKind::ValueFunc,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "LEAD",
+        kind: WindowFuncKind::ValueFunc,
+        requires_order_by: true,
+    },
+    WindowFuncDesc {
+        name: "FIRST_VALUE",
+        kind: WindowFuncKind::ValueFunc,
+        requires_order_by: false,
+    },
+    WindowFuncDesc {
+        name: "LAST_VALUE",
+        kind: WindowFuncKind::ValueFunc,
+        requires_order_by: false,
+    },
+    WindowFuncDesc {
+        name: "NTH_VALUE",
+        kind: WindowFuncKind::NthValueFunc,
+        requires_order_by: false,
+    },
+];
+
+/// Generate a window function expression with an OVER clause.
+fn generate_window_expr(
+    columns: &[TypedSource],
+    expr_idx: usize,
+    func_idx: usize,
+    alias: String,
+) -> Option<TypedExpr> {
+    let wf = &WINDOW_FUNCTIONS[func_idx % WINDOW_FUNCTIONS.len()];
+
+    // Pick columns for the value argument and OVER clause
+    let col = &columns[expr_idx % columns.len()];
+    let order_col = &columns[(expr_idx + 1) % columns.len()];
+    // Use a different column for PARTITION BY when available
+    let partition_col = if columns.len() > 2 {
+        Some(&columns[(expr_idx + 2) % columns.len()])
+    } else {
+        None
+    };
+
+    // Build the function call
+    let func_call = match wf.kind {
+        WindowFuncKind::RankingBigInt | WindowFuncKind::RankingDouble => {
+            format!("{}()", wf.name)
+        }
+        WindowFuncKind::NtileBigInt => {
+            format!("{}(4)", wf.name)
+        }
+        WindowFuncKind::ValueFunc => {
+            format!("{}({})", wf.name, col.name)
+        }
+        WindowFuncKind::NthValueFunc => {
+            format!("{}({}, 1)", wf.name, col.name)
+        }
+    };
+
+    // Build OVER clause
+    let mut over_parts = Vec::new();
+    if let Some(pcol) = partition_col {
+        over_parts.push(format!("PARTITION BY {}", pcol.name));
+    }
+    if wf.requires_order_by || func_idx.is_multiple_of(2) {
+        over_parts.push(format!("ORDER BY {}", order_col.name));
+    }
+
+    let over_clause = if over_parts.is_empty() {
+        "OVER ()".to_string()
+    } else {
+        format!("OVER ({})", over_parts.join(" "))
+    };
+
+    // Determine return type
+    let expected_type = match wf.kind {
+        WindowFuncKind::RankingBigInt | WindowFuncKind::NtileBigInt => DataType::BigInt,
+        WindowFuncKind::RankingDouble => DataType::Double,
+        WindowFuncKind::ValueFunc | WindowFuncKind::NthValueFunc => col.data_type.clone(),
+    };
+
+    Some(TypedExpr {
+        sql: format!("{func_call} {over_clause}"),
+        alias,
+        expected_smelt_type: expected_type,
+    })
 }
 
 fn smelt_type_to_base(dt: &DataType) -> Option<BaseType> {
@@ -935,11 +1084,19 @@ fn is_aggregate_expr(sql: &str) -> bool {
     }
 }
 
+/// Check if a SQL expression string is a window function call (contains OVER).
+fn is_window_expr(sql: &str) -> bool {
+    sql.to_uppercase().contains(" OVER ")
+}
+
 /// Assemble a CTE query from columns and expressions.
 ///
-/// If any expression uses aggregate functions, we wrap the whole SELECT in a
-/// GROUP BY on all non-aggregate columns (or just use SELECT without FROM for
-/// a single-row aggregate).
+/// Handles three expression categories that cannot be freely mixed:
+/// - Aggregates: require GROUP BY or single-row output
+/// - Window functions: valid without GROUP BY, but conflict with bare aggregates
+/// - Scalar expressions: column refs, casts, binary ops, etc.
+///
+/// Strategy: emit only one category per query to avoid complex interactions.
 pub fn assemble_cte_query(columns: &[TypedSource], exprs: &[TypedExpr]) -> String {
     // Build the CTE
     let cte_cols: Vec<String> = columns
@@ -947,41 +1104,44 @@ pub fn assemble_cte_query(columns: &[TypedSource], exprs: &[TypedExpr]) -> Strin
         .map(|c| format!("{} AS {}", c.cast_sql, c.name))
         .collect();
 
-    let select_exprs: Vec<String> = exprs
+    let has_aggregate = exprs.iter().any(|e| is_aggregate_expr(&e.sql));
+    let has_window = exprs.iter().any(|e| is_window_expr(&e.sql));
+
+    // Pick which expressions to include based on what's present.
+    // Window and aggregate expressions don't mix well without GROUP BY,
+    // so we prioritize one category.
+    let selected_exprs: Vec<&TypedExpr> = if has_aggregate && has_window {
+        // When both present, prefer window expressions + scalar expressions
+        // (aggregates would need GROUP BY which complicates window semantics)
+        exprs
+            .iter()
+            .filter(|e| !is_aggregate_expr(&e.sql))
+            .collect()
+    } else if has_aggregate {
+        // Only aggregates: filter to just aggregate expressions
+        exprs.iter().filter(|e| is_aggregate_expr(&e.sql)).collect()
+    } else {
+        // Scalar + window expressions coexist fine
+        exprs.iter().collect()
+    };
+
+    // Fallback: if filtering removed everything, use all expressions
+    let selected_exprs = if selected_exprs.is_empty() {
+        exprs.iter().collect()
+    } else {
+        selected_exprs
+    };
+
+    let select_list: Vec<String> = selected_exprs
         .iter()
         .map(|e| format!("{} AS {}", e.sql, e.alias))
         .collect();
 
-    let has_aggregate = exprs.iter().any(|e| is_aggregate_expr(&e.sql));
-
-    if has_aggregate {
-        // For queries with aggregates, only include aggregate expressions
-        let agg_exprs: Vec<String> = exprs
-            .iter()
-            .filter(|e| is_aggregate_expr(&e.sql))
-            .map(|e| format!("{} AS {}", e.sql, e.alias))
-            .collect();
-
-        if agg_exprs.is_empty() {
-            format!(
-                "WITH data AS (SELECT {}) SELECT {} FROM data",
-                cte_cols.join(", "),
-                select_exprs.join(", ")
-            )
-        } else {
-            format!(
-                "WITH data AS (SELECT {}) SELECT {} FROM data",
-                cte_cols.join(", "),
-                agg_exprs.join(", ")
-            )
-        }
-    } else {
-        format!(
-            "WITH data AS (SELECT {}) SELECT {} FROM data",
-            cte_cols.join(", "),
-            select_exprs.join(", ")
-        )
-    }
+    format!(
+        "WITH data AS (SELECT {}) SELECT {} FROM data",
+        cte_cols.join(", "),
+        select_list.join(", ")
+    )
 }
 
 /// Strategy for generating complete test scenarios.
