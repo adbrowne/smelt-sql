@@ -24,8 +24,9 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 ### Expressions and Operators
 
-- [ ] **Window functions** — Add ROW_NUMBER, RANK, DENSE_RANK, NTILE, CUME_DIST, PERCENT_RANK, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE with OVER clauses (none covered)
+- [x] **Window functions** — Added ROW_NUMBER, RANK, DENSE_RANK, NTILE, CUME_DIST, PERCENT_RANK, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE with random OVER clauses (PARTITION BY, ORDER BY). Frame specs not yet covered.
 - [x] **BETWEEN / IN expressions** — Added BETWEEN and IN for numeric columns (both return Boolean). EXISTS not yet covered.
+- [ ] **GROUP BY + window functions combined** — Generate queries that use window functions over aggregated results (e.g., `RANK() OVER (ORDER BY SUM(x))`), or window functions alongside GROUP BY columns. Currently window and aggregate expressions are separated into different queries.
 - [ ] **Scalar subqueries** — Generate `(SELECT ...)` in expression position (none covered)
 - [ ] **Regex operators** — Add `~`, `~*`, `!~`, `!~*` PostgreSQL regex operators (none covered, type inference also missing)
 - [ ] **JSON operators** — Add `->`, `->>`, `#>`, `#>>`, `@>`, `<@` (none covered, type inference also missing)
