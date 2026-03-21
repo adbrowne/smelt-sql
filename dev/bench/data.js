@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774083864361,
+  "lastUpdate": 1774083865341,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3047,6 +3047,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.060862363898014,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fde96655274afde115b803b0e882541c1db00b5d",
+          "message": "Add plans documentation convention to CLAUDE.md (#64)",
+          "timestamp": "2026-03-21T20:02:40+11:00",
+          "tree_id": "fe4db904d9ed97beed499ceae8c20b7aff0aa772",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/fde96655274afde115b803b0e882541c1db00b5d"
+        },
+        "date": 1774083865023,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.723815049551504,
             "unit": "MB/s"
           }
         ]
