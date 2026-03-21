@@ -2,7 +2,10 @@ use crate::config::{BackendType, Config, Materialization, Target};
 use crate::discovery::ModelFile;
 use crate::errors::{extract_snippet, text_range_to_line_col, CliError};
 use anyhow::Result;
-use smelt_dialect::{BackendCapabilities, PrintContext, SqlDialect};
+use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+use smelt_dialect::{wrap_with_type_casts, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_parser::ast::File;
+use smelt_types::DataType;
 
 #[derive(Debug, Clone)]
 pub struct CompiledModel {
@@ -75,6 +78,10 @@ impl SqlCompiler {
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
+        // Type-conforming cast insertion: wrap SELECT columns with CASTs so
+        // backend output types match smelt's type inference exactly.
+        let compiled_sql = self.apply_type_casts(&compiled_sql);
+
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
             &model.name,
@@ -86,6 +93,50 @@ impl SqlCompiler {
             sql: compiled_sql,
             materialization,
         })
+    }
+
+    /// Wrap SELECT columns with CASTs based on type inference.
+    ///
+    /// Returns the original SQL unchanged if type inference can't extract
+    /// column names/types (e.g. models referencing other models via smelt.ref()
+    /// where upstream schemas aren't yet available).
+    fn apply_type_casts(&self, sql: &str) -> String {
+        let parse = smelt_parser::parse(sql);
+        let file = match File::cast(parse.syntax()) {
+            Some(f) => f,
+            None => return sql.to_string(),
+        };
+        let select_stmt = match file.select_stmt() {
+            Some(s) => s,
+            None => return sql.to_string(),
+        };
+
+        let ctx = TypeContext::new();
+        let column_types = infer_select_column_types(&select_stmt, &ctx);
+
+        let select_list = match select_stmt.select_list() {
+            Some(sl) => sl,
+            None => return sql.to_string(),
+        };
+        let items: Vec<_> = select_list.items().collect();
+
+        // Only apply casts if we have concrete types for at least one column
+        let has_concrete = column_types
+            .iter()
+            .any(|tc| !matches!(tc.data_type, DataType::Unknown | DataType::Null));
+        if !has_concrete {
+            return sql.to_string();
+        }
+
+        let col_names: Vec<String> = items
+            .iter()
+            .map(|item| item.alias().unwrap_or_else(|| "?".to_string()))
+            .collect();
+        let col_name_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
+        let col_type_refs: Vec<DataType> =
+            column_types.iter().map(|tc| tc.data_type.clone()).collect();
+
+        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs)
     }
 
     /// Compile a model with custom SQL (e.g., for transformed queries).

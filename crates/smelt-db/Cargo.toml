@@ -20,3 +20,4 @@ smelt-types = { path = "../smelt-types" }
 duckdb = { workspace = true, features = ["bundled"] }
 arrow = { workspace = true }
 proptest = { workspace = true }
+smelt-dialect = { path = "../smelt-dialect" }
