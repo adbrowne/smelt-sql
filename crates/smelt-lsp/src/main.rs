@@ -125,10 +125,12 @@ impl Backend {
         };
 
         let db = self.db.lock().await;
-        let diagnostics = db.file_diagnostics(path);
+        let diagnostics = db.file_diagnostics(path.clone());
+        let type_diags = db.type_diagnostics(path);
 
         let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
             .iter()
+            .chain(type_diags.iter())
             .map(|d| self.to_lsp_diagnostic(d))
             .collect();
 
@@ -306,8 +308,10 @@ impl Backend {
                 if let Ok(uri) = Url::from_file_path(path) {
                     let db_guard = db.lock().await;
                     let diagnostics = db_guard.file_diagnostics(path.clone());
+                    let type_diags = db_guard.type_diagnostics(path.clone());
                     let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
                         .iter()
+                        .chain(type_diags.iter())
                         .map(|d| lsp_types::Diagnostic {
                             range: Range {
                                 start: Position {

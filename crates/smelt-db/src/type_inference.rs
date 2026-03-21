@@ -393,7 +393,20 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             first_arg_type_or(func, ctx, DataType::Unknown, true)
         }
 
-        SqlFunction::Coalesce => first_arg_type_or(func, ctx, DataType::Unknown, true),
+        SqlFunction::Coalesce => {
+            // Try all arguments, return first concrete (non-Unknown, non-Null) type
+            for arg in func.arguments() {
+                if let Some(arg_type) = infer_expression_type(&arg, ctx) {
+                    if !matches!(arg_type.data_type, DataType::Unknown | DataType::Null) {
+                        return Some(TypedColumn {
+                            data_type: arg_type.data_type,
+                            nullable: true,
+                        });
+                    }
+                }
+            }
+            first_arg_type_or(func, ctx, DataType::Unknown, true)
+        }
 
         SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::Unknown, true),
 
@@ -594,6 +607,17 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         }),
 
         SqlFunction::Greatest | SqlFunction::Least => {
+            // Try all arguments, return first concrete type
+            for arg in func.arguments() {
+                if let Some(arg_type) = infer_expression_type(&arg, ctx) {
+                    if !matches!(arg_type.data_type, DataType::Unknown | DataType::Null) {
+                        return Some(TypedColumn {
+                            data_type: arg_type.data_type,
+                            nullable: true,
+                        });
+                    }
+                }
+            }
             first_arg_type_or(func, ctx, DataType::Unknown, true)
         }
 
