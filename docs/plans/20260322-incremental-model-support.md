@@ -28,7 +28,7 @@ This plan covers: strategy expansion, configuration unification, backfill intell
 2. **Three execution paths** in main.rs (optimizer+incremental, incremental-only, legacy) — should be one
 3. **ROADMAP Phase 6** still listed as "Future" despite basic incremental being complete
 4. **DESIGN.md annotation syntax** (`-- @materialize: incremental`) never implemented; YAML frontmatter is the real surface — doc should clarify
-5. **No lookback_days** despite DESIGN.md mentioning it
+5. **No lookback/temporal analysis** despite DESIGN.md mentioning lookback_days
 6. **Granularity conversion boilerplate** in main.rs (lines 669-683) mapping smelt-core Granularity to optimizer Granularity — unnecessary with unified type
 
 ### Key Files
@@ -99,7 +99,7 @@ pub struct IncrementalConfig {
     pub granularity: Granularity,
     pub strategy: IncrementalStrategy,        // NEW — default: DeleteInsert
     pub unique_key: Vec<String>,              // NEW — required for Merge
-    pub lookback: Option<LookbackWindow>,     // NEW — late-arriving data
+    pub data_latency: Option<LatencyWindow>,  // NEW — upstream data arrival latency
     pub safety_overrides: IncrementalSafetyOverrides, // MOVED from optimizer
 }
 
@@ -110,13 +110,17 @@ pub enum IncrementalStrategy {
     InsertOverwrite, // replace entire partitions
 }
 
-pub struct LookbackWindow {
+/// How late upstream data can arrive and still be processed.
+/// This is NOT the same as temporal dependencies (which are inferred from the query AST).
+pub struct LatencyWindow {
     pub count: u32,
-    pub unit: LookbackUnit,  // Days, Weeks, Months, Partitions
+    pub unit: LatencyUnit,  // Days, Weeks, Months, Partitions
 }
 ```
 
-`LookbackUnit::Partitions` means "N partition periods" — so with weekly granularity, `lookback: { count: 2, unit: partitions }` means 2 weeks. This is more natural than forcing everything into days.
+`LatencyUnit::Partitions` means "N partition periods" — so with weekly granularity, `data_latency: { count: 2, unit: partitions }` means 2 weeks. This is more natural than forcing everything into days.
+
+**Note: No explicit lookback config.** Temporal dependencies (how much prior data a query needs to compute correctly) are inferred from the SQL AST — see Phase 3. The `data_latency` config covers only the orthogonal concern of when upstream data physically arrives.
 
 Move `IncrementalSafetyOverrides` from `smelt-optimizer/src/types.rs` to `smelt-core/src/config.rs`. Update optimizer to import from core.
 
@@ -214,40 +218,148 @@ insert_overwrite | No         | Required      | Emul.  | Native | No
 
 ---
 
-### Phase 3: Lookback & Late-Arriving Data
+### Phase 3: Temporal Dependency Inference & Data Latency
 
-**Goal:** Configurable reprocessing window to catch late data.
+**Goal:** Automatically determine how much context each query needs (from the AST), and separately handle late-arriving data (from config). These are two orthogonal concerns:
 
-#### Config
+1. **Temporal dependencies** (inferred from SQL): "this query needs 6 prior days to compute correctly" — e.g., window functions, self-joins with date offsets, LAG/LEAD
+2. **Data latency** (configured): "upstream events can arrive up to 3 days late" — operational knowledge about the pipeline, not the query
+
+#### 3a. AST-Based Temporal Dependency Analysis
+
+New analysis pass in `smelt-optimizer` that examines the query AST to infer how much historical context is needed beyond the requested time range:
+
+```rust
+pub struct TemporalDependency {
+    /// How many periods of prior data the query needs
+    pub lookback: Duration,
+    /// How many periods of future data the query needs (rare — LEAD, lookahead joins)
+    pub lookahead: Duration,
+    /// Where the dependency was detected (for explain output)
+    pub sources: Vec<TemporalSource>,
+}
+
+pub enum TemporalSource {
+    WindowFrame { function: String, frame: String },  // "SUM OVER ROWS BETWEEN 6 PRECEDING"
+    LagLead { function: String, offset: u32 },        // "LAG(col, 3)"
+    JoinOffset { interval: String },                  // "ON a.day = b.day - INTERVAL '1 day'"
+    WhereOffset { interval: String },                 // "WHERE ts >= day - INTERVAL '3 days'"
+    Unbounded { reason: String },                     // correlated subquery with no temporal bound
+}
+```
+
+Recognizable patterns:
+
+| SQL Pattern | Inferred dependency |
+|-------------|-------------------|
+| Simple `GROUP BY` with partition col | 0 (partition-local) |
+| `ROWS BETWEEN N PRECEDING AND CURRENT ROW` | lookback = N periods |
+| `RANGE BETWEEN INTERVAL 'N days' PRECEDING` | lookback = N days |
+| `LAG(col, N)` | lookback = N periods |
+| `LEAD(col, N)` | lookahead = N periods |
+| `JOIN ... ON a.date = b.date - INTERVAL 'N'` | lookback = N |
+| `JOIN ... ON a.date = b.date + INTERVAL 'N'` | lookahead = N |
+| `WHERE col >= partition_date - INTERVAL 'N'` | lookback = N |
+| Correlated subquery, no temporal bound | **Unbounded** — warn, require override or full refresh |
+| No recognizable pattern | Conservative: warn, suggest explicit annotation |
+
+When multiple patterns exist, take the **max** across all detected dependencies.
+
+For **Unbounded** cases, smelt should error with a clear message:
+```
+Model 'user_lifetime_value': detected unbounded temporal dependency
+  (correlated subquery at line 12 scans full history for each user).
+  Options:
+    1. Add a temporal bound to the subquery
+    2. Use `safety_overrides.allow_unbounded_lookback: true` and accept full-refresh-only
+    3. Restructure as a separate model
+```
+
+**Files:** NEW `crates/smelt-optimizer/src/analysis/temporal.rs`
+
+#### 3b. Data Latency Config
+
+Separately, users configure how late upstream data can arrive:
 
 ```yaml
 incremental:
-  lookback:
+  data_latency:
     count: 3
-    unit: days        # days | weeks | months | partitions
+    unit: days     # days | weeks | months | partitions
 ```
 
-`unit: partitions` means "3 granularity periods" — so weekly model + `count: 2, unit: partitions` = 2 weeks lookback.
+This is purely about when data physically shows up in source tables — nothing to do with query structure. `unit: partitions` means "N granularity periods," so a weekly model with `count: 1, unit: partitions` = 1 week.
 
-#### Behavior
+#### 3c. Effective Window Computation
 
-When lookback is configured:
-1. **Effective start** = `event_time_start - lookback_duration`
-2. Both the WHERE filter injection AND the partition DELETE range use the effective start
-3. The lookback is applied automatically — no user action needed per run
+The total window applied to each run is:
 
 ```
-Requested range:  [2026-03-20, 2026-03-22)
-Lookback: 3 days
-Effective range:  [2026-03-17, 2026-03-22)
-Partitions deleted: 2026-03-17, 2026-03-18, 2026-03-19, 2026-03-20, 2026-03-21
+effective_lookback  = max(ast_inferred_lookback, data_latency)
+effective_lookahead = ast_inferred_lookahead  (data_latency doesn't affect lookahead)
 ```
 
-#### Implementation
+Example scenarios:
 
-Modify `generate_partition_values()` in main.rs: before generating, compute effective start by subtracting lookback. The transformer's `inject_time_filter()` receives the already-adjusted TimeRange — no changes needed there.
+```
+Model: daily_revenue (simple GROUP BY day)
+  AST temporal dependency: 0 days (partition-local)
+  Data latency: 3 days (configured)
+  Effective lookback: 3 days
 
-**Files:** `smelt-cli/src/main.rs` (apply lookback offset), `smelt-core/src/config.rs` (LookbackWindow type)
+Model: user_rolling_7d (window function with 6 PRECEDING)
+  AST temporal dependency: 6 days (from ROWS BETWEEN 6 PRECEDING)
+  Data latency: not configured
+  Effective lookback: 6 days
+
+Model: user_rolling_7d_with_late_data
+  AST temporal dependency: 6 days (from ROWS BETWEEN 6 PRECEDING)
+  Data latency: 3 days (configured)
+  Effective lookback: 6 days (AST wins — already covers latency)
+
+Model: day_over_day_change (self-join with 1-day offset)
+  AST temporal dependency: 1 day (from JOIN ON a.day = b.day + INTERVAL '1 day')
+  Data latency: 0
+  Effective lookback: 1 day
+```
+
+#### 3d. Explain Output
+
+`smelt explain` shows both components transparently:
+
+```
+$ smelt explain user_rolling_7d
+
+user_rolling_7d:
+  Strategy: delete_insert (day granularity)
+  Temporal dependencies:
+    lookback: 6 days (from: SUM OVER ROWS BETWEEN 6 PRECEDING AND CURRENT ROW, line 5)
+    lookahead: 0
+  Data latency: not configured
+  Effective window: lookback=6 days, lookahead=0
+  Batch safety: bounded (needs 6-day context per batch)
+```
+
+#### 3e. Implementation
+
+Modify `generate_partition_values()` in main.rs: before generating, compute effective start/end by applying the combined window. The transformer's `inject_time_filter()` receives the already-adjusted TimeRange — no changes needed there.
+
+For lookahead (rare but needed for LEAD), extend the end date:
+```
+Requested range:     [2026-03-20, 2026-03-22)
+Lookback: 6 days
+Lookahead: 1 day
+Filter range:        [2026-03-14, 2026-03-23)   ← what goes in WHERE clause
+Partition DELETE:    [2026-03-20, 2026-03-22)   ← only delete/replace requested partitions
+```
+
+Note: the filter range is wider than the partition range. We fetch extra context rows for the query to compute correctly, but only write/replace the requested partitions.
+
+**Files:**
+- NEW `crates/smelt-optimizer/src/analysis/temporal.rs` — AST analysis
+- `crates/smelt-core/src/config.rs` — `LatencyWindow` type (from Phase 1a)
+- `crates/smelt-cli/src/main.rs` — apply combined window to partition generation
+- `crates/smelt-cli/src/transformer.rs` — may need separate filter range vs partition range
 
 ---
 
@@ -268,11 +380,11 @@ Single query    Large chunks     Small chunks    Per-partition   Full refresh
 
 #### Batch Safety Analysis
 
-A model is **batch-safe** (can process any arbitrary range in a single query) when:
-1. All aggregations include the partition column in GROUP BY (partition-local)
-2. Window functions are PARTITION BY-aligned with the batch key
-3. No self-joins across batch boundaries
-4. No global DISTINCT
+Batch safety is a direct consequence of Phase 3's temporal dependency analysis:
+
+- **Temporal dependency = 0** (partition-local): Fully batch-safe — single query for any range
+- **Temporal dependency = bounded N**: Safe in chunks, but each chunk needs N extra context rows. A backfill query covering range [start, end) fetches [start - N, end) but only writes [start, end).
+- **Temporal dependency = unbounded**: Must process per-partition or full refresh
 
 The existing safety checks in `smelt-optimizer/src/rules/incremental.rs` already detect most unsafe patterns. Extend with:
 
@@ -617,7 +729,7 @@ Each phase is independently valuable:
 
 - [ ] ROADMAP.md: Fix Phase 6 status (basic incremental complete, link to this plan for advanced)
 - [ ] DESIGN.md: Note that `-- @materialize` annotation is deferred; YAML frontmatter is current surface
-- [ ] DESIGN.md: Reconcile `lookback_days` references with new `lookback: { count, unit }` config
+- [ ] DESIGN.md: Reconcile `lookback_days` references with new approach (AST-inferred temporal deps + `data_latency` config)
 - [ ] Unify IncrementalConfig (eliminate smelt-optimizer duplicate)
 - [ ] Remove Granularity conversion boilerplate in main.rs (lines 669-683)
 - [ ] Clean up triple execution path in main.rs
@@ -652,14 +764,17 @@ Each phase is independently valuable:
 3. **Weekly models** — Configuring `week_start: monday` (or any day). Partition values align to week boundaries.
 4. **Interaction with lookback** — `unit: partitions` means "N periods at your granularity"
 
-### 6.3 Late-Arriving Data Guide
+### 6.3 Temporal Dependencies & Data Latency Guide
 
 **Sections:**
-1. **The problem** — Data arrives after the time window it belongs to has been processed
-2. **Lookback windows** — Configure `lookback: { count: 3, unit: days }` to reprocess recent partitions
-3. **How lookback works** — Diagram: requested range vs effective range with lookback
-4. **Choosing lookback size** — Analyze your data's latency distribution. Most pipelines: 1-3 days. CDC: 0. Batch loads: match batch frequency.
-5. **Partition-based lookback** — `unit: partitions` for weekly/monthly models where "3 days" doesn't make sense
+1. **Two different problems** — Temporal dependencies (query needs prior data to compute correctly) vs data latency (upstream data arrives late). These are orthogonal.
+2. **Temporal dependencies (automatic)** — smelt analyzes your SQL to detect window functions, LAG/LEAD, self-joins with date offsets, and other patterns that require historical context. No config needed — it's inferred from the query.
+3. **What smelt detects** — Table of patterns: `ROWS BETWEEN N PRECEDING`, `LAG(col, N)`, `JOIN ON a.day = b.day - INTERVAL '1 day'`, etc.
+4. **Data latency (configured)** — When upstream events can arrive late, configure `data_latency: { count: 3, unit: days }`. This is about your pipeline, not your query.
+5. **How they combine** — Effective window = max(temporal dependency, data latency). Diagram showing filter range (wider) vs partition range (only requested partitions).
+6. **Lookahead** — Rare but supported: LEAD functions need future context. smelt extends the filter end date while still only writing requested partitions.
+7. **Explain output** — `smelt explain model_name` shows both components transparently so you can verify what smelt inferred.
+8. **Unbounded dependencies** — What happens when smelt can't determine a bound (correlated subqueries, etc.) and your options.
 
 ### 6.4 Backfill Guide
 
