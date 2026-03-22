@@ -99,7 +99,6 @@ pub struct IncrementalConfig {
     pub granularity: Granularity,
     pub strategy: IncrementalStrategy,        // NEW — default: DeleteInsert
     pub unique_key: Vec<String>,              // NEW — required for Merge
-    pub data_latency: Option<LatencyWindow>,  // NEW — upstream data arrival latency
     pub safety_overrides: IncrementalSafetyOverrides, // MOVED from optimizer
 }
 
@@ -109,18 +108,40 @@ pub enum IncrementalStrategy {
     Append,        // insert-only, no dedup
     InsertOverwrite, // replace entire partitions
 }
-
-/// How late upstream data can arrive and still be processed.
-/// This is NOT the same as temporal dependencies (which are inferred from the query AST).
-pub struct LatencyWindow {
-    pub count: u32,
-    pub unit: LatencyUnit,  // Days, Weeks, Months, Partitions
-}
 ```
 
-`LatencyUnit::Partitions` means "N partition periods" — so with weekly granularity, `data_latency: { count: 2, unit: partitions }` means 2 weeks. This is more natural than forcing everything into days.
+**Note: No explicit lookback config on incremental models.** Two concerns are handled separately:
+1. **Temporal dependencies** — inferred from the SQL AST (see Phase 3)
+2. **Data latency** — declared on upstream sources/models, not on the consumer (see Phase 3b)
 
-**Note: No explicit lookback config.** Temporal dependencies (how much prior data a query needs to compute correctly) are inferred from the SQL AST — see Phase 3. The `data_latency` config covers only the orthogonal concern of when upstream data physically arrives.
+Move `IncrementalSafetyOverrides` from `smelt-optimizer/src/types.rs` to `smelt-core/src/config.rs`. Update optimizer to import from core.
+
+**Data latency** is a property of the table that produces the data, not the model that reads it:
+
+```yaml
+# sources.yml — latency declared per column on the producing table
+sources:
+  - name: raw
+    tables:
+      - name: transactions
+        columns:
+          - name: event_time
+            type: TIMESTAMP
+            data_latency: { count: 3, unit: days }
+          - name: ingestion_time
+            type: TIMESTAMP
+            data_latency: { count: 0, unit: hours }
+
+# models can also declare per-column latency (propagates to downstream)
+---
+name: events_cleaned
+columns:
+  event_time:
+    data_latency: { count: 3, unit: days }
+---
+```
+
+When building the execution plan for a downstream model, smelt traces the model's `event_time_column` to the upstream source column and resolves its `data_latency`. Different columns on the same table can have different latencies — a model filtering on `event_time` gets 3-day buffer while one filtering on `ingestion_time` gets none.
 
 Move `IncrementalSafetyOverrides` from `smelt-optimizer/src/types.rs` to `smelt-core/src/config.rs`. Update optimizer to import from core.
 
@@ -277,18 +298,55 @@ Model 'user_lifetime_value': detected unbounded temporal dependency
 
 **Files:** NEW `crates/smelt-optimizer/src/analysis/temporal.rs`
 
-#### 3b. Data Latency Config
+#### 3b. Data Latency (Property of Upstream, Not Downstream)
 
-Separately, users configure how late upstream data can arrive:
+Data latency is declared on the table that *produces* the data — sources or models — not on the consumer. Crucially, latency is **per-column** because different columns on the same table can have very different arrival characteristics:
+
+- `ingestion_time` — set when data lands in the warehouse (near-zero latency)
+- `event_time` — when the event actually happened (could be days earlier for mobile offline sync, batch uploads, etc.)
 
 ```yaml
-incremental:
-  data_latency:
-    count: 3
-    unit: days     # days | weeks | months | partitions
+# sources.yml — latency declared per column
+sources:
+  - name: raw
+    tables:
+      - name: transactions
+        columns:
+          - name: event_time
+            type: TIMESTAMP
+            data_latency: { count: 3, unit: days }   # mobile events arrive up to 3 days late
+          - name: ingestion_time
+            type: TIMESTAMP
+            data_latency: { count: 0, unit: hours }   # set on warehouse arrival
+          - name: amount
+            type: DECIMAL
+      - name: clicks
+        columns:
+          - name: click_time
+            type: TIMESTAMP
+            data_latency: { count: 1, unit: hours }   # near-real-time stream
+
+# model frontmatter — latency on output columns propagates downstream
+---
+name: events_cleaned
+columns:
+  event_time:
+    data_latency: { count: 3, unit: days }   # inherited from source, or explicitly declared
+---
 ```
 
-This is purely about when data physically shows up in source tables — nothing to do with query structure. `unit: partitions` means "N granularity periods," so a weekly model with `count: 1, unit: partitions` = 1 week.
+When smelt builds the execution plan for a downstream incremental model, it resolves latency by matching the model's `event_time_column` to the upstream column:
+
+1. The downstream model declares `event_time_column: event_time`
+2. smelt traces `event_time` through the query to its upstream source column(s)
+3. The relevant `data_latency` is the latency of those specific upstream columns
+4. If multiple upstream columns contribute, take the **max**
+
+This means a model filtering on `event_time` (3-day latency) gets a 3-day buffer, while a different model filtering on `ingestion_time` (0 latency) on the **same source table** gets no buffer at all.
+
+`unit: partitions` means "N granularity periods of the consuming model," so a weekly model reading a source with `count: 1, unit: partitions` gets 1 week of latency buffer.
+
+**Files:** `crates/smelt-core/src/config.rs` (LatencyWindow on column definitions), `crates/smelt-db/src/lib.rs` (latency resolution via column lineage)
 
 #### 3c. Effective Window Computation
 
@@ -302,24 +360,24 @@ effective_lookahead = ast_inferred_lookahead  (data_latency doesn't affect looka
 Example scenarios:
 
 ```
-Model: daily_revenue (simple GROUP BY day)
+Model: daily_revenue (GROUP BY day, event_time_column=event_time, source event_time has 3-day latency)
   AST temporal dependency: 0 days (partition-local)
-  Data latency: 3 days (configured)
+  Upstream column latency: 3 days (from raw.transactions.event_time)
   Effective lookback: 3 days
 
-Model: user_rolling_7d (window function with 6 PRECEDING)
-  AST temporal dependency: 6 days (from ROWS BETWEEN 6 PRECEDING)
-  Data latency: not configured
-  Effective lookback: 6 days
+Model: daily_ingestion_stats (GROUP BY day, event_time_column=ingestion_time, same source but 0 latency)
+  AST temporal dependency: 0 days (partition-local)
+  Upstream column latency: 0 (from raw.transactions.ingestion_time)
+  Effective lookback: 0 days
 
-Model: user_rolling_7d_with_late_data
+Model: user_rolling_7d (window function with 6 PRECEDING, reads events_cleaned.event_time with 3-day latency)
   AST temporal dependency: 6 days (from ROWS BETWEEN 6 PRECEDING)
-  Data latency: 3 days (configured)
+  Upstream column latency: 3 days (from events_cleaned.event_time)
   Effective lookback: 6 days (AST wins — already covers latency)
 
 Model: day_over_day_change (self-join with 1-day offset)
   AST temporal dependency: 1 day (from JOIN ON a.day = b.day + INTERVAL '1 day')
-  Data latency: 0
+  Upstream column latency: 0
   Effective lookback: 1 day
 ```
 
@@ -335,7 +393,7 @@ user_rolling_7d:
   Temporal dependencies:
     lookback: 6 days (from: SUM OVER ROWS BETWEEN 6 PRECEDING AND CURRENT ROW, line 5)
     lookahead: 0
-  Data latency: not configured
+  Upstream column latency: 3 days (from: events_cleaned.event_time)
   Effective window: lookback=6 days, lookahead=0
   Batch safety: bounded (needs 6-day context per batch)
 ```
@@ -770,11 +828,12 @@ Each phase is independently valuable:
 1. **Two different problems** — Temporal dependencies (query needs prior data to compute correctly) vs data latency (upstream data arrives late). These are orthogonal.
 2. **Temporal dependencies (automatic)** — smelt analyzes your SQL to detect window functions, LAG/LEAD, self-joins with date offsets, and other patterns that require historical context. No config needed — it's inferred from the query.
 3. **What smelt detects** — Table of patterns: `ROWS BETWEEN N PRECEDING`, `LAG(col, N)`, `JOIN ON a.day = b.day - INTERVAL '1 day'`, etc.
-4. **Data latency (configured)** — When upstream events can arrive late, configure `data_latency: { count: 3, unit: days }`. This is about your pipeline, not your query.
-5. **How they combine** — Effective window = max(temporal dependency, data latency). Diagram showing filter range (wider) vs partition range (only requested partitions).
+4. **Data latency (declared on upstream, per-column)** — Latency belongs on the source/model that produces the data, attached to specific columns. A table might have `event_time` with 3-day latency and `ingestion_time` with near-zero. smelt matches the downstream model’s `event_time_column` to the upstream column’s latency.
+5. **How they combine** — Effective window = max(temporal dependency, resolved upstream column latency). Diagram showing filter range (wider) vs partition range (only requested partitions).
 6. **Lookahead** — Rare but supported: LEAD functions need future context. smelt extends the filter end date while still only writing requested partitions.
-7. **Explain output** — `smelt explain model_name` shows both components transparently so you can verify what smelt inferred.
-8. **Unbounded dependencies** — What happens when smelt can't determine a bound (correlated subqueries, etc.) and your options.
+7. **Explain output** — `smelt explain model_name` shows both components transparently: what the AST requires, what upstream latency contributes (and from which column/source), and the resulting effective window.
+8. **Unbounded dependencies** — What happens when smelt can’t determine a bound (correlated subqueries, etc.) and your options.
+9. **Latency propagation** — If source A’s `event_time` has 3-day latency and model B reads A, model B’s output inherits that. Downstream models of B see the cumulative latency.
 
 ### 6.4 Backfill Guide
 
