@@ -143,17 +143,63 @@ pub enum Granularity {
     Day,
     Week { week_start: Weekday },
     Month,
+    Quarter,
+    Year,
+}
+
+/// Safety overrides for incremental materialization checks.
+///
+/// Each flag allows a specific pattern that is normally rejected
+/// because it can produce different results on partial vs full data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct IncrementalSafetyOverrides {
+    #[serde(default)]
+    pub allow_window_functions: bool,
+    #[serde(default)]
+    pub allow_having: bool,
+    #[serde(default)]
+    pub allow_limit: bool,
+    #[serde(default)]
+    pub allow_subqueries: bool,
+    #[serde(default)]
+    pub allow_nondeterministic: bool,
+    #[serde(default)]
+    pub allow_distinct: bool,
+}
+
+/// Strategy for incremental materialization.
+///
+/// Model authors declare *what* (unique_key, partition_column) and backends
+/// decide *how* (which strategy to use) via `resolve_strategy()`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncrementalStrategy {
+    DeleteInsert,
+    Merge,
+    Append,
+    InsertOverwrite,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IncrementalConfig {
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Column in source data to filter on (for WHERE injection)
     pub event_time_column: String,
     /// Column in output to delete by (for DELETE+INSERT)
     pub partition_column: String,
-    /// Partition granularity (hour, day, month)
+    /// Partition granularity (hour, day, week, month, quarter, year)
     pub granularity: Granularity,
+    /// Columns that uniquely identify a row (backend uses presence to choose strategy)
+    #[serde(default)]
+    pub unique_key: Vec<String>,
+    /// Safety overrides for patterns that may diverge on partial data
+    #[serde(default)]
+    pub safety_overrides: IncrementalSafetyOverrides,
 }
 
 impl Config {
@@ -308,5 +354,78 @@ targets:
 
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.default_materialization, Materialization::View);
+    }
+
+    #[test]
+    fn test_quarter_granularity_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: quarter
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.granularity, Granularity::Quarter);
+        assert!(config.enabled); // default_enabled = true
+    }
+
+    #[test]
+    fn test_year_granularity_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: year
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.granularity, Granularity::Year);
+    }
+
+    #[test]
+    fn test_safety_overrides_default_when_absent() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.safety_overrides,
+            IncrementalSafetyOverrides::default()
+        );
+        assert!(!config.safety_overrides.allow_window_functions);
+    }
+
+    #[test]
+    fn test_unique_key_defaults_empty() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.unique_key.is_empty());
+    }
+
+    #[test]
+    fn test_unique_key_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+            unique_key:
+              - id
+              - source
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.unique_key, vec!["id", "source"]);
+    }
+
+    #[test]
+    fn test_incremental_strategy_serialization() {
+        let strategy = IncrementalStrategy::DeleteInsert;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(json, r#""delete_insert""#);
+
+        let strategy: IncrementalStrategy = serde_json::from_str(r#""merge""#).unwrap();
+        assert_eq!(strategy, IncrementalStrategy::Merge);
     }
 }

@@ -65,6 +65,8 @@ fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'
                     )
                 }
                 crate::types::Granularity::Month => "month".to_string(),
+                crate::types::Granularity::Quarter => "quarter".to_string(),
+                crate::types::Granularity::Year => "year".to_string(),
             };
             Some(ic.call1((
                 cfg.partition_column.as_str(),
@@ -327,9 +329,11 @@ mod tests {
                 sql: "SELECT 1".to_string(),
                 refs: vec!["other".to_string()],
                 incremental_config: Some(IncrementalConfig {
+                    enabled: true,
                     partition_column: "dt".to_string(),
                     event_time_column: "event_time".to_string(),
                     granularity: crate::types::Granularity::Day,
+                    unique_key: vec![],
                     safety_overrides: crate::types::IncrementalSafetyOverrides::default(),
                 }),
             };

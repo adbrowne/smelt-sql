@@ -3769,6 +3769,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "smelt-core",
  "smelt-parser",
  "smelt-types",
 ]

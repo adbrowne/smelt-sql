@@ -11,8 +11,8 @@ pub mod sources;
 pub mod text;
 
 pub use config::{
-    BackendType, Config, ConfigError, Granularity, IncrementalConfig, Materialization, ModelConfig,
-    Target,
+    BackendType, Config, ConfigError, Granularity, IncrementalConfig, IncrementalSafetyOverrides,
+    IncrementalStrategy, Materialization, ModelConfig, Target, Weekday,
 };
 pub use discovery::{ModelDiscovery, ModelFile};
 pub use graph::{DependencyGraph, GraphError};

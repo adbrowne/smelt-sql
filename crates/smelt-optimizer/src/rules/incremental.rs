@@ -235,9 +235,11 @@ mod tests {
             sql: sql.to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: partition_column.to_string(),
                 event_time_column: event_time_column.to_string(),
                 granularity: Granularity::Day,
+                unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
         }
@@ -254,9 +256,11 @@ mod tests {
             sql: sql.to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: partition_column.to_string(),
                 event_time_column: "event_timestamp".to_string(),
                 granularity: Granularity::Day,
+                unique_key: vec![],
                 safety_overrides: overrides,
             }),
         }
@@ -325,9 +329,11 @@ mod tests {
             sql: "SELECT date_trunc('hour', event_timestamp) as event_hour, COUNT(*) as cnt FROM events GROUP BY 1".to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: "event_hour".to_string(),
                 event_time_column: "event_timestamp".to_string(),
                 granularity: Granularity::Hour,
+                unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
         };
@@ -511,11 +517,13 @@ mod tests {
             sql: "SELECT date_trunc('week', event_timestamp) as event_week, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: "event_week".to_string(),
                 event_time_column: "event_timestamp".to_string(),
                 granularity: Granularity::Week {
                     week_start: Weekday::Monday,
                 },
+                unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
         };

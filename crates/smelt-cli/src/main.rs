@@ -10,9 +10,10 @@ use smelt_cli::{
     parse_selector, resolve_refs_in_sql, seed, BackendType, Config, DependencyGraph,
     ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
+use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
 use smelt_optimizer::{
-    Frontmatter, Granularity, ModelGraph, ModelInfo, Optimizer, Transformation, Weekday,
+    ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation,
 };
 use std::path::{Path, PathBuf};
 
@@ -444,213 +445,122 @@ async fn run(args: RunArgs) -> Result<()> {
     for model_name in &execution_order {
         let model = graph.get_model(model_name)?;
 
-        let has_plan = plan_overrides.contains_key(model_name.as_str());
-        let has_incremental = incremental_overrides.contains_key(model_name.as_str());
-
-        // Case 1: Cube split plan (with or without incremental)
-        if has_plan {
-            let steps = plan_overrides.get(model_name.as_str()).unwrap();
-
-            // Resolve refs in each step's SQL
-            let resolved_steps: Vec<smelt_optimizer::ExecutionStep> = steps
+        // Determine execution mode from optimizer overrides or config
+        let plan_steps = plan_overrides.get(model_name.as_str()).map(|steps| {
+            steps
                 .iter()
                 .map(|step| match step {
-                    smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
-                        smelt_optimizer::ExecutionStep::CreateTemp {
-                            name: name.clone(),
-                            sql: resolve_refs_in_sql(sql, &target_config.schema),
-                        }
+                    ExecutionStep::CreateTemp { name, sql } => ExecutionStep::CreateTemp {
+                        name: name.clone(),
+                        sql: resolve_refs_in_sql(sql, &target_config.schema),
+                    },
+                    ExecutionStep::AppendToTemp { name, sql } => ExecutionStep::AppendToTemp {
+                        name: name.clone(),
+                        sql: resolve_refs_in_sql(sql, &target_config.schema),
+                    },
+                    ExecutionStep::FinalQuery { sql } => {
+                        ExecutionStep::FinalQuery { sql: sql.clone() }
                     }
-                    smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
-                        smelt_optimizer::ExecutionStep::AppendToTemp {
-                            name: name.clone(),
-                            sql: resolve_refs_in_sql(sql, &target_config.schema),
-                        }
-                    }
-                    smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
-                        smelt_optimizer::ExecutionStep::FinalQuery {
-                            sql: sql.clone(), // Final query references temp tables, not models
-                        }
-                    }
-                    smelt_optimizer::ExecutionStep::DropTemp { name } => {
-                        smelt_optimizer::ExecutionStep::DropTemp { name: name.clone() }
+                    ExecutionStep::DropTemp { name } => {
+                        ExecutionStep::DropTemp { name: name.clone() }
                     }
                 })
-                .collect();
+                .collect::<Vec<_>>()
+        });
 
-            if has_incremental {
-                // Composed: cube split + incremental
-                let range = time_range.as_ref().unwrap();
-                let (event_time_col, partition_col, granularity) =
-                    incremental_overrides.get(model_name.as_str()).unwrap();
+        let execution = if let Some((event_time_col, partition_col, granularity)) =
+            incremental_overrides.get(model_name.as_str())
+        {
+            // Optimizer detected incremental
+            ModelExecution::Incremental {
+                config: IncrementalConfig {
+                    enabled: true,
+                    event_time_column: event_time_col.clone(),
+                    partition_column: partition_col.clone(),
+                    granularity: granularity.clone(),
+                    unique_key: vec![],
+                    safety_overrides: Default::default(),
+                },
+                time_range: time_range.as_ref().unwrap().clone(),
+                plan_steps,
+            }
+        } else if let Some(inc) = config
+            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()))
+            .filter(|_| time_range.is_some())
+        {
+            // Config-based incremental (smelt.yml or frontmatter)
+            ModelExecution::Incremental {
+                config: inc.clone(),
+                time_range: time_range.as_ref().unwrap().clone(),
+                plan_steps,
+            }
+        } else if let Some(steps) = plan_steps {
+            // Cube split only (full refresh with plan)
+            ModelExecution::CubeSplit { steps }
+        } else {
+            ModelExecution::FullRefresh
+        };
 
+        let result = match &execution {
+            ModelExecution::Incremental {
+                config: inc_config,
+                time_range: range,
+                plan_steps: Some(steps),
+            } => {
+                // Cube split + incremental
                 println!(
                     "\n▶ Running model: {} (cube split + incremental)",
                     model_name
                 );
 
                 let partition_values =
-                    generate_partition_values(&range.start, &range.end, granularity)?;
+                    generate_partition_values(&range.start, &range.end, &inc_config.granularity)?;
                 let partition = PartitionSpec {
-                    column: partition_col.clone(),
+                    column: inc_config.partition_column.clone(),
                     values: partition_values,
                 };
 
-                let result = executor::execute_plan_incremental(
+                executor::execute_plan_incremental(
                     backend.as_ref(),
                     model_name,
-                    &resolved_steps,
+                    steps,
                     &target_config.schema,
                     partition,
-                    event_time_col,
+                    &inc_config.event_time_column,
                     range,
                     args.show_results,
                 )
                 .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-                println!(
-                    "  ✓ {} ({} rows, {:?})",
-                    result.model_name, result.row_count, result.duration
-                );
-
-                if let Some(ref batches) = result.preview {
-                    println!("\n  Preview:");
-                    pretty::print_batches(batches)
-                        .with_context(|| "Failed to print result preview")?;
-                    println!();
-                }
-
-                results.push(result);
-            } else {
+                .with_context(|| format!("Failed to execute model: {}", model_name))?
+            }
+            ModelExecution::CubeSplit { steps } => {
                 // Cube split only (full refresh)
                 println!("\n▶ Running model: {} (cube split)", model_name);
 
-                let result = executor::execute_plan(
+                executor::execute_plan(
                     backend.as_ref(),
                     model_name,
-                    &resolved_steps,
+                    steps,
                     &target_config.schema,
                     args.show_results,
                 )
                 .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-                println!(
-                    "  ✓ {} ({} rows, {:?})",
-                    result.model_name, result.row_count, result.duration
-                );
-
-                if let Some(ref batches) = result.preview {
-                    println!("\n  Preview:");
-                    pretty::print_batches(batches)
-                        .with_context(|| "Failed to print result preview")?;
-                    println!();
-                }
-
-                results.push(result);
+                .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
-        }
-        // Case 2: Incremental only (no cube split) — use existing incremental path
-        else if has_incremental {
-            let range = time_range.as_ref().unwrap();
-            let (event_time_col, partition_col, granularity) =
-                incremental_overrides.get(model_name.as_str()).unwrap();
-
-            println!("\n▶ Running model: {} (incremental)", model_name);
-
-            // Transform SQL to filter by time range (strip frontmatter first)
-            let clean_sql = smelt_parser::strip_frontmatter(&model.content);
-            let transformed_sql = inject_time_filter(&clean_sql, event_time_col, range)
-                .with_context(|| format!("Failed to transform SQL for model: {}", model_name))?;
-
-            // Compile with transformed SQL
-            let compiled = compiler
-                .compile_with_sql(model, &target_config.schema, &transformed_sql)
-                .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-            if args.verbose {
-                println!("\n  Transformed SQL:");
-                println!("  {}", "─".repeat(58));
-                for line in compiled.sql.lines() {
-                    println!("  {}", line);
-                }
-                println!("  {}", "─".repeat(58));
-            }
-
-            // Generate partition values for DELETE
-            let partition_values =
-                generate_partition_values(&range.start, &range.end, granularity)?;
-            let granularity_label = match granularity {
-                Granularity::Hour => "hours",
-                Granularity::Day => "days",
-                Granularity::Week { .. } => "weeks",
-                Granularity::Month => "months",
-            };
-            println!(
-                "  Partitions to update: {} ({} {})",
-                if partition_values.len() <= 3 {
-                    partition_values.join(", ")
-                } else {
-                    format!(
-                        "{}, ..., {}",
-                        partition_values.first().unwrap(),
-                        partition_values.last().unwrap()
-                    )
-                },
-                partition_values.len(),
-                granularity_label,
-            );
-
-            let partition = PartitionSpec {
-                column: partition_col.clone(),
-                values: partition_values,
-            };
-
-            // Execute incrementally
-            let result = executor::execute_model_incremental(
-                backend.as_ref(),
-                &compiled,
-                &target_config.schema,
-                partition,
-                args.show_results,
-            )
-            .await
-            .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-            println!(
-                "  ✓ {} ({} rows, {:?})",
-                result.model_name, result.row_count, result.duration
-            );
-
-            if let Some(ref batches) = result.preview {
-                println!("\n  Preview:");
-                pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
-                println!();
-            }
-
-            results.push(result);
-        }
-        // Case 3: Standard full refresh (no optimizer transformations)
-        else {
-            // Check legacy incremental config from smelt.yml
-            let inc_config = config.get_incremental_with_metadata(
-                model_name,
-                model.metadata.as_ref().map(|b| b.as_ref()),
-            );
-            let is_legacy_incremental = time_range.is_some() && inc_config.is_some();
-
-            if is_legacy_incremental {
-                let range = time_range.as_ref().unwrap();
-                let inc = inc_config.unwrap();
-
+            ModelExecution::Incremental {
+                config: inc_config,
+                time_range: range,
+                plan_steps: None,
+            } => {
+                // Incremental without cube split
                 println!("\n▶ Running model: {} (incremental)", model_name);
 
                 let clean_sql = smelt_parser::strip_frontmatter(&model.content);
-                let transformed_sql = inject_time_filter(&clean_sql, &inc.event_time_column, range)
-                    .with_context(|| {
-                        format!("Failed to transform SQL for model: {}", model_name)
-                    })?;
+                let transformed_sql =
+                    inject_time_filter(&clean_sql, &inc_config.event_time_column, range)
+                        .with_context(|| {
+                            format!("Failed to transform SQL for model: {}", model_name)
+                        })?;
 
                 let compiled = compiler
                     .compile_with_sql(model, &target_config.schema, &transformed_sql)
@@ -665,31 +575,8 @@ async fn run(args: RunArgs) -> Result<()> {
                     println!("  {}", "─".repeat(58));
                 }
 
-                let opt_granularity = match &inc.granularity {
-                    smelt_core::config::Granularity::Hour => Granularity::Hour,
-                    smelt_core::config::Granularity::Day => Granularity::Day,
-                    smelt_core::config::Granularity::Week { week_start } => {
-                        let ws = match week_start {
-                            smelt_core::config::Weekday::Monday => Weekday::Monday,
-                            smelt_core::config::Weekday::Tuesday => Weekday::Tuesday,
-                            smelt_core::config::Weekday::Wednesday => Weekday::Wednesday,
-                            smelt_core::config::Weekday::Thursday => Weekday::Thursday,
-                            smelt_core::config::Weekday::Friday => Weekday::Friday,
-                            smelt_core::config::Weekday::Saturday => Weekday::Saturday,
-                            smelt_core::config::Weekday::Sunday => Weekday::Sunday,
-                        };
-                        Granularity::Week { week_start: ws }
-                    }
-                    smelt_core::config::Granularity::Month => Granularity::Month,
-                };
                 let partition_values =
-                    generate_partition_values(&range.start, &range.end, &opt_granularity)?;
-                let granularity_label = match opt_granularity {
-                    Granularity::Hour => "hours",
-                    Granularity::Day => "days",
-                    Granularity::Week { .. } => "weeks",
-                    Granularity::Month => "months",
-                };
+                    generate_partition_values(&range.start, &range.end, &inc_config.granularity)?;
                 println!(
                     "  Partitions to update: {} ({} {})",
                     if partition_values.len() <= 3 {
@@ -702,15 +589,15 @@ async fn run(args: RunArgs) -> Result<()> {
                         )
                     },
                     partition_values.len(),
-                    granularity_label,
+                    granularity_label(&inc_config.granularity),
                 );
 
                 let partition = PartitionSpec {
-                    column: inc.partition_column.clone(),
+                    column: inc_config.partition_column.clone(),
                     values: partition_values,
                 };
 
-                let result = executor::execute_model_incremental(
+                executor::execute_model_incremental(
                     backend.as_ref(),
                     &compiled,
                     &target_config.schema,
@@ -718,23 +605,10 @@ async fn run(args: RunArgs) -> Result<()> {
                     args.show_results,
                 )
                 .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-                println!(
-                    "  ✓ {} ({} rows, {:?})",
-                    result.model_name, result.row_count, result.duration
-                );
-
-                if let Some(ref batches) = result.preview {
-                    println!("\n  Preview:");
-                    pretty::print_batches(batches)
-                        .with_context(|| "Failed to print result preview")?;
-                    println!();
-                }
-
-                results.push(result);
-            } else {
-                if time_range.is_some() && inc_config.is_none() {
+                .with_context(|| format!("Failed to execute model: {}", model_name))?
+            }
+            ModelExecution::FullRefresh => {
+                if time_range.is_some() {
                     println!(
                         "\n▶ Running model: {} (full refresh - not configured for incremental)",
                         model_name
@@ -756,30 +630,29 @@ async fn run(args: RunArgs) -> Result<()> {
                     println!("  {}", "─".repeat(58));
                 }
 
-                let result = executor::execute_model(
+                executor::execute_model(
                     backend.as_ref(),
                     &compiled,
                     &target_config.schema,
                     args.show_results,
                 )
                 .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?;
-
-                println!(
-                    "  ✓ {} ({} rows, {:?})",
-                    result.model_name, result.row_count, result.duration
-                );
-
-                if let Some(ref batches) = result.preview {
-                    println!("\n  Preview:");
-                    pretty::print_batches(batches)
-                        .with_context(|| "Failed to print result preview")?;
-                    println!();
-                }
-
-                results.push(result);
+                .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
+        };
+
+        println!(
+            "  ✓ {} ({} rows, {:?})",
+            result.model_name, result.row_count, result.duration
+        );
+
+        if let Some(ref batches) = result.preview {
+            println!("\n  Preview:");
+            pretty::print_batches(batches).with_context(|| "Failed to print result preview")?;
+            println!();
         }
+
+        results.push(result);
     }
 
     // 9. Summary
@@ -792,6 +665,30 @@ async fn run(args: RunArgs) -> Result<()> {
     println!("  Total time: {:?}", total_duration);
 
     Ok(())
+}
+
+/// Describes how a model should be executed.
+enum ModelExecution {
+    FullRefresh,
+    CubeSplit {
+        steps: Vec<ExecutionStep>,
+    },
+    Incremental {
+        config: IncrementalConfig,
+        time_range: TimeRange,
+        plan_steps: Option<Vec<ExecutionStep>>,
+    },
+}
+
+fn granularity_label(g: &Granularity) -> &'static str {
+    match g {
+        Granularity::Hour => "hours",
+        Granularity::Day => "days",
+        Granularity::Week { .. } => "weeks",
+        Granularity::Month => "months",
+        Granularity::Quarter => "quarters",
+        Granularity::Year => "years",
+    }
 }
 
 /// Generate partition values from a time range based on granularity.
@@ -858,6 +755,28 @@ fn generate_partition_values(
                     (current.year(), current.month() + 1)
                 };
                 current = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+            }
+        }
+        Granularity::Quarter => {
+            let mut current = start_date;
+            while current < end_date {
+                let q = (current.month() - 1) / 3 + 1;
+                values.push(format!("{}-Q{}", current.year(), q));
+                // Advance to next quarter (3 months)
+                let new_month = current.month() + 3;
+                let (y, m) = if new_month > 12 {
+                    (current.year() + 1, new_month - 12)
+                } else {
+                    (current.year(), new_month)
+                };
+                current = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+            }
+        }
+        Granularity::Year => {
+            let mut current = start_date;
+            while current < end_date {
+                values.push(format!("{}", current.year()));
+                current = NaiveDate::from_ymd_opt(current.year() + 1, 1, 1).unwrap();
             }
         }
     }

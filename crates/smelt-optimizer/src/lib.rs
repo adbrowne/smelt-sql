@@ -9,5 +9,5 @@ pub use graph::{ModelGraph, ModelInfo};
 pub use rules::Optimizer;
 pub use types::{
     ExecutionStep, Frontmatter, Granularity, IncrementalConfig, IncrementalSafetyOverrides,
-    Opportunity, OpportunityData, Transformation, Weekday,
+    IncrementalStrategy, Opportunity, OpportunityData, Transformation, Weekday,
 };
