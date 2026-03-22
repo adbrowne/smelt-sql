@@ -58,6 +58,27 @@ This plan covers: strategy expansion, configuration unification, backfill intell
 - **No state**: Stateless — skipped runs create silent data gaps
 - **BigQuery cost**: Incremental merges trigger full table scans unexpectedly
 
+### dbt Microbatch (newest strategy, dbt 1.9+)
+
+Microbatch is dbt's latest attempt to fix incremental models. It eliminates `is_incremental()` by processing data one time-batch at a time (hour/day/month/year — notably no week support). Key design:
+
+- **Automatic upstream filtering**: dbt injects WHERE clauses on upstream `ref()` calls that have `event_time` configured. This is elegant but **fragile** — if any upstream model lacks `event_time`, dbt silently falls back to full table scans with no warning.
+- **Fixed lookback**: Reprocesses N recent batches (default: 1) as a heuristic for late data. Not time-based, not per-column — just "redo the last N batches."
+- **begin date**: Configures when the first batch starts. Required for knowing where history begins.
+- **Idempotent batches**: Each batch is independent and retryable via `dbt retry`.
+- **Still stateless**: No tracking of which batches succeeded. If a run is skipped, the gap is permanent and undetected.
+
+**Where smelt improves on microbatch:**
+
+| Aspect | dbt Microbatch | smelt |
+|--------|---------------|-------|
+| Upstream filtering | Requires explicit `event_time` on every upstream model; silent full-scan if missed | Inferred from AST — can't be misconfigured |
+| Late-arriving data | Fixed `lookback` (N batches) — heuristic | Per-column `data_latency` on source — declarative, precise |
+| Temporal dependencies | Not analyzed — user must configure lookback manually | Inferred from query AST (window frames, LAG/LEAD, joins) |
+| State tracking | None — silent data gaps | Interval tracking with gap detection |
+| Granularity | hour/day/month/year (no week) | hour/day/week(configurable start)/month/quarter/year |
+| Batch safety | Not analyzed — always processes one batch at a time | Proves batch safety — can run single query for large ranges |
+
 ### SQLMesh Advantages
 - Declarative interval-based processing (no `is_incremental()`)
 - `@start_ds`/`@end_ds` macros for clean temporal boundaries
@@ -413,6 +434,19 @@ Partition DELETE:    [2026-03-20, 2026-03-22)   ← only delete/replace requeste
 
 Note: the filter range is wider than the partition range. We fetch extra context rows for the query to compute correctly, but only write/replace the requested partitions.
 
+#### 3f. Upstream Ref Filtering (learned from dbt microbatch)
+
+dbt microbatch's most valuable insight: when processing a time batch, automatically filter upstream `ref()` calls too — not just the main query. If `daily_revenue` reads from `smelt.ref('orders')` and `orders` is a large table, pushing the time filter into the ref avoids scanning the entire orders table.
+
+smelt should do this more intelligently than dbt:
+- dbt requires explicit `event_time` config on every upstream model (silent full-scan if missed)
+- smelt can infer which upstream column to filter by tracing the `event_time_column` through the query AST to its source columns
+
+This is a future optimization (not needed for Phase 3 MVP) but worth designing for:
+- Currently `inject_time_filter()` adds one WHERE clause to the main query
+- Future: push filters into individual `smelt.ref()` calls when the upstream model has a known time column
+- This becomes especially important for joins across large tables
+
 **Files:**
 - NEW `crates/smelt-optimizer/src/analysis/temporal.rs` — AST analysis
 - `crates/smelt-core/src/config.rs` — `LatencyWindow` type (from Phase 1a)
@@ -557,6 +591,8 @@ Enables:
 - **Gap detection**: `smelt status` warns about uncovered intervals
 - **Auto mode**: `smelt run --auto` processes only uncovered intervals since last run
 - **Model change detection**: When model_hash changes, intervals can be selectively invalidated
+
+Note: dbt microbatch has a `begin` date config that marks when history starts. smelt's interval tracking serves the same purpose more naturally — the earliest covered interval IS the begin date. For `--auto` mode, smelt needs to know when to start looking for gaps. This comes from either the first run's time range or an explicit `begin` in the incremental config (useful for initial setup).
 
 #### New Crate: `smelt-state`
 
