@@ -1297,19 +1297,15 @@ Smelt SQL is a **logical SQL superset** built on a PostgreSQL-compatible base, c
 
 ---
 
-### Phase 6: Incremental Materialization
+### Phase 6: Incremental Materialization *(Partially Complete)*
 
-**Value**: Faster execution by only recomputing changed data
+**Basic incremental materialization completed in Phase 9** (December 27, 2024): DELETE+INSERT strategy, partition management, DuckDB backend support, CLI with `--event-time-start`/`--event-time-end`. Further enhanced with optimizer integration (March 14, 2026): safety checks, YAML frontmatter detection, cube split composition.
 
-**Work**:
-- Track model state (checksums, timestamps)
-- Detect incremental-safe models
-- Generate incremental SQL (DELETE+INSERT, MERGE)
-- Handle batch boundaries and watermarks
+**Remaining work** (advanced incremental): strategy expansion (MERGE, APPEND, INSERT_OVERWRITE), temporal dependency inference, data latency, backfill intelligence, schema evolution. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) for the comprehensive plan.
 
-**Design**: See [DESIGN.md](DESIGN.md#incremental-table-builds) for full specification.
+**Design**: See [DESIGN.md](DESIGN.md#incremental-table-builds) for full specification. Note: `lookback_days` and `-- @materialize` annotation syntax described there are superseded by the current approach (YAML frontmatter config, AST-inferred temporal dependencies).
 
-**Effort**: Medium-High
+**Effort**: Medium-High (for remaining work)
 
 ---
 
