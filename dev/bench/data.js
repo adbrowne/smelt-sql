@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774131451160,
+  "lastUpdate": 1774171376449,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -2913,6 +2913,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.870338,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0cfb16e653b283885ef6022ef720a464f5fa1acf",
+          "message": "Plan: Comprehensive Incremental Model Support (#84)\n\n* Add plan: Comprehensive Incremental Model Support (#83)\n\nCovers strategy expansion (MERGE/APPEND/INSERT_OVERWRITE), config\nunification, backfill intelligence with batch safety analysis,\nlookback windows for late-arriving data, operational metadata,\nschema evolution, orchestrator integration (Dagster/Airflow),\nand testing infrastructure.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update plan: AST-inferred temporal dependencies replace explicit lookback\n\nPhase 3 redesigned around two orthogonal concerns:\n- Temporal dependencies (inferred from SQL AST): window functions,\n  LAG/LEAD, self-joins with date offsets — automatic, no config needed\n- Data latency (configured): how late upstream data can arrive —\n  operational knowledge that can't be inferred from the query\n\nEffective window = max(ast_inferred, data_latency). Lookahead support\nfor LEAD/forward joins. Unbounded dependencies detected and reported.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update plan: data latency is per-column on upstream sources/models\n\nLatency is a property of the producing table's columns, not the\nconsuming model. Different columns on the same table can have\ndifferent latencies (e.g., event_time=3 days vs ingestion_time=0).\nsmelt traces the downstream model's event_time_column to the\nupstream source column and resolves the appropriate latency.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update plan: add dbt microbatch analysis, upstream ref filtering, begin date\n\n- Added detailed dbt microbatch comparison table showing where smelt\n  improves (AST inference vs explicit event_time, per-column latency\n  vs fixed lookback, interval tracking vs stateless)\n- Added Phase 3f: upstream ref filtering (learned from microbatch's\n  automatic upstream WHERE injection, but without silent full-scan\n  failure mode)\n- Added begin date note to Phase 5 interval tracking\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update plan: address review feedback on strategy, syntax, and execution modes\n\n- Strategy moves from model config to backend (resolve_strategy() on trait)\n- data_latency uses SQL interval syntax (\"3 days\") instead of structured YAML\n- Drop unit: partitions, require explicit time units\n- Upstream ref filtering promoted to Phase 3 MVP\n- Add max_lookback thresholds (project → model → per-dependency)\n- Add allow_unfiltered_refs config acknowledgment + LSP warnings\n- Replace --cascade with dbt-style +model/model+ selector syntax\n- Define three execution modes: run, backbuild, range run\n- Backbuild walks DAG backwards expanding ranges per temporal deps\n- Phase 5 (state tracking) marked as optional\n- Custom granularity extension point via plugin API (future)\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n* Update docs: codebase discoveries, Phase 6 status, DESIGN.md clarifications\n\n- Plan doc: document existing selector syntax and graph traversal infrastructure,\n  add line references to Key Files table, note Phase 4 can reuse existing code\n- ROADMAP.md: mark Phase 6 as partially complete, cross-reference Phase 9,\n  link to incremental plan for advanced features\n- DESIGN.md: clarify that @materialize annotation syntax is not implemented\n  (YAML frontmatter is current config surface), note lookback_days superseded\n  by AST-inferred temporal dependencies + per-column data_latency\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-22T20:21:24+11:00",
+          "tree_id": "aeadcda5601e96df569df900b48bc7b4e416f7e6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0cfb16e653b283885ef6022ef720a464f5fa1acf"
+        },
+        "date": 1774171376029,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 28.772813000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 27.733079,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.473172,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.289635,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.00421,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 31.591161,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028464,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015456,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010473,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.244285,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.5590610000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.5895600000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.037419999999997,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.200053,
             "unit": "ms"
           }
         ]
