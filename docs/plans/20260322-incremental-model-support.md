@@ -16,12 +16,16 @@ This plan covers: strategy expansion, configuration unification, backfill intell
 ### What Works
 - DELETE+INSERT strategy with partition-based management
 - Hour/Day/Week(configurable start)/Month granularity
-- Safety checks: window functions, HAVING, LIMIT, subqueries, non-deterministic, DISTINCT
+- Safety checks: window functions, HAVING, LIMIT, subqueries, non-deterministic, DISTINCT (17 unit tests)
 - CLI: `--event-time-start` / `--event-time-end` (required, ISO 8601)
-- Time filter injection into WHERE clauses via AST transformer
+- Time filter injection into WHERE clauses via AST transformer (per-model, not per-ref)
 - DuckDB backend: `delete_partitions()` + `insert_into_from_query()`
-- YAML frontmatter + smelt.yml config with precedence
+- YAML frontmatter + smelt.yml config with precedence (13 metadata tests)
 - Optimizer detection validates partition_column in SELECT/GROUP BY
+- **Selector syntax** already implemented: `+model`, `model+`, `+model+`, `tag:X` (`smelt-core/src/selector.rs`)
+- **Graph traversal** already implemented: `select_models()`, `collect_upstream()`, `collect_downstream()`, `filtered_execution_order()` via Kahn's algorithm (`smelt-core/src/graph.rs`)
+- **BackendCapabilities** includes `supports_merge: true` for DuckDB, Spark, PostgreSQL (`smelt-dialect/src/dialect.rs`)
+- 27+ incremental-specific tests (17 optimizer unit, 3 CLI integration, 7 optimizer integration)
 
 ### Known Issues to Fix
 1. **Duplicate IncrementalConfig**: `smelt-core/src/config.rs` (no safety_overrides) vs `smelt-optimizer/src/types.rs` (has safety_overrides, no `enabled`)
@@ -34,16 +38,20 @@ This plan covers: strategy expansion, configuration unification, backfill intell
 ### Key Files
 | File | Role |
 |------|------|
-| `crates/smelt-core/src/config.rs` | IncrementalConfig, Granularity, Weekday |
-| `crates/smelt-core/src/metadata.rs` | Frontmatter extraction |
-| `crates/smelt-optimizer/src/types.rs` | Duplicate IncrementalConfig + SafetyOverrides |
-| `crates/smelt-optimizer/src/rules/incremental.rs` | Detection, validation, 21+ tests |
-| `crates/smelt-cli/src/transformer.rs` | `inject_time_filter()`, TimeRange |
+| `crates/smelt-core/src/config.rs` | IncrementalConfig (line 148), Granularity (line 139), Weekday (line 125) |
+| `crates/smelt-core/src/metadata.rs` | Frontmatter extraction, ModelMetadata (line 32) |
+| `crates/smelt-core/src/selector.rs` | Selector syntax parsing: `+model`, `model+`, `tag:X` (already implemented) |
+| `crates/smelt-core/src/graph.rs` | DAG traversal, topological sort, upstream/downstream collection (already implemented) |
+| `crates/smelt-core/src/sources.rs` | SourceColumnDef (line 158) — where `data_latency` will be added |
+| `crates/smelt-optimizer/src/types.rs` | Duplicate IncrementalConfig (line 102) + SafetyOverrides (line 82) |
+| `crates/smelt-optimizer/src/rules/incremental.rs` | Detection, validation, 17 unit tests |
+| `crates/smelt-optimizer/src/graph.rs` | ModelInfo + ModelGraph (simple model collection, 48 lines) |
+| `crates/smelt-cli/src/transformer.rs` | `inject_time_filter()` (line 56), TimeRange — per-model only |
 | `crates/smelt-cli/src/executor.rs` | `execute_model_incremental()`, `execute_plan_incremental()` |
-| `crates/smelt-cli/src/main.rs` | CLI dispatch, `generate_partition_values()` |
-| `crates/smelt-backend/src/lib.rs` | Backend trait |
+| `crates/smelt-cli/src/main.rs` | CLI dispatch (3 paths, lines 450-781), `generate_partition_values()` (line 798) |
+| `crates/smelt-backend/src/lib.rs` | Backend trait: `delete_partitions()` (line 163), `insert_into_from_query()` (line 171) |
 | `crates/smelt-backend-duckdb/src/lib.rs` | DuckDB impl |
-| `crates/smelt-dialect/src/dialect.rs` | BackendCapabilities (already has `supports_merge`) |
+| `crates/smelt-dialect/src/dialect.rs` | BackendCapabilities (line 28, already has `supports_merge`) |
 
 ---
 
@@ -532,7 +540,7 @@ pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety
 
 #### Model Selection Syntax
 
-Use dbt-style selector syntax for specifying which models to include:
+**Already implemented** in `smelt-core/src/selector.rs` and `smelt-core/src/graph.rs`. Selector parsing, upstream/downstream collection, and topological ordering are all in place. Backfill/backbuild commands can leverage this directly — the new work is range computation logic, not graph walking.
 
 | Selector | Meaning |
 |----------|---------|
@@ -602,9 +610,11 @@ Execution always follows topological order. Non-incremental models in the select
 
 #### Files
 
-- **NEW** `crates/smelt-cli/src/backfill.rs` — batch generation, safety-to-batch-size mapping, cascade
+- **NEW** `crates/smelt-cli/src/backfill.rs` — batch generation, safety-to-batch-size mapping, DAG-aware range computation
 - `crates/smelt-optimizer/src/rules/incremental.rs` — add `analyze_batch_safety()`
-- `crates/smelt-cli/src/main.rs` — add `Backfill` subcommand
+- `crates/smelt-cli/src/main.rs` — add `Backbuild` subcommand
+- **REUSE** `crates/smelt-core/src/selector.rs` — selector parsing (already implemented)
+- **REUSE** `crates/smelt-core/src/graph.rs` — `select_models()`, `collect_upstream()`, `collect_downstream()`, `filtered_execution_order()` (already implemented)
 
 ---
 
@@ -855,6 +865,7 @@ Why weaker fit:
 The CLI with `--auto` (from Phase 5, if built) serves as a lightweight standalone scheduler for dev/small deployments.
 
 **Files:** `crates/smelt-cli/src/main.rs` (Explain subcommand), NEW `crates/smelt-cli/src/explain.rs`
+**REUSE:** `crates/smelt-core/src/graph.rs` (model graph + execution order), `crates/smelt-core/src/selector.rs` (selector parsing)
 
 ---
 

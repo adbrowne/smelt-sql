@@ -16,7 +16,7 @@ smelt is a data transformation framework that separates **logical transformation
 
 - **DO**: Write SQL that expresses business logic
 - **DO**: Use `smelt.ref()` and `smelt.metric()` extensions
-- **DO**: Add configuration annotations (`@materialize`, `@partition_by`)
+- **DO**: Add configuration via YAML frontmatter (annotation syntax like `@materialize` is a future consideration; YAML frontmatter is the current config surface)
 - **DON'T**: Add macros, conditionals, or templating to logical models
 - **DON'T**: Mix execution strategy with business logic
 
@@ -211,6 +211,7 @@ Use standard SQL with smelt extensions to compose metrics and build complex tran
 
 ```sql
 -- Model: daily_user_stats
+-- (annotation syntax shown here is illustrative; YAML frontmatter is the current config surface)
 -- @materialize: daily
 -- @partition_by: event_date
 
@@ -486,9 +487,25 @@ ROW_NUMBER() OVER (PARTITION BY user_id, batch_date ORDER BY ts)
 └─────────────────────────────────────────┘
 ```
 
-### Configuration Syntax (Proposed)
+### Configuration Syntax
 
-**Option A: Annotations in SQL comments**
+> **Status**: YAML frontmatter in `.sql` files is the implemented config surface, with `smelt.yml` for project-level overrides. The annotation syntax (`@materialize`, `@partition_by`) shown below was an early design option that has not been implemented. It may be revisited in the future.
+
+**Current approach: YAML frontmatter**
+```sql
+---
+name: daily_stats
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT ...
+```
+
+**Previously proposed: Annotations in SQL comments** *(not implemented)*
 ```sql
 -- @materialize: daily
 -- @partition_by: event_date
@@ -496,25 +513,18 @@ ROW_NUMBER() OVER (PARTITION BY user_id, batch_date ORDER BY ts)
 SELECT ...
 ```
 
-**Option B: Separate config file**
+**Previously proposed: Separate config file** *(smelt.yml serves this role)*
 ```yaml
-# daily_stats.config.yaml
-model: daily_stats
-materialize:
-  grain: daily
-  partition_by: event_date
-backend_hints:
-  spark:
-    coalesce_partitions: 200
-    avoid_cube: true
-optimization:
-  budget: 2h
-  learn_from_history: true
+# smelt.yml
+models:
+  daily_stats:
+    materialization: table
+    incremental:
+      enabled: true
+      event_time_column: event_date
+      partition_column: event_date
+      granularity: day
 ```
-
-**Option C: Both** (annotations for simple, file for complex)
-
-Recommendation: Start with Option A for simplicity, add Option B when needed.
 
 ---
 
@@ -654,6 +664,8 @@ Incremental table builds are implemented through **rewrite rules**, not macros o
    - **Backends own computational state** (watermarks, offsets)
 
 Analyst writes pure business logic:
+
+> **Note**: The examples below use `@materialize` annotation syntax which is not yet implemented. The current config surface is YAML frontmatter. The conceptual design (separation of logical model from physical strategy) is accurate regardless of syntax. The `lookback_days` parameter shown in rewrite rules below has been superseded by two orthogonal mechanisms: AST-inferred temporal dependencies and per-column `data_latency` on upstream sources. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) Phase 3.
 
 ```sql
 -- models/daily_revenue.sql
@@ -816,13 +828,21 @@ GROUP BY order_date, customer_id;
 
 ### Configuration
 
-Models declare metadata through annotations:
+> **Status update**: The annotation syntax shown here (`@materialize`, `@lookback_days`) is not yet implemented. YAML frontmatter is the current config surface. The `lookback_days` concept has been superseded by AST-inferred temporal dependencies + per-column `data_latency` on upstream sources. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md).
+
+Models declare metadata through YAML frontmatter:
 
 ```sql
 -- models/daily_revenue.sql
--- @materialize: incremental
--- @partition_by: order_date
--- @lookback_days: 3
+---
+name: daily_revenue
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+---
 
 SELECT
   order_date,
@@ -832,14 +852,17 @@ FROM smelt.ref('orders')
 GROUP BY order_date, customer_id
 ```
 
-Or in YAML config:
+Or in project config:
 ```yaml
 # smelt.yml
 models:
   daily_revenue:
-    materialize: incremental
-    partition_by: order_date
-    lookback_days: 3
+    materialization: table
+    incremental:
+      enabled: true
+      event_time_column: order_date
+      partition_column: order_date
+      granularity: day
 ```
 
 **Configuration tells rewrite rules HOW to transform, but doesn't change WHAT is computed.**
@@ -1402,7 +1425,7 @@ metric revenue:
   decomposable: true
 ```
 
-**Model definition:**
+**Model definition** *(uses annotation syntax not yet implemented; see YAML frontmatter for current config surface)*:
 ```sql
 -- models/daily_revenue.sql
 -- @materialize: daily
