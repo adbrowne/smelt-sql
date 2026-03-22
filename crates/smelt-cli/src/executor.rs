@@ -2,7 +2,8 @@ use crate::compiler::CompiledModel;
 use crate::errors::CliError;
 use anyhow::Result;
 use smelt_backend::{
-    Backend, ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec,
+    Backend, ExecutionResult, IncrementalStrategy, Materialization, MaterializationStrategy,
+    PartitionSpec,
 };
 use smelt_core::SourcesConfig;
 
@@ -38,17 +39,18 @@ pub async fn execute_model(
         })
 }
 
-/// Execute a compiled model incrementally using DELETE+INSERT pattern.
+/// Execute a compiled model incrementally using the resolved strategy.
 ///
 /// This function:
-/// 1. Deletes existing rows for the specified partitions
-/// 2. Inserts new rows from the (filtered) SQL query
-/// 3. Auto-creates the table on first run if it doesn't exist
+/// 1. Applies the strategy (DELETE+INSERT, MERGE, APPEND, or INSERT OVERWRITE)
+/// 2. Auto-creates the table on first run if it doesn't exist
 pub async fn execute_model_incremental(
     backend: &dyn Backend,
     compiled: &CompiledModel,
     schema: &str,
     partition: PartitionSpec,
+    inc_strategy: IncrementalStrategy,
+    unique_key: Vec<String>,
     show_results: bool,
 ) -> Result<ExecutionResult> {
     // Views can't be incremental - warn and use full refresh
@@ -63,7 +65,11 @@ pub async fn execute_model_incremental(
         return execute_model(backend, compiled, schema, show_results).await;
     }
 
-    let strategy = MaterializationStrategy::Incremental { partition };
+    let strategy = MaterializationStrategy::Incremental {
+        partition,
+        strategy: inc_strategy,
+        unique_key,
+    };
 
     backend
         .execute_model_incremental(
@@ -168,7 +174,7 @@ pub async fn execute_plan(
 /// Execute a multi-step plan incrementally (cube split + incremental).
 ///
 /// Applies time filtering to each step's SQL before execution, and uses
-/// DELETE+INSERT pattern instead of full table replacement.
+/// the resolved strategy for the final table update.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_plan_incremental(
     backend: &dyn Backend,
@@ -178,18 +184,21 @@ pub async fn execute_plan_incremental(
     partition: PartitionSpec,
     event_time_column: &str,
     time_range: &crate::transformer::TimeRange,
+    inc_strategy: IncrementalStrategy,
+    unique_key: Vec<String>,
     show_results: bool,
 ) -> Result<ExecutionResult> {
     use crate::transformer::inject_time_filter;
 
     let start = std::time::Instant::now();
 
-    // Delete existing partition rows before inserting
     let table_exists = backend
         .table_exists(schema, model_name)
         .await
         .unwrap_or(false);
-    if table_exists {
+
+    // For DELETE+INSERT strategy, delete partitions upfront before inserting
+    if table_exists && inc_strategy == IncrementalStrategy::DeleteInsert {
         backend
             .delete_partitions(schema, model_name, &partition)
             .await
@@ -203,7 +212,6 @@ pub async fn execute_plan_incremental(
     for step in steps {
         match step {
             smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
-                // Inject time filter into the step's SQL
                 let filtered_sql = inject_time_filter(sql, event_time_column, time_range)
                     .map_err(|e| anyhow::anyhow!("Failed to inject time filter: {}", e))?;
                 let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, filtered_sql);
@@ -230,9 +238,7 @@ pub async fn execute_plan_incremental(
                     })?;
             }
             smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
-                // Final query joins temp tables — no time filter needed on the join itself
                 if !table_exists {
-                    // First run: create table
                     backend
                         .create_table_as(schema, model_name, sql)
                         .await
@@ -242,15 +248,49 @@ pub async fn execute_plan_incremental(
                             source: e.into(),
                         })?;
                 } else {
-                    // Subsequent runs: insert into existing table
-                    backend
-                        .insert_into_from_query(schema, model_name, sql)
-                        .await
-                        .map_err(|e| CliError::ExecutionError {
-                            model: model_name.to_string(),
-                            sql: sql.clone(),
-                            source: e.into(),
-                        })?;
+                    match inc_strategy {
+                        IncrementalStrategy::DeleteInsert => {
+                            // Partitions already deleted above
+                            backend
+                                .insert_into_from_query(schema, model_name, sql)
+                                .await
+                                .map_err(|e| CliError::ExecutionError {
+                                    model: model_name.to_string(),
+                                    sql: sql.clone(),
+                                    source: e.into(),
+                                })?;
+                        }
+                        IncrementalStrategy::Merge => {
+                            backend
+                                .merge_into(schema, model_name, sql, &unique_key)
+                                .await
+                                .map_err(|e| CliError::ExecutionError {
+                                    model: model_name.to_string(),
+                                    sql: sql.clone(),
+                                    source: e.into(),
+                                })?;
+                        }
+                        IncrementalStrategy::Append => {
+                            backend
+                                .insert_into_from_query(schema, model_name, sql)
+                                .await
+                                .map_err(|e| CliError::ExecutionError {
+                                    model: model_name.to_string(),
+                                    sql: sql.clone(),
+                                    source: e.into(),
+                                })?;
+                        }
+                        IncrementalStrategy::InsertOverwrite => {
+                            backend
+                                .insert_overwrite(schema, model_name, sql, &partition)
+                                .await
+                                .map_err(|e| CliError::ExecutionError {
+                                    model: model_name.to_string(),
+                                    sql: sql.clone(),
+                                    source: e.into(),
+                                })?;
+                        }
+                    }
                 }
             }
             smelt_optimizer::ExecutionStep::DropTemp { name } => {

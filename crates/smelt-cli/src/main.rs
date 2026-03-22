@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use arrow::util::pretty;
 use chrono::{Datelike, Duration, NaiveDate, Weekday as ChronoWeekday};
 use clap::{Parser, Subcommand};
-use smelt_backend::{Backend, PartitionSpec};
+use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 #[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
@@ -507,10 +507,11 @@ async fn run(args: RunArgs) -> Result<()> {
                 time_range: range,
                 plan_steps: Some(steps),
             } => {
-                // Cube split + incremental
+                let resolved_strategy = backend.resolve_strategy(inc_config);
                 println!(
-                    "\n▶ Running model: {} (cube split + incremental)",
-                    model_name
+                    "\n▶ Running model: {} (cube split + incremental/{})",
+                    model_name,
+                    strategy_label(&resolved_strategy),
                 );
 
                 let partition_values =
@@ -528,6 +529,8 @@ async fn run(args: RunArgs) -> Result<()> {
                     partition,
                     &inc_config.event_time_column,
                     range,
+                    resolved_strategy,
+                    inc_config.unique_key.clone(),
                     args.show_results,
                 )
                 .await
@@ -552,8 +555,12 @@ async fn run(args: RunArgs) -> Result<()> {
                 time_range: range,
                 plan_steps: None,
             } => {
-                // Incremental without cube split
-                println!("\n▶ Running model: {} (incremental)", model_name);
+                let resolved_strategy = backend.resolve_strategy(inc_config);
+                println!(
+                    "\n▶ Running model: {} (incremental/{})",
+                    model_name,
+                    strategy_label(&resolved_strategy),
+                );
 
                 let clean_sql = smelt_parser::strip_frontmatter(&model.content);
                 let transformed_sql =
@@ -602,6 +609,8 @@ async fn run(args: RunArgs) -> Result<()> {
                     &compiled,
                     &target_config.schema,
                     partition,
+                    resolved_strategy,
+                    inc_config.unique_key.clone(),
                     args.show_results,
                 )
                 .await
@@ -688,6 +697,15 @@ fn granularity_label(g: &Granularity) -> &'static str {
         Granularity::Month => "months",
         Granularity::Quarter => "quarters",
         Granularity::Year => "years",
+    }
+}
+
+fn strategy_label(s: &IncrementalStrategy) -> &'static str {
+    match s {
+        IncrementalStrategy::DeleteInsert => "delete+insert",
+        IncrementalStrategy::Merge => "merge",
+        IncrementalStrategy::Append => "append",
+        IncrementalStrategy::InsertOverwrite => "insert_overwrite",
     }
 }
 

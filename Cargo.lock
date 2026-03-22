@@ -3595,6 +3595,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "smelt-core",
  "smelt-dialect",
  "thiserror 2.0.17",
  "tokio",

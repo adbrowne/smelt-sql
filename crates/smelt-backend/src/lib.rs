@@ -7,6 +7,9 @@ mod error;
 mod types;
 
 pub use error::BackendError;
+pub use smelt_core::config::{
+    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
+};
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use types::{ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec};
 
@@ -109,7 +112,7 @@ pub trait Backend: Send + Sync {
 
     /// Execute a model with incremental materialization support.
     ///
-    /// This extends execute_model() with partition-aware incremental updates.
+    /// Dispatches to the appropriate strategy (DELETE+INSERT, MERGE, APPEND, INSERT OVERWRITE).
     async fn execute_model_incremental(
         &self,
         schema: &str,
@@ -130,14 +133,34 @@ pub trait Backend: Send + Sync {
                 self.drop_table_if_exists(schema, name).await?;
                 self.create_table_as(schema, name, sql).await?;
             }
-            (Materialization::Table, MaterializationStrategy::Incremental { partition }) => {
+            (
+                Materialization::Table,
+                MaterializationStrategy::Incremental {
+                    partition,
+                    strategy: inc_strategy,
+                    unique_key,
+                },
+            ) => {
                 let table_exists = self.table_exists(schema, name).await?;
 
                 if !table_exists {
                     self.create_table_as(schema, name, sql).await?;
                 } else {
-                    self.delete_partitions(schema, name, &partition).await?;
-                    self.insert_into_from_query(schema, name, sql).await?;
+                    match inc_strategy {
+                        IncrementalStrategy::DeleteInsert => {
+                            self.delete_partitions(schema, name, &partition).await?;
+                            self.insert_into_from_query(schema, name, sql).await?;
+                        }
+                        IncrementalStrategy::Merge => {
+                            self.merge_into(schema, name, sql, &unique_key).await?;
+                        }
+                        IncrementalStrategy::Append => {
+                            self.insert_into_from_query(schema, name, sql).await?;
+                        }
+                        IncrementalStrategy::InsertOverwrite => {
+                            self.insert_overwrite(schema, name, sql, &partition).await?;
+                        }
+                    }
                 }
             }
         }
@@ -159,6 +182,18 @@ pub trait Backend: Send + Sync {
         })
     }
 
+    /// Resolve the best incremental strategy for the given config.
+    ///
+    /// Default implementation: uses MERGE if unique_key is set and supported,
+    /// otherwise falls back to DELETE+INSERT.
+    fn resolve_strategy(&self, config: &IncrementalConfig) -> IncrementalStrategy {
+        if !config.unique_key.is_empty() && self.capabilities().supports_merge {
+            IncrementalStrategy::Merge
+        } else {
+            IncrementalStrategy::DeleteInsert
+        }
+    }
+
     /// Delete rows matching partition values.
     async fn delete_partitions(
         &self,
@@ -173,5 +208,28 @@ pub trait Backend: Send + Sync {
         schema: &str,
         name: &str,
         sql: &str,
+    ) -> Result<(), BackendError>;
+
+    /// MERGE (upsert) rows using unique_key columns for matching.
+    ///
+    /// Matched rows are updated, unmatched rows are inserted.
+    async fn merge_into(
+        &self,
+        schema: &str,
+        table: &str,
+        source_sql: &str,
+        unique_key: &[String],
+    ) -> Result<(), BackendError>;
+
+    /// Replace partitions by inserting new data and removing old partition rows.
+    ///
+    /// Backends with native INSERT OVERWRITE use that; others emulate via
+    /// DELETE (partition values derived from source) + INSERT.
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        sql: &str,
+        partition: &PartitionSpec,
     ) -> Result<(), BackendError>;
 }

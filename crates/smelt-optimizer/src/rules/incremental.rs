@@ -74,6 +74,26 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         ));
     }
 
+    // Validate unique_key columns exist in SELECT list (needed for MERGE strategy)
+    let select_aliases: Vec<&str> = analysis
+        .items
+        .iter()
+        .map(|item| match item {
+            SelectItemKind::GroupByKey { alias, .. } => alias.as_str(),
+            SelectItemKind::CountDistinct { alias, .. } => alias.as_str(),
+            SelectItemKind::OtherAggregate { alias, .. } => alias.as_str(),
+        })
+        .collect();
+
+    for key_col in &inc_config.unique_key {
+        if !select_aliases.contains(&key_col.as_str()) {
+            return Err(format!(
+                "Model '{}': unique_key column '{}' not found as alias in SELECT list",
+                model.name, key_col
+            ));
+        }
+    }
+
     // --- Safety checks ---
 
     // 2a: Window functions (OVER clause)
@@ -542,5 +562,47 @@ mod tests {
             }
             _ => panic!("Expected Incremental data"),
         }
+    }
+
+    #[test]
+    fn test_detect_with_valid_unique_key() {
+        let m = ModelInfo {
+            name: "daily".to_string(),
+            sql: "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                enabled: true,
+                partition_column: "event_date".to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Day,
+                unique_key: vec!["event_date".to_string(), "user_id".to_string()],
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        };
+        let result = detect(&m);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_detect_rejects_invalid_unique_key() {
+        let m = ModelInfo {
+            name: "daily".to_string(),
+            sql: "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                enabled: true,
+                partition_column: "event_date".to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Day,
+                unique_key: vec!["nonexistent_col".to_string()],
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        };
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("unique_key column 'nonexistent_col' not found"));
     }
 }

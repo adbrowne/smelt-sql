@@ -112,7 +112,7 @@ Microbatch is dbt's latest attempt to fix incremental models. It eliminates `is_
 
 ## 3. Implementation Phases
 
-### Phase 1: Configuration Unification & Cleanup
+### Phase 1: Configuration Unification & Cleanup ✅ (March 22, 2026)
 
 **Goal:** Single IncrementalConfig, one execution path, doc fixes.
 
@@ -250,7 +250,7 @@ Update `generate_partition_values()` for Quarter and Year.
 
 ---
 
-### Phase 2: Strategy Expansion
+### Phase 2: Strategy Expansion ✅ (March 22, 2026)
 
 **Goal:** MERGE, APPEND, INSERT_OVERWRITE alongside existing DELETE+INSERT.
 
@@ -303,6 +303,16 @@ insert_overwrite | No         | Required      | Emul.  | Native | No
 ```
 
 **Files:** `smelt-backend/src/lib.rs`, `smelt-backend/src/types.rs`, `smelt-backend-duckdb/src/lib.rs`, `smelt-optimizer/src/rules/incremental.rs`
+
+#### Implementation Notes (Phase 2)
+
+- `resolve_strategy()` has a **default implementation** on the Backend trait (not per-backend override needed unless specific behavior desired). Uses `capabilities().supports_merge` to decide.
+- `MaterializationStrategy::Incremental` now carries `strategy: IncrementalStrategy` and `unique_key: Vec<String>` alongside `partition: PartitionSpec`.
+- DuckDB supports MERGE natively via `MERGE INTO ... USING ... ON ... WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`.
+- `supports_insert_overwrite` added to `BackendCapabilities` (false for DuckDB/PostgreSQL, true for Spark).
+- `smelt-backend` now depends on `smelt-core` (for `IncrementalConfig`, `IncrementalStrategy`) and re-exports key types: `Granularity`, `IncrementalConfig`, `IncrementalSafetyOverrides`, `IncrementalStrategy`.
+- Optimizer validates `unique_key` columns exist in SELECT list (catches misconfigured merge keys at analysis time).
+- Test coverage: 5 new DuckDB backend tests, 2 new optimizer tests, 2 new CLI integration tests.
 
 ---
 

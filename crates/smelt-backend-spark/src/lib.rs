@@ -206,6 +206,36 @@ impl Backend for SparkBackend {
             table_name
         )))
     }
+
+    async fn merge_into(
+        &self,
+        schema: &str,
+        table: &str,
+        _source_sql: &str,
+        _unique_key: &[String],
+    ) -> Result<(), BackendError> {
+        let table_name = self.qualified_name(schema, table);
+
+        Err(BackendError::Other(anyhow::anyhow!(
+            "Spark backend stub: would merge into {}",
+            table_name
+        )))
+    }
+
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        _sql: &str,
+        _partition: &PartitionSpec,
+    ) -> Result<(), BackendError> {
+        let table_name = self.qualified_name(schema, table);
+
+        Err(BackendError::Other(anyhow::anyhow!(
+            "Spark backend stub: would insert overwrite into {}",
+            table_name
+        )))
+    }
 }
 
 #[cfg(test)]
