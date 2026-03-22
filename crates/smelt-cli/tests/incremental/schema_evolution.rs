@@ -21,8 +21,12 @@ async fn test_schema_evolution_add_column_then_continue_incremental() -> Result<
         GROUP BY 1, 2
     "#;
 
-    backend.drop_table_if_exists("main", "evolving_model").await?;
-    backend.create_table_as("main", "evolving_model", v1_sql).await?;
+    backend
+        .drop_table_if_exists("main", "evolving_model")
+        .await?;
+    backend
+        .create_table_as("main", "evolving_model", v1_sql)
+        .await?;
 
     let initial_count = backend.get_row_count("main", "evolving_model").await?;
     assert!(initial_count > 0);
@@ -56,9 +60,7 @@ async fn test_schema_evolution_add_column_then_continue_incremental() -> Result<
 
     // Verify new column is populated for new rows
     let result = backend
-        .execute_sql(
-            "SELECT COUNT(*) FROM main.evolving_model WHERE transaction_count IS NOT NULL",
-        )
+        .execute_sql("SELECT COUNT(*) FROM main.evolving_model WHERE transaction_count IS NOT NULL")
         .await?;
     let non_null_count = extract_count(&result[0]);
     assert!(non_null_count > 0, "New rows should have transaction_count");
@@ -192,9 +194,7 @@ async fn test_incremental_continues_after_full_refresh_on_type_change() -> Resul
         )
         .await?;
 
-    let final_count = backend
-        .get_row_count("main", "type_change_model")
-        .await?;
+    let final_count = backend.get_row_count("main", "type_change_model").await?;
     assert!(
         final_count > initial_count,
         "Should have added rows after type-change full refresh + incremental"

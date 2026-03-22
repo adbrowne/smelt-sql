@@ -27,7 +27,9 @@ pub async fn setup_backend() -> Result<(TempDir, DuckDbBackend)> {
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("test.duckdb");
     let backend = DuckDbBackend::new(&db_path, "main").await?;
-    backend.execute_sql("CREATE SCHEMA IF NOT EXISTS raw").await?;
+    backend
+        .execute_sql("CREATE SCHEMA IF NOT EXISTS raw")
+        .await?;
     Ok((temp_dir, backend))
 }
 
@@ -83,11 +85,7 @@ pub fn daily_revenue_filtered(start: &str, end: &str) -> String {
 }
 
 /// Run a model as full refresh and return the result table name.
-pub async fn run_full_refresh(
-    backend: &DuckDbBackend,
-    table_name: &str,
-    sql: &str,
-) -> Result<()> {
+pub async fn run_full_refresh(backend: &DuckDbBackend, table_name: &str, sql: &str) -> Result<()> {
     backend.drop_table_if_exists("main", table_name).await?;
     backend.create_table_as("main", table_name, sql).await?;
     Ok(())

@@ -51,8 +51,14 @@ async fn test_late_arriving_data_captured_by_reprocess() -> Result<()> {
         "inc_lookback",
         &daily_revenue_filtered,
         &[
-            TestTimeRange { start: "2024-12-25".into(), end: "2024-12-26".into() },
-            TestTimeRange { start: "2024-12-26".into(), end: "2024-12-27".into() },
+            TestTimeRange {
+                start: "2024-12-25".into(),
+                end: "2024-12-26".into(),
+            },
+            TestTimeRange {
+                start: "2024-12-26".into(),
+                end: "2024-12-27".into(),
+            },
         ],
         IncrementalStrategy::DeleteInsert,
         "revenue_date",
@@ -68,7 +74,10 @@ async fn test_late_arriving_data_captured_by_reprocess() -> Result<()> {
         &backend,
         "inc_lookback",
         &daily_revenue_filtered,
-        &[TestTimeRange { start: "2024-12-25".into(), end: "2024-12-26".into() }],
+        &[TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-26".into(),
+        }],
         IncrementalStrategy::DeleteInsert,
         "revenue_date",
         &[],
@@ -98,8 +107,14 @@ async fn test_late_arriving_data_with_merge() -> Result<()> {
         "inc_merge_lookback",
         &daily_revenue_filtered,
         &[
-            TestTimeRange { start: "2024-12-25".into(), end: "2024-12-26".into() },
-            TestTimeRange { start: "2024-12-26".into(), end: "2024-12-27".into() },
+            TestTimeRange {
+                start: "2024-12-25".into(),
+                end: "2024-12-26".into(),
+            },
+            TestTimeRange {
+                start: "2024-12-26".into(),
+                end: "2024-12-27".into(),
+            },
         ],
         IncrementalStrategy::Merge,
         "revenue_date",
@@ -115,7 +130,10 @@ async fn test_late_arriving_data_with_merge() -> Result<()> {
         &backend,
         "inc_merge_lookback",
         &daily_revenue_filtered,
-        &[TestTimeRange { start: "2024-12-25".into(), end: "2024-12-26".into() }],
+        &[TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-26".into(),
+        }],
         IncrementalStrategy::Merge,
         "revenue_date",
         &["revenue_date".to_string(), "user_id".to_string()],
@@ -143,7 +161,9 @@ async fn test_lookback_window_wider_than_partition() -> Result<()> {
     // Request Dec 27 but filter from Dec 25 to capture context
     // This simulates the temporal window expansion from Phase 3
     let wider_range_sql = daily_revenue_filtered("2024-12-25", "2024-12-28");
-    backend.drop_table_if_exists("main", "inc_wide_lookback").await?;
+    backend
+        .drop_table_if_exists("main", "inc_wide_lookback")
+        .await?;
     backend
         .create_table_as("main", "inc_wide_lookback", &wider_range_sql)
         .await?;

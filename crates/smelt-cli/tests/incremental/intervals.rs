@@ -130,7 +130,10 @@ async fn test_incremental_run_updates_intervals() -> Result<()> {
         &backend,
         "inc_interval_test",
         &daily_revenue_filtered,
-        &[TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() }],
+        &[TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        }],
         IncrementalStrategy::DeleteInsert,
         "revenue_date",
         &[],
@@ -158,7 +161,10 @@ async fn test_incremental_run_updates_intervals() -> Result<()> {
         &backend,
         "inc_interval_test",
         &daily_revenue_filtered,
-        &[TestTimeRange { start: "2024-12-27".into(), end: "2024-12-30".into() }],
+        &[TestTimeRange {
+            start: "2024-12-27".into(),
+            end: "2024-12-30".into(),
+        }],
         IncrementalStrategy::DeleteInsert,
         "revenue_date",
         &[],

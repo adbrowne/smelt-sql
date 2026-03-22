@@ -6,11 +6,11 @@ use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 #[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    compute_backbuild_plans, compute_batches_for_model, compute_incremental_windows,
-    discover_python_models, executor, find_project_root, format_plan_summary, init_db,
-    inject_time_filter, migration, parse_selector, resolve_refs_in_sql, seed, BackendType,
-    BackfillBatch, BackfillOptions, Config, DependencyGraph, ModelDiscovery, SourcesConfig,
-    SqlCompiler, TimeRange,
+    build_explain_output, compute_backbuild_plans, compute_batches_for_model,
+    compute_incremental_windows, discover_python_models, executor, find_project_root,
+    format_plan_summary, init_db, inject_time_filter, migration, parse_selector,
+    resolve_refs_in_sql, seed, BackendType, BackfillBatch, BackfillOptions, Config,
+    DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -55,6 +55,8 @@ enum Commands {
     Status(StatusArgs),
     /// Show run history
     History(HistoryArgs),
+    /// Output model graph and configuration as JSON for orchestrator integration
+    Explain(ExplainArgs),
 }
 
 #[derive(Parser)]
@@ -295,6 +297,21 @@ struct HistoryArgs {
     limit: usize,
 }
 
+#[derive(Parser)]
+struct ExplainArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Output as JSON (required for machine consumption)
+    #[arg(long)]
+    json: bool,
+
+    /// Select models to include (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -309,6 +326,7 @@ async fn main() -> Result<()> {
         Commands::Type(args) => show_type(args).await,
         Commands::Status(args) => status(args).await,
         Commands::History(args) => history(args).await,
+        Commands::Explain(args) => explain(args).await,
     }
 }
 
@@ -1917,6 +1935,100 @@ async fn history(args: HistoryArgs) -> Result<()> {
     }
 
     println!();
+    Ok(())
+}
+
+async fn explain(args: ExplainArgs) -> Result<()> {
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let mut models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
+    }
+
+    let graph = DependencyGraph::build(models, sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+
+    graph
+        .validate()
+        .with_context(|| "Dependency validation failed")?;
+
+    let output = build_explain_output(&graph, &config)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        // Human-readable output
+        println!("Project: {} (version {})", config.name, config.version);
+        println!(
+            "Models: {} | Execution order: {}",
+            output.models.len(),
+            output.execution_order.join(" → ")
+        );
+        println!();
+
+        for name in &output.execution_order {
+            if let Some(model) = output.models.get(name) {
+                let mat = serde_json::to_value(&model.materialization)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                print!("  {} [{}]", name, mat);
+
+                if !model.dependencies.is_empty() {
+                    print!(" ← {}", model.dependencies.join(", "));
+                }
+
+                if let Some(ref inc) = model.incremental {
+                    print!(
+                        " (incremental: {} by {}, {})",
+                        serde_json::to_value(&inc.granularity)
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "?".to_string()),
+                        inc.partition_column,
+                        inc.batch_safety
+                    );
+                }
+
+                if !model.tags.is_empty() {
+                    print!(" [{}]", model.tags.join(", "));
+                }
+
+                if let Some(ref owner) = model.owner {
+                    print!(" @{}", owner);
+                }
+
+                println!();
+            }
+        }
+
+        println!("\nTip: Use --json for machine-readable output.");
+    }
+
     Ok(())
 }
 

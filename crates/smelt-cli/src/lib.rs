@@ -4,6 +4,7 @@ pub mod config;
 pub mod discovery;
 pub mod errors;
 pub mod executor;
+pub mod explain;
 pub mod graph;
 pub mod metadata;
 pub mod migration;
@@ -23,6 +24,7 @@ pub use config::{
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
+pub use explain::{build_explain_output, ExplainOutput};
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use python::discover_python_models;

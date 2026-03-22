@@ -6,9 +6,7 @@
 //! - Backfill batch generation respects safety analysis
 
 use super::*;
-use smelt_cli::{
-    compute_batches_for_model, BackfillOptions, TimeRange,
-};
+use smelt_cli::{compute_batches_for_model, BackfillOptions, TimeRange};
 use smelt_core::{Granularity, IncrementalConfig};
 use smelt_optimizer::BatchSafety;
 
@@ -95,9 +93,18 @@ async fn test_batch_safe_multi_day_chunks_match() -> Result<()> {
 
     // 2-day chunks
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-27".into(), end: "2024-12-29".into() },
-        TestTimeRange { start: "2024-12-29".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-27".into(),
+            end: "2024-12-29".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-29".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(

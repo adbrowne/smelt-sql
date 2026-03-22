@@ -19,11 +19,26 @@ async fn test_delete_insert_matches_full_refresh() -> Result<()> {
 
     // Incremental: process day-by-day
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-26".into() },
-        TestTimeRange { start: "2024-12-26".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-27".into(), end: "2024-12-28".into() },
-        TestTimeRange { start: "2024-12-28".into(), end: "2024-12-29".into() },
-        TestTimeRange { start: "2024-12-29".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-26".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-26".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-27".into(),
+            end: "2024-12-28".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-28".into(),
+            end: "2024-12-29".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-29".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -54,7 +69,10 @@ async fn test_delete_insert_first_run_creates_table() -> Result<()> {
         &backend,
         "first_run_test",
         &daily_revenue_filtered,
-        &[TestTimeRange { start: "2024-12-25".into(), end: "2024-12-26".into() }],
+        &[TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-26".into(),
+        }],
         IncrementalStrategy::DeleteInsert,
         "revenue_date",
         &[],
@@ -76,9 +94,18 @@ async fn test_delete_insert_overlapping_ranges_idempotent() -> Result<()> {
 
     // Run with overlapping ranges — re-process Dec 26 twice
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-26".into(), end: "2024-12-28".into() },
-        TestTimeRange { start: "2024-12-28".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-26".into(),
+            end: "2024-12-28".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-28".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -108,8 +135,14 @@ async fn test_merge_matches_full_refresh() -> Result<()> {
     run_full_refresh(&backend, "baseline_merge", DAILY_REVENUE_SQL).await?;
 
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-27".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-27".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -136,8 +169,14 @@ async fn test_merge_overlapping_ranges_idempotent() -> Result<()> {
 
     // Re-process same range twice — MERGE should be idempotent
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-30".into() },
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-30".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -167,8 +206,14 @@ async fn test_append_accumulates_rows() -> Result<()> {
     // APPEND doesn't delete — it just adds rows, so with non-overlapping ranges
     // it should match a full refresh over the union of those ranges
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-27".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-27".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -196,8 +241,14 @@ async fn test_append_overlapping_creates_duplicates() -> Result<()> {
 
     // APPEND with overlapping ranges WILL create duplicates — that's expected behavior
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -241,8 +292,14 @@ async fn test_insert_overwrite_matches_full_refresh() -> Result<()> {
     run_full_refresh(&backend, "baseline_io", DAILY_REVENUE_SQL).await?;
 
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-27".into() },
-        TestTimeRange { start: "2024-12-27".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-27".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-27".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
@@ -269,9 +326,18 @@ async fn test_insert_overwrite_overlapping_is_idempotent() -> Result<()> {
 
     // Re-process same partition — should overwrite cleanly
     let ranges = vec![
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-30".into() },
-        TestTimeRange { start: "2024-12-25".into(), end: "2024-12-28".into() },
-        TestTimeRange { start: "2024-12-28".into(), end: "2024-12-30".into() },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-30".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-25".into(),
+            end: "2024-12-28".into(),
+        },
+        TestTimeRange {
+            start: "2024-12-28".into(),
+            end: "2024-12-30".into(),
+        },
     ];
 
     run_incremental_sequence(
