@@ -1,0 +1,18 @@
+[package]
+name = "smelt-state"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow.workspace = true
+thiserror.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.8"

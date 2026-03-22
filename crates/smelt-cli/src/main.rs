@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use arrow::util::pretty;
-use chrono::{Datelike, Duration, NaiveDate, Weekday as ChronoWeekday};
+use chrono::{Datelike, Duration, NaiveDate, Utc, Weekday as ChronoWeekday};
 use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 #[cfg(feature = "duckdb")]
@@ -17,6 +17,11 @@ use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
 use smelt_optimizer::{
     ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation,
 };
+use smelt_state::file_store::FileStore;
+use smelt_state::history::HistoryQuery;
+use smelt_state::intervals::compute_model_hash;
+use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "spark")]
@@ -46,6 +51,10 @@ enum Commands {
     Build(BuildArgs),
     /// Show the function type signature of models (inputs -> outputs)
     Type(TypeArgs),
+    /// Show interval coverage and gaps for incremental models
+    Status(StatusArgs),
+    /// Show run history
+    History(HistoryArgs),
 }
 
 #[derive(Parser)]
@@ -101,6 +110,10 @@ struct RunArgs {
     /// Force per-partition execution (one query per granularity period)
     #[arg(long = "per-partition")]
     per_partition: bool,
+
+    /// Auto mode: process only uncovered intervals since last run
+    #[arg(long)]
+    auto: bool,
 }
 
 #[derive(Parser)]
@@ -246,6 +259,38 @@ struct TypeArgs {
     project_dir: PathBuf,
 }
 
+#[derive(Parser)]
+struct StatusArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Specific model to show status for (omit for all)
+    model_name: Option<String>,
+
+    /// Start of query range for gap detection (ISO 8601: YYYY-MM-DD)
+    #[arg(long)]
+    since: Option<String>,
+
+    /// End of query range for gap detection (ISO 8601: YYYY-MM-DD, default: today)
+    #[arg(long)]
+    until: Option<String>,
+}
+
+#[derive(Parser)]
+struct HistoryArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Specific model to show history for (omit for all runs)
+    model_name: Option<String>,
+
+    /// Number of runs to show (default: 10)
+    #[arg(long, short, default_value = "10")]
+    limit: usize,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -258,10 +303,14 @@ async fn main() -> Result<()> {
         Commands::Seed(args) => run_seed(args).await,
         Commands::Build(args) => build(args).await,
         Commands::Type(args) => show_type(args).await,
+        Commands::Status(args) => status(args).await,
+        Commands::History(args) => history(args).await,
     }
 }
 
 async fn run(args: RunArgs) -> Result<()> {
+    let run_start = Utc::now();
+
     // 1. Find project root
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
@@ -432,6 +481,40 @@ async fn run(args: RunArgs) -> Result<()> {
             ));
         }
         _ => None,
+    };
+
+    // Handle --auto mode: compute time range from interval store
+    let time_range = if args.auto && time_range.is_none() {
+        let file_store = FileStore::new(&project_dir);
+        let interval_store = file_store.load_intervals().unwrap_or_default();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+
+        // Find the latest covered date across all incremental models
+        let mut latest: Option<NaiveDate> = None;
+        for model_name in &execution_order {
+            if let Some(intervals) = interval_store.get(model_name) {
+                if let Some(date) = intervals.latest_date() {
+                    latest = Some(match latest {
+                        Some(prev) => prev.min(date), // use the earliest "latest" — conservative
+                        None => date,
+                    });
+                }
+            }
+        }
+
+        if let Some(start_date) = latest {
+            let start = start_date.format("%Y-%m-%d").to_string();
+            println!(
+                "\n[AUTO] Time range: {} to {} (from interval store)",
+                start, today
+            );
+            Some(TimeRange { start, end: today })
+        } else {
+            println!("\n[AUTO] No interval history found. Use --start/--end for initial run.");
+            None
+        }
+    } else {
+        time_range
     };
 
     let backfill_options = BackfillOptions {
@@ -860,16 +943,80 @@ async fn run(args: RunArgs) -> Result<()> {
             println!();
         }
 
-        results.push(result);
+        results.push((result, execution));
     }
 
-    // 9. Summary
+    // 9. Save run manifest and update intervals
+    let file_store = FileStore::new(&project_dir);
+    let run_id = generate_run_id();
+    let mut manifest = RunManifest {
+        run_id: run_id.clone(),
+        started_at: run_start,
+        completed_at: Some(Utc::now()),
+        models: HashMap::new(),
+    };
+
+    let mut interval_store = file_store.load_intervals().unwrap_or_default();
+
+    for (result, execution) in &results {
+        let (strategy_name, tr, partitions, batch_safety_label) = match execution {
+            ModelExecution::Incremental {
+                config: inc,
+                time_range: range,
+                ..
+            } => {
+                let strategy = backend.resolve_strategy(inc);
+                (
+                    strategy_label(&strategy).to_string(),
+                    Some(TimeRangeRecord {
+                        start: range.start.clone(),
+                        end: range.end.clone(),
+                    }),
+                    generate_partition_values(&range.start, &range.end, &inc.granularity)
+                        .unwrap_or_default(),
+                    Some("incremental".to_string()),
+                )
+            }
+            ModelExecution::CubeSplit { .. } => ("cube_split".to_string(), None, vec![], None),
+            ModelExecution::FullRefresh => ("full_refresh".to_string(), None, vec![], None),
+        };
+
+        manifest.models.insert(
+            result.model_name.clone(),
+            ModelRunRecord {
+                strategy: strategy_name,
+                time_range: tr.clone(),
+                partitions_updated: partitions,
+                row_count: result.row_count,
+                duration_ms: result.duration.as_millis() as u64,
+                batch_safety: batch_safety_label,
+            },
+        );
+
+        // Update interval tracking for incremental models
+        if let Some(ref range) = tr {
+            let model = graph.get_model(&result.model_name)?;
+            let model_hash = compute_model_hash(&model.content);
+            let intervals = interval_store.get_or_create(&result.model_name, &model_hash);
+            intervals.record_interval(&range.start, &range.end);
+        }
+    }
+
+    // Save state (best-effort — don't fail the run if state can't be saved)
+    if let Err(e) = file_store.save_run(&manifest) {
+        eprintln!("Warning: Failed to save run manifest: {}", e);
+    }
+    if let Err(e) = file_store.save_intervals(&interval_store) {
+        eprintln!("Warning: Failed to save interval store: {}", e);
+    }
+
+    // 10. Summary
     println!("\n{}", "=".repeat(60));
-    println!("Summary");
+    println!("Summary (run: {})", run_id);
     println!("{}", "=".repeat(60));
     println!("✓ Executed {} models successfully", results.len());
 
-    let total_duration: std::time::Duration = results.iter().map(|r| r.duration).sum();
+    let total_duration: std::time::Duration = results.iter().map(|(r, _)| r.duration).sum();
     println!("  Total time: {:?}", total_duration);
 
     Ok(())
@@ -1485,8 +1632,169 @@ async fn build(args: BuildArgs) -> Result<()> {
         end: None,
         batch_size: None,
         per_partition: false,
+        auto: false,
     };
     run(run_args).await
+}
+
+async fn status(args: StatusArgs) -> Result<()> {
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let file_store = FileStore::new(&project_dir);
+    if !file_store.exists() {
+        println!("No state directory found. Run `smelt run` with a time range first.");
+        return Ok(());
+    }
+
+    let interval_store = file_store
+        .load_intervals()
+        .with_context(|| "Failed to load interval store")?;
+
+    if interval_store.models.is_empty() {
+        println!("No interval data recorded yet.");
+        return Ok(());
+    }
+
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let until = args.until.as_deref().unwrap_or(&today);
+
+    let models_to_show: Vec<(&String, &smelt_state::intervals::ModelIntervals)> =
+        if let Some(ref name) = args.model_name {
+            interval_store
+                .get(name)
+                .map(|i| vec![(name, i)])
+                .unwrap_or_else(|| {
+                    eprintln!("Model '{}' not found in interval store", name);
+                    vec![]
+                })
+        } else {
+            let mut v: Vec<_> = interval_store.models.iter().collect();
+            v.sort_by_key(|(k, _)| (*k).clone());
+            v
+        };
+
+    println!("Interval Coverage Status");
+    println!("{}", "=".repeat(60));
+
+    for (model_name, intervals) in &models_to_show {
+        println!("\n  {}", model_name);
+        println!("  {}", "-".repeat(40));
+
+        if intervals.covered_intervals.is_empty() {
+            println!("    No coverage (model hash changed or never run)");
+            continue;
+        }
+
+        for interval in &intervals.covered_intervals {
+            println!("    Covered: {} to {}", interval.start, interval.end);
+        }
+
+        if let Some(since) = args.since.as_deref().or(intervals
+            .earliest_date()
+            .as_ref()
+            .map(|_| intervals.covered_intervals[0].start.as_str()))
+        {
+            let gaps = intervals.find_gaps(since, until);
+            if gaps.is_empty() {
+                println!("    No gaps in [{}, {})", since, until);
+            } else {
+                for gap in &gaps {
+                    println!("    GAP: {} to {}", gap.start, gap.end);
+                }
+            }
+        }
+
+        println!("    Hash: {}", intervals.model_hash);
+    }
+
+    Ok(())
+}
+
+async fn history(args: HistoryArgs) -> Result<()> {
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let file_store = FileStore::new(&project_dir);
+    let manifests = file_store
+        .load_runs()
+        .with_context(|| "Failed to load run history")?;
+
+    if manifests.is_empty() {
+        println!("No run history found.");
+        return Ok(());
+    }
+
+    let query = HistoryQuery::new(&manifests);
+
+    if let Some(ref model_name) = args.model_name {
+        let summaries = query.for_model(model_name);
+        if summaries.is_empty() {
+            println!("No runs found for model '{}'", model_name);
+            return Ok(());
+        }
+
+        println!("Run History for '{}'", model_name);
+        println!("{}", "=".repeat(60));
+
+        for (i, summary) in summaries.iter().take(args.limit).enumerate() {
+            println!(
+                "\n  {}. Run: {} ({})",
+                i + 1,
+                summary.run_id,
+                summary.started_at
+            );
+            println!("     Strategy: {}", summary.strategy);
+            if let Some((start, end)) = &summary.time_range {
+                println!("     Range: {} to {}", start, end);
+            }
+            println!(
+                "     {} rows in {}ms",
+                summary.row_count, summary.duration_ms
+            );
+        }
+    } else {
+        let runs = query.last_n(args.limit);
+
+        println!("Run History");
+        println!("{}", "=".repeat(60));
+
+        for (i, manifest) in runs.iter().enumerate() {
+            let model_count = manifest.models.len();
+            let total_rows: usize = manifest.models.values().map(|m| m.row_count).sum();
+            let total_ms: u64 = manifest.models.values().map(|m| m.duration_ms).sum();
+            let completed = manifest
+                .completed_at
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "in progress".to_string());
+
+            println!(
+                "\n  {}. {} (completed: {})",
+                i + 1,
+                manifest.run_id,
+                completed
+            );
+            println!(
+                "     {} model(s), {} total rows, {}ms",
+                model_count, total_rows, total_ms
+            );
+
+            for (name, record) in &manifest.models {
+                let range_str = record
+                    .time_range
+                    .as_ref()
+                    .map(|tr| format!(" [{}, {})", tr.start, tr.end))
+                    .unwrap_or_default();
+                println!(
+                    "       {} ({}){} → {} rows",
+                    name, record.strategy, range_str, record.row_count
+                );
+            }
+        }
+    }
+
+    println!();
+    Ok(())
 }
 
 async fn table(args: TableArgs) -> Result<()> {

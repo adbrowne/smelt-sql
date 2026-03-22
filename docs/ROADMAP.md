@@ -4,6 +4,16 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Incremental Phase 5: Operational Metadata & Run History (March 22, 2026)**: Track what smelt has done via advisory operational metadata:
+- **New `smelt-state` crate**: `RunManifest` (per-run records), `IntervalStore` (model coverage tracking), `FileStore` (JSON file-backed persistence in `.smelt/`)
+- **Interval tracking**: Records covered date ranges per model with automatic merge of adjacent/overlapping intervals, gap detection, and model hash-based invalidation when SQL changes
+- **Run manifests**: Each `smelt run` saves a JSON manifest to `.smelt/runs/` recording strategy, time range, partitions updated, row counts, and duration per model
+- **`smelt status` command**: Shows interval coverage and gaps for incremental models, with optional `--since`/`--until` range queries
+- **`smelt history` command**: Shows run history with optional model filtering and `--limit`
+- **`smelt run --auto`**: Computes time range from interval store — finds the latest covered date and processes [latest, today). No manual `--start`/`--end` needed after initial run
+- **Advisory design**: State is opt-in and non-authoritative. If `.smelt/` is deleted, everything keeps working — you just lose auto-detection. `--full-refresh` is always the escape hatch
+- 13 tests for interval merge/gap detection, file store roundtrips, and history queries
+
 **Incremental Phase 4: Backfill Intelligence (March 22, 2026)**: Smart backfill that picks the right execution shape based on semantic analysis:
 - **Batch safety analysis**: New `BatchSafety` enum (`FullyBatchSafe`, `BoundedSafe`, `PerPartitionOnly`) derived from Phase 3's temporal dependency analysis — determines whether a backfill can run as a single query, chunked batches, or must go per-partition
 - **`analyze_batch_safety()`**: Examines lookback/lookahead offsets to classify models; fully batch-safe models run 1 query for any range, bounded models get auto-sized chunks (3x context, clamped 7–90 days), unbounded models fall back to per-partition
