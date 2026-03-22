@@ -1,3 +1,4 @@
+pub mod backfill;
 pub mod compiler;
 pub mod config;
 pub mod discovery;
@@ -11,6 +12,10 @@ pub mod selector;
 pub mod temporal;
 pub mod transformer;
 
+pub use backfill::{
+    compute_backbuild_plans, compute_batches_for_model, compute_range_run_plans,
+    format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
+};
 pub use compiler::{resolve_refs_in_sql, CompiledModel, SqlCompiler};
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,

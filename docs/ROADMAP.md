@@ -4,6 +4,16 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Incremental Phase 4: Backfill Intelligence (March 22, 2026)**: Smart backfill that picks the right execution shape based on semantic analysis:
+- **Batch safety analysis**: New `BatchSafety` enum (`FullyBatchSafe`, `BoundedSafe`, `PerPartitionOnly`) derived from Phase 3's temporal dependency analysis — determines whether a backfill can run as a single query, chunked batches, or must go per-partition
+- **`analyze_batch_safety()`**: Examines lookback/lookahead offsets to classify models; fully batch-safe models run 1 query for any range, bounded models get auto-sized chunks (3x context, clamped 7–90 days), unbounded models fall back to per-partition
+- **DAG-aware range computation**: `compute_backbuild_plans()` walks the DAG backwards from a target model, expanding upstream ranges based on each model's temporal dependencies and data latency (e.g., if model A has 7-day lookback from B, backbuilding A for March triggers B starting in late February)
+- **`smelt backbuild` command**: New CLI subcommand for target-focused rebuilds — `smelt backbuild +daily_revenue --start 2025-01-01 --end 2026-01-01` rebuilds the model and all upstreams with computed range expansion. Supports `--dry-run`, `--batch-size`, `--per-partition`
+- **Range run flags on `smelt run`**: `--start`/`--end` aliases for `--event-time-start`/`--event-time-end`, plus `--batch-size` and `--per-partition` overrides
+- **Smart batching in `run` command**: Incremental models now use batch safety analysis during range runs — batch-safe models run a single query for any range, bounded models auto-chunk, per-partition models split by granularity. Batch progress displayed per-batch for multi-batch runs.
+- **Batch generation**: Splits time ranges into batches based on safety analysis, with per-batch filter ranges expanded for temporal context
+- 15 new tests across batch safety analysis, batch generation, DAG range computation, and plan formatting
+
 **Incremental Phase 3: Temporal Dependency Inference (March 22, 2026)**: AST-based analysis of window functions, LAG/LEAD, JOIN offsets, and WHERE offsets to automatically infer how much historical context each incremental model needs:
 - **Temporal analysis**: New `smelt-optimizer/src/analysis/temporal.rs` detects lookback/lookahead from ROWS BETWEEN, RANGE, LAG/LEAD, JOIN INTERVAL offsets, WHERE INTERVAL patterns
 - **Data latency**: New `DataLatency` type (SQL interval syntax "3 days") on source columns and model frontmatter columns — represents how late upstream data can arrive

@@ -6,9 +6,11 @@ use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 #[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    compute_incremental_windows, discover_python_models, executor, find_project_root, init_db,
-    inject_time_filter, parse_selector, resolve_refs_in_sql, seed, BackendType, Config,
-    DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
+    compute_backbuild_plans, compute_batches_for_model, compute_incremental_windows,
+    discover_python_models, executor, find_project_root, format_plan_summary, init_db,
+    inject_time_filter, parse_selector, resolve_refs_in_sql, seed, BackendType, BackfillBatch,
+    BackfillOptions, Config, DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler,
+    TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -32,6 +34,8 @@ struct Cli {
 enum Commands {
     /// Run models and materialize them in the target database
     Run(RunArgs),
+    /// Backbuild: rebuild a target model and all its upstreams for a time range
+    Backbuild(BackbuildArgs),
     /// Show column types for a model
     Table(TableArgs),
     /// Start the web UI for visualizing the model graph
@@ -81,6 +85,68 @@ struct RunArgs {
     /// Select models to run (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
     #[arg(long = "select", short = 's')]
     select: Vec<String>,
+
+    /// Start of range for backfill (ISO 8601: YYYY-MM-DD). Alias for --event-time-start.
+    #[arg(long)]
+    start: Option<String>,
+
+    /// End of range for backfill (exclusive, ISO 8601: YYYY-MM-DD). Alias for --event-time-end.
+    #[arg(long)]
+    end: Option<String>,
+
+    /// Override batch size in days for backfill chunking
+    #[arg(long = "batch-size")]
+    batch_size: Option<u32>,
+
+    /// Force per-partition execution (one query per granularity period)
+    #[arg(long = "per-partition")]
+    per_partition: bool,
+}
+
+#[derive(Parser)]
+struct BackbuildArgs {
+    /// Target model selector (e.g., +daily_revenue, model_name)
+    selector: String,
+
+    /// Start of time range (ISO 8601: YYYY-MM-DD)
+    #[arg(long)]
+    start: String,
+
+    /// End of time range (exclusive, ISO 8601: YYYY-MM-DD)
+    #[arg(long)]
+    end: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// DuckDB database file path
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Target environment from smelt.yml
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Display query results after execution
+    #[arg(long)]
+    show_results: bool,
+
+    /// Show compiled SQL for each model
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Show what would execute without running
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Override batch size in days for backfill chunking
+    #[arg(long = "batch-size")]
+    batch_size: Option<u32>,
+
+    /// Force per-partition execution (one query per granularity period)
+    #[arg(long = "per-partition")]
+    per_partition: bool,
 }
 
 #[derive(Parser)]
@@ -186,6 +252,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run(args) => run(args).await,
+        Commands::Backbuild(args) => backbuild(args).await,
         Commands::Table(args) => table(args).await,
         Commands::Ui(args) => ui(args).await,
         Commands::Seed(args) => run_seed(args).await,
@@ -339,7 +406,11 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 8. Parse time range if provided (for incremental processing)
-    let time_range = match (&args.event_time_start, &args.event_time_end) {
+    //    --start/--end are aliases for --event-time-start/--event-time-end
+    let effective_start = args.start.as_ref().or(args.event_time_start.as_ref());
+    let effective_end = args.end.as_ref().or(args.event_time_end.as_ref());
+
+    let time_range = match (effective_start, effective_end) {
         (Some(start), Some(end)) => {
             // Validate date format
             NaiveDate::parse_from_str(start, "%Y-%m-%d").with_context(|| {
@@ -355,7 +426,17 @@ async fn run(args: RunArgs) -> Result<()> {
                 end: end.clone(),
             })
         }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "Both --start and --end (or --event-time-start and --event-time-end) must be provided together"
+            ));
+        }
         _ => None,
+    };
+
+    let backfill_options = BackfillOptions {
+        batch_size_days: args.batch_size,
+        per_partition: args.per_partition,
     };
 
     // 9. Run optimizer on discovered models
@@ -582,11 +663,6 @@ async fn run(args: RunArgs) -> Result<()> {
                 plan_steps: None,
             } => {
                 let resolved_strategy = backend.resolve_strategy(inc_config);
-                println!(
-                    "\n▶ Running model: {} (incremental/{})",
-                    model_name,
-                    strategy_label(&resolved_strategy),
-                );
 
                 // Compute temporal windows (lookback/lookahead from AST + data latency)
                 let model_latency = model
@@ -602,6 +678,40 @@ async fn run(args: RunArgs) -> Result<()> {
                     range,
                 );
 
+                // Compute smart batching based on batch safety analysis
+                let (batch_safety, batches) = compute_batches_for_model(
+                    &model.content,
+                    inc_config,
+                    range,
+                    &windows.filter_range,
+                    &backfill_options,
+                )
+                .with_context(|| format!("Failed to compute batches for model: {}", model_name))?;
+
+                let batch_count = batches.len().max(1);
+                let safety_label = match &batch_safety {
+                    smelt_optimizer::BatchSafety::FullyBatchSafe => "batch-safe".to_string(),
+                    smelt_optimizer::BatchSafety::BoundedSafe {
+                        max_chunk_days,
+                        context_days,
+                        ..
+                    } => format!(
+                        "bounded {}d chunks/{}d context",
+                        max_chunk_days, context_days
+                    ),
+                    smelt_optimizer::BatchSafety::PerPartitionOnly { .. } => {
+                        "per-partition".to_string()
+                    }
+                };
+
+                println!(
+                    "\n▶ Running model: {} (incremental/{}, {} batch(es), {})",
+                    model_name,
+                    strategy_label(&resolved_strategy),
+                    batch_count,
+                    safety_label,
+                );
+
                 if windows.effective_window.lookback_days > 0
                     || windows.effective_window.lookahead_days > 0
                 {
@@ -611,63 +721,99 @@ async fn run(args: RunArgs) -> Result<()> {
                     );
                 }
 
-                let clean_sql = smelt_parser::strip_frontmatter(&model.content);
-                let transformed_sql = inject_time_filter(
-                    &clean_sql,
-                    &inc_config.event_time_column,
-                    &windows.filter_range,
-                )
-                .with_context(|| format!("Failed to transform SQL for model: {}", model_name))?;
-
-                let compiled = compiler
-                    .compile_with_sql(model, &target_config.schema, &transformed_sql)
-                    .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-                if args.verbose {
-                    println!("\n  Transformed SQL:");
-                    println!("  {}", "─".repeat(58));
-                    for line in compiled.sql.lines() {
-                        println!("  {}", line);
-                    }
-                    println!("  {}", "─".repeat(58));
-                }
-
-                let partition_values = generate_partition_values(
-                    &windows.partition_range.start,
-                    &windows.partition_range.end,
-                    &inc_config.granularity,
-                )?;
-                println!(
-                    "  Partitions to update: {} ({} {})",
-                    if partition_values.len() <= 3 {
-                        partition_values.join(", ")
-                    } else {
-                        format!(
-                            "{}, ..., {}",
-                            partition_values.first().unwrap(),
-                            partition_values.last().unwrap()
-                        )
-                    },
-                    partition_values.len(),
-                    granularity_label(&inc_config.granularity),
-                );
-
-                let partition = PartitionSpec {
-                    column: inc_config.partition_column.clone(),
-                    values: partition_values,
+                // Use computed batches, or fall back to single batch for the full range
+                let effective_batches: Vec<BackfillBatch> = if batches.is_empty() {
+                    vec![BackfillBatch {
+                        partition_range: windows.partition_range.clone(),
+                        filter_range: windows.filter_range.clone(),
+                    }]
+                } else {
+                    batches
                 };
 
-                executor::execute_model_incremental(
-                    backend.as_ref(),
-                    &compiled,
-                    &target_config.schema,
-                    partition,
-                    resolved_strategy,
-                    inc_config.unique_key.clone(),
-                    args.show_results,
-                )
-                .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?
+                let mut last_result = None;
+                for (i, batch) in effective_batches.iter().enumerate() {
+                    if effective_batches.len() > 1 {
+                        println!(
+                            "  Batch {}/{}: [{}, {})",
+                            i + 1,
+                            effective_batches.len(),
+                            batch.partition_range.start,
+                            batch.partition_range.end,
+                        );
+                    }
+
+                    let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+                    let transformed_sql = inject_time_filter(
+                        &clean_sql,
+                        &inc_config.event_time_column,
+                        &batch.filter_range,
+                    )
+                    .with_context(|| {
+                        format!("Failed to transform SQL for model: {}", model_name)
+                    })?;
+
+                    let compiled = compiler
+                        .compile_with_sql(model, &target_config.schema, &transformed_sql)
+                        .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+                    if args.verbose {
+                        println!("\n  Transformed SQL:");
+                        println!("  {}", "─".repeat(58));
+                        for line in compiled.sql.lines() {
+                            println!("  {}", line);
+                        }
+                        println!("  {}", "─".repeat(58));
+                    }
+
+                    let partition_values = generate_partition_values(
+                        &batch.partition_range.start,
+                        &batch.partition_range.end,
+                        &inc_config.granularity,
+                    )?;
+
+                    if effective_batches.len() == 1 {
+                        println!(
+                            "  Partitions to update: {} ({} {})",
+                            if partition_values.len() <= 3 {
+                                partition_values.join(", ")
+                            } else {
+                                format!(
+                                    "{}, ..., {}",
+                                    partition_values.first().unwrap(),
+                                    partition_values.last().unwrap()
+                                )
+                            },
+                            partition_values.len(),
+                            granularity_label(&inc_config.granularity),
+                        );
+                    }
+
+                    let partition = PartitionSpec {
+                        column: inc_config.partition_column.clone(),
+                        values: partition_values,
+                    };
+
+                    let result = executor::execute_model_incremental(
+                        backend.as_ref(),
+                        &compiled,
+                        &target_config.schema,
+                        partition,
+                        resolved_strategy.clone(),
+                        inc_config.unique_key.clone(),
+                        args.show_results,
+                    )
+                    .await
+                    .with_context(|| format!("Failed to execute model: {}", model_name))?;
+
+                    if effective_batches.len() > 1 {
+                        println!("    ✓ {} rows ({:?})", result.row_count, result.duration);
+                    }
+
+                    last_result = Some(result);
+                }
+
+                last_result.unwrap()
             }
             ModelExecution::FullRefresh => {
                 if time_range.is_some() {
@@ -724,6 +870,297 @@ async fn run(args: RunArgs) -> Result<()> {
     println!("✓ Executed {} models successfully", results.len());
 
     let total_duration: std::time::Duration = results.iter().map(|r| r.duration).sum();
+    println!("  Total time: {:?}", total_duration);
+
+    Ok(())
+}
+
+async fn backbuild(args: BackbuildArgs) -> Result<()> {
+    // 1. Find project root
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    println!("Project directory: {}", project_dir.display());
+
+    // 2. Load configuration
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    println!("Project: {} (version {})", config.name, config.version);
+
+    let target_config = config.targets.get(&args.target).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Target '{}' not found in smelt.yml. Available targets: {}",
+            args.target,
+            config
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+
+    // 3. Discover models
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let mut models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
+    }
+
+    if models.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No models found in model paths: {}",
+            config.model_paths.join(", ")
+        ));
+    }
+
+    // 4. Build dependency graph
+    let graph = DependencyGraph::build(models, sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+
+    graph
+        .validate()
+        .with_context(|| "Dependency validation failed")?;
+
+    // 5. Parse selector — backbuild always includes upstream (+model)
+    let selector = parse_selector(&args.selector)
+        .with_context(|| format!("Invalid selector: {}", args.selector))?;
+
+    // Force upstream inclusion for backbuild
+    let selectors = vec![smelt_cli::Selector {
+        include_upstream: true,
+        ..selector
+    }];
+
+    let selected = graph
+        .select_models(&selectors, &config)
+        .with_context(|| "Failed to select models")?;
+
+    if selected.is_empty() {
+        println!("No models matched the selector");
+        return Ok(());
+    }
+
+    let execution_order = graph
+        .filtered_execution_order(&selected)
+        .with_context(|| "Failed to determine execution order")?;
+
+    println!(
+        "\nBackbuild execution order: {}",
+        execution_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{}. {}", i + 1, name))
+            .collect::<Vec<_>>()
+            .join(" → ")
+    );
+
+    // 6. Validate time range
+    let requested_range = TimeRange {
+        start: args.start.clone(),
+        end: args.end.clone(),
+    };
+
+    NaiveDate::parse_from_str(&args.start, "%Y-%m-%d")
+        .with_context(|| format!("Invalid start date: {}", args.start))?;
+    NaiveDate::parse_from_str(&args.end, "%Y-%m-%d")
+        .with_context(|| format!("Invalid end date: {}", args.end))?;
+
+    println!("Target range: {} to {} (exclusive)", args.start, args.end);
+
+    // 7. Compute DAG-aware backfill plans
+    let target_model = selectors[0]
+        .method
+        .model_name()
+        .ok_or_else(|| anyhow::anyhow!("Backbuild selector must specify a model name"))?;
+
+    let backfill_options = BackfillOptions {
+        batch_size_days: args.batch_size,
+        per_partition: args.per_partition,
+    };
+
+    let plans = compute_backbuild_plans(
+        target_model,
+        &execution_order,
+        &graph,
+        &config,
+        sources.as_ref(),
+        &requested_range,
+        &backfill_options,
+    )
+    .with_context(|| "Failed to compute backbuild plans")?;
+
+    // 8. Display plan
+    println!("\nBackfill plan:");
+    println!("{}", format_plan_summary(&plans));
+
+    if args.dry_run {
+        println!("\n[DRY RUN] Skipping execution");
+        return Ok(());
+    }
+
+    // 9. Execute
+    let backend = create_backend(target_config, &project_dir, args.database).await?;
+
+    if let Some(ref source_config) = sources {
+        executor::validate_sources(backend.as_ref(), source_config)
+            .await
+            .with_context(|| "Source validation failed")?;
+    }
+
+    let compiler = SqlCompiler::new(config.clone(), target_config);
+
+    println!("\n{}", "=".repeat(60));
+    println!("Executing backbuild...");
+    println!("{}", "=".repeat(60));
+
+    let mut total_results = Vec::new();
+
+    for plan in &plans {
+        let model = graph.get_model(&plan.model_name)?;
+
+        if !plan.is_incremental {
+            println!("\n▶ {} (full refresh)", plan.model_name);
+            let compiled = compiler
+                .compile(model, &target_config.schema)
+                .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
+
+            let result = executor::execute_model(
+                backend.as_ref(),
+                &compiled,
+                &target_config.schema,
+                args.show_results,
+            )
+            .await
+            .with_context(|| format!("Failed to execute model: {}", plan.model_name))?;
+
+            println!(
+                "  ✓ {} ({} rows, {:?})",
+                result.model_name, result.row_count, result.duration
+            );
+            total_results.push(result);
+            continue;
+        }
+
+        let frontmatter = Frontmatter::parse(&model.content);
+        let inc_config = config
+            .get_incremental_with_metadata(
+                &plan.model_name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
+            )
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+
+        let inc_config = match inc_config {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let resolved_strategy = backend.resolve_strategy(&inc_config);
+
+        if plan.batches.len() == 1 {
+            println!(
+                "\n▶ {} (incremental/{}, 1 batch)",
+                plan.model_name,
+                strategy_label(&resolved_strategy),
+            );
+        } else {
+            println!(
+                "\n▶ {} (incremental/{}, {} batches)",
+                plan.model_name,
+                strategy_label(&resolved_strategy),
+                plan.batches.len(),
+            );
+        }
+
+        for (i, batch) in plan.batches.iter().enumerate() {
+            if plan.batches.len() > 1 {
+                println!(
+                    "  Batch {}/{}: [{}, {})",
+                    i + 1,
+                    plan.batches.len(),
+                    batch.partition_range.start,
+                    batch.partition_range.end
+                );
+            }
+
+            let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+            let transformed_sql = inject_time_filter(
+                &clean_sql,
+                &inc_config.event_time_column,
+                &batch.filter_range,
+            )
+            .with_context(|| format!("Failed to transform SQL for model: {}", plan.model_name))?;
+
+            let compiled = compiler
+                .compile_with_sql(model, &target_config.schema, &transformed_sql)
+                .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
+
+            if args.verbose {
+                println!("\n  Compiled SQL:");
+                println!("  {}", "─".repeat(58));
+                for line in compiled.sql.lines() {
+                    println!("  {}", line);
+                }
+                println!("  {}", "─".repeat(58));
+            }
+
+            let partition_values = generate_partition_values(
+                &batch.partition_range.start,
+                &batch.partition_range.end,
+                &inc_config.granularity,
+            )?;
+
+            let partition = PartitionSpec {
+                column: inc_config.partition_column.clone(),
+                values: partition_values,
+            };
+
+            let result = executor::execute_model_incremental(
+                backend.as_ref(),
+                &compiled,
+                &target_config.schema,
+                partition,
+                resolved_strategy.clone(),
+                inc_config.unique_key.clone(),
+                args.show_results,
+            )
+            .await
+            .with_context(|| format!("Failed to execute model: {}", plan.model_name))?;
+
+            println!(
+                "  ✓ {} ({} rows, {:?})",
+                result.model_name, result.row_count, result.duration
+            );
+            total_results.push(result);
+        }
+    }
+
+    // Summary
+    println!("\n{}", "=".repeat(60));
+    println!("Backbuild Summary");
+    println!("{}", "=".repeat(60));
+    println!("✓ Executed {} step(s) successfully", total_results.len());
+
+    let total_duration: std::time::Duration = total_results.iter().map(|r| r.duration).sum();
     println!("  Total time: {:?}", total_duration);
 
     Ok(())
@@ -1044,6 +1481,10 @@ async fn build(args: BuildArgs) -> Result<()> {
         event_time_start: args.event_time_start,
         event_time_end: args.event_time_end,
         select: args.select,
+        start: None,
+        end: None,
+        batch_size: None,
+        per_partition: false,
     };
     run(run_args).await
 }

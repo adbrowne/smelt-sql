@@ -10,6 +10,7 @@ pub use analysis::temporal::{
     EffectiveWindow, TemporalDependency, TemporalOffset, TemporalSource,
 };
 pub use graph::{ModelGraph, ModelInfo};
+pub use rules::incremental::{analyze_batch_safety, BatchSafety};
 pub use rules::Optimizer;
 pub use types::{
     ExecutionStep, Frontmatter, Granularity, IncrementalConfig, IncrementalSafetyOverrides,

@@ -26,6 +26,16 @@ pub enum SelectionMethod {
     Tag(String),
 }
 
+impl SelectionMethod {
+    /// Return the model name if this is a `ModelName` selector.
+    pub fn model_name(&self) -> Option<&str> {
+        match self {
+            SelectionMethod::ModelName(name) => Some(name),
+            SelectionMethod::Tag(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.include_upstream {
