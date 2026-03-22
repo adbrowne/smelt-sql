@@ -1,3 +1,4 @@
+use crate::config::DataLatency;
 use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
 use std::collections::HashMap;
@@ -160,6 +161,8 @@ pub struct SourceColumnDef {
     pub name: String,
     pub data_type: Option<DataType>,
     pub description: Option<String>,
+    /// How late data can arrive for this column (e.g., "3 days" for mobile events).
+    pub data_latency: Option<DataLatency>,
 }
 
 impl<'de> Deserialize<'de> for SourceColumnDef {
@@ -174,6 +177,8 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
             type_str: Option<String>,
             #[serde(default)]
             description: Option<String>,
+            #[serde(default)]
+            data_latency: Option<DataLatency>,
         }
 
         let raw = RawColumn::deserialize(deserializer)?;
@@ -185,7 +190,52 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
             name: raw.name,
             data_type,
             description: raw.description,
+            data_latency: raw.data_latency,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sources_with_data_latency() {
+        let yaml = r#"
+sources:
+  raw:
+    tables:
+      transactions:
+        columns:
+          - name: event_time
+            type: TIMESTAMP
+            data_latency: "3 days"
+          - name: ingestion_time
+            type: TIMESTAMP
+            data_latency: "0 hours"
+          - name: amount
+            type: DECIMAL
+"#;
+        let config: SourcesConfig = serde_yaml::from_str(yaml).unwrap();
+        let source = config.find_source("raw").unwrap();
+        let table = source.find_table("transactions").unwrap();
+
+        let event_time = table
+            .columns
+            .iter()
+            .find(|c| c.name == "event_time")
+            .unwrap();
+        assert_eq!(event_time.data_latency.as_ref().unwrap().to_days(), 3);
+
+        let ingestion_time = table
+            .columns
+            .iter()
+            .find(|c| c.name == "ingestion_time")
+            .unwrap();
+        assert_eq!(ingestion_time.data_latency.as_ref().unwrap().to_days(), 0);
+
+        let amount = table.columns.iter().find(|c| c.name == "amount").unwrap();
+        assert!(amount.data_latency.is_none());
     }
 }
 

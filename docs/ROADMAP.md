@@ -4,6 +4,14 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Incremental Phase 3: Temporal Dependency Inference (March 22, 2026)**: AST-based analysis of window functions, LAG/LEAD, JOIN offsets, and WHERE offsets to automatically infer how much historical context each incremental model needs:
+- **Temporal analysis**: New `smelt-optimizer/src/analysis/temporal.rs` detects lookback/lookahead from ROWS BETWEEN, RANGE, LAG/LEAD, JOIN INTERVAL offsets, WHERE INTERVAL patterns
+- **Data latency**: New `DataLatency` type (SQL interval syntax "3 days") on source columns and model frontmatter columns — represents how late upstream data can arrive
+- **Effective window**: Combines AST temporal dependency with data latency: `effective_lookback = max(ast_lookback, data_latency)`
+- **Separate filter vs partition ranges**: Filter WHERE clause uses wider range (lookback + lookahead), partition DELETE/overwrite uses original requested range
+- **Per-column latency**: Different columns on the same source table can have different latencies (e.g., `event_time` 3 days, `ingestion_time` 0 hours)
+- 37 new tests across temporal analysis, effective window, data latency parsing, and CLI integration
+
 **JSON Function Canonicalization (March 21, 2026)**: Redesigned JSON function support to accept all dialect variants and map to canonical internal functions:
 - **Canonical functions**: JsonObject, JsonArray, ToJson, JsonExtract, JsonExtractText, JsonArrayLength, JsonObjectKeys, JsonContains
 - **Dialect aliases**: `json_build_object` (PG) and `json_object` (DuckDB) both resolve to `JsonObject`; `get_json_object` (Spark), `json_extract_string` (DuckDB), and `json_extract_path_text` (PG) all resolve to `JsonExtractText`

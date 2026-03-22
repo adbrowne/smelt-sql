@@ -1,3 +1,5 @@
+pub mod temporal;
+
 use serde::Serialize;
 use smelt_types::SqlFunction;
 

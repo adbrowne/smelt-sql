@@ -135,6 +135,78 @@ pub enum Weekday {
     Sunday,
 }
 
+/// Data latency for a column — how late data can arrive.
+///
+/// Parsed from SQL interval syntax (e.g., "3 days", "1 hour", "0 hours").
+/// Stored as a number of seconds for precise comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DataLatency {
+    /// Latency in seconds (for comparison and arithmetic).
+    pub seconds: u64,
+    /// Original string representation (for display).
+    pub display: String,
+}
+
+impl DataLatency {
+    /// Parse a SQL interval string like "3 days", "1 hour", "0 hours", "2 weeks".
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let n: u64 = parts[0].parse().ok()?;
+        let unit = if parts.len() > 1 {
+            parts[1].to_lowercase()
+        } else {
+            return None;
+        };
+
+        let seconds = match unit.trim_end_matches('s') {
+            "hour" => n * 3600,
+            "day" => n * 86400,
+            "week" => n * 7 * 86400,
+            "month" => n * 30 * 86400, // Approximate
+            "year" => n * 365 * 86400, // Approximate
+            _ => return None,
+        };
+
+        Some(DataLatency {
+            seconds,
+            display: s.to_string(),
+        })
+    }
+
+    /// Convert to days (rounded up).
+    pub fn to_days(&self) -> u32 {
+        self.seconds.div_ceil(86400) as u32
+    }
+
+    /// Zero latency.
+    pub fn zero() -> Self {
+        DataLatency {
+            seconds: 0,
+            display: "0 hours".to_string(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DataLatency {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        DataLatency::parse(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid data_latency '{}': expected format like '3 days', '1 hour', '0 hours'",
+                s
+            ))
+        })
+    }
+}
+
 /// Granularity for incremental partition generation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -427,5 +499,34 @@ targets:
 
         let strategy: IncrementalStrategy = serde_json::from_str(r#""merge""#).unwrap();
         assert_eq!(strategy, IncrementalStrategy::Merge);
+    }
+
+    #[test]
+    fn test_data_latency_parse() {
+        let l = DataLatency::parse("3 days").unwrap();
+        assert_eq!(l.seconds, 3 * 86400);
+        assert_eq!(l.to_days(), 3);
+
+        let l = DataLatency::parse("1 hour").unwrap();
+        assert_eq!(l.seconds, 3600);
+        assert_eq!(l.to_days(), 1); // rounds up
+
+        let l = DataLatency::parse("0 hours").unwrap();
+        assert_eq!(l.seconds, 0);
+        assert_eq!(l.to_days(), 0);
+
+        let l = DataLatency::parse("2 weeks").unwrap();
+        assert_eq!(l.seconds, 2 * 7 * 86400);
+        assert_eq!(l.to_days(), 14);
+
+        assert!(DataLatency::parse("invalid").is_none());
+        assert!(DataLatency::parse("3").is_none()); // no unit
+    }
+
+    #[test]
+    fn test_data_latency_deserialization() {
+        let yaml = r#""3 days""#;
+        let latency: DataLatency = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(latency.to_days(), 3);
     }
 }

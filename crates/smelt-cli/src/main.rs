@@ -6,9 +6,9 @@ use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 #[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
-    discover_python_models, executor, find_project_root, init_db, inject_time_filter,
-    parse_selector, resolve_refs_in_sql, seed, BackendType, Config, DependencyGraph,
-    ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
+    compute_incremental_windows, discover_python_models, executor, find_project_root, init_db,
+    inject_time_filter, parse_selector, resolve_refs_in_sql, seed, BackendType, Config,
+    DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -514,8 +514,34 @@ async fn run(args: RunArgs) -> Result<()> {
                     strategy_label(&resolved_strategy),
                 );
 
-                let partition_values =
-                    generate_partition_values(&range.start, &range.end, &inc_config.granularity)?;
+                // Compute temporal windows (lookback/lookahead from AST + data latency)
+                let model_latency = model
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.columns.get(&inc_config.event_time_column))
+                    .and_then(|c| c.data_latency.as_ref());
+                let windows = compute_incremental_windows(
+                    &model.content,
+                    inc_config,
+                    sources.as_ref(),
+                    model_latency,
+                    range,
+                );
+
+                if windows.effective_window.lookback_days > 0
+                    || windows.effective_window.lookahead_days > 0
+                {
+                    println!(
+                        "  Temporal window: {}",
+                        windows.effective_window.explanation
+                    );
+                }
+
+                let partition_values = generate_partition_values(
+                    &windows.partition_range.start,
+                    &windows.partition_range.end,
+                    &inc_config.granularity,
+                )?;
                 let partition = PartitionSpec {
                     column: inc_config.partition_column.clone(),
                     values: partition_values,
@@ -528,7 +554,7 @@ async fn run(args: RunArgs) -> Result<()> {
                     &target_config.schema,
                     partition,
                     &inc_config.event_time_column,
-                    range,
+                    &windows.filter_range,
                     resolved_strategy,
                     inc_config.unique_key.clone(),
                     args.show_results,
@@ -562,12 +588,36 @@ async fn run(args: RunArgs) -> Result<()> {
                     strategy_label(&resolved_strategy),
                 );
 
+                // Compute temporal windows (lookback/lookahead from AST + data latency)
+                let model_latency = model
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.columns.get(&inc_config.event_time_column))
+                    .and_then(|c| c.data_latency.as_ref());
+                let windows = compute_incremental_windows(
+                    &model.content,
+                    inc_config,
+                    sources.as_ref(),
+                    model_latency,
+                    range,
+                );
+
+                if windows.effective_window.lookback_days > 0
+                    || windows.effective_window.lookahead_days > 0
+                {
+                    println!(
+                        "  Temporal window: {}",
+                        windows.effective_window.explanation
+                    );
+                }
+
                 let clean_sql = smelt_parser::strip_frontmatter(&model.content);
-                let transformed_sql =
-                    inject_time_filter(&clean_sql, &inc_config.event_time_column, range)
-                        .with_context(|| {
-                            format!("Failed to transform SQL for model: {}", model_name)
-                        })?;
+                let transformed_sql = inject_time_filter(
+                    &clean_sql,
+                    &inc_config.event_time_column,
+                    &windows.filter_range,
+                )
+                .with_context(|| format!("Failed to transform SQL for model: {}", model_name))?;
 
                 let compiled = compiler
                     .compile_with_sql(model, &target_config.schema, &transformed_sql)
@@ -582,8 +632,11 @@ async fn run(args: RunArgs) -> Result<()> {
                     println!("  {}", "─".repeat(58));
                 }
 
-                let partition_values =
-                    generate_partition_values(&range.start, &range.end, &inc_config.granularity)?;
+                let partition_values = generate_partition_values(
+                    &windows.partition_range.start,
+                    &windows.partition_range.end,
+                    &inc_config.granularity,
+                )?;
                 println!(
                     "  Partitions to update: {} ({} {})",
                     if partition_values.len() <= 3 {

@@ -8,6 +8,7 @@ pub mod metadata;
 pub mod python;
 pub mod seed;
 pub mod selector;
+pub mod temporal;
 pub mod transformer;
 
 pub use compiler::{resolve_refs_in_sql, CompiledModel, SqlCompiler};
@@ -21,6 +22,7 @@ pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMeta
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
+pub use temporal::{compute_incremental_windows, IncrementalWindows};
 pub use transformer::{inject_time_filter, TimeRange, TransformError};
 
 use std::path::Path;

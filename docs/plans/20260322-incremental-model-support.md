@@ -316,7 +316,7 @@ insert_overwrite | No         | Required      | Emul.  | Native | No
 
 ---
 
-### Phase 3: Temporal Dependency Inference & Data Latency
+### Phase 3: Temporal Dependency Inference & Data Latency ✅ (March 22, 2026)
 
 **Goal:** Automatically determine how much context each query needs (from the AST), and separately handle late-arriving data (from config). These are two orthogonal concerns:
 
@@ -507,6 +507,19 @@ Implementation:
 - `crates/smelt-core/src/config.rs` — `LatencyWindow` type (from Phase 1a)
 - `crates/smelt-cli/src/main.rs` — apply combined window to partition generation
 - `crates/smelt-cli/src/transformer.rs` — may need separate filter range vs partition range
+
+#### Implementation Notes (Phase 3)
+
+- `analysis.rs` converted to `analysis/` module directory to host `temporal.rs` alongside existing `mod.rs`
+- `TemporalOffset` enum: `Zero | Periods(u32) | Days(u32) | Unbounded{reason}` — cleanly handles both row-based (ROWS BETWEEN) and time-based (RANGE/INTERVAL) offsets with `to_days(period_days)` conversion
+- `DataLatency` type in `smelt-core/src/config.rs` — parses SQL interval syntax ("3 days", "1 hour") into seconds; serde `Deserialize` impl for YAML parsing
+- `SourceColumnDef` gained `data_latency: Option<DataLatency>` field
+- `ModelMetadata` gained `columns: HashMap<String, ColumnMetadata>` for per-column properties (data_latency, description) in model frontmatter
+- `IncrementalWindows` struct in `smelt-cli/src/temporal.rs` — separates `filter_range` (wider, for WHERE clause) from `partition_range` (original request, for DELETE/overwrite)
+- Both incremental execution paths in main.rs (plain incremental + cube split + incremental) now compute temporal windows and print the explanation when non-zero
+- Window functions with no explicit frame (default RANGE BETWEEN UNBOUNDED PRECEDING) are flagged as unbounded — matching SQL standard behavior
+- **Phase 3f deferred**: Per-ref upstream filtering (wrapping `smelt.ref()` calls in filtered subqueries) requires column lineage tracing through the query AST, which is a significant addition. The current implementation applies a single wider filter range to the main query. Per-ref filtering will be addressed in a follow-up phase alongside `smelt explain`.
+- Test coverage: 20 temporal analysis unit tests, 7 effective window tests, 7 CLI temporal integration tests, 2 data latency parsing tests, 1 sources YAML with latency test
 
 ---
 

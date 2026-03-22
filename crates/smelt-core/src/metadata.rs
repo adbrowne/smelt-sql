@@ -23,11 +23,23 @@
 //!    SELECT ...
 //!    ```
 
-use crate::config::{IncrementalConfig, Materialization};
+use crate::config::{DataLatency, IncrementalConfig, Materialization};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
 use thiserror::Error;
+
+/// Per-column metadata declared in model frontmatter.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ColumnMetadata {
+    /// How late data can arrive for this column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_latency: Option<DataLatency>,
+
+    /// Human-readable description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
 
 /// Metadata for a single model extracted from frontmatter
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -55,6 +67,10 @@ pub struct ModelMetadata {
     /// Human-readable description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Per-column metadata (latency, description, etc.)
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub columns: HashMap<String, ColumnMetadata>,
 
     /// Backend-specific hints (forward compatibility)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
