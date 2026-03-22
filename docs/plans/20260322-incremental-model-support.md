@@ -75,8 +75,8 @@ Microbatch is dbt's latest attempt to fix incremental models. It eliminates `is_
 | Upstream filtering | Requires explicit `event_time` on every upstream model; silent full-scan if missed | Inferred from AST — can't be misconfigured |
 | Late-arriving data | Fixed `lookback` (N batches) — heuristic | Per-column `data_latency` on source — declarative, precise |
 | Temporal dependencies | Not analyzed — user must configure lookback manually | Inferred from query AST (window frames, LAG/LEAD, joins) |
-| State tracking | None — silent data gaps | Interval tracking with gap detection |
-| Granularity | hour/day/month/year (no week) | hour/day/week(configurable start)/month/quarter/year |
+| State tracking | None — silent data gaps | Interval tracking with gap detection *(optional, opt-in — see Phase 5)* |
+| Granularity | hour/day/month/year (no week) | hour/day/week(configurable start)/month/quarter/year + custom via plugin |
 | Batch safety | Not analyzed — always processes one batch at a time | Proves batch safety — can run single query for large ranges |
 
 ### SQLMesh Advantages
@@ -118,13 +118,18 @@ pub struct IncrementalConfig {
     pub event_time_column: String,
     pub partition_column: String,
     pub granularity: Granularity,
-    pub strategy: IncrementalStrategy,        // NEW — default: DeleteInsert
-    pub unique_key: Vec<String>,              // NEW — required for Merge
+    pub unique_key: Vec<String>,              // NEW — backend uses presence to choose strategy
     pub safety_overrides: IncrementalSafetyOverrides, // MOVED from optimizer
 }
+```
 
+**Strategy is NOT on the model.** Model authors declare *what* (unique_key, partition_column) and backends decide *how* (which strategy to use). The backend trait gains a `default_strategy()` method (see Phase 2a) that picks the best strategy given the model's config and the backend's capabilities — e.g., if `unique_key` is present, a backend that supports MERGE will use it; one that doesn't will fall back to DELETE+INSERT.
+
+**Future layering** (not in this plan): project-level per-backend strategy defaults, so a team can say "all DuckDB models use DELETE+INSERT, all Databricks models use MERGE" without touching individual models. Model authors are not necessarily data engineers — strategy is an infrastructure concern.
+
+```rust
 pub enum IncrementalStrategy {
-    DeleteInsert,  // default — current behavior
+    DeleteInsert,  // DELETE matching partitions + INSERT
     Merge,         // UPSERT via unique_key
     Append,        // insert-only, no dedup
     InsertOverwrite, // replace entire partitions
@@ -140,7 +145,7 @@ Move `IncrementalSafetyOverrides` from `smelt-optimizer/src/types.rs` to `smelt-
 **Data latency** is a property of the table that produces the data, not the model that reads it:
 
 ```yaml
-# sources.yml — latency declared per column on the producing table
+# sources.yml — latency declared per column on the producing table, using SQL interval syntax
 sources:
   - name: raw
     tables:
@@ -148,19 +153,42 @@ sources:
         columns:
           - name: event_time
             type: TIMESTAMP
-            data_latency: { count: 3, unit: days }
+            data_latency: "3 days"
           - name: ingestion_time
             type: TIMESTAMP
-            data_latency: { count: 0, unit: hours }
+            data_latency: "0 hours"
 
 # models can also declare per-column latency (propagates to downstream)
 ---
 name: events_cleaned
 columns:
   event_time:
-    data_latency: { count: 3, unit: days }
+    data_latency: "3 days"
 ---
 ```
+
+Internally, `data_latency` is parsed from SQL interval syntax into Rust's `chrono::Duration` (analogous to Python's `timedelta`). Only explicit time units are supported (hours, days, weeks, months, years) — no abstract `partitions` unit.
+
+**Unfiltered dependency warnings:** If an incremental model depends on an upstream ref that cannot be automatically time-filtered (no resolvable time column), smelt emits a warning at parse/validation time — including in the LSP. To suppress the warning and acknowledge the full-scan cost, set `allow_unfiltered_refs: true` on the model config.
+
+**Max lookback threshold:** Configurable at three levels with fallback (project → model → per-dependency):
+
+```yaml
+# smelt.yml (project-level default)
+incremental:
+  max_lookback: "30 days"
+
+# model frontmatter (override for this model)
+---
+incremental:
+  max_lookback: "90 days"
+  dependencies:
+    large_source:
+      max_lookback: "7 days"   # per-dependency override
+---
+```
+
+If any model's inferred temporal dependency or data latency exceeds the applicable threshold, smelt errors with an explanation and options (add a temporal bound to the query, raise the threshold, or use full refresh).
 
 When building the execution plan for a downstream model, smelt traces the model's `event_time_column` to the upstream source column and resolves its `data_latency`. Different columns on the same table can have different latencies — a model filtering on `event_time` gets 3-day buffer while one filtering on `ingestion_time` gets none.
 
@@ -194,7 +222,7 @@ Single code path: build `ModelExecution` from either optimizer output or config,
 
 #### 1d. Granularity improvements
 
-Current granularities are good (Hour, Day, Week{week_start}, Month). Add:
+Current granularities are good (Hour, Day, Week{week_start}, Month). Add built-in Quarter and Year:
 
 ```rust
 pub enum Granularity {
@@ -204,8 +232,11 @@ pub enum Granularity {
     Month,
     Quarter,   // NEW — useful for fiscal reporting
     Year,      // NEW — rare but needed for annual aggregations
+    Custom(Box<dyn GranularityPlugin>),  // Extension point
 }
 ```
+
+**Custom granularities** (future): Users can define custom granularities via a Python or Rust plugin API (e.g., fiscal quarters with offset, 4-4-5 retail calendar). The plugin would implement a trait providing `truncate(timestamp) -> period_start`, `next(period_start) -> next_period_start`, and `label(period_start) -> String`. Not in scope for this plan — the `Custom` variant is a placeholder showing where the extension point lives.
 
 Update `generate_partition_values()` for Quarter and Year.
 
@@ -220,6 +251,11 @@ Update `generate_partition_values()` for Quarter and Year.
 Add to `smelt-backend/src/lib.rs`:
 
 ```rust
+/// Backend chooses the best strategy given the model's config and its own capabilities.
+/// If unique_key is present and the backend supports MERGE, it uses MERGE.
+/// Otherwise falls back to DELETE+INSERT (or other backend-preferred strategy).
+fn resolve_strategy(&self, config: &IncrementalConfig) -> IncrementalStrategy;
+
 async fn merge_into(
     &self, schema: &str, table: &str,
     source_sql: &str, unique_key: &[String],
@@ -231,7 +267,9 @@ async fn insert_overwrite(
 ) -> Result<(), BackendError>;
 ```
 
-Update `execute_model_incremental()` default impl to dispatch on strategy.
+The `resolve_strategy()` method is how strategy selection moves from model config to backend. Each backend implements its own logic — e.g., DuckDB defaults to DELETE+INSERT (no native MERGE), Databricks defaults to MERGE for Delta tables when `unique_key` is present.
+
+Update `execute_model_incremental()` default impl to dispatch on the resolved strategy.
 
 #### 2b. DuckDB implementations
 
@@ -327,7 +365,7 @@ Data latency is declared on the table that *produces* the data — sources or mo
 - `event_time` — when the event actually happened (could be days earlier for mobile offline sync, batch uploads, etc.)
 
 ```yaml
-# sources.yml — latency declared per column
+# sources.yml — latency declared per column using SQL interval syntax
 sources:
   - name: raw
     tables:
@@ -335,24 +373,24 @@ sources:
         columns:
           - name: event_time
             type: TIMESTAMP
-            data_latency: { count: 3, unit: days }   # mobile events arrive up to 3 days late
+            data_latency: "3 days"       # mobile events arrive up to 3 days late
           - name: ingestion_time
             type: TIMESTAMP
-            data_latency: { count: 0, unit: hours }   # set on warehouse arrival
+            data_latency: "0 hours"      # set on warehouse arrival
           - name: amount
             type: DECIMAL
       - name: clicks
         columns:
           - name: click_time
             type: TIMESTAMP
-            data_latency: { count: 1, unit: hours }   # near-real-time stream
+            data_latency: "1 hour"       # near-real-time stream
 
 # model frontmatter — latency on output columns propagates downstream
 ---
 name: events_cleaned
 columns:
   event_time:
-    data_latency: { count: 3, unit: days }   # inherited from source, or explicitly declared
+    data_latency: "3 days"   # inherited from source, or explicitly declared
 ---
 ```
 
@@ -364,8 +402,6 @@ When smelt builds the execution plan for a downstream incremental model, it reso
 4. If multiple upstream columns contribute, take the **max**
 
 This means a model filtering on `event_time` (3-day latency) gets a 3-day buffer, while a different model filtering on `ingestion_time` (0 latency) on the **same source table** gets no buffer at all.
-
-`unit: partitions` means "N granularity periods of the consuming model," so a weekly model reading a source with `count: 1, unit: partitions` gets 1 week of latency buffer.
 
 **Files:** `crates/smelt-core/src/config.rs` (LatencyWindow on column definitions), `crates/smelt-db/src/lib.rs` (latency resolution via column lineage)
 
@@ -442,10 +478,11 @@ smelt should do this more intelligently than dbt:
 - dbt requires explicit `event_time` config on every upstream model (silent full-scan if missed)
 - smelt can infer which upstream column to filter by tracing the `event_time_column` through the query AST to its source columns
 
-This is a future optimization (not needed for Phase 3 MVP) but worth designing for:
-- Currently `inject_time_filter()` adds one WHERE clause to the main query
-- Future: push filters into individual `smelt.ref()` calls when the upstream model has a known time column
-- This becomes especially important for joins across large tables
+**This is in the Phase 3 MVP.** The transformer should push time filters into individual `smelt.ref()` calls when the upstream model has a resolvable time column — not just add one WHERE clause to the main query. This is especially important for joins across large tables.
+
+Implementation:
+- `inject_time_filter()` gains a per-ref mode: for each `smelt.ref('X')` in the query, if X has a known time column, wrap the ref as a subquery with a WHERE filter (or push the filter into the outer WHERE with proper table qualification)
+- If an upstream ref has no resolvable time column, emit a warning at parse/validation time (including in LSP) — see Phase 1a for the `allow_unfiltered_refs` config acknowledgment and `max_lookback` thresholds
 
 **Files:**
 - NEW `crates/smelt-optimizer/src/analysis/temporal.rs` — AST analysis
@@ -493,24 +530,47 @@ pub enum BatchSafety {
 pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety
 ```
 
-#### Backfill Command
+#### Model Selection Syntax
 
+Use dbt-style selector syntax for specifying which models to include:
+
+| Selector | Meaning |
+|----------|---------|
+| `model_name` | Just this model |
+| `+model_name` | This model + all upstream dependencies |
+| `model_name+` | This model + all downstream dependents |
+| `+model_name+` | Both directions |
+
+#### Three Execution Modes
+
+**1. Run** (normal daily operation):
 ```bash
-# Backfill a date range — smelt picks optimal batch size
-smelt backfill daily_revenue --start 2025-01-01 --end 2026-01-01
-
-# Override batch size (days)
-smelt backfill daily_revenue --start 2025-01-01 --end 2026-01-01 --batch-size 30
-
-# Force per-partition (override batch safety analysis)
-smelt backfill daily_revenue --start 2025-01-01 --end 2026-01-01 --per-partition
-
-# Cascade to downstream models
-smelt backfill daily_revenue --start 2025-01-01 --end 2026-01-01 --cascade
-
-# Dry run — show what would execute
-smelt backfill daily_revenue --start 2025-01-01 --end 2026-01-01 --dry-run
+smelt run --event-time-start 2026-03-21 --event-time-end 2026-03-22
 ```
+Process new partitions for all (or selected) models. Propagate changed partitions to downstream models.
+
+**2. Backbuild** (target a model, rebuild upstreams):
+```bash
+# Backbuild: rebuild daily_revenue and all its upstreams for the needed periods
+smelt backbuild +daily_revenue --start 2025-01-01 --end 2026-01-01
+
+# Dry run — show what would execute, including expanded ranges for each model
+smelt backbuild +daily_revenue --start 2025-01-01 --end 2026-01-01 --dry-run
+```
+Walks the DAG backwards from the target model. For each upstream, computes the time range needed to correctly produce the target's requested range — expanding based on temporal dependencies and data latency. If model A has a 7-day lookback from model B, and B has a 3-day lookback from source C, then backbuilding A for `[March 1, March 31]` triggers B for `[Feb 22, March 31]` and C for `[Feb 19, March 31]`. Lookahead expands the end date similarly.
+
+**3. Range run** (same range, selected models):
+```bash
+# Run all models in the DAG for the same range
+smelt run +daily_revenue+ --start 2025-01-01 --end 2026-01-01
+
+# Override batch size
+smelt run daily_revenue --start 2025-01-01 --end 2026-01-01 --batch-size 30
+
+# Force per-partition
+smelt run daily_revenue --start 2025-01-01 --end 2026-01-01 --per-partition
+```
+Runs all selected models for the explicitly specified range. No automatic range expansion — useful when you know exactly what you want.
 
 #### Default behavior
 
@@ -528,13 +588,17 @@ For weekly models, a 1-year backfill = ~52 chunks at worst (per-partition), or 1
 
 For monthly models, 1-year backfill = 12 chunks at worst, or 1 query if batch-safe.
 
-#### Downstream cascade
+#### DAG-Aware Range Computation
 
-When `--cascade` is specified:
-1. Traverse dependency graph (`smelt-cli/src/graph.rs`) to find downstream models
-2. For each downstream incremental model: backfill the same time range
-3. For non-incremental downstream models: trigger full refresh
-4. Execution follows topological order
+When selectors include multiple models (`+model+`, `+model`, `model+`), smelt computes the appropriate time range for each model in the DAG:
+
+**Downstream (`model+`):** Each downstream model's range is expanded based on its own temporal dependencies. If the target range is `[March 1, March 31]` and a downstream model has a 7-day lookback, that model runs for `[Feb 22, March 31]` (filter range) but only writes `[March 1, March 31]` (partition range). If it also has 1-day lookahead, the filter range extends to `[Feb 22, April 1]`.
+
+**Upstream (`+model`):** See Backbuild mode above — ranges expand backwards through the DAG.
+
+**Both (`+model+`):** Combine both — upstream ranges expand to feed the target, downstream ranges expand to correctly consume the target's output.
+
+Execution always follows topological order. Non-incremental models in the selection get full refresh. `--dry-run` shows the computed range for every model before execution.
 
 #### Files
 
@@ -544,9 +608,11 @@ When `--cascade` is specified:
 
 ---
 
-### Phase 5: Operational Metadata & Run History
+### Phase 5: Operational Metadata & Run History *(Optional)*
 
 **Goal:** Track what smelt has done (operational metadata, NOT computational state).
+
+**This phase is optional** — both in plan priority (may not be built) and at runtime (opt-in if built). Users who don't want to manage state can always specify ranges manually; `--full-refresh` is the escape hatch.
 
 Per DESIGN.md: smelt tracks run history, schema lineage, DAG deps, deployed versions. Backends own watermarks, offsets, partition data.
 
@@ -786,7 +852,7 @@ Why weaker fit:
 
 #### Standalone mode (current)
 
-The CLI with `--auto` (from Phase 5) serves as a lightweight standalone scheduler for dev/small deployments.
+The CLI with `--auto` (from Phase 5, if built) serves as a lightweight standalone scheduler for dev/small deployments.
 
 **Files:** `crates/smelt-cli/src/main.rs` (Explain subcommand), NEW `crates/smelt-cli/src/explain.rs`
 
@@ -797,13 +863,13 @@ The CLI with `--auto` (from Phase 5) serves as a lightweight standalone schedule
 ```
 Phase 1: Config Unification & Cleanup
   |
-Phase 2: Strategy Expansion          Phase 3: Lookback
+Phase 2: Strategy Expansion          Phase 3: Temporal Dependencies & Latency
   |                                    |
-Phase 4: Backfill Intelligence  <--- (needs strategies + lookback)
+Phase 4: Backfill Intelligence  <--- (needs strategies + temporal analysis)
   |
-Phase 5: Operational Metadata   (can start after Phase 1)
+Phase 5: Operational Metadata   (optional — can start after Phase 1)
   |
-Phase 6: Schema Evolution       (needs state infrastructure from Phase 5)
+Phase 6: Schema Evolution       (needs state infrastructure from Phase 5, also optional if Phase 5 skipped)
 Phase 7: Testing                (ongoing, each phase adds tests)
 Phase 8: Orchestrator Integration (needs explain command, can start after Phase 4)
 ```
@@ -811,9 +877,9 @@ Phase 8: Orchestrator Integration (needs explain command, can start after Phase 
 Each phase is independently valuable:
 - **Phase 1 alone**: Cleaner codebase, new config fields available, doc fixes
 - **+Phase 2**: Multiple strategies for different use cases
-- **+Phase 3**: Late-arriving data handled automatically
-- **+Phase 4**: Smart backfill — the biggest user-facing improvement
-- **+Phase 5**: Self-managing incremental with gap detection
+- **+Phase 3**: Late-arriving data handled automatically, upstream ref filtering
+- **+Phase 4**: Smart backfill with backbuild, selector syntax — the biggest user-facing improvement
+- **+Phase 5** *(optional)*: Self-managing incremental with gap detection
 - **+Phase 6**: Schema changes without downtime
 - **+Phase 8**: Production orchestration
 
@@ -838,11 +904,11 @@ Each phase is independently valuable:
 1. **What are incremental models?** — Process only new/changed data instead of full table rebuilds
 2. **Quick start** — Add `incremental: { enabled: true, event_time_column, partition_column }` to frontmatter
 3. **How it works** — smelt injects WHERE filter + uses DELETE+INSERT (or other strategy). Diagram showing: original SQL -> filter injection -> partition delete -> insert
-4. **Choosing a strategy** — Decision tree:
-   - Immutable time-series events -> `delete_insert` (default)
-   - Dimension tables with updates -> `merge` (requires `unique_key`)
-   - Append-only logs -> `append`
-   - Large partitioned tables -> `insert_overwrite`
+4. **How strategies work** — The backend picks the best strategy based on your model config and its capabilities. You influence strategy by declaring `unique_key` (enables merge/upsert) or not (partition-based strategies). Decision tree:
+   - Immutable time-series events -> backend uses `delete_insert` (typical default)
+   - Dimension tables with updates -> declare `unique_key`, backend uses `merge` if supported
+   - Append-only logs -> backend uses `append`
+   - Large partitioned tables -> backend uses `insert_overwrite` if native support
 5. **Configuration reference** — Full YAML spec with all fields, defaults, examples
 6. **Safety checks** — What smelt validates (window functions, HAVING, etc.) and how to override
 7. **What you DON'T write** — No `is_incremental()`, no conditional logic. smelt handles it.
@@ -856,7 +922,7 @@ Each phase is independently valuable:
    - Financial reporting -> Day or Week (fiscal week start)
    - Monthly KPIs -> Month
 3. **Weekly models** — Configuring `week_start: monday` (or any day). Partition values align to week boundaries.
-4. **Interaction with lookback** — `unit: partitions` means "N periods at your granularity"
+4. **Interaction with data latency** — Latency uses explicit time units (SQL interval syntax), so a weekly model with `"3 days"` latency gets exactly 3 days of buffer
 
 ### 6.3 Temporal Dependencies & Data Latency Guide
 
@@ -871,19 +937,20 @@ Each phase is independently valuable:
 8. **Unbounded dependencies** — What happens when smelt can’t determine a bound (correlated subqueries, etc.) and your options.
 9. **Latency propagation** — If source A’s `event_time` has 3-day latency and model B reads A, model B’s output inherits that. Downstream models of B see the cumulative latency.
 
-### 6.4 Backfill Guide
+### 6.4 Backfill & Backbuild Guide
 
 **Sections:**
 1. **When to backfill** — New model, bug fix, schema change, data correction
-2. **Basic backfill** — `smelt backfill model --start X --end Y`
-3. **How smelt picks batch size** — Batch safety analysis: if your model's aggregations are partition-local, smelt runs one query for the entire range. Otherwise it chunks intelligently.
-4. **Overriding batch size** — `--batch-size 30` for 30-day chunks, `--per-partition` for one-per-period
-5. **Downstream cascade** — `--cascade` reprocesses all downstream models
-6. **Backfill vs full refresh** — Backfill reprocesses a range incrementally (preserves data outside the range). Full refresh drops and recreates.
-7. **Examples:**
-   - Backfill a batch-safe daily model for 1 year: 1 query
-   - Backfill a weekly model with window functions: ~52 queries (per-partition)
-   - Backfill with cascade to 3 downstream models
+2. **Three modes** — Run (daily operation), Backbuild (target model + rebuild upstreams), Range run (explicit range for selected models)
+3. **Selector syntax** — `+model`, `model+`, `+model+` for upstream/downstream/both
+4. **Backbuild** — `smelt backbuild +model --start X --end Y` — smelt walks the DAG backwards, expanding ranges based on each model's temporal dependencies
+5. **How smelt picks batch size** — Batch safety analysis: if your model's aggregations are partition-local, smelt runs one query for the entire range. Otherwise it chunks intelligently.
+6. **Overriding batch size** — `--batch-size 30` for 30-day chunks, `--per-partition` for one-per-period
+7. **Backfill vs full refresh** — Backfill reprocesses a range incrementally (preserves data outside the range). Full refresh drops and recreates.
+8. **Examples:**
+   - Backbuild a model for 1 year: smelt computes ranges for each upstream
+   - Batch-safe daily model backfill: 1 query for entire range
+   - `model+` with downstream temporal dependencies: ranges expand per-model
 
 ### 6.5 Schema Evolution Guide
 
@@ -913,7 +980,7 @@ Each phase is independently valuable:
    | `{{ config(materialized='incremental') }}` | `incremental: { enabled: true }` |
    | `{% if is_incremental() %}` | Not needed — automatic |
    | `unique_key` | `incremental.unique_key` |
-   | `strategy: merge` | `incremental.strategy: merge` |
+   | `strategy: merge` | Backend chooses strategy based on `unique_key` + capabilities |
    | `on_schema_change` | Automatic schema evolution |
    | `dbt run --full-refresh` | `smelt run --full-refresh` |
    | `dbt run` (incremental) | `smelt run --event-time-start X --end Y` or `smelt run --auto` |
