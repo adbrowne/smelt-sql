@@ -8,9 +8,9 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::{
     compute_backbuild_plans, compute_batches_for_model, compute_incremental_windows,
     discover_python_models, executor, find_project_root, format_plan_summary, init_db,
-    inject_time_filter, parse_selector, resolve_refs_in_sql, seed, BackendType, BackfillBatch,
-    BackfillOptions, Config, DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler,
-    TimeRange,
+    inject_time_filter, migration, parse_selector, resolve_refs_in_sql, seed, BackendType,
+    BackfillBatch, BackfillOptions, Config, DependencyGraph, ModelDiscovery, SourcesConfig,
+    SqlCompiler, TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -114,6 +114,10 @@ struct RunArgs {
     /// Auto mode: process only uncovered intervals since last run
     #[arg(long)]
     auto: bool,
+
+    /// Allow column removal during schema evolution (otherwise blocked for safety)
+    #[arg(long = "allow-column-removal")]
+    allow_column_removal: bool,
 }
 
 #[derive(Parser)]
@@ -600,6 +604,15 @@ async fn run(args: RunArgs) -> Result<()> {
     // 10. Compile and execute each model
     let compiler = SqlCompiler::new(config.clone(), target_config);
 
+    // Initialize type inference DB for schema evolution
+    let all_models: Vec<_> = execution_order
+        .iter()
+        .filter_map(|name| graph.get_model(name).ok())
+        .cloned()
+        .collect();
+    let type_db = init_db(&project_dir, &all_models);
+    let file_store = FileStore::new(&project_dir);
+
     println!("\n{}", "=".repeat(60));
     println!("Executing models...");
     println!("{}", "=".repeat(60));
@@ -663,6 +676,68 @@ async fn run(args: RunArgs) -> Result<()> {
             ModelExecution::CubeSplit { steps }
         } else {
             ModelExecution::FullRefresh
+        };
+
+        // Schema evolution check for incremental table models
+        let mut force_full_refresh = false;
+        if let ModelExecution::Incremental { .. } = &execution {
+            if let Ok(true) = backend
+                .table_exists(&target_config.schema, model_name)
+                .await
+            {
+                let inferred_columns = infer_deployed_columns(&type_db, model);
+                if !inferred_columns.is_empty() {
+                    match migration::check_and_migrate(
+                        backend.as_ref(),
+                        &file_store,
+                        model_name,
+                        &model.content,
+                        &target_config.schema,
+                        &inferred_columns,
+                        args.allow_column_removal,
+                        args.dry_run,
+                    )
+                    .await
+                    {
+                        Ok(migration::SchemaEvolutionResult::FirstDeployment) => {}
+                        Ok(migration::SchemaEvolutionResult::NoChange) => {}
+                        Ok(migration::SchemaEvolutionResult::Migrated { statements }) => {
+                            println!(
+                                "  Schema evolved ({} ALTER statement(s)):",
+                                statements.len()
+                            );
+                            for stmt in &statements {
+                                println!("    {}", stmt);
+                            }
+                        }
+                        Ok(migration::SchemaEvolutionResult::FullRefreshRequired { reason }) => {
+                            println!("  Schema change requires full refresh: {}", reason);
+                            force_full_refresh = true;
+                        }
+                        Ok(migration::SchemaEvolutionResult::ColumnRemovalBlocked { columns }) => {
+                            return Err(anyhow::anyhow!(
+                                "Schema evolution for '{}' would remove columns: {}. \
+                                 Use --allow-column-removal to permit this.",
+                                model_name,
+                                columns.join(", ")
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  Warning: Schema evolution check failed: {}. Continuing with incremental.",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // If schema evolution requires full refresh, override the execution mode
+        let execution = if force_full_refresh {
+            ModelExecution::FullRefresh
+        } else {
+            execution
         };
 
         let result = match &execution {
@@ -943,11 +1018,31 @@ async fn run(args: RunArgs) -> Result<()> {
             println!();
         }
 
+        // Save deployed schema after successful execution (best-effort)
+        if !args.dry_run {
+            let inferred_columns = infer_deployed_columns(&type_db, model);
+            if !inferred_columns.is_empty() {
+                let existing_version = file_store
+                    .load_schema(model_name)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.version);
+                if let Err(e) = migration::save_deployed_schema(
+                    &file_store,
+                    model_name,
+                    &model.content,
+                    &inferred_columns,
+                    existing_version,
+                ) {
+                    eprintln!("  Warning: Failed to save deployed schema: {}", e);
+                }
+            }
+        }
+
         results.push((result, execution));
     }
 
     // 9. Save run manifest and update intervals
-    let file_store = FileStore::new(&project_dir);
     let run_id = generate_run_id();
     let mut manifest = RunManifest {
         run_id: run_id.clone(),
@@ -1346,6 +1441,33 @@ fn strategy_label(s: &IncrementalStrategy) -> &'static str {
     }
 }
 
+/// Infer deployed columns from the Salsa type inference database.
+fn infer_deployed_columns(
+    db: &smelt_db::Database,
+    model: &smelt_cli::ModelFile,
+) -> Vec<smelt_state::schema_tracking::DeployedColumn> {
+    use smelt_db::TypeChecking;
+
+    let schema = db.typed_model_schema(model.path.clone());
+
+    schema
+        .columns
+        .iter()
+        .filter(|c| c.name != "*")
+        .map(|c| {
+            let (data_type, nullable) = match &c.data_type {
+                Some(tc) => (tc.data_type.to_sql(), tc.nullable),
+                None => ("UNKNOWN".to_string(), true),
+            };
+            smelt_state::schema_tracking::DeployedColumn {
+                name: c.name.clone(),
+                data_type,
+                nullable,
+            }
+        })
+        .collect()
+}
+
 /// Generate partition values from a time range based on granularity.
 fn generate_partition_values(
     start: &str,
@@ -1633,6 +1755,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         batch_size: None,
         per_partition: false,
         auto: false,
+        allow_column_removal: false,
     };
     run(run_args).await
 }

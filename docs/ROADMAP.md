@@ -1329,7 +1329,15 @@ Smelt SQL is a **logical SQL superset** built on a PostgreSQL-compatible base, c
 
 **Basic incremental materialization completed in Phase 9** (December 27, 2024): DELETE+INSERT strategy, partition management, DuckDB backend support, CLI with `--event-time-start`/`--event-time-end`. Further enhanced with optimizer integration (March 14, 2026): safety checks, YAML frontmatter detection, cube split composition.
 
-**Remaining work** (advanced incremental): strategy expansion (MERGE, APPEND, INSERT_OVERWRITE), temporal dependency inference, data latency, backfill intelligence, schema evolution. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) for the comprehensive plan.
+**Remaining work** (advanced incremental): testing infrastructure. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) for the comprehensive plan.
+
+**Completed sub-phases** (March 22, 2026):
+- ✅ Phase 1: Unified IncrementalConfig, Quarter/Year granularity
+- ✅ Phase 2: Strategy expansion (MERGE, APPEND, INSERT_OVERWRITE)
+- ✅ Phase 3: Temporal dependency inference & data latency
+- ✅ Phase 4: Backfill intelligence (smart batching, backbuild, DAG-aware ranges)
+- ✅ Phase 5: Operational metadata & run history (smelt-state crate, interval tracking, auto mode)
+- ✅ Phase 6: Schema evolution (deployed schema tracking, change detection, ALTER TABLE migration, safety checks)
 
 **Design**: See [DESIGN.md](DESIGN.md#incremental-table-builds) for full specification. Note: `lookback_days` and `-- @materialize` annotation syntax described there are superseded by the current approach (YAML frontmatter config, AST-inferred temporal dependencies).
 

@@ -1,4 +1,5 @@
 use crate::intervals::IntervalStore;
+use crate::schema_tracking::DeployedSchema;
 use crate::RunManifest;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,10 @@ impl FileStore {
 
     fn intervals_path(&self) -> PathBuf {
         self.state_dir.join("intervals.json")
+    }
+
+    fn schemas_dir(&self) -> PathBuf {
+        self.state_dir.join("schemas")
     }
 
     // --- Run Manifests ---
@@ -119,6 +124,34 @@ impl FileStore {
         Ok(())
     }
 
+    // --- Schema Tracking ---
+
+    /// Save a deployed schema for a model.
+    pub fn save_schema(&self, schema: &DeployedSchema) -> Result<()> {
+        let dir = self.schemas_dir();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create schemas directory: {:?}", dir))?;
+        let path = dir.join(format!("{}.json", schema.model));
+        let json = serde_json::to_string_pretty(schema)
+            .with_context(|| "Failed to serialize deployed schema")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("Failed to write schema: {:?}", path))?;
+        Ok(())
+    }
+
+    /// Load the deployed schema for a model. Returns None if not found.
+    pub fn load_schema(&self, model_name: &str) -> Result<Option<DeployedSchema>> {
+        let path = self.schemas_dir().join(format!("{}.json", model_name));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read schema: {:?}", path))?;
+        let schema = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse schema: {:?}", path))?;
+        Ok(Some(schema))
+    }
+
     /// Check if state directory exists (indicates state tracking has been initialized).
     pub fn exists(&self) -> bool {
         self.state_dir.exists()
@@ -128,6 +161,7 @@ impl FileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema_tracking::DeployedColumn;
     use crate::{ModelRunRecord, TimeRangeRecord};
     use chrono::Utc;
     use std::collections::HashMap;
@@ -220,5 +254,48 @@ mod tests {
 
         let intervals = store.load_intervals().unwrap();
         assert!(intervals.models.is_empty());
+    }
+
+    #[test]
+    fn test_schema_save_and_load() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        let schema = DeployedSchema {
+            model: "daily_revenue".to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "sha256:abc".to_string(),
+            columns: vec![
+                DeployedColumn {
+                    name: "order_date".to_string(),
+                    data_type: "DATE".to_string(),
+                    nullable: false,
+                },
+                DeployedColumn {
+                    name: "total".to_string(),
+                    data_type: "DECIMAL(10,2)".to_string(),
+                    nullable: true,
+                },
+            ],
+        };
+
+        store.save_schema(&schema).unwrap();
+
+        let loaded = store.load_schema("daily_revenue").unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.model, "daily_revenue");
+        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.columns.len(), 2);
+    }
+
+    #[test]
+    fn test_schema_not_found() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        let loaded = store.load_schema("nonexistent").unwrap();
+        assert!(loaded.is_none());
     }
 }

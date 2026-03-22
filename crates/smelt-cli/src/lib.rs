@@ -6,6 +6,7 @@ pub mod errors;
 pub mod executor;
 pub mod graph;
 pub mod metadata;
+pub mod migration;
 pub mod python;
 pub mod seed;
 pub mod selector;
