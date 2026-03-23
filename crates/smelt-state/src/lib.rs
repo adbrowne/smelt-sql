@@ -46,10 +46,12 @@ pub fn generate_run_id() -> String {
 }
 
 fn rand_suffix() -> u32 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let s = RandomState::new();
-    let mut hasher = s.build_hasher();
-    hasher.write_u8(0);
-    (hasher.finish() & 0xFFFFFF) as u32
+    use std::time::SystemTime;
+    // Use sub-microsecond time bits + process id for sufficient uniqueness
+    // in non-concurrent use (only one smelt process runs at a time).
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    (nanos ^ std::process::id()) & 0xFFFFFF
 }

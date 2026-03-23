@@ -508,7 +508,16 @@ async fn run(args: RunArgs) -> Result<()> {
     // Handle --auto mode: compute time range from interval store
     let time_range = if args.auto && time_range.is_none() {
         let file_store = FileStore::new(&project_dir);
-        let interval_store = file_store.load_intervals().unwrap_or_default();
+        let interval_store = match file_store.load_intervals() {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load interval store: {}. Starting with empty history.",
+                    e
+                );
+                smelt_state::intervals::IntervalStore::default()
+            }
+        };
         let today = Utc::now().format("%Y-%m-%d").to_string();
 
         // Find the latest covered date across all incremental models
@@ -1858,7 +1867,7 @@ async fn history(args: HistoryArgs) -> Result<()> {
 
     let file_store = FileStore::new(&project_dir);
     let manifests = file_store
-        .load_runs()
+        .load_runs(Some(args.limit))
         .with_context(|| "Failed to load run history")?;
 
     if manifests.is_empty() {

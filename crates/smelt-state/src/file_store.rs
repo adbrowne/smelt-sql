@@ -53,34 +53,47 @@ impl FileStore {
         Ok(())
     }
 
-    /// Load all run manifests, sorted by run_id (newest first).
-    pub fn load_runs(&self) -> Result<Vec<RunManifest>> {
+    /// Load run manifests, sorted by run_id (newest first).
+    ///
+    /// If `limit` is `Some(n)`, only the most recent `n` manifests are returned.
+    /// Files are sorted by name (descending) before loading, so with a limit
+    /// only the newest files are read from disk.
+    pub fn load_runs(&self, limit: Option<usize>) -> Result<Vec<RunManifest>> {
         let runs_dir = self.runs_dir();
         if !runs_dir.exists() {
             return Ok(Vec::new());
         }
 
-        let mut manifests = Vec::new();
-        for entry in std::fs::read_dir(&runs_dir)
+        let mut paths: Vec<_> = std::fs::read_dir(&runs_dir)
             .with_context(|| format!("Failed to read runs directory: {:?}", runs_dir))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => match serde_json::from_str::<RunManifest>(&content) {
-                        Ok(manifest) => manifests.push(manifest),
-                        Err(e) => {
-                            eprintln!("Warning: Failed to parse run manifest {:?}: {}", path, e);
-                        }
-                    },
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+
+        // Sort descending by filename (run_id encodes timestamp, so newest first)
+        paths.sort_by(|a, b| b.cmp(a));
+
+        if let Some(n) = limit {
+            paths.truncate(n);
+        }
+
+        let mut manifests = Vec::new();
+        for path in &paths {
+            match std::fs::read_to_string(path) {
+                Ok(content) => match serde_json::from_str::<RunManifest>(&content) {
+                    Ok(manifest) => manifests.push(manifest),
                     Err(e) => {
-                        eprintln!("Warning: Failed to read {:?}: {}", path, e);
+                        eprintln!("Warning: Failed to parse run manifest {:?}: {}", path, e);
                     }
+                },
+                Err(e) => {
+                    eprintln!("Warning: Failed to read {:?}: {}", path, e);
                 }
             }
         }
 
+        // Already sorted by filename, but re-sort by run_id for correctness
         manifests.sort_by(|a, b| b.run_id.cmp(&a.run_id));
         Ok(manifests)
     }
@@ -219,7 +232,7 @@ mod tests {
         store.save_run(&m1).unwrap();
         store.save_run(&m2).unwrap();
 
-        let runs = store.load_runs().unwrap();
+        let runs = store.load_runs(None).unwrap();
         assert_eq!(runs.len(), 2);
         // Newest first
         assert_eq!(runs[0].run_id, "20260322-110000-bbb");
@@ -249,7 +262,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = FileStore::new(dir.path());
 
-        let runs = store.load_runs().unwrap();
+        let runs = store.load_runs(None).unwrap();
         assert!(runs.is_empty());
 
         let intervals = store.load_intervals().unwrap();

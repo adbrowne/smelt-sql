@@ -171,9 +171,24 @@ pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) ->
     SchemaDiff { changes }
 }
 
-/// Normalize type strings for comparison (case-insensitive, strip aliases).
+/// Normalize type strings for comparison (case-insensitive, canonicalize aliases).
+///
+/// Maps common SQL type aliases to their canonical forms so that
+/// e.g. `INT` vs `INTEGER` or `BOOL` vs `BOOLEAN` don't trigger spurious
+/// schema change detections.
 fn normalize_type(type_str: &str) -> String {
-    type_str.to_uppercase().trim().to_string()
+    let upper = type_str.to_uppercase().trim().to_string();
+    match upper.as_str() {
+        "INT" | "INT4" | "SIGNED" => "INTEGER".to_string(),
+        "INT2" | "SHORT" => "SMALLINT".to_string(),
+        "INT8" | "LONG" | "INT64" => "BIGINT".to_string(),
+        "BOOL" => "BOOLEAN".to_string(),
+        "FLOAT4" | "REAL" => "FLOAT".to_string(),
+        "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => "DOUBLE".to_string(),
+        "STRING" => "VARCHAR".to_string(),
+        "TEXT" => "VARCHAR".to_string(),
+        _ => upper,
+    }
 }
 
 /// Check if a type change is a safe widening (no data loss).
@@ -380,6 +395,42 @@ mod tests {
             data_type: data_type.to_string(),
             nullable,
         }
+    }
+
+    #[test]
+    fn test_type_alias_normalization() {
+        // INT vs INTEGER should not be detected as a change
+        let deployed = vec![col("id", "INT", false)];
+        let inferred = vec![col("id", "INTEGER", false)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(diff.is_empty(), "INT vs INTEGER should not trigger a change");
+
+        // BOOL vs BOOLEAN
+        let deployed = vec![col("active", "BOOL", true)];
+        let inferred = vec![col("active", "BOOLEAN", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "BOOL vs BOOLEAN should not trigger a change"
+        );
+
+        // INT8 vs BIGINT
+        let deployed = vec![col("big_id", "INT8", false)];
+        let inferred = vec![col("big_id", "BIGINT", false)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "INT8 vs BIGINT should not trigger a change"
+        );
+
+        // TEXT vs VARCHAR (both normalize to VARCHAR)
+        let deployed = vec![col("name", "TEXT", true)];
+        let inferred = vec![col("name", "VARCHAR", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "TEXT vs VARCHAR should not trigger a change"
+        );
     }
 
     #[test]

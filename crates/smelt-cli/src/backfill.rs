@@ -72,10 +72,12 @@ pub fn compute_range_run_plans(
             .cloned()
             .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
+        let refs = graph.get_upstream(model_name);
         let plan = match inc_config {
             Some(ref inc) => compute_model_backfill_plan(
                 model_name,
                 &model.content,
+                refs,
                 inc,
                 sources,
                 model.metadata.as_ref().map(|b| b.as_ref()),
@@ -182,10 +184,12 @@ pub fn compute_backbuild_plans(
             .cloned()
             .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
 
+        let refs = graph.get_upstream(model_name);
         let plan = match inc_config {
             Some(ref inc) => compute_model_backfill_plan(
                 model_name,
                 &model.content,
+                refs,
                 inc,
                 sources,
                 model.metadata.as_ref().map(|b| b.as_ref()),
@@ -209,9 +213,11 @@ pub fn compute_backbuild_plans(
 }
 
 /// Compute the backfill plan for a single model.
+#[allow(clippy::too_many_arguments)]
 fn compute_model_backfill_plan(
     model_name: &str,
     sql: &str,
+    refs: Vec<String>,
     inc_config: &IncrementalConfig,
     sources: Option<&smelt_core::SourcesConfig>,
     model_metadata: Option<&crate::metadata::ModelMetadata>,
@@ -222,7 +228,7 @@ fn compute_model_backfill_plan(
     let model_info = ModelInfo {
         name: model_name.to_string(),
         sql: sql.to_string(),
-        refs: vec![],
+        refs,
         incremental_config: Some(inc_config.clone()),
     };
     let batch_safety = analyze_batch_safety(&model_info);
@@ -377,9 +383,13 @@ fn parse_date(s: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").with_context(|| format!("Invalid date format: {}", s))
 }
 
+/// Returns the batch period size in days for a given granularity.
+///
+/// For sub-day granularities (Hour), returns 1 day as the minimum batch unit
+/// since batching operates at day boundaries.
 fn granularity_days(g: &Granularity) -> u32 {
     match g {
-        Granularity::Hour => 1,
+        Granularity::Hour => 1, // Sub-day: batch at day boundaries
         Granularity::Day => 1,
         Granularity::Week { .. } => 7,
         Granularity::Month => 30,

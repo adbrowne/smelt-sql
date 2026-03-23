@@ -76,13 +76,19 @@ impl TemporalOffset {
             (TemporalOffset::Periods(a), TemporalOffset::Periods(b)) => {
                 TemporalOffset::Periods((*a).max(*b))
             }
-            // When mixing periods and days, we can't compare directly — keep both
-            // and resolve later with granularity info. For now, convert periods
-            // assuming 1 period = 1 day as a conservative estimate.
+            // When mixing periods and days, we can't compare directly since
+            // 1 period could be 1 day, 7 days (weekly), or 30 days (monthly).
+            // Conservatively keep both by returning the one that could be larger.
+            // Since periods expand with granularity (1 period >= 1 day), prefer
+            // Periods when in doubt — it will be correctly resolved to days later
+            // via `to_days(period_days)`.
             (TemporalOffset::Days(d), TemporalOffset::Periods(p))
             | (TemporalOffset::Periods(p), TemporalOffset::Days(d)) => {
-                // Conservative: take the max assuming 1 period = 1 day
-                if d >= p {
+                // We can't know the true comparison without granularity info.
+                // Keep Periods since it scales with granularity and is more likely
+                // to be the larger value. The caller resolves via to_days(period_days).
+                // Only pick Days if it's clearly larger even assuming 1 period = 1 day.
+                if *d > *p {
                     TemporalOffset::Days(*d)
                 } else {
                     TemporalOffset::Periods(*p)
@@ -354,26 +360,41 @@ fn analyze_join_temporal(from_text: &str, dep: &mut TemporalDependency) {
     }
 }
 
-/// Find INTERVAL 'N days/day/weeks/...' pattern in text and return the number of days.
+/// Find all INTERVAL 'N days/day/weeks/...' patterns in text and return the max number of days.
 fn find_interval_in_text(text: &str) -> Option<u32> {
     let upper = text.to_uppercase();
+    let mut max_days: Option<u32> = None;
+    let mut search_from = 0;
 
-    // Pattern: INTERVAL 'N' UNIT  or  INTERVAL 'N unit'
-    let interval_pos = upper.find("INTERVAL")?;
-    let after = &upper[interval_pos + 8..];
+    while let Some(rel_pos) = upper[search_from..].find("INTERVAL") {
+        let interval_pos = search_from + rel_pos;
+        let after = &upper[interval_pos + 8..];
 
-    // Find the quoted value
-    let quote_start = after.find('\'')?;
-    let rest = &after[quote_start + 1..];
-    let quote_end = rest.find('\'')?;
-    let value = &rest[..quote_end];
+        // Find the quoted value
+        if let Some(quote_start) = after.find('\'') {
+            let rest = &after[quote_start + 1..];
+            if let Some(quote_end) = rest.find('\'') {
+                let value = &rest[..quote_end];
 
-    // Parse the value — could be "3" or "3 days"
-    let n: u32 = value.split_whitespace().find_map(|w| w.parse().ok())?;
+                // Parse the value — could be "3" or "3 days"
+                if let Some(n) = value.split_whitespace().find_map(|w| w.parse::<u32>().ok()) {
+                    let combined = format!("{} {}", value, &rest[quote_end + 1..]);
+                    if let Some(days) = extract_interval_days_from_combined(&combined, n) {
+                        max_days = Some(max_days.map_or(days, |prev: u32| prev.max(days)));
+                    }
+                }
 
-    // Determine the unit — check inside quotes first, then after
-    let combined = format!("{} {}", value, &rest[quote_end + 1..]);
-    extract_interval_days_from_combined(&combined, n)
+                // Advance past this INTERVAL occurrence
+                search_from = interval_pos + 8 + quote_start + 1 + quote_end + 1;
+                continue;
+            }
+        }
+
+        // Couldn't parse this one, skip past the keyword
+        search_from = interval_pos + 8;
+    }
+
+    max_days
 }
 
 /// Given a combined interval text and the numeric value, determine days.

@@ -70,11 +70,23 @@ impl ModelIntervals {
         for interval in &self.covered_intervals {
             let is = match NaiveDate::parse_from_str(&interval.start, "%Y-%m-%d") {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(_) => {
+                    eprintln!(
+                        "Warning: malformed interval start date '{}', skipping",
+                        interval.start
+                    );
+                    continue;
+                }
             };
             let ie = match NaiveDate::parse_from_str(&interval.end, "%Y-%m-%d") {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(_) => {
+                    eprintln!(
+                        "Warning: malformed interval end date '{}', skipping",
+                        interval.end
+                    );
+                    continue;
+                }
             };
 
             // Skip intervals entirely before cursor
@@ -130,6 +142,7 @@ impl ModelIntervals {
             return;
         }
 
+        // Lexicographic sort is correct for ISO 8601 date strings (YYYY-MM-DD).
         self.covered_intervals.sort_by(|a, b| a.start.cmp(&b.start));
 
         let mut merged = Vec::with_capacity(self.covered_intervals.len());

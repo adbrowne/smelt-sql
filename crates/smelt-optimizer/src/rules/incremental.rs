@@ -95,6 +95,14 @@ pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety {
         let min_chunk = context_days * 3;
         let max_chunk_days = min_chunk.clamp(7, 90);
 
+        if min_chunk > 90 {
+            eprintln!(
+                "Note: ideal chunk size ({} days, 3x context of {} days) exceeds 90-day cap. \
+                 Using 90-day chunks. Override with --batch-size if needed.",
+                min_chunk, context_days
+            );
+        }
+
         let reasons: Vec<String> = temporal
             .sources
             .iter()
