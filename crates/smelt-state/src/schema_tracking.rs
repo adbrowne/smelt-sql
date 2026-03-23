@@ -403,7 +403,10 @@ mod tests {
         let deployed = vec![col("id", "INT", false)];
         let inferred = vec![col("id", "INTEGER", false)];
         let diff = diff_schemas(&deployed, &inferred);
-        assert!(diff.is_empty(), "INT vs INTEGER should not trigger a change");
+        assert!(
+            diff.is_empty(),
+            "INT vs INTEGER should not trigger a change"
+        );
 
         // BOOL vs BOOLEAN
         let deployed = vec![col("active", "BOOL", true)];

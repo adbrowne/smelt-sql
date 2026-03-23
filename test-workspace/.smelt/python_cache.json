@@ -1,0 +1,31 @@
+{
+  "entries": {
+    "/home/andrew/smelt-sql/test-workspace/models/combined_events.py": {
+      "content_hash": "e784eb268f363cc76882f506f4e56969c1bd12e872b96e52ca055ae28e1b1e9a",
+      "models": [
+        {
+          "name": "combined_events",
+          "sql": "SELECT event_id, user_id, event_time, event_type FROM smelt.ref('raw_events')",
+          "decorator_line": 3
+        }
+      ],
+      "timestamp": 1773387281
+    },
+    "/home/andrew/smelt-sql/test-workspace/models/user_segments.py": {
+      "content_hash": "3a1f4d04a708dce7e4ee4972e4c76598b488c0738fc3ee3cefea6d004471b641",
+      "models": [
+        {
+          "name": "active_users",
+          "sql": "SELECT user_id, COUNT(*) as activity_count FROM smelt.ref('user_sessions') WHERE session_count > 0 GROUP BY user_id",
+          "decorator_line": 3
+        },
+        {
+          "name": "inactive_users",
+          "sql": "SELECT user_id FROM smelt.ref('user_stats') WHERE total_sessions = 0",
+          "decorator_line": 9
+        }
+      ],
+      "timestamp": 1773387281
+    }
+  }
+}
