@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::{Duration, NaiveDate};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::SourcesConfig;
@@ -215,6 +216,177 @@ pub fn build_model_details(
     }
 
     model_details
+}
+
+/// Compute a run plan preview — what models would run and how they'd be batched.
+pub fn build_run_plan(
+    graph: &DependencyGraph,
+    config: &Config,
+    request: &crate::types::RunPlanRequest,
+) -> anyhow::Result<crate::types::RunPlanResponse> {
+    use smelt_optimizer::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+
+    let start = NaiveDate::parse_from_str(&request.start, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("Invalid start date: {}", request.start))?;
+    let end = NaiveDate::parse_from_str(&request.end, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("Invalid end date: {}", request.end))?;
+
+    if start >= end {
+        return Err(anyhow::anyhow!("Start date must be before end date"));
+    }
+
+    let execution_order = graph.execution_order()?;
+
+    // Filter to selected models if specified
+    let selected: Vec<String> = if request.select.is_empty() {
+        execution_order.clone()
+    } else {
+        execution_order
+            .iter()
+            .filter(|name| request.select.iter().any(|s| s == *name))
+            .cloned()
+            .collect()
+    };
+
+    let mut plan_models = Vec::new();
+    let mut total_batches = 0;
+
+    for model_name in &selected {
+        let model = match graph.get_model(model_name) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let metadata = model.metadata.as_deref();
+        let frontmatter = Frontmatter::parse(&model.content);
+
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+
+        match inc_config {
+            Some(inc) => {
+                let model_info = ModelInfo {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                    incremental_config: Some(inc.clone()),
+                };
+                let safety = analyze_batch_safety(&model_info);
+
+                let batch_safety_info = match &safety {
+                    BatchSafety::FullyBatchSafe => BatchSafetyInfo {
+                        level: "fully_batch_safe".to_string(),
+                        max_chunk_days: None,
+                        context_days: None,
+                        reason: None,
+                    },
+                    BatchSafety::BoundedSafe {
+                        max_chunk_days,
+                        context_days,
+                        reason,
+                    } => BatchSafetyInfo {
+                        level: "bounded_safe".to_string(),
+                        max_chunk_days: Some(*max_chunk_days),
+                        context_days: Some(*context_days),
+                        reason: Some(reason.clone()),
+                    },
+                    BatchSafety::PerPartitionOnly { reason } => BatchSafetyInfo {
+                        level: "per_partition_only".to_string(),
+                        max_chunk_days: None,
+                        context_days: None,
+                        reason: Some(reason.clone()),
+                    },
+                };
+
+                // Generate batches
+                let (batch_days, context_days) = if request.per_partition {
+                    (granularity_days(&inc.granularity), 0)
+                } else if let Some(override_days) = request.batch_size_days {
+                    let ctx = match &safety {
+                        BatchSafety::BoundedSafe { context_days, .. } => *context_days,
+                        _ => 0,
+                    };
+                    (override_days, ctx)
+                } else {
+                    match &safety {
+                        BatchSafety::FullyBatchSafe => ((end - start).num_days() as u32, 0),
+                        BatchSafety::BoundedSafe {
+                            max_chunk_days,
+                            context_days,
+                            ..
+                        } => (*max_chunk_days, *context_days),
+                        BatchSafety::PerPartitionOnly { .. } => {
+                            (granularity_days(&inc.granularity), 0)
+                        }
+                    }
+                };
+
+                let mut batches = Vec::new();
+                let mut batch_start = start;
+                while batch_start < end {
+                    let batch_end = (batch_start + Duration::days(batch_days as i64)).min(end);
+                    let filter_start = batch_start - Duration::days(context_days as i64);
+
+                    batches.push(crate::types::PlanBatch {
+                        partition_start: batch_start.format("%Y-%m-%d").to_string(),
+                        partition_end: batch_end.format("%Y-%m-%d").to_string(),
+                        filter_start: filter_start.format("%Y-%m-%d").to_string(),
+                        filter_end: batch_end.format("%Y-%m-%d").to_string(),
+                    });
+                    batch_start = batch_end;
+                }
+
+                total_batches += batches.len();
+
+                plan_models.push(crate::types::PlanModel {
+                    name: model_name.clone(),
+                    is_incremental: true,
+                    batch_safety: Some(batch_safety_info),
+                    partition_range: Some(crate::types::PlanTimeRange {
+                        start: request.start.clone(),
+                        end: request.end.clone(),
+                    }),
+                    filter_range: Some(crate::types::PlanTimeRange {
+                        start: (start - Duration::days(context_days as i64))
+                            .format("%Y-%m-%d")
+                            .to_string(),
+                        end: request.end.clone(),
+                    }),
+                    batches,
+                });
+            }
+            None => {
+                // Non-incremental model — full refresh
+                plan_models.push(crate::types::PlanModel {
+                    name: model_name.clone(),
+                    is_incremental: false,
+                    batch_safety: None,
+                    partition_range: None,
+                    filter_range: None,
+                    batches: vec![],
+                });
+            }
+        }
+    }
+
+    Ok(crate::types::RunPlanResponse {
+        models: plan_models,
+        execution_order: selected,
+        total_batches,
+    })
+}
+
+fn granularity_days(g: &smelt_core::Granularity) -> u32 {
+    match g {
+        smelt_core::Granularity::Hour => 1,
+        smelt_core::Granularity::Day => 1,
+        smelt_core::Granularity::Week { .. } => 7,
+        smelt_core::Granularity::Month => 30,
+        smelt_core::Granularity::Quarter => 91,
+        smelt_core::Granularity::Year => 365,
+    }
 }
 
 #[cfg(test)]

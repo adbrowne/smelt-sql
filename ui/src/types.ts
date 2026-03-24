@@ -76,3 +76,35 @@ export interface DiagnosticInfo {
   line?: number;
   column?: number;
 }
+
+// --- Run Planner Types ---
+
+export interface RunPlanRequest {
+  start: string;
+  end: string;
+  batch_size_days?: number;
+  per_partition?: boolean;
+  select?: string[];
+}
+
+export interface RunPlanResponse {
+  models: PlanModel[];
+  execution_order: string[];
+  total_batches: number;
+}
+
+export interface PlanModel {
+  name: string;
+  is_incremental: boolean;
+  batch_safety?: BatchSafetyInfo;
+  partition_range?: { start: string; end: string };
+  filter_range?: { start: string; end: string };
+  batches: PlanBatch[];
+}
+
+export interface PlanBatch {
+  partition_start: string;
+  partition_end: string;
+  filter_start: string;
+  filter_end: string;
+}

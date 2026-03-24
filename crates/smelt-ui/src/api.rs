@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::build;
@@ -33,4 +34,15 @@ pub async fn get_model(
         .cloned()
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+pub async fn post_run_plan(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RunPlanRequest>,
+) -> Result<Json<RunPlanResponse>, impl IntoResponse> {
+    let graph = state.graph.lock().await;
+    match build::build_run_plan(&graph, &state.config, &request) {
+        Ok(plan) => Ok(Json(plan)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
 }

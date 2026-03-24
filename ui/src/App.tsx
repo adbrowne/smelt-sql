@@ -4,9 +4,13 @@ import { fetchGraph, fetchProject, fetchModel } from './api'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Graph } from './components/Graph'
 import { ModelDetail } from './components/ModelDetail'
+import { RunPlanner } from './pages/RunPlanner'
 import { useWebSocket } from './hooks/useWebSocket'
 
+type Page = 'graph' | 'planner'
+
 function App() {
+  const [page, setPage] = useState<Page>('graph')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const wsStatus = useWebSocket()
 
@@ -53,6 +57,30 @@ function App() {
               {project.source_count > 0 && ` \u00b7 ${project.source_count} sources`}
             </span>
           )}
+
+          <nav className="ml-4 flex gap-1">
+            <button
+              onClick={() => setPage('graph')}
+              className={`text-sm px-3 py-1 rounded ${
+                page === 'graph'
+                  ? 'bg-gray-900 text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              Graph
+            </button>
+            <button
+              onClick={() => setPage('planner')}
+              className={`text-sm px-3 py-1 rounded ${
+                page === 'planner'
+                  ? 'bg-gray-900 text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              Run Planner
+            </button>
+          </nav>
+
           <div className="ml-auto flex items-center gap-2">
             <span
               className={`inline-block w-2 h-2 rounded-full ${
@@ -71,22 +99,28 @@ function App() {
         </header>
 
         <div className="flex-1 flex min-h-0">
-          <div className="flex-1">
-            {graphData && (
-              <Graph
-                data={graphData}
-                selectedModel={selectedModel}
-                onSelectModel={setSelectedModel}
-              />
-            )}
-          </div>
+          {page === 'graph' && (
+            <>
+              <div className="flex-1">
+                {graphData && (
+                  <Graph
+                    data={graphData}
+                    selectedModel={selectedModel}
+                    onSelectModel={setSelectedModel}
+                  />
+                )}
+              </div>
 
-          {selectedModel && modelDetail && (
-            <ModelDetail
-              model={modelDetail}
-              onClose={() => setSelectedModel(null)}
-            />
+              {selectedModel && modelDetail && (
+                <ModelDetail
+                  model={modelDetail}
+                  onClose={() => setSelectedModel(null)}
+                />
+              )}
+            </>
           )}
+
+          {page === 'planner' && <RunPlanner />}
         </div>
       </div>
     </ErrorBoundary>

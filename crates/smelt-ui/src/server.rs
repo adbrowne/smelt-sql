@@ -6,7 +6,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::WebSocketUpgrade;
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use rust_embed::Embed;
 use tokio::sync::broadcast;
@@ -74,6 +74,7 @@ pub async fn start_server(
         .route("/api/project", get(api::get_project))
         .route("/api/graph", get(api::get_graph))
         .route("/api/models/{name}", get(api::get_model))
+        .route("/api/run/plan", post(api::post_run_plan))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(CorsLayer::permissive())

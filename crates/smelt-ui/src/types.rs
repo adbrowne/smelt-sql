@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize)]
 pub struct GraphResponse {
@@ -107,4 +107,49 @@ pub struct DiagnosticInfo {
     pub message: String,
     pub line: Option<u32>,
     pub column: Option<u32>,
+}
+
+// --- Run Planner Types ---
+
+#[derive(Clone, Deserialize)]
+pub struct RunPlanRequest {
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub batch_size_days: Option<u32>,
+    #[serde(default)]
+    pub per_partition: bool,
+    #[serde(default)]
+    pub select: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RunPlanResponse {
+    pub models: Vec<PlanModel>,
+    pub execution_order: Vec<String>,
+    pub total_batches: usize,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PlanModel {
+    pub name: String,
+    pub is_incremental: bool,
+    pub batch_safety: Option<BatchSafetyInfo>,
+    pub partition_range: Option<PlanTimeRange>,
+    pub filter_range: Option<PlanTimeRange>,
+    pub batches: Vec<PlanBatch>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PlanTimeRange {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PlanBatch {
+    pub partition_start: String,
+    pub partition_end: String,
+    pub filter_start: String,
+    pub filter_end: String,
 }

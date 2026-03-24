@@ -27,6 +27,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # File watching
 notify-debouncer-mini = "0.7"
 
+# Date handling
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

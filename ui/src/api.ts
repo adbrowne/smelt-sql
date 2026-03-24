@@ -1,4 +1,4 @@
-import type { GraphResponse, ModelDetailResponse, ProjectResponse } from './types';
+import type { GraphResponse, ModelDetailResponse, ProjectResponse, RunPlanRequest, RunPlanResponse } from './types';
 
 const BASE = '';
 
@@ -17,5 +17,18 @@ export async function fetchGraph(): Promise<GraphResponse> {
 export async function fetchModel(name: string): Promise<ModelDetailResponse> {
   const res = await fetch(`${BASE}/api/models/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Failed to fetch model ${name}: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchRunPlan(request: RunPlanRequest): Promise<RunPlanResponse> {
+  const res = await fetch(`${BASE}/api/run/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to compute run plan: ${res.statusText}`);
+  }
   return res.json();
 }
