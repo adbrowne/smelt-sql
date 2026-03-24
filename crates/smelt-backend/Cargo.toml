@@ -11,6 +11,9 @@ description = "Backend trait and types for smelt execution engines"
 # Dialect types (lightweight, sync-only)
 smelt-dialect = { path = "../smelt-dialect" }
 
+# Core types (IncrementalStrategy, IncrementalConfig)
+smelt-core = { path = "../smelt-core" }
+
 # Async runtime
 tokio.workspace = true
 

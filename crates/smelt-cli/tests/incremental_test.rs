@@ -190,3 +190,111 @@ async fn test_inject_time_filter_with_existing_where() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_incremental_merge() -> anyhow::Result<()> {
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("test.duckdb");
+
+    let backend = DuckDbBackend::new(&db_path, "main").await?;
+    seed_database(&backend).await?;
+
+    // Create initial daily_revenue table with unique_key = (revenue_date, user_id)
+    backend
+        .execute_sql(
+            r#"
+            CREATE TABLE IF NOT EXISTS main.daily_revenue_merge AS
+            SELECT
+                transaction_timestamp::DATE as revenue_date,
+                user_id,
+                SUM(amount) as total_revenue,
+                COUNT(*) as transaction_count
+            FROM raw.transactions
+            GROUP BY 1, 2
+        "#,
+        )
+        .await?;
+
+    let initial_count = backend.get_row_count("main", "daily_revenue_merge").await?;
+    assert!(initial_count > 0);
+
+    // MERGE with updated data for existing keys and a new key
+    backend
+        .merge_into(
+            "main",
+            "daily_revenue_merge",
+            r#"
+            SELECT
+                transaction_timestamp::DATE as revenue_date,
+                user_id,
+                SUM(amount) * 2 as total_revenue,
+                COUNT(*) as transaction_count
+            FROM raw.transactions
+            WHERE transaction_timestamp >= '2024-12-25' AND transaction_timestamp < '2024-12-26'
+            GROUP BY 1, 2
+        "#,
+            &["revenue_date".to_string(), "user_id".to_string()],
+        )
+        .await?;
+
+    // Row count should stay the same (merge updates, doesn't add duplicates)
+    let after_count = backend.get_row_count("main", "daily_revenue_merge").await?;
+    assert_eq!(
+        after_count, initial_count,
+        "MERGE should update existing rows, not add new ones"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_incremental_append() -> anyhow::Result<()> {
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("test.duckdb");
+
+    let backend = DuckDbBackend::new(&db_path, "main").await?;
+    seed_database(&backend).await?;
+
+    // Create initial table
+    backend
+        .execute_sql(
+            r#"
+            CREATE TABLE IF NOT EXISTS main.event_log AS
+            SELECT
+                transaction_timestamp::DATE as event_date,
+                user_id,
+                amount
+            FROM raw.transactions
+            WHERE transaction_timestamp < '2024-12-26'
+        "#,
+        )
+        .await?;
+
+    let initial_count = backend.get_row_count("main", "event_log").await?;
+
+    // APPEND: just insert, no delete
+    backend
+        .insert_into_from_query(
+            "main",
+            "event_log",
+            r#"
+            SELECT
+                transaction_timestamp::DATE as event_date,
+                user_id,
+                amount
+            FROM raw.transactions
+            WHERE transaction_timestamp >= '2024-12-26' AND transaction_timestamp < '2024-12-28'
+        "#,
+        )
+        .await?;
+
+    let after_count = backend.get_row_count("main", "event_log").await?;
+    assert!(
+        after_count > initial_count,
+        "APPEND should add rows (before: {}, after: {})",
+        initial_count,
+        after_count
+    );
+
+    Ok(())
+}

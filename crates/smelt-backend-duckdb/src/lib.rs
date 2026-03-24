@@ -288,6 +288,72 @@ impl Backend for DuckDbBackend {
         .await
         .map_err(|e| BackendError::Other(e.into()))?
     }
+
+    async fn merge_into(
+        &self,
+        schema: &str,
+        table: &str,
+        source_sql: &str,
+        unique_key: &[String],
+    ) -> Result<(), BackendError> {
+        let table_name = format!("{}.{}", schema, table);
+
+        let on_clause = unique_key
+            .iter()
+            .map(|k| format!("target.{} = source.{}", k, k))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+
+        let merge_sql = format!(
+            "MERGE INTO {} AS target USING ({}) AS source ON {} \
+             WHEN MATCHED THEN UPDATE SET * \
+             WHEN NOT MATCHED THEN INSERT *",
+            table_name, source_sql, on_clause
+        );
+
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let conn = connection.lock().unwrap();
+            conn.execute(&merge_sql, [])
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
+
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        sql: &str,
+        partition: &PartitionSpec,
+    ) -> Result<(), BackendError> {
+        let table_name = format!("{}.{}", schema, table);
+
+        // DuckDB has no native INSERT OVERWRITE. Emulate by deleting partition
+        // values that appear in the source query, then inserting.
+        let delete_sql = format!(
+            "DELETE FROM {} WHERE {} IN (SELECT DISTINCT {} FROM ({}))",
+            table_name, partition.column, partition.column, sql
+        );
+
+        let insert_sql = format!("INSERT INTO {} {}", table_name, sql);
+
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let conn = connection.lock().unwrap();
+            conn.execute(&delete_sql, [])
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            conn.execute(&insert_sql, [])
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
 }
 
 #[cfg(test)]
@@ -374,5 +440,177 @@ mod tests {
         assert!(caps.supports_qualify);
         assert!(caps.supports_merge);
         assert!(caps.supports_create_or_replace_table);
+        assert!(!caps.supports_insert_overwrite);
+    }
+
+    #[tokio::test]
+    async fn test_merge_into_upsert() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        // Create initial table
+        backend
+            .execute_sql("CREATE TABLE main.users AS SELECT 1 as id, 'Alice' as name, 100 as score")
+            .await
+            .unwrap();
+
+        // MERGE: update existing row (id=1) and insert new row (id=2)
+        backend
+            .merge_into(
+                "main",
+                "users",
+                "SELECT * FROM (VALUES (1, 'Alice', 200), (2, 'Bob', 150)) AS t(id, name, score)",
+                &["id".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let count = backend.get_row_count("main", "users").await.unwrap();
+        assert_eq!(count, 2, "Expected 2 rows after merge");
+
+        // Verify Alice's score was updated
+        let result = backend
+            .execute_sql("SELECT score FROM main.users WHERE id = 1")
+            .await
+            .unwrap();
+        let score: i32 = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(score, 200, "Expected Alice's score to be updated to 200");
+    }
+
+    #[tokio::test]
+    async fn test_merge_into_insert_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        // Create initial table with one row
+        backend
+            .execute_sql("CREATE TABLE main.items AS SELECT 1 as id, 'A' as name")
+            .await
+            .unwrap();
+
+        // MERGE with only new rows
+        backend
+            .merge_into(
+                "main",
+                "items",
+                "SELECT * FROM (VALUES (2, 'B'), (3, 'C')) AS t(id, name)",
+                &["id".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let count = backend.get_row_count("main", "items").await.unwrap();
+        assert_eq!(count, 3, "Expected 3 rows after merge insert");
+    }
+
+    #[tokio::test]
+    async fn test_insert_overwrite() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        // Create initial table with data across multiple dates
+        backend
+            .execute_sql(
+                "CREATE TABLE main.daily AS SELECT * FROM (VALUES \
+                 ('2024-01-01', 10), ('2024-01-01', 20), \
+                 ('2024-01-02', 30), \
+                 ('2024-01-03', 40) \
+                 ) AS t(dt, val)",
+            )
+            .await
+            .unwrap();
+
+        let initial_count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(initial_count, 4);
+
+        // INSERT OVERWRITE for dt='2024-01-01' — replaces 2 rows with 1
+        let partition = smelt_backend::PartitionSpec {
+            column: "dt".to_string(),
+            values: vec!["2024-01-01".to_string()],
+        };
+
+        backend
+            .insert_overwrite(
+                "main",
+                "daily",
+                "SELECT '2024-01-01' as dt, 999 as val",
+                &partition,
+            )
+            .await
+            .unwrap();
+
+        let count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(
+            count, 3,
+            "Expected 3 rows: 1 replaced + 1 for Jan 2 + 1 for Jan 3"
+        );
+
+        // Verify the overwritten value
+        let result = backend
+            .execute_sql("SELECT val FROM main.daily WHERE dt = '2024-01-01'")
+            .await
+            .unwrap();
+        let val: i32 = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(val, 999);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_strategy_with_unique_key() {
+        use smelt_backend::IncrementalConfig;
+        use smelt_backend::{Granularity, IncrementalSafetyOverrides};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        let config = IncrementalConfig {
+            enabled: true,
+            event_time_column: "ts".to_string(),
+            partition_column: "dt".to_string(),
+            granularity: Granularity::Day,
+            unique_key: vec!["id".to_string()],
+            safety_overrides: IncrementalSafetyOverrides::default(),
+        };
+
+        let strategy = backend.resolve_strategy(&config);
+        assert_eq!(strategy, smelt_backend::IncrementalStrategy::Merge);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_strategy_without_unique_key() {
+        use smelt_backend::IncrementalConfig;
+        use smelt_backend::{Granularity, IncrementalSafetyOverrides};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        let config = IncrementalConfig {
+            enabled: true,
+            event_time_column: "ts".to_string(),
+            partition_column: "dt".to_string(),
+            granularity: Granularity::Day,
+            unique_key: vec![],
+            safety_overrides: IncrementalSafetyOverrides::default(),
+        };
+
+        let strategy = backend.resolve_strategy(&config);
+        assert_eq!(strategy, smelt_backend::IncrementalStrategy::DeleteInsert);
     }
 }

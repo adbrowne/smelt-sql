@@ -21,6 +21,7 @@ smelt-backend = { path = "../smelt-backend" }
 smelt-dialect = { path = "../smelt-dialect" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
+smelt-state = { path = "../smelt-state" }
 smelt-ui = { path = "../smelt-ui" }
 
 # Parser dependencies (for TextRange in graph tests)

@@ -59,6 +59,9 @@ pub struct BackendCapabilities {
 
     /// Supports trailing commas in SELECT and GROUP BY lists
     pub supports_trailing_commas: bool,
+
+    /// Supports native INSERT OVERWRITE for partition replacement
+    pub supports_insert_overwrite: bool,
 }
 
 impl BackendCapabilities {
@@ -76,6 +79,7 @@ impl BackendCapabilities {
             supports_transactional_ddl: true,
             supports_double_colon_cast: true,
             supports_trailing_commas: true,
+            supports_insert_overwrite: false, // Emulated via DELETE+INSERT
         }
     }
 
@@ -93,6 +97,7 @@ impl BackendCapabilities {
             supports_transactional_ddl: false,
             supports_double_colon_cast: false, // Uses CAST(expr AS type)
             supports_trailing_commas: false,
+            supports_insert_overwrite: true, // Native in Spark/Delta
         }
     }
 
@@ -110,6 +115,7 @@ impl BackendCapabilities {
             supports_transactional_ddl: true,
             supports_double_colon_cast: true,
             supports_trailing_commas: false,
+            supports_insert_overwrite: false, // Not supported in PostgreSQL
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Common types used across backends.
 
 use arrow::array::RecordBatch;
+use smelt_core::config::IncrementalStrategy;
 use std::time::Duration;
 
 /// Result of executing a model.
@@ -68,6 +69,11 @@ pub enum MaterializationStrategy {
     #[default]
     FullRefresh,
 
-    /// Incremental: DELETE by partition + INSERT
-    Incremental { partition: PartitionSpec },
+    /// Incremental: strategy-dependent update
+    Incremental {
+        partition: PartitionSpec,
+        strategy: IncrementalStrategy,
+        /// Columns that uniquely identify a row (used by Merge strategy)
+        unique_key: Vec<String>,
+    },
 }

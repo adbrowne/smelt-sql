@@ -11,13 +11,13 @@ pub mod sources;
 pub mod text;
 
 pub use config::{
-    BackendType, Config, ConfigError, Granularity, IncrementalConfig, Materialization, ModelConfig,
-    Target,
+    BackendType, Config, ConfigError, DataLatency, Granularity, IncrementalConfig,
+    IncrementalSafetyOverrides, IncrementalStrategy, Materialization, ModelConfig, Target, Weekday,
 };
 pub use discovery::{ModelDiscovery, ModelFile};
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{
-    extract_file_metadata, FileMetadata, MetadataError, ModelMetadata, ModelSection,
+    extract_file_metadata, ColumnMetadata, FileMetadata, MetadataError, ModelMetadata, ModelSection,
 };
 pub use project::{
     find_config_file, find_project_root, find_project_root_by_walking_up,

@@ -277,6 +277,24 @@ impl DependencyGraph {
     pub fn models(&self) -> &HashMap<String, ModelFile> {
         &self.models
     }
+
+    /// Get the upstream dependencies for a model (model names it references).
+    pub fn get_upstream(&self, model_name: &str) -> Vec<String> {
+        self.dependencies
+            .get(model_name)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|dep| self.models.contains_key(dep))
+            .collect()
+    }
+
+    /// Collect all upstream dependencies recursively (public wrapper).
+    pub fn all_upstream(&self, model_name: &str) -> HashSet<String> {
+        let mut result = HashSet::new();
+        self.collect_upstream(model_name, &mut result);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +417,7 @@ mod tests {
                         name: "id".to_string(),
                         data_type: None,
                         description: None,
+                        data_latency: None,
                     }],
                 }],
             }],

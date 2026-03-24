@@ -1,26 +1,36 @@
+pub mod backfill;
 pub mod compiler;
 pub mod config;
 pub mod discovery;
 pub mod errors;
 pub mod executor;
+pub mod explain;
 pub mod graph;
 pub mod metadata;
+pub mod migration;
 pub mod python;
 pub mod seed;
 pub mod selector;
+pub mod temporal;
 pub mod transformer;
 
+pub use backfill::{
+    compute_backbuild_plans, compute_batches_for_model, compute_range_run_plans,
+    format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
+};
 pub use compiler::{resolve_refs_in_sql, CompiledModel, SqlCompiler};
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
+pub use explain::{build_explain_output, ExplainOutput};
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use python::discover_python_models;
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use smelt_core::RefInfo;
+pub use temporal::{compute_incremental_windows, IncrementalWindows};
 pub use transformer::{inject_time_filter, TimeRange, TransformError};
 
 use std::path::Path;

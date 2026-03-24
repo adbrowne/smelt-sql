@@ -1,3 +1,6 @@
+use serde::Serialize;
+
+use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
 use crate::analysis::{analyze_select, SelectItemKind};
 use crate::graph::ModelInfo;
 use crate::types::{Opportunity, OpportunityData, Transformation};
@@ -13,6 +16,114 @@ const NONDETERMINISTIC_FUNCTIONS: &[&str] = &[
     "GEN_RANDOM_UUID",
     "SETSEED",
 ];
+
+/// How safely a model can be backfilled in large batches.
+///
+/// Derived from temporal dependency analysis (Phase 3). Models with no
+/// cross-partition dependencies can process any range in a single query;
+/// models with bounded lookback need chunked execution; models with
+/// unbounded dependencies must go per-partition or full refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum BatchSafety {
+    /// Single query for any range — aggregations are partition-local.
+    FullyBatchSafe,
+    /// Safe for bounded chunks — window functions or joins need context rows
+    /// but the dependency is bounded.
+    BoundedSafe {
+        /// Maximum recommended chunk size in days. Each chunk query fetches
+        /// `[start - context_days, end)` but only writes `[start, end)`.
+        max_chunk_days: u32,
+        /// Extra context days needed before each chunk's start.
+        context_days: u32,
+        /// Human-readable explanation of why chunking is needed.
+        reason: String,
+    },
+    /// Must process per-partition — cross-partition dependencies are unbounded.
+    PerPartitionOnly {
+        /// Human-readable explanation of why per-partition is required.
+        reason: String,
+    },
+}
+
+/// Analyze how safely a model can be backfilled in batches.
+///
+/// Uses the SQL's temporal dependency (lookback/lookahead) to determine
+/// whether a single query can cover any range, or whether the range must
+/// be split into chunks or individual partitions.
+pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety {
+    let sql = crate::types::Frontmatter::strip(&model.sql);
+    let temporal = analyze_temporal_dependencies(sql);
+
+    // Determine granularity period for converting Periods→Days
+    let period_days = model
+        .incremental_config
+        .as_ref()
+        .map(|c| crate::analysis::temporal::granularity_period_days(&c.granularity))
+        .unwrap_or(1);
+
+    // Check lookback
+    let lookback_days = match &temporal.lookback {
+        TemporalOffset::Zero => 0,
+        TemporalOffset::Periods(n) => n * period_days,
+        TemporalOffset::Days(n) => *n,
+        TemporalOffset::Unbounded { reason } => {
+            return BatchSafety::PerPartitionOnly {
+                reason: format!("unbounded lookback: {}", reason),
+            };
+        }
+    };
+
+    // Check lookahead
+    let lookahead_days = match &temporal.lookahead {
+        TemporalOffset::Zero => 0,
+        TemporalOffset::Periods(n) => n * period_days,
+        TemporalOffset::Days(n) => *n,
+        TemporalOffset::Unbounded { reason } => {
+            return BatchSafety::PerPartitionOnly {
+                reason: format!("unbounded lookahead: {}", reason),
+            };
+        }
+    };
+
+    let context_days = lookback_days.max(lookahead_days);
+
+    if context_days == 0 {
+        BatchSafety::FullyBatchSafe
+    } else {
+        // Recommend chunks at least 3x the context to keep overhead reasonable.
+        // Minimum chunk = 7 days, maximum recommended = 90 days.
+        let min_chunk = context_days * 3;
+        let max_chunk_days = min_chunk.clamp(7, 90);
+
+        if min_chunk > 90 {
+            eprintln!(
+                "Note: ideal chunk size ({} days, 3x context of {} days) exceeds 90-day cap. \
+                 Using 90-day chunks. Override with --batch-size if needed.",
+                min_chunk, context_days
+            );
+        }
+
+        let reasons: Vec<String> = temporal
+            .sources
+            .iter()
+            .map(|s| format!("{:?}", s))
+            .collect();
+
+        BatchSafety::BoundedSafe {
+            max_chunk_days,
+            context_days,
+            reason: if reasons.is_empty() {
+                format!("temporal dependency of {} day(s)", context_days)
+            } else {
+                format!(
+                    "temporal dependency of {} day(s) from: {}",
+                    context_days,
+                    reasons.join(", ")
+                )
+            },
+        }
+    }
+}
 
 /// Detect incremental materialization opportunity from frontmatter config.
 pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
@@ -72,6 +183,26 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
             "Model '{}': event_time_column '{}' not found in SQL",
             model.name, event_time_column
         ));
+    }
+
+    // Validate unique_key columns exist in SELECT list (needed for MERGE strategy)
+    let select_aliases: Vec<&str> = analysis
+        .items
+        .iter()
+        .map(|item| match item {
+            SelectItemKind::GroupByKey { alias, .. } => alias.as_str(),
+            SelectItemKind::CountDistinct { alias, .. } => alias.as_str(),
+            SelectItemKind::OtherAggregate { alias, .. } => alias.as_str(),
+        })
+        .collect();
+
+    for key_col in &inc_config.unique_key {
+        if !select_aliases.contains(&key_col.as_str()) {
+            return Err(format!(
+                "Model '{}': unique_key column '{}' not found as alias in SELECT list",
+                model.name, key_col
+            ));
+        }
     }
 
     // --- Safety checks ---
@@ -235,9 +366,11 @@ mod tests {
             sql: sql.to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: partition_column.to_string(),
                 event_time_column: event_time_column.to_string(),
                 granularity: Granularity::Day,
+                unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
         }
@@ -254,9 +387,11 @@ mod tests {
             sql: sql.to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: partition_column.to_string(),
                 event_time_column: "event_timestamp".to_string(),
                 granularity: Granularity::Day,
+                unique_key: vec![],
                 safety_overrides: overrides,
             }),
         }
@@ -325,9 +460,11 @@ mod tests {
             sql: "SELECT date_trunc('hour', event_timestamp) as event_hour, COUNT(*) as cnt FROM events GROUP BY 1".to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: "event_hour".to_string(),
                 event_time_column: "event_timestamp".to_string(),
                 granularity: Granularity::Hour,
+                unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
         };
@@ -511,11 +648,13 @@ mod tests {
             sql: "SELECT date_trunc('week', event_timestamp) as event_week, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
             refs: vec![],
             incremental_config: Some(IncrementalConfig {
+                enabled: true,
                 partition_column: "event_week".to_string(),
                 event_time_column: "event_timestamp".to_string(),
                 granularity: Granularity::Week {
                     week_start: Weekday::Monday,
                 },
+                unique_key: vec![],
                 safety_overrides: IncrementalSafetyOverrides::default(),
             }),
         };
@@ -534,5 +673,120 @@ mod tests {
             }
             _ => panic!("Expected Incremental data"),
         }
+    }
+
+    #[test]
+    fn test_detect_with_valid_unique_key() {
+        let m = ModelInfo {
+            name: "daily".to_string(),
+            sql: "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                enabled: true,
+                partition_column: "event_date".to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Day,
+                unique_key: vec!["event_date".to_string(), "user_id".to_string()],
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        };
+        let result = detect(&m);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_detect_rejects_invalid_unique_key() {
+        let m = ModelInfo {
+            name: "daily".to_string(),
+            sql: "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2".to_string(),
+            refs: vec![],
+            incremental_config: Some(IncrementalConfig {
+                enabled: true,
+                partition_column: "event_date".to_string(),
+                event_time_column: "event_timestamp".to_string(),
+                granularity: Granularity::Day,
+                unique_key: vec!["nonexistent_col".to_string()],
+                safety_overrides: IncrementalSafetyOverrides::default(),
+            }),
+        };
+        let result = detect(&m);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("unique_key column 'nonexistent_col' not found"));
+    }
+
+    // --- BatchSafety tests ---
+
+    #[test]
+    fn test_batch_safety_simple_aggregate() {
+        // Pure GROUP BY with no window functions → fully batch safe
+        let m = model(
+            "daily",
+            "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2",
+            "event_date",
+        );
+        let safety = analyze_batch_safety(&m);
+        assert_eq!(safety, BatchSafety::FullyBatchSafe);
+    }
+
+    #[test]
+    fn test_batch_safety_lag_function() {
+        // LAG(col, 3) → bounded lookback of 3 periods
+        let m = model_with_overrides(
+            "lagged",
+            "SELECT user_id, event_timestamp, LAG(amount, 3) OVER (ORDER BY event_timestamp) as prev FROM events",
+            "event_date",
+            IncrementalSafetyOverrides {
+                allow_window_functions: true,
+                ..Default::default()
+            },
+        );
+        let safety = analyze_batch_safety(&m);
+        match safety {
+            BatchSafety::BoundedSafe { context_days, .. } => {
+                assert!(
+                    context_days >= 3,
+                    "expected context >= 3, got {}",
+                    context_days
+                );
+            }
+            other => panic!("Expected BoundedSafe, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_batch_safety_unbounded_window() {
+        // UNBOUNDED PRECEDING with RANGE → per partition only
+        let m = model_with_overrides(
+            "running",
+            "SELECT user_id, event_timestamp, SUM(amount) OVER (ORDER BY event_timestamp RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as running FROM events",
+            "event_date",
+            IncrementalSafetyOverrides {
+                allow_window_functions: true,
+                ..Default::default()
+            },
+        );
+        let safety = analyze_batch_safety(&m);
+        match safety {
+            BatchSafety::PerPartitionOnly { reason } => {
+                assert!(reason.contains("unbounded"), "reason: {}", reason);
+            }
+            other => panic!("Expected PerPartitionOnly, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_batch_safety_no_incremental_config() {
+        // No incremental config → still fully batch safe (uses default period_days=1)
+        let m = ModelInfo {
+            name: "plain".to_string(),
+            sql: "SELECT a, SUM(b) FROM t GROUP BY 1".to_string(),
+            refs: vec![],
+            incremental_config: None,
+        };
+        let safety = analyze_batch_safety(&m);
+        assert_eq!(safety, BatchSafety::FullyBatchSafe);
     }
 }

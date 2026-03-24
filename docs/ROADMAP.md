@@ -4,6 +4,34 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**Incremental Phase 5: Operational Metadata & Run History (March 22, 2026)**: Track what smelt has done via advisory operational metadata:
+- **New `smelt-state` crate**: `RunManifest` (per-run records), `IntervalStore` (model coverage tracking), `FileStore` (JSON file-backed persistence in `.smelt/`)
+- **Interval tracking**: Records covered date ranges per model with automatic merge of adjacent/overlapping intervals, gap detection, and model hash-based invalidation when SQL changes
+- **Run manifests**: Each `smelt run` saves a JSON manifest to `.smelt/runs/` recording strategy, time range, partitions updated, row counts, and duration per model
+- **`smelt status` command**: Shows interval coverage and gaps for incremental models, with optional `--since`/`--until` range queries
+- **`smelt history` command**: Shows run history with optional model filtering and `--limit`
+- **`smelt run --auto`**: Computes time range from interval store — finds the latest covered date and processes [latest, today). No manual `--start`/`--end` needed after initial run
+- **Advisory design**: State is opt-in and non-authoritative. If `.smelt/` is deleted, everything keeps working — you just lose auto-detection. `--full-refresh` is always the escape hatch
+- 13 tests for interval merge/gap detection, file store roundtrips, and history queries
+
+**Incremental Phase 4: Backfill Intelligence (March 22, 2026)**: Smart backfill that picks the right execution shape based on semantic analysis:
+- **Batch safety analysis**: New `BatchSafety` enum (`FullyBatchSafe`, `BoundedSafe`, `PerPartitionOnly`) derived from Phase 3's temporal dependency analysis — determines whether a backfill can run as a single query, chunked batches, or must go per-partition
+- **`analyze_batch_safety()`**: Examines lookback/lookahead offsets to classify models; fully batch-safe models run 1 query for any range, bounded models get auto-sized chunks (3x context, clamped 7–90 days), unbounded models fall back to per-partition
+- **DAG-aware range computation**: `compute_backbuild_plans()` walks the DAG backwards from a target model, expanding upstream ranges based on each model's temporal dependencies and data latency (e.g., if model A has 7-day lookback from B, backbuilding A for March triggers B starting in late February)
+- **`smelt backbuild` command**: New CLI subcommand for target-focused rebuilds — `smelt backbuild +daily_revenue --start 2025-01-01 --end 2026-01-01` rebuilds the model and all upstreams with computed range expansion. Supports `--dry-run`, `--batch-size`, `--per-partition`
+- **Range run flags on `smelt run`**: `--start`/`--end` aliases for `--event-time-start`/`--event-time-end`, plus `--batch-size` and `--per-partition` overrides
+- **Smart batching in `run` command**: Incremental models now use batch safety analysis during range runs — batch-safe models run a single query for any range, bounded models auto-chunk, per-partition models split by granularity. Batch progress displayed per-batch for multi-batch runs.
+- **Batch generation**: Splits time ranges into batches based on safety analysis, with per-batch filter ranges expanded for temporal context
+- 15 new tests across batch safety analysis, batch generation, DAG range computation, and plan formatting
+
+**Incremental Phase 3: Temporal Dependency Inference (March 22, 2026)**: AST-based analysis of window functions, LAG/LEAD, JOIN offsets, and WHERE offsets to automatically infer how much historical context each incremental model needs:
+- **Temporal analysis**: New `smelt-optimizer/src/analysis/temporal.rs` detects lookback/lookahead from ROWS BETWEEN, RANGE, LAG/LEAD, JOIN INTERVAL offsets, WHERE INTERVAL patterns
+- **Data latency**: New `DataLatency` type (SQL interval syntax "3 days") on source columns and model frontmatter columns — represents how late upstream data can arrive
+- **Effective window**: Combines AST temporal dependency with data latency: `effective_lookback = max(ast_lookback, data_latency)`
+- **Separate filter vs partition ranges**: Filter WHERE clause uses wider range (lookback + lookahead), partition DELETE/overwrite uses original requested range
+- **Per-column latency**: Different columns on the same source table can have different latencies (e.g., `event_time` 3 days, `ingestion_time` 0 hours)
+- 37 new tests across temporal analysis, effective window, data latency parsing, and CLI integration
+
 **JSON Function Canonicalization (March 21, 2026)**: Redesigned JSON function support to accept all dialect variants and map to canonical internal functions:
 - **Canonical functions**: JsonObject, JsonArray, ToJson, JsonExtract, JsonExtractText, JsonArrayLength, JsonObjectKeys, JsonContains
 - **Dialect aliases**: `json_build_object` (PG) and `json_object` (DuckDB) both resolve to `JsonObject`; `get_json_object` (Spark), `json_extract_string` (DuckDB), and `json_extract_path_text` (PG) all resolve to `JsonExtractText`
@@ -1301,11 +1329,21 @@ Smelt SQL is a **logical SQL superset** built on a PostgreSQL-compatible base, c
 
 **Basic incremental materialization completed in Phase 9** (December 27, 2024): DELETE+INSERT strategy, partition management, DuckDB backend support, CLI with `--event-time-start`/`--event-time-end`. Further enhanced with optimizer integration (March 14, 2026): safety checks, YAML frontmatter detection, cube split composition.
 
-**Remaining work** (advanced incremental): strategy expansion (MERGE, APPEND, INSERT_OVERWRITE), temporal dependency inference, data latency, backfill intelligence, schema evolution. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) for the comprehensive plan.
+**Remaining work** (advanced incremental): Dagster/Airflow plugin packages (Python side). See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) for the comprehensive plan.
+
+**Completed sub-phases** (March 22, 2026):
+- ✅ Phase 1: Unified IncrementalConfig, Quarter/Year granularity
+- ✅ Phase 2: Strategy expansion (MERGE, APPEND, INSERT_OVERWRITE)
+- ✅ Phase 3: Temporal dependency inference & data latency
+- ✅ Phase 4: Backfill intelligence (smart batching, backbuild, DAG-aware ranges)
+- ✅ Phase 5: Operational metadata & run history (smelt-state crate, interval tracking, auto mode)
+- ✅ Phase 6: Schema evolution (deployed schema tracking, change detection, ALTER TABLE migration, safety checks)
+- ✅ Phase 7: Testing infrastructure (32 integration tests: strategy correctness, lookback, backfill batching, schema evolution, interval tracking)
+- ✅ Phase 8: Orchestrator integration — `smelt explain` CLI command (March 22, 2026): JSON output of model graph, dependencies, materialization, incremental config, batch safety, tags, owner, execution order. Human-readable mode also supported. Core enabler for Dagster/Airflow plugin packages.
 
 **Design**: See [DESIGN.md](DESIGN.md#incremental-table-builds) for full specification. Note: `lookback_days` and `-- @materialize` annotation syntax described there are superseded by the current approach (YAML frontmatter config, AST-inferred temporal dependencies).
 
-**Effort**: Medium-High (for remaining work)
+**Effort**: Low (Python plugin packages for Dagster/Airflow remain)
 
 ---
 

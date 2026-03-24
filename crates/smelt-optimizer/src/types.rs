@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+pub use smelt_core::config::{
+    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy, Weekday,
+};
 
 /// A transformation the optimizer wants to apply to a model.
 #[derive(Debug, Clone, Serialize)]
@@ -54,59 +57,6 @@ pub enum OpportunityData {
         partition_column: String,
         granularity: Granularity,
     },
-}
-
-/// Day of the week for weekly partition start.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Weekday {
-    Monday,
-    Tuesday,
-    Wednesday,
-    Thursday,
-    Friday,
-    Saturday,
-    Sunday,
-}
-
-/// Granularity for incremental partition generation.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Granularity {
-    Hour,
-    Day,
-    Week { week_start: Weekday },
-    Month,
-}
-
-/// Safety overrides for incremental materialization checks.
-///
-/// Each flag allows a specific pattern that is normally rejected
-/// because it can produce different results on partial vs full data.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct IncrementalSafetyOverrides {
-    #[serde(default)]
-    pub allow_window_functions: bool,
-    #[serde(default)]
-    pub allow_having: bool,
-    #[serde(default)]
-    pub allow_limit: bool,
-    #[serde(default)]
-    pub allow_subqueries: bool,
-    #[serde(default)]
-    pub allow_nondeterministic: bool,
-    #[serde(default)]
-    pub allow_distinct: bool,
-}
-
-/// Incremental configuration from YAML frontmatter.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IncrementalConfig {
-    pub partition_column: String,
-    pub event_time_column: String,
-    pub granularity: Granularity,
-    #[serde(default)]
-    pub safety_overrides: IncrementalSafetyOverrides,
 }
 
 /// Frontmatter configuration parsed from model SQL files.

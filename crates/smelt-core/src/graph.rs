@@ -404,6 +404,7 @@ mod tests {
                         name: "id".to_string(),
                         data_type: None,
                         description: None,
+                        data_latency: None,
                     }],
                 }],
             }],

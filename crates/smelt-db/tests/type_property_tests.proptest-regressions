@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b6ddc0d7fa8864130763c143b4c81c30153eb18aa64351aeb4c9c3430d3e267d # shrinks to (columns, expr_kinds, func_indices) = ([TypedSource { name: "dec_col_0", data_type: Decimal { precision: 10, scale: 2 }, cast_sql: "CAST(99.99 AS DECIMAL(10,2))" }], [Function], [51])
+cc 3bb49a120a0970423100961f80b80b62c026989e93a95505cc498fcd119d2e1f # shrinks to (columns, expr_kinds, func_indices) = ([TypedSource { name: "dbl_col_0", data_type: Double, cast_sql: "CAST(3.14 AS DOUBLE)" }], [ColumnRef, Function], [0, 72])

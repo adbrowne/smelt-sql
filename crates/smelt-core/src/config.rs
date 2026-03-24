@@ -135,6 +135,78 @@ pub enum Weekday {
     Sunday,
 }
 
+/// Data latency for a column — how late data can arrive.
+///
+/// Parsed from SQL interval syntax (e.g., "3 days", "1 hour", "0 hours").
+/// Stored as a number of seconds for precise comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DataLatency {
+    /// Latency in seconds (for comparison and arithmetic).
+    pub seconds: u64,
+    /// Original string representation (for display).
+    pub display: String,
+}
+
+impl DataLatency {
+    /// Parse a SQL interval string like "3 days", "1 hour", "0 hours", "2 weeks".
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let n: u64 = parts[0].parse().ok()?;
+        let unit = if parts.len() > 1 {
+            parts[1].to_lowercase()
+        } else {
+            return None;
+        };
+
+        let seconds = match unit.trim_end_matches('s') {
+            "hour" => n * 3600,
+            "day" => n * 86400,
+            "week" => n * 7 * 86400,
+            "month" => n * 30 * 86400, // Approximate
+            "year" => n * 365 * 86400, // Approximate
+            _ => return None,
+        };
+
+        Some(DataLatency {
+            seconds,
+            display: s.to_string(),
+        })
+    }
+
+    /// Convert to days (rounded up).
+    pub fn to_days(&self) -> u32 {
+        self.seconds.div_ceil(86400) as u32
+    }
+
+    /// Zero latency.
+    pub fn zero() -> Self {
+        DataLatency {
+            seconds: 0,
+            display: "0 hours".to_string(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DataLatency {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        DataLatency::parse(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid data_latency '{}': expected format like '3 days', '1 hour', '0 hours'",
+                s
+            ))
+        })
+    }
+}
+
 /// Granularity for incremental partition generation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -143,17 +215,63 @@ pub enum Granularity {
     Day,
     Week { week_start: Weekday },
     Month,
+    Quarter,
+    Year,
+}
+
+/// Safety overrides for incremental materialization checks.
+///
+/// Each flag allows a specific pattern that is normally rejected
+/// because it can produce different results on partial vs full data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct IncrementalSafetyOverrides {
+    #[serde(default)]
+    pub allow_window_functions: bool,
+    #[serde(default)]
+    pub allow_having: bool,
+    #[serde(default)]
+    pub allow_limit: bool,
+    #[serde(default)]
+    pub allow_subqueries: bool,
+    #[serde(default)]
+    pub allow_nondeterministic: bool,
+    #[serde(default)]
+    pub allow_distinct: bool,
+}
+
+/// Strategy for incremental materialization.
+///
+/// Model authors declare *what* (unique_key, partition_column) and backends
+/// decide *how* (which strategy to use) via `resolve_strategy()`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncrementalStrategy {
+    DeleteInsert,
+    Merge,
+    Append,
+    InsertOverwrite,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IncrementalConfig {
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Column in source data to filter on (for WHERE injection)
     pub event_time_column: String,
     /// Column in output to delete by (for DELETE+INSERT)
     pub partition_column: String,
-    /// Partition granularity (hour, day, month)
+    /// Partition granularity (hour, day, week, month, quarter, year)
     pub granularity: Granularity,
+    /// Columns that uniquely identify a row (backend uses presence to choose strategy)
+    #[serde(default)]
+    pub unique_key: Vec<String>,
+    /// Safety overrides for patterns that may diverge on partial data
+    #[serde(default)]
+    pub safety_overrides: IncrementalSafetyOverrides,
 }
 
 impl Config {
@@ -308,5 +426,107 @@ targets:
 
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.default_materialization, Materialization::View);
+    }
+
+    #[test]
+    fn test_quarter_granularity_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: quarter
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.granularity, Granularity::Quarter);
+        assert!(config.enabled); // default_enabled = true
+    }
+
+    #[test]
+    fn test_year_granularity_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: year
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.granularity, Granularity::Year);
+    }
+
+    #[test]
+    fn test_safety_overrides_default_when_absent() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.safety_overrides,
+            IncrementalSafetyOverrides::default()
+        );
+        assert!(!config.safety_overrides.allow_window_functions);
+    }
+
+    #[test]
+    fn test_unique_key_defaults_empty() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.unique_key.is_empty());
+    }
+
+    #[test]
+    fn test_unique_key_deserialization() {
+        let yaml = r#"
+            event_time_column: ts
+            partition_column: dt
+            granularity: day
+            unique_key:
+              - id
+              - source
+        "#;
+        let config: IncrementalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.unique_key, vec!["id", "source"]);
+    }
+
+    #[test]
+    fn test_incremental_strategy_serialization() {
+        let strategy = IncrementalStrategy::DeleteInsert;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(json, r#""delete_insert""#);
+
+        let strategy: IncrementalStrategy = serde_json::from_str(r#""merge""#).unwrap();
+        assert_eq!(strategy, IncrementalStrategy::Merge);
+    }
+
+    #[test]
+    fn test_data_latency_parse() {
+        let l = DataLatency::parse("3 days").unwrap();
+        assert_eq!(l.seconds, 3 * 86400);
+        assert_eq!(l.to_days(), 3);
+
+        let l = DataLatency::parse("1 hour").unwrap();
+        assert_eq!(l.seconds, 3600);
+        assert_eq!(l.to_days(), 1); // rounds up
+
+        let l = DataLatency::parse("0 hours").unwrap();
+        assert_eq!(l.seconds, 0);
+        assert_eq!(l.to_days(), 0);
+
+        let l = DataLatency::parse("2 weeks").unwrap();
+        assert_eq!(l.seconds, 2 * 7 * 86400);
+        assert_eq!(l.to_days(), 14);
+
+        assert!(DataLatency::parse("invalid").is_none());
+        assert!(DataLatency::parse("3").is_none()); // no unit
+    }
+
+    #[test]
+    fn test_data_latency_deserialization() {
+        let yaml = r#""3 days""#;
+        let latency: DataLatency = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(latency.to_days(), 3);
     }
 }

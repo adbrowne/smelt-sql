@@ -3595,6 +3595,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "smelt-core",
  "smelt-dialect",
  "thiserror 2.0.17",
  "tokio",
@@ -3669,6 +3670,7 @@ dependencies = [
  "smelt-dialect",
  "smelt-optimizer",
  "smelt-parser",
+ "smelt-state",
  "smelt-types",
  "smelt-ui",
  "tempfile",
@@ -3769,6 +3771,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "smelt-core",
  "smelt-parser",
  "smelt-types",
 ]
@@ -3795,6 +3798,19 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "smelt-state"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
