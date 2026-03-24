@@ -1,18 +1,31 @@
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { fetchGraph, fetchRunPlan } from '../api'
+import { fetchGraph, fetchRunPlan, executeRun, cancelRun } from '../api'
+import { useRunStatus } from '../hooks/useRunStatus'
+import { RunProgress } from '../components/RunProgress'
 import type { RunPlanResponse, PlanModel } from '../types'
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10)
 }
 
-function PlanPreview({ plan }: { plan: RunPlanResponse }) {
+function PlanPreview({ plan, onExecute, isExecuting }: {
+  plan: RunPlanResponse
+  onExecute: () => void
+  isExecuting: boolean
+}) {
   return (
     <div className="space-y-3">
-      <div className="flex gap-4 text-sm text-gray-600">
-        <span>{plan.execution_order.length} model(s)</span>
-        <span>{plan.total_batches} batch(es)</span>
+      <div className="flex items-center gap-4">
+        <span className="text-sm text-gray-600">{plan.execution_order.length} model(s)</span>
+        <span className="text-sm text-gray-600">{plan.total_batches} batch(es)</span>
+        <button
+          onClick={onExecute}
+          disabled={isExecuting}
+          className="ml-auto bg-green-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+        >
+          {isExecuting ? 'Starting...' : 'Execute Run'}
+        </button>
       </div>
 
       <div className="border border-gray-200 rounded overflow-hidden">
@@ -113,8 +126,17 @@ export function RunPlanner() {
     queryFn: fetchGraph,
   })
 
+  const { status, startRun } = useRunStatus()
+
   const planMutation = useMutation({
     mutationFn: fetchRunPlan,
+  })
+
+  const executeMutation = useMutation({
+    mutationFn: executeRun,
+    onSuccess: (data) => {
+      startRun(data.run_id)
+    },
   })
 
   const allModels = graphData?.nodes
@@ -132,10 +154,38 @@ export function RunPlanner() {
     })
   }
 
+  function handleExecute() {
+    executeMutation.mutate({
+      start,
+      end,
+      batch_size_days: batchSize ? parseInt(batchSize) : undefined,
+      per_partition: perPartition,
+      select: selectedModels.length > 0 ? selectedModels : undefined,
+    })
+  }
+
+  async function handleCancel() {
+    try {
+      await cancelRun()
+    } catch {
+      // Ignore cancel errors
+    }
+  }
+
+  const isRunning = status.state === 'running'
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-4xl mx-auto p-6">
         <h1 className="text-xl font-semibold text-gray-900 mb-6">Run Planner</h1>
+
+        {isRunning && <RunProgress status={status} onCancel={handleCancel} />}
+
+        {status.error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 mb-6 text-sm">
+            Run failed: {status.error}
+          </div>
+        )}
 
         <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -145,7 +195,8 @@ export function RunPlanner() {
                 type="date"
                 value={start}
                 onChange={e => setStart(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                disabled={isRunning}
+                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm disabled:opacity-50"
               />
             </div>
             <div>
@@ -154,7 +205,8 @@ export function RunPlanner() {
                 type="date"
                 value={end}
                 onChange={e => setEnd(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                disabled={isRunning}
+                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm disabled:opacity-50"
               />
             </div>
             <div>
@@ -168,7 +220,8 @@ export function RunPlanner() {
                 onChange={e => setBatchSize(e.target.value)}
                 placeholder="auto"
                 min="1"
-                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                disabled={isRunning}
+                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm disabled:opacity-50"
               />
             </div>
             <div className="flex items-end">
@@ -177,6 +230,7 @@ export function RunPlanner() {
                   type="checkbox"
                   checked={perPartition}
                   onChange={e => setPerPartition(e.target.checked)}
+                  disabled={isRunning}
                   className="rounded border-gray-300"
                 />
                 Per-partition execution
@@ -203,7 +257,8 @@ export function RunPlanner() {
                           : [...prev, name]
                       )
                     }}
-                    className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                    disabled={isRunning}
+                    className={`text-xs px-2 py-0.5 rounded border transition-colors disabled:opacity-50 ${
                       selectedModels.includes(name)
                         ? 'bg-blue-50 border-blue-300 text-blue-700'
                         : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
@@ -218,7 +273,7 @@ export function RunPlanner() {
 
           <button
             onClick={handlePreview}
-            disabled={planMutation.isPending}
+            disabled={planMutation.isPending || isRunning}
             className="bg-blue-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
           >
             {planMutation.isPending ? 'Computing...' : 'Preview Plan'}
@@ -231,7 +286,19 @@ export function RunPlanner() {
           </div>
         )}
 
-        {planMutation.data && <PlanPreview plan={planMutation.data} />}
+        {executeMutation.error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded p-3 mb-6 text-sm">
+            {(executeMutation.error as Error).message}
+          </div>
+        )}
+
+        {planMutation.data && (
+          <PlanPreview
+            plan={planMutation.data}
+            onExecute={handleExecute}
+            isExecuting={executeMutation.isPending || isRunning}
+          />
+        )}
       </div>
     </div>
   )

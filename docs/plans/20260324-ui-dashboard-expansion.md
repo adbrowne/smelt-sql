@@ -49,30 +49,34 @@ Interactive UI to configure run options and preview execution plan.
 - Plan preview table with expandable per-batch detail rows
 - Navigation tabs: Graph | Run Planner
 
-### 🔮 Phase 4: Run Execution + Monitoring
+### ✅ Phase 4: Run Execution + Monitoring (March 24, 2026)
 
 Execute runs from the UI with real-time progress streaming via WebSocket.
 
-**New: `RunManager`** (`crates/smelt-ui/src/run_manager.rs`):
+**`RunManager`** (`crates/smelt-ui/src/run_manager.rs`):
 - Singleton with `Mutex<RunState>` (Idle | Running)
-- On execute: spawns tokio task, runs the model execution loop (adapted from `crates/smelt-cli/src/main.rs` run flow)
+- On execute: spawns tokio task, compiles SQL using smelt-parser + smelt-dialect directly (no smelt-cli dependency to avoid circular deps)
 - Streams `RunProgressEvent` through broadcast channel → WebSocket → browser
 - Cancellation via `CancellationToken` checked between batches
 - Only one run at a time (returns 409 if busy)
+- Saves RunManifest and updates IntervalStore via smelt-state on completion
 
 **Events**: `RunStarted`, `ModelStarted`, `BatchCompleted`, `ModelCompleted`, `RunCompleted`, `RunFailed`, `RunCancelled`
 
-**New API endpoints:**
-- `POST /api/run/execute` — start run (same body as plan)
+**API endpoints:**
+- `POST /api/run/execute` — start run (same body as plan + target field)
 - `POST /api/run/cancel` — cancel current run
-- `GET /api/run/status` — current state (idle/running)
-- `GET /api/runs` — run history from `smelt-state` FileStore
+- `GET /api/run/status` — current state (idle/running) with progress counters
+- `GET /api/runs` — run history (most recent 50) from smelt-state FileStore
 - `GET /api/runs/{id}` — single run manifest
 
 **Frontend:**
-- `useRunStatus` hook subscribing to WebSocket run progress events
-- `RunProgress` component: current model, batch N/M, row counts, elapsed time, progress bars
-- `RunHistory` page: table of past runs
+- `useRunStatus` hook subscribing to WebSocket run progress events via global handler set
+- `RunProgress` component: current model, batch N/M, row counts, progress bars, event log
+- `RunHistory` page: table of past runs with expandable per-model detail
+- "Execute Run" button in PlanPreview after previewing
+- Cancel button during execution
+- Navigation tab: Graph | Run Planner | History
 
 ### 🔮 Phase 5: Mobile Responsive + Polish
 
@@ -103,15 +107,19 @@ Execute runs from the UI with real-time progress streaming via WebSocket.
 
 | File | Role |
 |------|------|
-| `crates/smelt-ui/src/server.rs` | AppState, routes, WebSocket, server startup |
-| `crates/smelt-ui/src/api.rs` | All API handlers |
+| `crates/smelt-ui/src/server.rs` | AppState, routes, WebSocket (change + run events), server startup |
+| `crates/smelt-ui/src/api.rs` | All API handlers (project, graph, model, run plan/execute/cancel/status/history) |
 | `crates/smelt-ui/src/build.rs` | Build responses from Salsa/config, run plan computation |
-| `crates/smelt-ui/src/types.rs` | All serializable request/response types |
+| `crates/smelt-ui/src/run_manager.rs` | RunManager: execution orchestration, progress streaming, cancellation |
+| `crates/smelt-ui/src/types.rs` | All serializable request/response types (incl. run execution types) |
 | `crates/smelt-ui/src/watcher.rs` | File watcher, Salsa refresh, graph rebuild |
 | `crates/smelt-cli/src/main.rs` | `ui()` function (startup) |
 | `crates/smelt-optimizer/src/rules/incremental.rs` | `analyze_batch_safety()` |
 | `crates/smelt-lsp/src/main.rs` | Reference for Salsa + file watching pattern |
-| `ui/src/App.tsx` | Frontend entry, navigation, WebSocket |
+| `ui/src/App.tsx` | Frontend entry, navigation (Graph/Run Planner/History), WebSocket |
 | `ui/src/components/ModelDetail.tsx` | Model detail panel with types/diagnostics |
-| `ui/src/pages/RunPlanner.tsx` | Run planner page |
-| `ui/src/hooks/useWebSocket.ts` | WebSocket connection + auto-reconnect |
+| `ui/src/components/RunProgress.tsx` | Run progress bars, event log, cancel button |
+| `ui/src/pages/RunPlanner.tsx` | Run planner page with Execute button |
+| `ui/src/pages/RunHistory.tsx` | Run history table with expandable model details |
+| `ui/src/hooks/useWebSocket.ts` | WebSocket connection + auto-reconnect + run event dispatch |
+| `ui/src/hooks/useRunStatus.ts` | Run status state management from WebSocket events |

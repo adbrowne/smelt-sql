@@ -1,4 +1,4 @@
-import type { GraphResponse, ModelDetailResponse, ProjectResponse, RunPlanRequest, RunPlanResponse } from './types';
+import type { GraphResponse, ModelDetailResponse, ProjectResponse, RunPlanRequest, RunPlanResponse, RunExecuteRequest, RunStatusResponse, RunHistoryEntry } from './types';
 
 const BASE = '';
 
@@ -30,5 +30,44 @@ export async function fetchRunPlan(request: RunPlanRequest): Promise<RunPlanResp
     const text = await res.text();
     throw new Error(text || `Failed to compute run plan: ${res.statusText}`);
   }
+  return res.json();
+}
+
+export async function executeRun(request: RunExecuteRequest): Promise<{ run_id: string }> {
+  const res = await fetch(`${BASE}/api/run/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to start run: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function cancelRun(): Promise<void> {
+  const res = await fetch(`${BASE}/api/run/cancel`, { method: 'POST' });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to cancel run: ${res.statusText}`);
+  }
+}
+
+export async function fetchRunStatus(): Promise<RunStatusResponse> {
+  const res = await fetch(`${BASE}/api/run/status`);
+  if (!res.ok) throw new Error(`Failed to fetch run status: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchRuns(): Promise<RunHistoryEntry[]> {
+  const res = await fetch(`${BASE}/api/runs`);
+  if (!res.ok) throw new Error(`Failed to fetch run history: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchRunById(id: string): Promise<RunHistoryEntry> {
+  const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`Failed to fetch run ${id}: ${res.statusText}`);
   return res.json();
 }

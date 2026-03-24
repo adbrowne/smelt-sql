@@ -108,3 +108,48 @@ export interface PlanBatch {
   filter_start: string;
   filter_end: string;
 }
+
+// --- Run Execution Types ---
+
+export interface RunExecuteRequest {
+  start: string;
+  end: string;
+  batch_size_days?: number;
+  per_partition?: boolean;
+  select?: string[];
+  target?: string;
+}
+
+export interface RunStatusResponse {
+  state: 'idle' | 'running';
+  run_id?: string;
+  current_model?: string;
+  models_completed?: number;
+  models_total?: number;
+  batches_completed?: number;
+  batches_total?: number;
+}
+
+export type RunProgressEvent =
+  | { type: 'run_started'; run_id: string; models: string[]; total_batches: number }
+  | { type: 'model_started'; run_id: string; model: string; model_index: number; models_total: number }
+  | { type: 'batch_completed'; run_id: string; model: string; batch_index: number; batches_total: number; row_count: number; duration_ms: number }
+  | { type: 'model_completed'; run_id: string; model: string; row_count: number; duration_ms: number }
+  | { type: 'run_completed'; run_id: string; models_executed: number; duration_ms: number }
+  | { type: 'run_failed'; run_id: string; error: string; model?: string }
+  | { type: 'run_cancelled'; run_id: string };
+
+export interface RunHistoryEntry {
+  run_id: string;
+  started_at: string;
+  completed_at?: string;
+  model_count: number;
+  models: Record<string, RunModelSummary>;
+}
+
+export interface RunModelSummary {
+  strategy: string;
+  row_count: number;
+  duration_ms: number;
+  time_range?: { start: string; end: string };
+}

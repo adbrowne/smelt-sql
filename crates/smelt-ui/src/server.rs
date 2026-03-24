@@ -17,6 +17,8 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::SourcesConfig;
 
 use crate::api;
+use crate::run_manager::RunManager;
+use crate::types::RunProgressEvent;
 
 #[derive(Embed)]
 #[folder = "../../ui/dist"]
@@ -36,9 +38,10 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub sources: Arc<Option<SourcesConfig>>,
     pub graph: Arc<tokio::sync::Mutex<DependencyGraph>>,
-    #[allow(dead_code)] // Used in later phases for run execution
     pub project_dir: PathBuf,
     pub change_tx: broadcast::Sender<ChangeEvent>,
+    pub run_manager: Arc<RunManager>,
+    pub run_event_tx: broadcast::Sender<RunProgressEvent>,
 }
 
 pub async fn start_server(
@@ -51,6 +54,9 @@ pub async fn start_server(
     host: &str,
 ) -> Result<()> {
     let (change_tx, _) = broadcast::channel::<ChangeEvent>(64);
+    let (run_event_tx, _) = broadcast::channel::<RunProgressEvent>(256);
+
+    let run_manager = Arc::new(RunManager::new(run_event_tx.clone(), project_dir.clone()));
 
     let state = Arc::new(AppState {
         db: Arc::new(tokio::sync::Mutex::new(db)),
@@ -59,6 +65,8 @@ pub async fn start_server(
         graph: Arc::new(tokio::sync::Mutex::new(graph)),
         project_dir: project_dir.clone(),
         change_tx: change_tx.clone(),
+        run_manager,
+        run_event_tx: run_event_tx.clone(),
     });
 
     // Start file watcher
@@ -75,6 +83,11 @@ pub async fn start_server(
         .route("/api/graph", get(api::get_graph))
         .route("/api/models/{name}", get(api::get_model))
         .route("/api/run/plan", post(api::post_run_plan))
+        .route("/api/run/execute", post(api::post_run_execute))
+        .route("/api/run/cancel", post(api::post_run_cancel))
+        .route("/api/run/status", get(api::get_run_status))
+        .route("/api/runs", get(api::get_runs))
+        .route("/api/runs/{id}", get(api::get_run))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(CorsLayer::permissive())
@@ -103,26 +116,40 @@ async fn ws_handler(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
-    let mut rx = state.change_tx.subscribe();
+    let mut change_rx = state.change_tx.subscribe();
+    let mut run_rx = state.run_event_tx.subscribe();
 
     loop {
         tokio::select! {
-            result = rx.recv() => {
+            result = change_rx.recv() => {
                 match result {
                     Ok(event) => {
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if socket.send(Message::Text(json.into())).await.is_err() {
-                            break; // Client disconnected
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket client lagged by {} events", n);
-                        // Send a catch-up notification
+                        tracing::warn!("WebSocket client lagged by {} change events", n);
                         let event = ChangeEvent::ModelsUpdated;
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if socket.send(Message::Text(json.into())).await.is_err() {
                             break;
                         }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            result = run_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket client lagged by {} run events", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -135,7 +162,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                             break;
                         }
                     }
-                    _ => {} // Ignore other messages
+                    _ => {}
                 }
             }
         }
@@ -209,6 +236,7 @@ mod tests {
         db.set_all_files(Arc::new(file_paths));
 
         let (change_tx, _) = broadcast::channel(16);
+        let (run_event_tx, _) = broadcast::channel(16);
 
         let mut targets = HashMap::new();
         targets.insert(
@@ -222,6 +250,7 @@ mod tests {
             },
         );
 
+        let project_root_clone = project_root.clone();
         Arc::new(AppState {
             db: Arc::new(tokio::sync::Mutex::new(db)),
             config: Arc::new(Config {
@@ -238,6 +267,8 @@ mod tests {
             graph: Arc::new(tokio::sync::Mutex::new(graph)),
             project_dir: project_root,
             change_tx,
+            run_manager: Arc::new(RunManager::new(run_event_tx.clone(), project_root_clone)),
+            run_event_tx,
         })
     }
 

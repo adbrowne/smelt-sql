@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize)]
@@ -152,4 +153,120 @@ pub struct PlanBatch {
     pub partition_end: String,
     pub filter_start: String,
     pub filter_end: String,
+}
+
+// --- Run Execution Types ---
+
+/// Request body for POST /api/run/execute (same shape as RunPlanRequest).
+#[derive(Clone, Deserialize)]
+pub struct RunExecuteRequest {
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub batch_size_days: Option<u32>,
+    #[serde(default)]
+    pub per_partition: bool,
+    #[serde(default)]
+    pub select: Vec<String>,
+    #[serde(default = "default_target")]
+    pub target: String,
+}
+
+fn default_target() -> String {
+    "dev".to_string()
+}
+
+/// Response for GET /api/run/status.
+#[derive(Clone, Serialize)]
+pub struct RunStatusResponse {
+    pub state: RunState,
+    /// Present when state is Running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batches_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batches_total: Option<usize>,
+}
+
+#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    Idle,
+    Running,
+}
+
+/// Events streamed via WebSocket during run execution.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum RunProgressEvent {
+    #[serde(rename = "run_started")]
+    RunStarted {
+        run_id: String,
+        models: Vec<String>,
+        total_batches: usize,
+    },
+    #[serde(rename = "model_started")]
+    ModelStarted {
+        run_id: String,
+        model: String,
+        model_index: usize,
+        models_total: usize,
+    },
+    #[serde(rename = "batch_completed")]
+    BatchCompleted {
+        run_id: String,
+        model: String,
+        batch_index: usize,
+        batches_total: usize,
+        row_count: usize,
+        duration_ms: u64,
+    },
+    #[serde(rename = "model_completed")]
+    ModelCompleted {
+        run_id: String,
+        model: String,
+        row_count: usize,
+        duration_ms: u64,
+    },
+    #[serde(rename = "run_completed")]
+    RunCompleted {
+        run_id: String,
+        models_executed: usize,
+        duration_ms: u64,
+    },
+    #[serde(rename = "run_failed")]
+    RunFailed {
+        run_id: String,
+        error: String,
+        model: Option<String>,
+    },
+    #[serde(rename = "run_cancelled")]
+    RunCancelled { run_id: String },
+}
+
+/// Response for GET /api/runs (run history list).
+#[derive(Clone, Serialize)]
+pub struct RunHistoryEntry {
+    pub run_id: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub model_count: usize,
+    pub models: std::collections::HashMap<String, RunModelSummary>,
+}
+
+/// Per-model summary in run history.
+#[derive(Clone, Serialize)]
+pub struct RunModelSummary {
+    pub strategy: String,
+    pub row_count: usize,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_range: Option<PlanTimeRange>,
 }

@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { runStatusHandlers } from './useRunStatus'
 
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
+
+const RUN_EVENT_TYPES = new Set([
+  'run_started', 'model_started', 'batch_completed',
+  'model_completed', 'run_completed', 'run_failed', 'run_cancelled',
+])
 
 export function useWebSocket() {
   const queryClient = useQueryClient()
@@ -26,8 +32,16 @@ export function useWebSocket() {
         try {
           const data = JSON.parse(event.data)
           if (data.type === 'models_updated') {
-            // Invalidate all queries so the UI refetches
             queryClient.invalidateQueries()
+          } else if (RUN_EVENT_TYPES.has(data.type)) {
+            for (const handler of runStatusHandlers) {
+              handler(data)
+            }
+            // Refetch run status and history when a run completes/fails
+            if (data.type === 'run_completed' || data.type === 'run_failed' || data.type === 'run_cancelled') {
+              queryClient.invalidateQueries({ queryKey: ['runs'] })
+              queryClient.invalidateQueries({ queryKey: ['runStatus'] })
+            }
           }
         } catch {
           // Ignore malformed messages
@@ -37,7 +51,6 @@ export function useWebSocket() {
       ws.onclose = () => {
         setStatus('disconnected')
         wsRef.current = null
-        // Reconnect after a delay
         reconnectTimeout.current = setTimeout(connect, 2000)
       }
 

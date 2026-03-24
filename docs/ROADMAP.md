@@ -4,6 +4,14 @@ This document tracks the implementation status of smelt, aligned with the spec i
 
 ## Current Status
 
+**UI Dashboard Phase 4: Run Execution + Monitoring (March 24, 2026)**: Execute runs from the UI with real-time progress streaming:
+- **RunManager** (`crates/smelt-ui/src/run_manager.rs`): Orchestrates model execution in a background tokio task, streams progress events via broadcast channel, supports cancellation between batches. Uses smelt-parser + smelt-dialect directly (no circular dependency on smelt-cli)
+- **Run APIs**: `POST /api/run/execute` (start run, 409 if busy), `POST /api/run/cancel`, `GET /api/run/status`, `GET /api/runs` (history), `GET /api/runs/{id}` (single manifest)
+- **WebSocket run events**: `RunStarted`, `ModelStarted`, `BatchCompleted`, `ModelCompleted`, `RunCompleted`, `RunFailed`, `RunCancelled` — all streamed to all connected WebSocket clients
+- **Frontend**: `useRunStatus` hook subscribes to run events, `RunProgress` component shows progress bars and event log, `RunHistory` page shows past runs with expandable model details, "Execute Run" button in plan preview
+- **State persistence**: Saves RunManifest to `.smelt/runs/` and updates IntervalStore on completion via smelt-state
+- New dependencies: smelt-backend, smelt-backend-duckdb (optional), smelt-state, smelt-parser, smelt-dialect, tokio-util (CancellationToken)
+
 **Incremental Phase 5: Operational Metadata & Run History (March 22, 2026)**: Track what smelt has done via advisory operational metadata:
 - **New `smelt-state` crate**: `RunManifest` (per-run records), `IntervalStore` (model coverage tracking), `FileStore` (JSON file-backed persistence in `.smelt/`)
 - **Interval tracking**: Records covered date ranges per model with automatic merge of adjacent/overlapping intervals, gap detection, and model hash-based invalidation when SQL changes

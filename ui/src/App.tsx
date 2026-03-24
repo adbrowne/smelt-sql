@@ -5,9 +5,10 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { Graph } from './components/Graph'
 import { ModelDetail } from './components/ModelDetail'
 import { RunPlanner } from './pages/RunPlanner'
+import { RunHistory } from './pages/RunHistory'
 import { useWebSocket } from './hooks/useWebSocket'
 
-type Page = 'graph' | 'planner'
+type Page = 'graph' | 'planner' | 'history'
 
 function App() {
   const [page, setPage] = useState<Page>('graph')
@@ -46,6 +47,12 @@ function App() {
     )
   }
 
+  const navItems: { key: Page; label: string }[] = [
+    { key: 'graph', label: 'Graph' },
+    { key: 'planner', label: 'Run Planner' },
+    { key: 'history', label: 'History' },
+  ]
+
   return (
     <ErrorBoundary>
       <div className="h-full flex flex-col bg-gray-50">
@@ -59,26 +66,19 @@ function App() {
           )}
 
           <nav className="ml-4 flex gap-1">
-            <button
-              onClick={() => setPage('graph')}
-              className={`text-sm px-3 py-1 rounded ${
-                page === 'graph'
-                  ? 'bg-gray-900 text-white'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              Graph
-            </button>
-            <button
-              onClick={() => setPage('planner')}
-              className={`text-sm px-3 py-1 rounded ${
-                page === 'planner'
-                  ? 'bg-gray-900 text-white'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              Run Planner
-            </button>
+            {navItems.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setPage(key)}
+                className={`text-sm px-3 py-1 rounded ${
+                  page === key
+                    ? 'bg-gray-900 text-white'
+                    : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </nav>
 
           <div className="ml-auto flex items-center gap-2">
@@ -121,6 +121,7 @@ function App() {
           )}
 
           {page === 'planner' && <RunPlanner />}
+          {page === 'history' && <RunHistory />}
         </div>
       </div>
     </ErrorBoundary>
