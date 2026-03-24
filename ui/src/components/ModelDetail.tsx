@@ -179,6 +179,17 @@ export function ModelDetail({ model, onClose }: ModelDetailProps) {
           </div>
         )}
 
+        {model.function_type && (
+          <div className="mb-4">
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+              Model Type
+            </h3>
+            <pre className="bg-gray-50 text-gray-700 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono border border-gray-200">
+              {model.function_type}
+            </pre>
+          </div>
+        )}
+
         <div>
           <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
             SQL

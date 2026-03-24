@@ -32,6 +32,7 @@ export interface ModelDetailResponse {
   incremental?: IncrementalInfo;
   batch_safety?: BatchSafetyInfo;
   diagnostics?: DiagnosticInfo[];
+  function_type?: string;
 }
 
 export interface ColumnInfo {

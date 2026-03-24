@@ -52,6 +52,9 @@ pub struct ModelDetailResponse {
     /// Parse errors and type diagnostics.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<DiagnosticInfo>,
+    /// Function type signature: (inputs) -> outputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_type: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

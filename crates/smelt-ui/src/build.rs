@@ -88,6 +88,10 @@ pub fn build_model_details(
         let tags = config.get_tags(name, metadata);
 
         let schema = db.typed_model_schema(model.path.clone());
+        let function_type = {
+            let ft = db.model_function_type(model.path.clone());
+            Some(ft.to_string())
+        };
         let columns: Vec<ColumnInfo> = schema
             .columns
             .iter()
@@ -211,6 +215,7 @@ pub fn build_model_details(
                 incremental,
                 batch_safety,
                 diagnostics,
+                function_type,
             },
         );
     }
