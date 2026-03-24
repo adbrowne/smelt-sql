@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774341537168,
+  "lastUpdate": 1774341538768,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4277,6 +4277,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.29040692367912,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a03ea28ef1eea8703b530f42297b5da76fd38325",
+          "message": "Phase 3: Run Planner — interactive run preview UI\n\nBackend:\n- POST /api/run/plan endpoint accepts time range, batch size, per-partition\n  flag, and model selection\n- build_run_plan() computes execution plan using batch safety analysis\n  from smelt-optimizer, generates batches per model\n- Returns models with batch counts, safety levels, and per-batch ranges\n\nFrontend:\n- Run Planner page with date range inputs, batch size override,\n  per-partition toggle, and model selector (click to toggle)\n- Preview button triggers plan computation\n- Plan table shows models with type, safety badge, batch count, range\n- Expandable rows show individual batch read/write ranges\n- Navigation tabs in header: Graph | Run Planner\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T19:36:44+11:00",
+          "tree_id": "c2d6c604cfece006f47ecfe0cd714483ac9d4214",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a03ea28ef1eea8703b530f42297b5da76fd38325"
+        },
+        "date": 1774341538155,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.968798737708408,
             "unit": "MB/s"
           }
         ]
