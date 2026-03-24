@@ -84,6 +84,46 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             }),
             status: DivergenceStatus::BackendSpecific,
         },
+        TypeDivergence {
+            id: "sign_double",
+            description:
+                "SIGN(DOUBLE) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Double",
+            smelt_type: DataType::SmallInt,
+            duckdb_type: None,
+            spark_type: Some(DataType::Double),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
+            id: "sign_integer",
+            description:
+                "SIGN(INTEGER) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Integer",
+            smelt_type: DataType::SmallInt,
+            duckdb_type: None,
+            spark_type: Some(DataType::Integer),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
+            id: "sign_bigint",
+            description:
+                "SIGN(BIGINT) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns BigInt",
+            smelt_type: DataType::SmallInt,
+            duckdb_type: None,
+            spark_type: Some(DataType::BigInt),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
+            id: "sign_decimal",
+            description:
+                "SIGN(DECIMAL) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Decimal",
+            smelt_type: DataType::SmallInt,
+            duckdb_type: None,
+            // Wildcard: Decimal(0,0) matches any Decimal precision/scale
+            spark_type: Some(DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            }),
+            status: DivergenceStatus::BackendSpecific,
+        },
     ]
 }
 
