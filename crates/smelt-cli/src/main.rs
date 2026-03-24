@@ -2190,7 +2190,7 @@ async fn ui(args: UiArgs) -> Result<()> {
     // Initialize smelt-db for schema queries
     let db = init_db(&project_dir, &models);
 
-    // Build a smelt-core DependencyGraph for UI builders (they use smelt-core types)
+    // Build dependency graph
     let core_models: Vec<smelt_core::ModelFile> = models
         .iter()
         .map(|m| smelt_core::ModelFile {
@@ -2202,19 +2202,15 @@ async fn ui(args: UiArgs) -> Result<()> {
             metadata: m.metadata.clone(),
         })
         .collect();
-    let core_graph = smelt_core::graph::DependencyGraph::build(core_models, sources.as_ref())
+    let graph = smelt_core::graph::DependencyGraph::build(core_models, sources.as_ref())
         .with_context(|| "Failed to build UI dependency graph")?;
 
-    // Build responses using smelt-ui builders
-    let project_response =
-        smelt_ui::build::build_project_response(&config, &core_graph, sources.as_ref());
-    let graph_response = smelt_ui::build::build_graph_response(&core_graph, &config);
-    let model_details = smelt_ui::build::build_model_details(&core_graph, &config, &db);
-
     smelt_ui::start_server(
-        project_response,
-        graph_response,
-        model_details,
+        db,
+        config,
+        sources,
+        graph,
+        project_dir,
         args.port,
         &args.host,
     )

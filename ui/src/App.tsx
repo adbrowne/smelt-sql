@@ -4,9 +4,11 @@ import { fetchGraph, fetchProject, fetchModel } from './api'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Graph } from './components/Graph'
 import { ModelDetail } from './components/ModelDetail'
+import { useWebSocket } from './hooks/useWebSocket'
 
 function App() {
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
+  const wsStatus = useWebSocket()
 
   const { data: project } = useQuery({
     queryKey: ['project'],
@@ -51,6 +53,21 @@ function App() {
               {project.source_count > 0 && ` \u00b7 ${project.source_count} sources`}
             </span>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                wsStatus === 'connected'
+                  ? 'bg-green-500'
+                  : wsStatus === 'connecting'
+                    ? 'bg-yellow-500'
+                    : 'bg-gray-400'
+              }`}
+              title={`Live updates: ${wsStatus}`}
+            />
+            <span className="text-xs text-gray-400">
+              {wsStatus === 'connected' ? 'live' : wsStatus}
+            </span>
+          </div>
         </header>
 
         <div className="flex-1 flex min-h-0">

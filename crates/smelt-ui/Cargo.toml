@@ -12,7 +12,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
 
 # Web server
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Embedded assets
@@ -21,6 +21,10 @@ mime_guess = "2"
 
 # Async runtime
 tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# File watching
+notify-debouncer-mini = "0.7"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +35,9 @@ anyhow.workspace = true
 
 # CST types (for TextRange in tests)
 rowan.workspace = true
+
+# Logging
+tracing = "0.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

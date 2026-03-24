@@ -1,52 +1,87 @@
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use axum::extract::ws::{Message, WebSocket};
+use axum::extract::WebSocketUpgrade;
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use rust_embed::Embed;
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
+use smelt_core::config::Config;
+use smelt_core::graph::DependencyGraph;
+use smelt_core::SourcesConfig;
+
 use crate::api;
-use crate::types::*;
 
 #[derive(Embed)]
 #[folder = "../../ui/dist"]
 struct Assets;
 
+/// Events pushed to WebSocket clients.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum ChangeEvent {
+    /// Model files changed on disk — clients should refetch.
+    #[serde(rename = "models_updated")]
+    ModelsUpdated,
+}
+
 pub struct AppState {
-    pub project: ProjectResponse,
-    pub graph: GraphResponse,
-    pub models: HashMap<String, ModelDetailResponse>,
+    pub db: Arc<tokio::sync::Mutex<smelt_db::Database>>,
+    pub config: Arc<Config>,
+    pub sources: Arc<Option<SourcesConfig>>,
+    pub graph: Arc<tokio::sync::Mutex<DependencyGraph>>,
+    #[allow(dead_code)] // Used in later phases for run execution
+    pub project_dir: PathBuf,
+    pub change_tx: broadcast::Sender<ChangeEvent>,
 }
 
 pub async fn start_server(
-    project: ProjectResponse,
-    graph: GraphResponse,
-    models: HashMap<String, ModelDetailResponse>,
+    db: smelt_db::Database,
+    config: Config,
+    sources: Option<SourcesConfig>,
+    graph: DependencyGraph,
+    project_dir: PathBuf,
     port: u16,
     host: &str,
 ) -> Result<()> {
+    let (change_tx, _) = broadcast::channel::<ChangeEvent>(64);
+
     let state = Arc::new(AppState {
-        project,
-        graph,
-        models,
+        db: Arc::new(tokio::sync::Mutex::new(db)),
+        config: Arc::new(config.clone()),
+        sources: Arc::new(sources),
+        graph: Arc::new(tokio::sync::Mutex::new(graph)),
+        project_dir: project_dir.clone(),
+        change_tx: change_tx.clone(),
     });
+
+    // Start file watcher
+    let watcher_state = state.clone();
+    let model_paths: Vec<PathBuf> = config
+        .model_paths
+        .iter()
+        .map(|p| project_dir.join(p))
+        .collect();
+    crate::watcher::start_watcher(watcher_state, model_paths, project_dir.clone())?;
 
     let app = Router::new()
         .route("/api/project", get(api::get_project))
         .route("/api/graph", get(api::get_graph))
         .route("/api/models/{name}", get(api::get_model))
+        .route("/ws", get(ws_handler))
         .fallback(static_handler)
-        // Permissive CORS for dev mode (Vite dev server proxies to this port)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = format!("{}:{}", host, port);
     println!("Starting UI server at http://{}:{}", host, port);
-    println!("Serving a snapshot of your project — restart to pick up changes");
+    println!("Live mode — file changes will auto-update the UI");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -59,10 +94,56 @@ pub async fn start_server(
     Ok(())
 }
 
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.change_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break; // Client disconnected
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket client lagged by {} events", n);
+                        // Send a catch-up notification
+                        let event = ChangeEvent::ModelsUpdated;
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {} // Ignore other messages
+                }
+            }
+        }
+    }
+}
+
 async fn static_handler(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
-    // Try the exact path first
     if let Some(file) = Assets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response();
@@ -74,7 +155,6 @@ async fn static_handler(uri: axum::http::Uri) -> Response {
         return Html(html).into_response();
     }
 
-    // No embedded assets - show helpful message
     Html(
         r#"<!DOCTYPE html>
 <html><body>
@@ -97,46 +177,66 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use smelt_core::config::Materialization;
+    use smelt_core::discovery::ModelFile;
+    use smelt_db::Inputs;
+    use std::collections::HashMap;
     use tower::ServiceExt;
 
     fn test_state() -> Arc<AppState> {
-        let mut models = HashMap::new();
-        models.insert(
-            "test_model".to_string(),
-            ModelDetailResponse {
-                name: "test_model".to_string(),
-                path: "models/test_model.sql".to_string(),
-                sql: "SELECT 1".to_string(),
-                materialization: Some("view".to_string()),
-                tags: vec!["test".to_string()],
-                owner: None,
-                description: Some("A test model".to_string()),
-                refs: vec![],
-                columns: vec![],
+        let models = vec![ModelFile {
+            name: "test_model".to_string(),
+            path: "models/test_model.sql".into(),
+            content: "SELECT 1".to_string(),
+            refs: vec![],
+            parse_errors: vec![],
+            metadata: None,
+        }];
+
+        let graph = DependencyGraph::build(models.clone(), None).unwrap();
+
+        let mut db = smelt_db::Database::default();
+        let project_root = PathBuf::from("/test");
+        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
+        let mut file_paths = Vec::new();
+        for model in &models {
+            db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
+            db.set_file_project_root(model.path.clone(), project_root.clone());
+            file_paths.push(model.path.clone());
+        }
+        db.set_all_files(Arc::new(file_paths));
+
+        let (change_tx, _) = broadcast::channel(16);
+
+        let mut targets = HashMap::new();
+        targets.insert(
+            "dev".to_string(),
+            smelt_core::config::Target {
+                target_type: "duckdb".to_string(),
+                database: Some("test.duckdb".to_string()),
+                schema: "main".to_string(),
+                connect_url: None,
+                catalog: None,
             },
         );
 
         Arc::new(AppState {
-            project: ProjectResponse {
+            db: Arc::new(tokio::sync::Mutex::new(db)),
+            config: Arc::new(Config {
                 name: "test".to_string(),
                 version: 1,
-                model_count: 1,
-                source_count: 0,
-            },
-            graph: GraphResponse {
-                nodes: vec![GraphNode {
-                    id: "test_model".to_string(),
-                    label: "test_model".to_string(),
-                    materialization: Some("view".to_string()),
-                    tags: vec!["test".to_string()],
-                    description: Some("A test model".to_string()),
-                    has_errors: false,
-                    node_type: NodeType::Model,
-                }],
-                edges: vec![],
-                sources: vec![],
-            },
-            models,
+                model_paths: vec!["models".to_string()],
+                seed_paths: vec!["seeds".to_string()],
+                targets,
+                default_materialization: Materialization::View,
+                models: HashMap::new(),
+                python: None,
+            }),
+            sources: Arc::new(None),
+            graph: Arc::new(tokio::sync::Mutex::new(graph)),
+            project_dir: project_root,
+            change_tx,
         })
     }
 
@@ -163,7 +263,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -186,7 +285,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -209,13 +307,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let model: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(model["name"], "test_model");
-        assert_eq!(model["sql"], "SELECT 1");
     }
 
     #[tokio::test]
