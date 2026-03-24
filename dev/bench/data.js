@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774388042467,
+  "lastUpdate": 1774388044155,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4769,6 +4769,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.63492932804478,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "437ea51b8229728f04f6ce717598622b1c200f39",
+          "message": "Show model function type signature in UI sidebar\n\nAdds the model's (inputs) -> outputs type signature to the detail\nsidebar, rendered just above the SQL block. Uses the existing\nModelFunctionType Display impl from smelt-db.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T08:32:05+11:00",
+          "tree_id": "22ea8fcff259a63288aa56d22c6350934823cb3e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/437ea51b8229728f04f6ce717598622b1c200f39"
+        },
+        "date": 1774388043486,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.960290493722383,
             "unit": "MB/s"
           }
         ]
