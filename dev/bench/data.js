@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774341867273,
+  "lastUpdate": 1774341868851,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4400,6 +4400,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.968798737708408,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "bc72334eead61c6fb748054db7a2a640e4ca31f5",
+          "message": "Add UI dashboard expansion plan to docs/plans\n\nDocuments completed phases 1-3 and remaining phases 4-6.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T19:42:48+11:00",
+          "tree_id": "75b2367ab709edb9cf18d26a5ddc65bf96780eb5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bc72334eead61c6fb748054db7a2a640e4ca31f5"
+        },
+        "date": 1774341868495,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.00430379498324,
             "unit": "MB/s"
           }
         ]
