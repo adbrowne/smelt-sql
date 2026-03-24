@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774342969289,
+  "lastUpdate": 1774342970201,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4523,6 +4523,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.00430379498324,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3eee0c8f2dd76204fca7cd252175fd1611f9da9f",
+          "message": "Register SIGN() Spark type divergences in property tests\n\nSpark's SIGN() preserves the input type (DOUBLE→DOUBLE, INTEGER→INTEGER,\netc.) while DuckDB returns TINYINT. smelt infers SmallInt matching DuckDB\nbehavior. Register all numeric input variants as BackendSpecific divergences\nso the Spark property tests pass.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T19:52:36+11:00",
+          "tree_id": "5323ce943dd1972fdecaebb958d1d362279eb2ec",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3eee0c8f2dd76204fca7cd252175fd1611f9da9f"
+        },
+        "date": 1774342969972,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.0296907742068,
             "unit": "MB/s"
           }
         ]
