@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774338643730,
+  "lastUpdate": 1774341537168,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3195,6 +3195,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.673909,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a03ea28ef1eea8703b530f42297b5da76fd38325",
+          "message": "Phase 3: Run Planner — interactive run preview UI\n\nBackend:\n- POST /api/run/plan endpoint accepts time range, batch size, per-partition\n  flag, and model selection\n- build_run_plan() computes execution plan using batch safety analysis\n  from smelt-optimizer, generates batches per model\n- Returns models with batch counts, safety levels, and per-batch ranges\n\nFrontend:\n- Run Planner page with date range inputs, batch size override,\n  per-partition toggle, and model selector (click to toggle)\n- Preview button triggers plan computation\n- Plan table shows models with type, safety badge, batch count, range\n- Expandable rows show individual batch read/write ranges\n- Navigation tabs in header: Graph | Run Planner\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T19:36:44+11:00",
+          "tree_id": "c2d6c604cfece006f47ecfe0cd714483ac9d4214",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a03ea28ef1eea8703b530f42297b5da76fd38325"
+        },
+        "date": 1774341536252,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 34.553464999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.383462,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.5586760000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.302177,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002715,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.020139,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.018124,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012073,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.01046,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.086607,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.0893689999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.94917,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.68969,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.830547,
             "unit": "ms"
           }
         ]
