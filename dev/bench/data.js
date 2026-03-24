@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774343246171,
+  "lastUpdate": 1774343248137,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4646,6 +4646,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.0296907742068,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5694783dec427376a5ad51f97609e85a5fd0d1e1",
+          "message": "Phase 4: Run Execution + Monitoring from the UI dashboard\n\nRunManager orchestrates model execution in a background tokio task with\nreal-time progress streaming via WebSocket. Supports cancellation between\nbatches and saves run manifests + interval updates on completion.\n\nBackend: RunManager, 5 new API endpoints (execute/cancel/status/history),\nWebSocket run event streaming, RunProgressEvent types.\n\nFrontend: useRunStatus hook, RunProgress component with progress bars,\nRunHistory page, Execute button in RunPlanner, History nav tab.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T20:05:16+11:00",
+          "tree_id": "ca5cafa61eba3ba96fa1041f749c923b546bb6f5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5694783dec427376a5ad51f97609e85a5fd0d1e1"
+        },
+        "date": 1774343247760,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.63492932804478,
             "unit": "MB/s"
           }
         ]
