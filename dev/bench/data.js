@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774341868851,
+  "lastUpdate": 1774342969289,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3383,6 +3383,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.326563,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3eee0c8f2dd76204fca7cd252175fd1611f9da9f",
+          "message": "Register SIGN() Spark type divergences in property tests\n\nSpark's SIGN() preserves the input type (DOUBLE→DOUBLE, INTEGER→INTEGER,\netc.) while DuckDB returns TINYINT. smelt infers SmallInt matching DuckDB\nbehavior. Register all numeric input variants as BackendSpecific divergences\nso the Spark property tests pass.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T19:52:36+11:00",
+          "tree_id": "5323ce943dd1972fdecaebb958d1d362279eb2ec",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3eee0c8f2dd76204fca7cd252175fd1611f9da9f"
+        },
+        "date": 1774342968945,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.242437,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.044162,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.5483830000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.327371,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002675,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.728839,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.023574,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.011942,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008886,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.985538,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.248368,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.79975,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.82259,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.800568,
             "unit": "ms"
           }
         ]
