@@ -220,15 +220,11 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 
 ## Development Workflow
 
-**IMPORTANT: Always Work on a Branch**
-
-Always work on a git branch for any changes, even small ones. This allows you to commit frequently without worrying about breaking the main branch.
-
-If you find yourself on `main` with uncommitted changes, create a branch immediately before committing.
-
-**Git Commit Policy:**
+**Git Workflow:**
+- Work on local branches for non-trivial changes, then merge to `main` and push
+- For small/trivial changes, committing directly to `main` is fine
+- No PRs needed — just push to `main` after tests pass
 - Normal git operations including push are available
-- Commit to branches, not directly to main (see above)
 
 ### For Parser/LSP Features
 
