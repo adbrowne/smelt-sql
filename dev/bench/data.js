@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774342970201,
+  "lastUpdate": 1774343246171,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3477,6 +3477,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.800568,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5694783dec427376a5ad51f97609e85a5fd0d1e1",
+          "message": "Phase 4: Run Execution + Monitoring from the UI dashboard\n\nRunManager orchestrates model execution in a background tokio task with\nreal-time progress streaming via WebSocket. Supports cancellation between\nbatches and saves run manifests + interval updates on completion.\n\nBackend: RunManager, 5 new API endpoints (execute/cancel/status/history),\nWebSocket run event streaming, RunProgressEvent types.\n\nFrontend: useRunStatus hook, RunProgress component with progress bars,\nRunHistory page, Execute button in RunPlanner, History nav tab.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-24T20:05:16+11:00",
+          "tree_id": "ca5cafa61eba3ba96fa1041f749c923b546bb6f5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5694783dec427376a5ad51f97609e85a5fd0d1e1"
+        },
+        "date": 1774343245649,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.238787,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.013360999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.616686,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.301259,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002716,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.663536,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.026299,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013875,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008726000000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.163311,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.1488620000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.50102,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.594479999999997,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.510648,
             "unit": "ms"
           }
         ]
