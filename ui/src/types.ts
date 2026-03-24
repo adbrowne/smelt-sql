@@ -29,6 +29,9 @@ export interface ModelDetailResponse {
   description: string | null;
   refs: string[];
   columns: ColumnInfo[];
+  incremental?: IncrementalInfo;
+  batch_safety?: BatchSafetyInfo;
+  diagnostics?: DiagnosticInfo[];
 }
 
 export interface ColumnInfo {
@@ -51,4 +54,25 @@ export interface ProjectResponse {
   version: number;
   model_count: number;
   source_count: number;
+}
+
+export interface IncrementalInfo {
+  granularity: string;
+  partition_column: string;
+  event_time_column: string;
+  unique_key: string[];
+}
+
+export interface BatchSafetyInfo {
+  level: string;
+  max_chunk_days?: number;
+  context_days?: number;
+  reason?: string;
+}
+
+export interface DiagnosticInfo {
+  severity: string;
+  message: string;
+  line?: number;
+  column?: number;
 }

@@ -3944,6 +3944,7 @@ dependencies = [
  "serde_json",
  "smelt-core",
  "smelt-db",
+ "smelt-optimizer",
  "tokio",
  "tokio-util",
  "tower 0.5.3",

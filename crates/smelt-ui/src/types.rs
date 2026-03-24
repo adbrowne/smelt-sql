@@ -42,6 +42,15 @@ pub struct ModelDetailResponse {
     pub description: Option<String>,
     pub refs: Vec<String>,
     pub columns: Vec<ColumnInfo>,
+    /// Incremental configuration (if model is incremental).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<IncrementalInfo>,
+    /// Batch safety classification for backfill operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_safety: Option<BatchSafetyInfo>,
+    /// Parse errors and type diagnostics.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<DiagnosticInfo>,
 }
 
 #[derive(Clone, Serialize)]
@@ -74,4 +83,28 @@ pub struct ProjectResponse {
     pub version: u32,
     pub model_count: usize,
     pub source_count: usize,
+}
+
+#[derive(Clone, Serialize)]
+pub struct IncrementalInfo {
+    pub granularity: String,
+    pub partition_column: String,
+    pub event_time_column: String,
+    pub unique_key: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct BatchSafetyInfo {
+    pub level: String,
+    pub max_chunk_days: Option<u32>,
+    pub context_days: Option<u32>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DiagnosticInfo {
+    pub severity: String,
+    pub message: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
 }

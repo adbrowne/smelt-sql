@@ -10,6 +10,7 @@ publish = false
 # Core smelt dependencies
 smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
+smelt-optimizer = { path = "../smelt-optimizer" }
 
 # Web server
 axum = { version = "0.8", features = ["ws"] }

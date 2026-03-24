@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::SourcesConfig;
-use smelt_db::{ColumnSource, TypeChecking};
+use smelt_db::{ColumnSource, DiagnosticSeverity, Semantic, TypeChecking};
 
 use crate::types::*;
 
@@ -125,6 +125,74 @@ pub fn build_model_details(
             })
             .collect();
 
+        // Build incremental info from config
+        let inc_config = config.get_incremental(name).or_else(|| {
+            metadata
+                .and_then(|m| m.incremental.as_ref())
+                .and_then(|_| config.get_incremental(name))
+        });
+
+        let incremental = inc_config.map(|inc| IncrementalInfo {
+            granularity: format!("{:?}", inc.granularity).to_lowercase(),
+            partition_column: inc.partition_column.clone(),
+            event_time_column: inc.event_time_column.clone(),
+            unique_key: inc.unique_key.clone(),
+        });
+
+        // Build batch safety info
+        let batch_safety = inc_config.map(|inc| {
+            use smelt_optimizer::analyze_batch_safety;
+            use smelt_optimizer::ModelInfo;
+
+            let model_info = ModelInfo {
+                name: name.to_string(),
+                sql: model.content.clone(),
+                refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+                incremental_config: Some(inc.clone()),
+            };
+            let safety = analyze_batch_safety(&model_info);
+            match safety {
+                smelt_optimizer::BatchSafety::FullyBatchSafe => BatchSafetyInfo {
+                    level: "fully_batch_safe".to_string(),
+                    max_chunk_days: None,
+                    context_days: None,
+                    reason: None,
+                },
+                smelt_optimizer::BatchSafety::BoundedSafe {
+                    max_chunk_days,
+                    context_days,
+                    reason,
+                } => BatchSafetyInfo {
+                    level: "bounded_safe".to_string(),
+                    max_chunk_days: Some(max_chunk_days),
+                    context_days: Some(context_days),
+                    reason: Some(reason),
+                },
+                smelt_optimizer::BatchSafety::PerPartitionOnly { reason } => BatchSafetyInfo {
+                    level: "per_partition_only".to_string(),
+                    max_chunk_days: None,
+                    context_days: None,
+                    reason: Some(reason),
+                },
+            }
+        });
+
+        // Build diagnostics
+        let diags = db.file_diagnostics(model.path.clone());
+        let diagnostics: Vec<DiagnosticInfo> = diags
+            .iter()
+            .map(|d| DiagnosticInfo {
+                severity: match d.severity {
+                    DiagnosticSeverity::Error => "error".to_string(),
+                    DiagnosticSeverity::Warning => "warning".to_string(),
+                    DiagnosticSeverity::Info => "info".to_string(),
+                },
+                message: d.message.clone(),
+                line: Some(d.range.start.line),
+                column: Some(d.range.start.column),
+            })
+            .collect();
+
         model_details.insert(
             name.to_string(),
             ModelDetailResponse {
@@ -139,6 +207,9 @@ pub fn build_model_details(
                 description: metadata.and_then(|m| m.description.clone()),
                 refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
                 columns,
+                incremental,
+                batch_safety,
+                diagnostics,
             },
         );
     }
@@ -331,5 +402,8 @@ mod tests {
         let a = &details["A"];
         assert_eq!(a.name, "A");
         assert_eq!(a.sql, "SELECT * FROM A");
+        // No incremental config → should be None
+        assert!(a.incremental.is_none());
+        assert!(a.batch_safety.is_none());
     }
 }
