@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774428236679,
+  "lastUpdate": 1774428238388,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6122,6 +6122,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.823271211408713,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ea7b6d023d657bc07f752289ec61f832c9458057",
+          "message": "Switch dev release publishing from PyPI to TestPyPI\n\nDev releases should publish to TestPyPI. Production PyPI publishing\nremains in the release.yml workflow for tagged releases.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T19:42:39+11:00",
+          "tree_id": "77f895258209f1d39fff678050edb449665f64a9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ea7b6d023d657bc07f752289ec61f832c9458057"
+        },
+        "date": 1774428237720,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.296398554340833,
             "unit": "MB/s"
           }
         ]
