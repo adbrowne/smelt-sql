@@ -132,9 +132,11 @@ mod tests {
             })
             .collect();
 
+        let path: std::path::PathBuf = format!("{}.sql", name).into();
         ModelFile {
             name: name.to_string(),
-            path: format!("{}.sql", name).into(),
+            model_id: smelt_core::ModelId::from_path(path.clone()),
+            path,
             content: content.to_string(),
             refs,
             parse_errors: Vec::new(),

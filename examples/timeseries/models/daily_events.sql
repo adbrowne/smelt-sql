@@ -1,5 +1,5 @@
 ---
-materialized: table
+materialization: table
 incremental:
   partition_column: event_date
   event_time_column: event_timestamp

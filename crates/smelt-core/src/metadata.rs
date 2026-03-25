@@ -43,6 +43,7 @@ pub struct ColumnMetadata {
 
 /// Metadata for a single model extracted from frontmatter
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ModelMetadata {
     /// Model name (optional in single-model files, required in multi-model)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,10 +76,6 @@ pub struct ModelMetadata {
     /// Backend-specific hints (forward compatibility)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub backend_hints: HashMap<String, serde_yaml::Value>,
-
-    /// Custom fields (forward compatibility)
-    #[serde(flatten)]
-    pub custom: HashMap<String, serde_yaml::Value>,
 }
 
 /// Complete file metadata (single or multi-model)
@@ -501,6 +498,26 @@ SELECT * FROM users"#;
             }
             _ => panic!("Expected Single variant, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_unknown_field_rejected() {
+        let source = "---\nname: test\nmaterialized: table\n---\nSELECT 1";
+        let result = extract_file_metadata(source);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unknown field"),
+            "Expected 'unknown field' in error: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_incremental_key_rejected() {
+        let source = "---\nname: test\nincremental_key: user_id\n---\nSELECT 1";
+        let result = extract_file_metadata(source);
+        assert!(result.is_err());
     }
 
     #[test]

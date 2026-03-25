@@ -1,4 +1,5 @@
 use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata};
+use crate::model_id::ModelId;
 use crate::refs::extract_refs;
 pub use crate::refs::RefInfo;
 use anyhow::{anyhow, Context, Result};
@@ -9,12 +10,15 @@ use walkdir::WalkDir;
 #[derive(Debug, Clone)]
 pub struct ModelFile {
     pub name: String,
+    /// Path used as the Salsa query key (virtual for multi-model files).
     pub path: PathBuf,
     pub content: String,
     pub refs: Vec<RefInfo>,
     pub parse_errors: Vec<smelt_parser::ParseError>,
     /// Metadata extracted from YAML frontmatter
     pub metadata: Option<Box<ModelMetadata>>,
+    /// Canonical model identifier.
+    pub model_id: ModelId,
 }
 
 pub struct ModelDiscovery {
@@ -49,8 +53,8 @@ impl ModelDiscovery {
                 let path = entry.path();
 
                 if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                    let model = self.parse_model_file(path)?;
-                    models.push(model);
+                    let parsed = self.parse_model_file(path)?;
+                    models.extend(parsed);
                 }
             }
         }
@@ -65,60 +69,90 @@ impl ModelDiscovery {
         Ok(models)
     }
 
-    fn parse_model_file(&self, path: &Path) -> Result<ModelFile> {
+    fn parse_model_file(&self, path: &Path) -> Result<Vec<ModelFile>> {
         // Read file content
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read model file: {:?}", path))?;
 
         // Extract metadata from YAML frontmatter
-        let file_metadata = extract_file_metadata(&content).ok();
-        let model_metadata = match file_metadata {
-            Some(FileMetadata::Single { metadata, .. }) => Some(metadata),
-            Some(FileMetadata::Multi { models }) => {
-                // For multi-model files, we need to handle each model separately
-                // For now, just use the first model's metadata if it matches the filename
-                let filename_stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string());
-
-                models
-                    .into_iter()
-                    .find(|section| section.metadata.name.as_ref() == filename_stem.as_ref())
-                    .map(|section| Box::new(section.metadata))
+        let file_metadata = match extract_file_metadata(&content) {
+            Ok(fm) => Some(fm),
+            Err(e) => {
+                eprintln!("Warning: {}: {}", path.display(), e);
+                None
             }
-            Some(FileMetadata::Empty) | None => None,
         };
 
-        // Determine model name: from metadata if present, otherwise from filename
-        let name = model_metadata
-            .as_ref()
-            .and_then(|m| m.name.clone())
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-            })
-            .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+        match file_metadata {
+            Some(FileMetadata::Multi { models }) => {
+                // Multi-model file: create one ModelFile per section
+                let mut result = Vec::with_capacity(models.len());
+                for section in models {
+                    let model_name =
+                        section.metadata.name.clone().ok_or_else(|| {
+                            anyhow!("Multi-model section missing name in {:?}", path)
+                        })?;
 
-        // Parse using smelt-parser
-        let parse = smelt_parser::parse(&content);
+                    let sql_content = &content[section.sql_range.clone()];
+                    let clean_content = smelt_parser::strip_frontmatter(sql_content);
+                    let parse = smelt_parser::parse(&clean_content);
+                    let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+                        extract_refs(&file)
+                    } else {
+                        Vec::new()
+                    };
 
-        // Extract refs using AST
-        let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
-            extract_refs(&file)
-        } else {
-            Vec::new()
-        };
+                    let model_id = ModelId::multi_model(path.to_path_buf(), model_name.clone());
 
-        Ok(ModelFile {
-            name,
-            path: path.to_path_buf(),
-            content,
-            refs,
-            parse_errors: parse.errors,
-            metadata: model_metadata,
-        })
+                    result.push(ModelFile {
+                        name: model_name,
+                        path: model_id.salsa_key(),
+                        content: sql_content.to_string(),
+                        refs,
+                        parse_errors: parse.errors,
+                        metadata: Some(Box::new(section.metadata)),
+                        model_id,
+                    });
+                }
+                Ok(result)
+            }
+            _ => {
+                // Single-model or no frontmatter: existing behavior
+                let model_metadata = match file_metadata {
+                    Some(FileMetadata::Single { metadata, .. }) => Some(metadata),
+                    _ => None,
+                };
+
+                let name = model_metadata
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .or_else(|| {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+
+                let parse = smelt_parser::parse(&content);
+                let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+                    extract_refs(&file)
+                } else {
+                    Vec::new()
+                };
+
+                let model_id = ModelId::from_path(path.to_path_buf());
+
+                Ok(vec![ModelFile {
+                    name,
+                    path: path.to_path_buf(),
+                    content,
+                    refs,
+                    parse_errors: parse.errors,
+                    metadata: model_metadata,
+                    model_id,
+                }])
+            }
+        }
     }
 }
 
@@ -159,6 +193,51 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].model_name, "raw_events");
         assert!(refs[0].has_named_params);
+    }
+
+    #[test]
+    fn test_multi_model_file_discovery() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+
+        let multi_model_content = r#"--- name: staging_events ---
+materialization: view
+---
+SELECT * FROM raw_events
+
+--- name: cleaned_events ---
+materialization: table
+---
+SELECT * FROM smelt.ref('staging_events')
+"#;
+
+        let file_path = models_dir.join("pipeline.sql");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        file.write_all(multi_model_content.as_bytes()).unwrap();
+
+        let discovery =
+            ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let models = discovery.discover_models().unwrap();
+
+        assert_eq!(models.len(), 2, "Should discover 2 models from multi-model file");
+
+        let staging = models.iter().find(|m| m.name == "staging_events").unwrap();
+        assert!(staging.model_id.is_multi_model);
+        assert!(staging.content.contains("SELECT * FROM raw_events"));
+        assert!(!staging.content.contains("cleaned_events"));
+
+        let cleaned = models.iter().find(|m| m.name == "cleaned_events").unwrap();
+        assert!(cleaned.model_id.is_multi_model);
+        assert!(cleaned.content.contains("smelt.ref('staging_events')"));
+        assert_eq!(cleaned.refs.len(), 1);
+        assert_eq!(cleaned.refs[0].model_name, "staging_events");
+
+        // Virtual paths should be different
+        assert_ne!(staging.path, cleaned.path);
+        // But source paths should be the same
+        assert_eq!(staging.model_id.source_path(), cleaned.model_id.source_path());
     }
 
     #[test]

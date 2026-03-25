@@ -247,6 +247,7 @@ GROUP BY user_id
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
@@ -274,6 +275,7 @@ JOIN smelt.ref('model_b') b ON a.id = b.id
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
@@ -301,6 +303,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
@@ -324,6 +327,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let mut config = make_test_config();
@@ -354,6 +358,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
@@ -377,6 +382,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
@@ -404,6 +410,7 @@ JOIN smelt.ref('model_a') b ON a.parent_id = b.id
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
@@ -434,6 +441,7 @@ WHERE event_type = 'click'
             parse_errors: Vec::new(),
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
         };
 
         let config = make_test_config();
