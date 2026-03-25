@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774412887111,
+  "lastUpdate": 1774414295437,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3947,6 +3947,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.255676,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5f13317efbd935a707ed4b64bc2a7d773389f1b8",
+          "message": "Rename smelt-optimizer to smelt-planner\n\nThe crate implements planning (execution strategy, materialization,\nbatching) rather than query optimization. This rename clarifies intent.\n\n- Crate: smelt-optimizer → smelt-planner\n- Struct: Optimizer → Planner, .optimize() → .plan()\n- Python: OptimizerRule → PlannerRule, entry point smelt.planner_rules\n- Docs: updated CLAUDE.md, ROADMAP.md, architecture_overview.md\n- Renamed optimization_rule_api_design.md → planner_rule_api_design.md\n- Test file: optimizer_test.rs → planner_test.rs\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T15:49:32+11:00",
+          "tree_id": "e899b17edab3bf7e8e9394518688d85a3c40d093",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5f13317efbd935a707ed4b64bc2a7d773389f1b8"
+        },
+        "date": 1774414295041,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.951205,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.768629,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.538128,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.320491,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002696,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.190859999999994,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.018224,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.011161,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008585,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.971881,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.122677,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.88736,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.17131,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.274568,
             "unit": "ms"
           }
         ]
