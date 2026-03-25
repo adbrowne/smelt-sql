@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774432781873,
+  "lastUpdate": 1774435315260,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4887,6 +4887,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.586967,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "162cca5d729f276b07c2570b02b31b06f538e831",
+          "message": "Add plan for logical-to-physical graph architecture\n\nIntroduces a two-stage graph design separating user-authored models\n(logical graph) from the execution plan (physical graph). The physical\ngraph removes ephemeral nodes, adds planner-created intermediates as\nfirst-class nodes, and carries concrete execution strategies. This\ngives planner rule authors a clear contract and follows patterns from\nDataFusion, Spark Catalyst, and Apache Calcite.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T21:39:01+11:00",
+          "tree_id": "5b1ee3e27ffce2c58c250fdabb6b6a8a64a71beb",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/162cca5d729f276b07c2570b02b31b06f538e831"
+        },
+        "date": 1774435314818,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.679714,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.345878,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6342519999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.384202,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002775,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.587352,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.02151,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013435,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008506,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.177513,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.303059,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.00919,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.55781,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.167977,
             "unit": "ms"
           }
         ]
