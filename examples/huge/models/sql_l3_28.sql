@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    updated_at,
+    price,
+    is_active,
+    referrer
+FROM smelt.ref('sql_l2_59')
+WHERE score >= 50

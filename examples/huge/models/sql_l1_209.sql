@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    status,
+    ip_address,
+    device_type,
+    order_id
+FROM smelt.ref('users')
+WHERE status = 'active'

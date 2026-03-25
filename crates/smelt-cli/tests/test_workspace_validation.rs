@@ -13,7 +13,7 @@ fn project_dir() -> std::path::PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("test-workspace")
+        .join("examples/test_workspace")
 }
 
 #[test]
@@ -28,10 +28,6 @@ fn test_workspace_no_parse_errors() {
 
     let mut errors = Vec::new();
     for model in &models {
-        // broken_model.sql is intentionally broken - skip it
-        if model.name == "broken_model" {
-            continue;
-        }
         for err in &model.parse_errors {
             errors.push(format!("{}: {}", model.name, err.message));
         }
@@ -70,12 +66,9 @@ fn test_workspace_no_undefined_refs() {
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
-    // Remove broken_model (intentionally references nonexistent model)
-    models.retain(|m| m.name != "broken_model");
-
     let graph = DependencyGraph::build(models, sources.as_ref()).unwrap();
     graph.validate().expect(
-        "All refs in test-workspace models (except broken_model) should resolve.\n\
+        "All refs in test_workspace models should resolve.\n\
          If this fails, a model references an undefined model or source.",
     );
 }

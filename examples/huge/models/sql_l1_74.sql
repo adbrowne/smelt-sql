@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    event_date,
+    order_id,
+    country,
+    is_active
+FROM smelt.ref('reviews')
+WHERE is_active = true

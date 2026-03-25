@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    product_id,
+    is_verified,
+    price,
+    rating
+FROM smelt.ref('sql_l1_78')
+WHERE status = 'active'

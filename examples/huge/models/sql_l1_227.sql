@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    ip_address,
+    session_id,
+    category,
+    transaction_id
+FROM smelt.ref('events')
+WHERE score >= 50

@@ -9,6 +9,10 @@ __pycache__/
 *.egg-info/
 .venv/
 
+# Example build artifacts
+examples/*/target/
+examples/*/.smelt/
+
 # UI
 ui/node_modules/
 ui/dist/

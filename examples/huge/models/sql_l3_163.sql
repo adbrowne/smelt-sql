@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    campaign_id,
+    updated_at,
+    cost,
+    plan_type
+FROM smelt.ref('sql_l2_221')
+WHERE platform = 'web'

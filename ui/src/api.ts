@@ -1,4 +1,4 @@
-import type { GraphResponse, ModelDetailResponse, ProjectResponse, RunPlanRequest, RunPlanResponse, RunExecuteRequest, RunStatusResponse, RunHistoryEntry } from './types';
+import type { GraphResponse, ModelDetailResponse, ProjectResponse, ResolveRequest, ResolveResponse, RunPlanRequest, RunPlanResponse, RunExecuteRequest, RunStatusResponse, RunHistoryEntry } from './types';
 
 const BASE = '';
 
@@ -17,6 +17,19 @@ export async function fetchGraph(): Promise<GraphResponse> {
 export async function fetchModel(name: string): Promise<ModelDetailResponse> {
   const res = await fetch(`${BASE}/api/models/${encodeURIComponent(name)}`);
   if (!res.ok) throw new Error(`Failed to fetch model ${name}: ${res.statusText}`);
+  return res.json();
+}
+
+export async function resolveSelectors(request: ResolveRequest): Promise<ResolveResponse> {
+  const res = await fetch(`${BASE}/api/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to resolve selectors: ${res.statusText}`);
+  }
   return res.json();
 }
 

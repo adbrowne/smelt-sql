@@ -38,6 +38,17 @@ pub async fn get_model(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+pub async fn post_resolve(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ResolveRequest>,
+) -> Result<Json<ResolveResponse>, impl IntoResponse> {
+    let graph = state.graph.lock().await;
+    match build::resolve_selectors(&graph, &state.config, &request) {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
 pub async fn post_run_plan(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RunPlanRequest>,

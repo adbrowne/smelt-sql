@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    platform,
+    is_active,
+    page_path,
+    region
+FROM smelt.ref('sql_l3_60')
+WHERE quantity > 0

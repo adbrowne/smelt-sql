@@ -9,7 +9,7 @@ pub fn generate_smelt_yml(_spec: &GraphSpec, models: &[ModelSpec]) -> String {
     for model in models {
         if model.model_type == ModelType::Sql {
             yml.push_str(&format!(
-                "  {}:\n    materialization: table\n    incremental:\n      enabled: true\n      partition_column: event_date\n",
+                "  {}:\n    materialization: table\n    incremental:\n      enabled: true\n      event_time_column: event_time\n      partition_column: event_date\n      granularity: day\n",
                 model.name
             ));
         }

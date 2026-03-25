@@ -1,0 +1,16 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    cohort_date,
+    device_type,
+    email_domain
+FROM smelt.ref('sql_l1_121')
+WHERE user_id IN (
+    SELECT user_id FROM smelt.ref('sql_l1_132') WHERE amount > 0
+)

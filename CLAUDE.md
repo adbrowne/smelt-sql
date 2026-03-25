@@ -66,12 +66,6 @@ cargo clippy --all-targets
 # Run tests
 cargo test
 
-# Run examples
-cargo run --example example1_naive       # Common intermediate aggregation (naive)
-cargo run --example example1_optimized   # Common intermediate aggregation (optimized)
-cargo run --example example2_naive       # Split large GROUP BY (naive)
-cargo run --example example2_optimized   # Split large GROUP BY (optimized)
-
 # Build with bundled DuckDB (no system dependency required)
 cargo build  # bundled is default
 
@@ -79,7 +73,7 @@ cargo build  # bundled is default
 cargo run -p smelt-lsp
 
 # Test with sample workspace
-# (Configure your editor to use the LSP server, then open test-workspace/)
+# (Configure your editor to use the LSP server, then open examples/test_workspace/)
 ```
 
 ### VSCode Extension
@@ -142,18 +136,15 @@ This separation allows the LSP to get incremental parsing via Salsa, while the o
 - **DuckDB**: Local execution engine for testing (bundled, no system install needed)
 - **Arrow**: Data interchange format between components
 
-### SQL Model Examples
+### Examples
 
-The `examples/` directory contains SQL model examples demonstrating smelt capabilities:
+All examples live under `examples/`:
 
-- **daily_revenue.sql**: Demonstrates incremental materialization with daily partitions
-  - Aggregates transaction data by date and user
-  - Configured in smelt.yml for incremental updates
-  - Shows day-by-day processing with partition awareness
-- **transactions.sql**: Source model mapping raw transaction data
-- **user_activity.sql**: Derived model using smelt.ref() for cross-model dependencies
-- Configuration in smelt.yml with incremental settings
-- Source data setup with timestamps for testing incremental updates
+- **`examples/timeseries/`**: User/event analytics pipeline (12 SQL models, incremental materialization)
+- **`examples/retail_analytics/`**: TPC-DS-based retail pipeline (25 models: staging/intermediate/marts)
+- **`examples/broken/`**: Intentionally broken models for testing error handling
+- **`examples/test_workspace/`**: Minimal workspace for VSCode/LSP integration testing
+- **`examples/huge/`**: Auto-generated 2000-model workspace for stress testing
 
 ### Crate Structure
 
@@ -232,7 +223,7 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 2. Implement parser changes (lexer → syntax → parser → AST)
 3. Update smelt-db queries if needed (usually automatic via AST)
 4. Update LSP features if needed (diagnostics, goto-definition, etc.)
-5. Test with test-workspace models
+5. Test with examples/test_workspace models
 6. **Run `cargo fmt --all` to format code**
 7. **Run `cargo clippy --all-targets` and fix all warnings**
 8. Run `cargo build` and `cargo test` to ensure everything compiles and passes

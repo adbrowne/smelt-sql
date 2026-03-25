@@ -97,6 +97,10 @@ struct RunArgs {
     #[arg(long = "select", short = 's')]
     select: Vec<String>,
 
+    /// Exclude models from the run (repeatable). Same syntax as --select.
+    #[arg(long = "exclude", short = 'e')]
+    exclude: Vec<String>,
+
     /// Start of range for backfill (ISO 8601: YYYY-MM-DD). Alias for --event-time-start.
     #[arg(long)]
     start: Option<String>,
@@ -253,6 +257,10 @@ struct BuildArgs {
     /// Select models to run (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
     #[arg(long = "select", short = 's')]
     select: Vec<String>,
+
+    /// Exclude models from the run (repeatable). Same syntax as --select.
+    #[arg(long = "exclude", short = 'e')]
+    exclude: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -426,20 +434,38 @@ async fn run(args: RunArgs) -> Result<()> {
         .with_context(|| "Dependency validation failed")?;
 
     // 5. Determine execution order (with optional selector filtering)
-    let execution_order = if args.select.is_empty() {
+    let execution_order = if args.select.is_empty() && args.exclude.is_empty() {
         graph
             .execution_order()
             .with_context(|| "Failed to determine execution order")?
     } else {
-        let selectors: Vec<_> = args
-            .select
-            .iter()
-            .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
-            .collect::<Result<_, _>>()?;
+        let mut selected = if args.select.is_empty() {
+            graph.all_model_names()
+        } else {
+            let selectors: Vec<_> = args
+                .select
+                .iter()
+                .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
+                .collect::<Result<_, _>>()?;
 
-        let selected = graph
-            .select_models(&selectors, &config)
-            .with_context(|| "Failed to select models")?;
+            graph
+                .select_models(&selectors, &config)
+                .with_context(|| "Failed to select models")?
+        };
+
+        if !args.exclude.is_empty() {
+            let excludes: Vec<_> = args
+                .exclude
+                .iter()
+                .map(|s| {
+                    parse_selector(s).with_context(|| format!("Invalid exclude selector '{}'", s))
+                })
+                .collect::<Result<_, _>>()?;
+
+            selected = graph
+                .exclude_models(&selected, &excludes, &config)
+                .with_context(|| "Failed to apply exclude selectors")?;
+        }
 
         if selected.is_empty() {
             println!("No models matched the selectors");
@@ -1777,6 +1803,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         event_time_start: args.event_time_start,
         event_time_end: args.event_time_end,
         select: args.select,
+        exclude: args.exclude,
         start: None,
         end: None,
         batch_size: None,

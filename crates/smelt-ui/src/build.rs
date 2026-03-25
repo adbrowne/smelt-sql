@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{Duration, NaiveDate};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
+use smelt_core::parse_selector;
 use smelt_core::SourcesConfig;
 use smelt_db::{ColumnSource, DiagnosticSeverity, Semantic, TypeChecking};
 
@@ -223,6 +224,55 @@ pub fn build_model_details(
     model_details
 }
 
+/// Resolve select/exclude selectors to model names without computing a full plan.
+pub fn resolve_selectors(
+    graph: &DependencyGraph,
+    config: &Config,
+    request: &crate::types::ResolveRequest,
+) -> anyhow::Result<crate::types::ResolveResponse> {
+    let selected_set = if request.select.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        let selectors: Vec<_> = request
+            .select
+            .iter()
+            .map(|s| {
+                parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid selector '{}': {}", s, e))
+            })
+            .collect::<Result<_, _>>()?;
+        graph.select_models(&selectors, config)?
+    };
+
+    let excluded_set = if request.exclude.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        let excludes: Vec<_> = request
+            .exclude
+            .iter()
+            .map(|s| {
+                parse_selector(s)
+                    .map_err(|e| anyhow::anyhow!("Invalid exclude selector '{}': {}", s, e))
+            })
+            .collect::<Result<_, _>>()?;
+        graph.select_models(&excludes, config)?
+    };
+
+    // Return in execution order for consistency
+    let all_order = graph.execution_order()?;
+    let selected: Vec<String> = all_order
+        .iter()
+        .filter(|n| selected_set.contains(*n))
+        .cloned()
+        .collect();
+    let excluded: Vec<String> = all_order
+        .iter()
+        .filter(|n| excluded_set.contains(*n))
+        .cloned()
+        .collect();
+
+    Ok(crate::types::ResolveResponse { selected, excluded })
+}
+
 /// Compute a run plan preview — what models would run and how they'd be batched.
 pub fn build_run_plan(
     graph: &DependencyGraph,
@@ -240,18 +290,33 @@ pub fn build_run_plan(
         return Err(anyhow::anyhow!("Start date must be before end date"));
     }
 
-    let execution_order = graph.execution_order()?;
-
-    // Filter to selected models if specified
-    let selected: Vec<String> = if request.select.is_empty() {
-        execution_order.clone()
+    // Resolve select/exclude using proper selector parsing
+    let mut selected = if request.select.is_empty() {
+        graph.all_model_names()
     } else {
-        execution_order
+        let selectors: Vec<_> = request
+            .select
             .iter()
-            .filter(|name| request.select.iter().any(|s| s == *name))
-            .cloned()
-            .collect()
+            .map(|s| {
+                parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid selector '{}': {}", s, e))
+            })
+            .collect::<Result<_, _>>()?;
+        graph.select_models(&selectors, config)?
     };
+
+    if !request.exclude.is_empty() {
+        let excludes: Vec<_> = request
+            .exclude
+            .iter()
+            .map(|s| {
+                parse_selector(s)
+                    .map_err(|e| anyhow::anyhow!("Invalid exclude selector '{}': {}", s, e))
+            })
+            .collect::<Result<_, _>>()?;
+        selected = graph.exclude_models(&selected, &excludes, config)?;
+    }
+
+    let selected: Vec<String> = graph.filtered_execution_order(&selected)?;
 
     let mut plan_models = Vec::new();
     let mut total_batches = 0;
@@ -376,11 +441,36 @@ pub fn build_run_plan(
         }
     }
 
+    let cli_command = build_cli_command(request);
+
     Ok(crate::types::RunPlanResponse {
         models: plan_models,
         execution_order: selected,
         total_batches,
+        cli_command,
     })
+}
+
+fn build_cli_command(request: &crate::types::RunPlanRequest) -> String {
+    let mut parts = vec![format!(
+        "smelt run --start {} --end {}",
+        request.start, request.end
+    )];
+
+    for s in &request.select {
+        parts.push(format!("--select {}", s));
+    }
+    for e in &request.exclude {
+        parts.push(format!("--exclude {}", e));
+    }
+    if let Some(bs) = request.batch_size_days {
+        parts.push(format!("--batch-size {}", bs));
+    }
+    if request.per_partition {
+        parts.push("--per-partition".to_string());
+    }
+
+    parts.join(" ")
 }
 
 fn granularity_days(g: &smelt_core::Granularity) -> u32 {

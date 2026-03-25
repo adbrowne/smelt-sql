@@ -1,0 +1,16 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_time
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    a.score,
+    b.event_type,
+    c.status,
+    c.country
+FROM smelt.ref('sql_l2_184') a
+INNER JOIN smelt.ref('sql_l2_204') b ON a.user_id = b.user_id
+LEFT JOIN smelt.ref('sql_l2_145') c ON a.user_id = c.user_id

@@ -13,7 +13,7 @@ fn project_dir() -> std::path::PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("benchmarks/retail-analytics")
+        .join("examples/retail_analytics")
 }
 
 #[test]
