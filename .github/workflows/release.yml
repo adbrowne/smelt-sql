@@ -115,7 +115,7 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist
           manylinux: auto
-          docker-options: -e DUCKDB_PLATFORM=${{ contains(matrix.target, 'aarch64') && 'linux_arm64' || 'linux_amd64' }}
+          docker-options: -e CXXFLAGS=-DDUCKDB_EXPLICIT_PLATFORM=${{ contains(matrix.target, 'aarch64') && 'linux_arm64' || 'linux_amd64' }}
           before-script-linux: |
             cargo build --release -p smelt-lsp
             mkdir -p smelt_sql.data/scripts
