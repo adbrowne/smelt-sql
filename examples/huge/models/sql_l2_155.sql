@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     is_verified,
@@ -10,5 +12,5 @@ SELECT
     COUNT(*) AS agg_1,
     AVG(duration_seconds) AS agg_2,
     SUM(revenue) AS agg_3
-FROM smelt.ref('py_l1_396')
+FROM smelt.ref('sql_l1_164')
 GROUP BY is_verified

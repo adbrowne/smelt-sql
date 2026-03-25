@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     page_path,
     email_domain,
     event_type
-FROM smelt.ref('sql_l3_223')
+FROM smelt.ref('sql_l3_36')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_223') WHERE status = 'active'
+    SELECT user_id FROM smelt.ref('sql_l3_8') WHERE status = 'active'
 )

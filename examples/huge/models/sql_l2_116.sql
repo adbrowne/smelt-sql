@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT profit, event_type, email_domain
-    FROM smelt.ref('py_l1_398')
+    FROM smelt.ref('sql_l1_125')
     WHERE score >= 50
 ),
 aggregated AS (

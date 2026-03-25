@@ -2,12 +2,14 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     country,
     referrer,
     created_at,
     event_time
-FROM smelt.ref('py_l3_394')
+FROM smelt.ref('sql_l3_4')
 WHERE quantity > 0

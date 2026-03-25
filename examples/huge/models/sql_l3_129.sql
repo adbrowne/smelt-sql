@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT is_verified, revenue, profit
-    FROM smelt.ref('py_l2_465')
+    FROM smelt.ref('sql_l2_107')
     WHERE country = 'US'
 ),
 aggregated AS (

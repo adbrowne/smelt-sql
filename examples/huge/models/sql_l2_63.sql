@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     ip_address,
     channel,
     transaction_id
-FROM smelt.ref('py_l1_437')
+FROM smelt.ref('sql_l1_67')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('py_l1_437') WHERE is_active = true
+    SELECT user_id FROM smelt.ref('sql_l1_67') WHERE is_active = true
 )

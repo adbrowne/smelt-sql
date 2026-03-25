@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     a.updated_at,
     a.status,
     b.region
-FROM smelt.ref('py_l3_481') a
-INNER JOIN smelt.ref('py_l3_481') b ON a.user_id = b.user_id
+FROM smelt.ref('sql_l3_77') a
+INNER JOIN smelt.ref('sql_l3_208') b ON a.user_id = b.user_id

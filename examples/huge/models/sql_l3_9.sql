@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT email_domain, updated_at, score
-    FROM smelt.ref('py_l2_416')
+    FROM smelt.ref('sql_l2_23')
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

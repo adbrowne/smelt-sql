@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT quantity, os_name, price
-    FROM smelt.ref('py_l1_290')
+    FROM smelt.ref('sql_l1_182')
     WHERE status = 'active'
 ),
 aggregated AS (

@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT discount, event_time, rating
-    FROM smelt.ref('sql_l1_247')
+    FROM smelt.ref('sql_l1_24')
     WHERE country = 'US'
 ),
 aggregated AS (

@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     created_at,
     event_time,
     session_id
-FROM smelt.ref('py_l3_385')
+FROM smelt.ref('sql_l3_52')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_57') WHERE quantity > 0
+    SELECT user_id FROM smelt.ref('sql_l3_151') WHERE quantity > 0
 )

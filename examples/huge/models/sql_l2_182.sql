@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT is_active, discount, duration_seconds
-    FROM smelt.ref('py_l1_338')
+    FROM smelt.ref('sql_l1_28')
     WHERE country = 'US'
 ),
 aggregated AS (

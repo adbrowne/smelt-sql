@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT tier, platform, revenue
-    FROM smelt.ref('py_l2_272')
+    FROM smelt.ref('sql_l2_1')
     WHERE platform = 'web'
 ),
 aggregated AS (

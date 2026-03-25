@@ -4,7 +4,7 @@ from smelt import model
 def py_l4_287(project):
     """Generated model: union tagged."""
     parts = []
-    for dep in ['py_l3_462']:
+    for dep in ['py_l3_495']:
         parts.append(f"SELECT user_id, event_time, amount FROM smelt.ref('{dep}')")
     return """
 ---

@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     campaign_id,
@@ -11,5 +13,5 @@ SELECT
     AVG(duration_seconds) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3,
     SUM(revenue) AS agg_4
-FROM smelt.ref('py_l1_407')
+FROM smelt.ref('sql_l1_205')
 GROUP BY campaign_id

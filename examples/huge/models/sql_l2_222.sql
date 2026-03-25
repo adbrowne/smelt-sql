@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     status,
     device_type,
     session_id
-FROM smelt.ref('py_l1_477')
+FROM smelt.ref('sql_l1_164')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_204') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.ref('sql_l1_164') WHERE category IS NOT NULL
 )

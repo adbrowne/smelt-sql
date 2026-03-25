@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT ip_address, segment, os_name
-    FROM smelt.ref('sql_l1_69')
+    FROM smelt.ref('sql_l1_47')
     WHERE quantity > 0
 ),
 aggregated AS (

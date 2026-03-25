@@ -2,10 +2,12 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     score,
     device_type,
     ROW_NUMBER() OVER (PARTITION BY score ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_155')
+FROM smelt.ref('sql_l3_60')

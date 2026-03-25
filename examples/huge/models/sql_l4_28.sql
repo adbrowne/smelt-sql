@@ -2,16 +2,18 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH base AS (
     SELECT amount, ip_address, segment
-    FROM smelt.ref('sql_l3_147')
+    FROM smelt.ref('sql_l3_188')
     WHERE platform = 'web'
 )
 SELECT
     b.amount,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l3_147') j ON b.user_id = j.user_id
+INNER JOIN smelt.ref('sql_l3_64') j ON b.user_id = j.user_id
 GROUP BY b.amount

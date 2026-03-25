@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     event_time,
@@ -11,5 +13,5 @@ SELECT
     SUM(quantity) AS agg_2,
     AVG(price) AS agg_3,
     AVG(amount) AS agg_4
-FROM smelt.ref('py_l1_458')
+FROM smelt.ref('sql_l1_204')
 GROUP BY event_time

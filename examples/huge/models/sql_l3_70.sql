@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     updated_at,
     SUM(amount) AS agg_0,
     COUNT(DISTINCT user_id) AS agg_1
-FROM smelt.ref('py_l2_274')
+FROM smelt.ref('sql_l2_89')
 GROUP BY updated_at

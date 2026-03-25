@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     event_type,
@@ -10,5 +12,5 @@ SELECT
     SUM(amount) AS agg_1,
     MIN(created_at) AS agg_2,
     SUM(revenue) AS agg_3
-FROM smelt.ref('py_l3_443')
+FROM smelt.ref('sql_l3_181')
 GROUP BY event_type

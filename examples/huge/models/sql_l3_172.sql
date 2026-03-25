@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT device_type, is_verified, product_id
-    FROM smelt.ref('py_l2_382')
+    FROM smelt.ref('sql_l2_138')
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

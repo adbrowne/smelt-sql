@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT profit, cohort_date, transaction_id
-    FROM smelt.ref('py_l1_411')
+    FROM smelt.ref('sql_l1_170')
     WHERE category IS NOT NULL
 ),
 aggregated AS (

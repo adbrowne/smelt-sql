@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     a.cohort_date,
     b.email_domain,
     c.ip_address,
     c.updated_at
-FROM smelt.ref('sql_l2_224') a
-INNER JOIN smelt.ref('sql_l2_223') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sql_l2_39') c ON a.user_id = c.user_id
+FROM smelt.ref('sql_l2_122') a
+INNER JOIN smelt.ref('sql_l2_132') b ON a.user_id = b.user_id
+LEFT JOIN smelt.ref('sql_l2_196') c ON a.user_id = c.user_id

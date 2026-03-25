@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT campaign_id, is_active, segment
-    FROM smelt.ref('sql_l3_167')
+    FROM smelt.ref('sql_l3_176')
     WHERE category IS NOT NULL
 ),
 aggregated AS (

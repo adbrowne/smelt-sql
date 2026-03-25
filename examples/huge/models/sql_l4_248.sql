@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT segment, page_path, email_domain
-    FROM smelt.ref('sql_l3_207')
+    FROM smelt.ref('sql_l3_92')
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (

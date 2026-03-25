@@ -2,12 +2,14 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     user_id,
     is_verified,
     cost,
     region
-FROM smelt.ref('py_l2_347')
+FROM smelt.ref('sql_l2_85')
 WHERE quantity > 0

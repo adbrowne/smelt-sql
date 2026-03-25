@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT channel, session_id, is_active
-    FROM smelt.ref('py_l1_465')
+    FROM smelt.ref('sql_l1_100')
     WHERE quantity > 0
 ),
 aggregated AS (

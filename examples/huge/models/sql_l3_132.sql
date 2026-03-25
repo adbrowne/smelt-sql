@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     is_active,
@@ -11,5 +13,5 @@ SELECT
     AVG(duration_seconds) AS agg_2,
     SUM(quantity) AS agg_3,
     AVG(amount) AS agg_4
-FROM smelt.ref('py_l2_346')
+FROM smelt.ref('sql_l2_226')
 GROUP BY is_active

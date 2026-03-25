@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT created_at, country, session_id
-    FROM smelt.ref('py_l2_489')
+    FROM smelt.ref('sql_l2_57')
     WHERE amount > 0
 ),
 aggregated AS (

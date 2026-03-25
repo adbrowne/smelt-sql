@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT order_id, segment, is_verified
-    FROM smelt.ref('sql_l1_86')
+    FROM smelt.ref('sql_l1_37')
     WHERE is_active = true
 ),
 aggregated AS (

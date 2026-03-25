@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     quantity,
     score,
     event_type
-FROM smelt.ref('sql_l2_146')
+FROM smelt.ref('sql_l2_6')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('py_l2_254') WHERE status = 'active'
+    SELECT user_id FROM smelt.ref('sql_l2_194') WHERE status = 'active'
 )

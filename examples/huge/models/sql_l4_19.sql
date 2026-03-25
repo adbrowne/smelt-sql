@@ -2,16 +2,18 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH base AS (
     SELECT status, region, transaction_id
-    FROM smelt.ref('py_l3_416')
+    FROM smelt.ref('sql_l3_242')
     WHERE country = 'US'
 )
 SELECT
     b.status,
     SUM(quantity) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l3_2') j ON b.user_id = j.user_id
+INNER JOIN smelt.ref('sql_l3_175') j ON b.user_id = j.user_id
 GROUP BY b.status

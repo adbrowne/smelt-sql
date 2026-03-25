@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     order_id,
@@ -11,5 +13,5 @@ SELECT
     MAX(created_at) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3,
     AVG(duration_seconds) AS agg_4
-FROM smelt.ref('sql_l3_193')
+FROM smelt.ref('sql_l3_118')
 GROUP BY order_id

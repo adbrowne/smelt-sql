@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT category, duration_seconds, user_id, 'source_0' AS source_tag FROM smelt.ref('logs')
 UNION ALL

@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     is_verified,
     SUM(revenue) AS agg_0,
     MIN(created_at) AS agg_1
-FROM smelt.ref('py_l1_333')
+FROM smelt.ref('sql_l1_14')
 GROUP BY is_verified

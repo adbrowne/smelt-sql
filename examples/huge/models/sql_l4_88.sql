@@ -2,10 +2,12 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     updated_at,
     transaction_id,
     RANK() OVER (PARTITION BY updated_at ORDER BY created_at) AS win_val
-FROM smelt.ref('py_l3_443')
+FROM smelt.ref('sql_l3_33')

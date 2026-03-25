@@ -2,12 +2,14 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     status,
     COUNT(DISTINCT user_id) AS val_1,
     AVG(price) AS val_2
-FROM smelt.ref('py_l3_488')
+FROM smelt.ref('sql_l3_11')
 GROUP BY status
 HAVING COUNT(*) > 10

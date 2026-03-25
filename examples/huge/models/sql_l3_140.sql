@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT os_name, status, platform
-    FROM smelt.ref('py_l2_485')
+    FROM smelt.ref('sql_l2_165')
     WHERE score >= 50
 ),
 aggregated AS (

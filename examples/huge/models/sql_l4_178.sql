@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT user_id, category, plan_type
-    FROM smelt.ref('sql_l3_185')
+    FROM smelt.ref('sql_l3_12')
     WHERE score >= 50
 ),
 aggregated AS (

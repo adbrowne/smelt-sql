@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT region, email_domain, price
-    FROM smelt.ref('py_l3_467')
+    FROM smelt.ref('sql_l3_143')
     WHERE country = 'US'
 ),
 aggregated AS (

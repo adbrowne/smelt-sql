@@ -2,16 +2,18 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH base AS (
     SELECT tier, revenue, event_date
-    FROM smelt.ref('sql_l3_188')
+    FROM smelt.ref('sql_l3_189')
     WHERE platform = 'web'
 )
 SELECT
     b.tier,
     AVG(duration_seconds) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('py_l3_281') j ON b.user_id = j.user_id
+INNER JOIN smelt.ref('sql_l3_50') j ON b.user_id = j.user_id
 GROUP BY b.tier

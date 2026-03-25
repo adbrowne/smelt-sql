@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     rating,
@@ -11,5 +13,5 @@ SELECT
     MAX(created_at) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3,
     COUNT(*) AS agg_4
-FROM smelt.ref('py_l2_321')
+FROM smelt.ref('sql_l2_157')
 GROUP BY rating

@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     a.price,
     a.cost,
     b.category
-FROM smelt.ref('py_l1_398') a
-INNER JOIN smelt.ref('py_l1_398') b ON a.user_id = b.user_id
+FROM smelt.ref('sql_l1_238') a
+INNER JOIN smelt.ref('sql_l1_151') b ON a.user_id = b.user_id

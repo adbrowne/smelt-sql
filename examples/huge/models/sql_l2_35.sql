@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT category, profit, product_id
-    FROM smelt.ref('sql_l1_2')
+    FROM smelt.ref('sql_l1_54')
     WHERE is_active = true
 ),
 aggregated AS (

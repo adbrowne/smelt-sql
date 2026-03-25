@@ -2,12 +2,14 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     channel,
     amount,
     status,
     discount
-FROM smelt.ref('sql_l1_154')
+FROM smelt.ref('sql_l1_191')
 WHERE amount > 0

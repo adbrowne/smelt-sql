@@ -2,10 +2,10 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
-SELECT browser, plan_type, amount, 'source_0' AS source_tag FROM smelt.ref('sql_l3_89')
+SELECT browser, plan_type, amount, 'source_0' AS source_tag FROM smelt.ref('sql_l3_66')
 UNION ALL
-SELECT browser, plan_type, amount, 'source_1' AS source_tag FROM smelt.ref('sql_l3_192')
-UNION ALL
-SELECT browser, plan_type, amount, 'source_2' AS source_tag FROM smelt.ref('sql_l3_183')
+SELECT browser, plan_type, amount, 'source_1' AS source_tag FROM smelt.ref('sql_l3_111')

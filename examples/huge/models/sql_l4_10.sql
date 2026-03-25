@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT user_id, status, page_path
-    FROM smelt.ref('sql_l3_231')
+    FROM smelt.ref('sql_l3_54')
     WHERE quantity > 0
 ),
 aggregated AS (

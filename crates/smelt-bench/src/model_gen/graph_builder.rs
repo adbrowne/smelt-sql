@@ -117,11 +117,14 @@ pub fn build_graph(spec: &GraphSpec) -> Vec<ModelSpec> {
         .map(|s| s.to_string())
         .collect();
 
-    // Previous layer's model names (start with sources)
-    let mut prev_layer_names = source_names;
+    // Track SQL-only names separately so SQL models never reference Python models.
+    // Sources are discoverable by both SQL and Python models.
+    let mut prev_sql_names = source_names.clone();
+    let mut prev_all_names = source_names;
 
     for layer in 1..=spec.num_layers {
-        let mut layer_names = Vec::new();
+        let mut layer_sql_names = Vec::new();
+        let mut layer_all_names = Vec::new();
 
         // Determine min/max deps for this layer
         let (min_deps, max_deps) = match layer {
@@ -147,9 +150,15 @@ pub fn build_graph(spec: &GraphSpec) -> Vec<ModelSpec> {
 
             let name = format!("{}_l{}_{}", type_prefix, layer, i);
 
-            // Pick dependencies from previous layer
-            let num_deps = rng.gen_range(min_deps..=max_deps.min(prev_layer_names.len()));
-            let deps = pick_unique(&mut rng, &prev_layer_names, num_deps);
+            // SQL models only reference other SQL models (+ sources).
+            // Python models can reference any model type.
+            let dep_pool = match model_type {
+                ModelType::Sql => &prev_sql_names,
+                ModelType::Python => &prev_all_names,
+            };
+
+            let num_deps = rng.gen_range(min_deps..=max_deps.min(dep_pool.len()));
+            let deps = pick_unique(&mut rng, dep_pool, num_deps);
 
             all_models.push(ModelSpec {
                 name: name.clone(),
@@ -158,10 +167,14 @@ pub fn build_graph(spec: &GraphSpec) -> Vec<ModelSpec> {
                 model_type,
             });
 
-            layer_names.push(name);
+            if model_type == ModelType::Sql {
+                layer_sql_names.push(name.clone());
+            }
+            layer_all_names.push(name);
         }
 
-        prev_layer_names = layer_names;
+        prev_sql_names = layer_sql_names;
+        prev_all_names = layer_all_names;
     }
 
     all_models

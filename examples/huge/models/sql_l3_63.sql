@@ -2,10 +2,10 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
-SELECT os_name, price, is_verified, 'source_0' AS source_tag FROM smelt.ref('sql_l2_162')
+SELECT os_name, price, is_verified, 'source_0' AS source_tag FROM smelt.ref('sql_l2_90')
 UNION ALL
-SELECT os_name, price, is_verified, 'source_1' AS source_tag FROM smelt.ref('py_l2_389')
-UNION ALL
-SELECT os_name, price, is_verified, 'source_2' AS source_tag FROM smelt.ref('py_l2_384')
+SELECT os_name, price, is_verified, 'source_1' AS source_tag FROM smelt.ref('sql_l2_140')

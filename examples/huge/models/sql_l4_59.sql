@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     a.tier,
     a.ip_address,
     b.amount
-FROM smelt.ref('sql_l3_214') a
-LEFT JOIN smelt.ref('sql_l3_222') b ON a.user_id = b.user_id
+FROM smelt.ref('sql_l3_207') a
+LEFT JOIN smelt.ref('sql_l3_129') b ON a.user_id = b.user_id

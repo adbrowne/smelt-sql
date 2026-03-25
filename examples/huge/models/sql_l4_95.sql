@@ -2,16 +2,18 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH base AS (
     SELECT ip_address, updated_at, email_domain
-    FROM smelt.ref('py_l3_364')
+    FROM smelt.ref('sql_l3_199')
     WHERE status = 'active'
 )
 SELECT
     b.ip_address,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('py_l3_440') j ON b.user_id = j.user_id
+INNER JOIN smelt.ref('sql_l3_199') j ON b.user_id = j.user_id
 GROUP BY b.ip_address

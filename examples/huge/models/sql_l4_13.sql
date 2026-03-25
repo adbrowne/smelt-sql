@@ -2,12 +2,14 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     product_id,
     COUNT(*) AS val_1,
     MAX(created_at) AS val_2
-FROM smelt.ref('py_l3_265')
+FROM smelt.ref('sql_l3_21')
 GROUP BY product_id
 HAVING COUNT(*) > 10

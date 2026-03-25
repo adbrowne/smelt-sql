@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT is_verified, created_at, is_active
-    FROM smelt.ref('py_l1_314')
+    FROM smelt.ref('sql_l1_74')
     WHERE platform = 'web'
 ),
 aggregated AS (

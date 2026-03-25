@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT revenue, event_date, cost
-    FROM smelt.ref('py_l1_328')
+    FROM smelt.ref('sql_l1_193')
     WHERE amount > 0
 ),
 aggregated AS (

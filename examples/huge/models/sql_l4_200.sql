@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT rating, quantity, is_active
-    FROM smelt.ref('sql_l3_181')
+    FROM smelt.ref('sql_l3_22')
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

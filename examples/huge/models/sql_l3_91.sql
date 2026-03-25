@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     revenue,
     cohort_date,
     event_date
-FROM smelt.ref('py_l2_380')
+FROM smelt.ref('sql_l2_33')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_92') WHERE status = 'active'
+    SELECT user_id FROM smelt.ref('sql_l2_185') WHERE status = 'active'
 )

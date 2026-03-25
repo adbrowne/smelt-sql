@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     updated_at,
@@ -12,4 +14,4 @@ SELECT
         WHEN amount > 100 THEN 'medium'
         ELSE 'low'
     END AS value_tier
-FROM smelt.ref('sql_l1_193')
+FROM smelt.ref('sql_l1_17')

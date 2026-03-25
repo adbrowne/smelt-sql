@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT country, campaign_id, status
-    FROM smelt.ref('py_l3_315')
+    FROM smelt.ref('sql_l3_80')
     WHERE platform = 'web'
 ),
 aggregated AS (

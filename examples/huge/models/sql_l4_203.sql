@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     score,
     ip_address,
     country
-FROM smelt.ref('sql_l3_227')
+FROM smelt.ref('sql_l3_190')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_177') WHERE country = 'US'
+    SELECT user_id FROM smelt.ref('sql_l3_99') WHERE country = 'US'
 )

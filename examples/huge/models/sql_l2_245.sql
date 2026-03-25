@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     created_at,
@@ -10,5 +12,5 @@ SELECT
     SUM(quantity) AS agg_1,
     SUM(amount) AS agg_2,
     MIN(created_at) AS agg_3
-FROM smelt.ref('py_l1_470')
+FROM smelt.ref('sql_l1_28')
 GROUP BY created_at

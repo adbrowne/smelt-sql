@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT event_time, referrer, duration_seconds
-    FROM smelt.ref('sql_l2_245')
+    FROM smelt.ref('sql_l2_132')
     WHERE score >= 50
 ),
 aggregated AS (

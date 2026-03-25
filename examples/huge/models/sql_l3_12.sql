@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT region, transaction_id, page_path
-    FROM smelt.ref('sql_l2_16')
+    FROM smelt.ref('sql_l2_200')
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (

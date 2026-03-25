@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT plan_type, channel, revenue
-    FROM smelt.ref('py_l1_323')
+    FROM smelt.ref('sql_l1_89')
     WHERE is_active = true
 ),
 aggregated AS (

@@ -15,6 +15,6 @@ SELECT
     event_time,
     amount,
     status
-FROM smelt.ref('sql_l3_103')
+FROM smelt.ref('sql_l3_4')
 WHERE status = 'active'
 """

@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     discount,
@@ -11,5 +13,5 @@ SELECT
     SUM(revenue) AS agg_2,
     MIN(created_at) AS agg_3,
     COUNT(DISTINCT user_id) AS agg_4
-FROM smelt.ref('py_l3_467')
+FROM smelt.ref('sql_l3_2')
 GROUP BY discount

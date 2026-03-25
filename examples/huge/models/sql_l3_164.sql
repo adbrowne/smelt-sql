@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     a.os_name,
     b.profit,
     c.user_id,
     c.page_path
-FROM smelt.ref('py_l2_477') a
-INNER JOIN smelt.ref('py_l2_322') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('py_l2_416') c ON a.user_id = c.user_id
+FROM smelt.ref('sql_l2_167') a
+INNER JOIN smelt.ref('sql_l2_45') b ON a.user_id = b.user_id
+LEFT JOIN smelt.ref('sql_l2_247') c ON a.user_id = c.user_id

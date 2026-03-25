@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT updated_at, user_id, is_active
-    FROM smelt.ref('sql_l2_5')
+    FROM smelt.ref('sql_l2_28')
     WHERE quantity > 0
 ),
 aggregated AS (

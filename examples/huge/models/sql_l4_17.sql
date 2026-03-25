@@ -2,8 +2,10 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
-SELECT discount, user_id, platform, 'source_0' AS source_tag FROM smelt.ref('py_l3_393')
+SELECT discount, user_id, platform, 'source_0' AS source_tag FROM smelt.ref('sql_l3_192')
 UNION ALL
-SELECT discount, user_id, platform, 'source_1' AS source_tag FROM smelt.ref('py_l3_393')
+SELECT discount, user_id, platform, 'source_1' AS source_tag FROM smelt.ref('sql_l3_192')

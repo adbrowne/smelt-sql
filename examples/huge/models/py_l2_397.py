@@ -20,6 +20,6 @@ SELECT
     event_time,
     amount,
     category
-FROM smelt.ref('py_l1_252')
+FROM smelt.ref('py_l1_490')
 {filter_clause}
 """

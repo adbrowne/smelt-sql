@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT amount, cost, cohort_date
-    FROM smelt.ref('py_l1_391')
+    FROM smelt.ref('sql_l1_0')
     WHERE quantity > 0
 ),
 aggregated AS (

@@ -2,12 +2,14 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     plan_type,
     duration_seconds,
     profit,
     updated_at
-FROM smelt.ref('sql_l1_78')
+FROM smelt.ref('sql_l1_178')
 WHERE category IS NOT NULL

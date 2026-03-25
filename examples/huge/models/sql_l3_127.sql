@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT ip_address, user_id, referrer
-    FROM smelt.ref('sql_l2_92')
+    FROM smelt.ref('sql_l2_38')
     WHERE category IS NOT NULL
 ),
 aggregated AS (

@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     browser,
@@ -11,5 +13,5 @@ SELECT
     COUNT(*) AS agg_2,
     AVG(amount) AS agg_3,
     AVG(price) AS agg_4
-FROM smelt.ref('py_l1_331')
+FROM smelt.ref('sql_l1_140')
 GROUP BY browser

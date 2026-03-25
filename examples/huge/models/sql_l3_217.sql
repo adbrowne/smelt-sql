@@ -2,7 +2,9 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     device_type,
@@ -10,5 +12,5 @@ SELECT
     SUM(quantity) AS agg_1,
     MAX(created_at) AS agg_2,
     AVG(price) AS agg_3
-FROM smelt.ref('sql_l2_243')
+FROM smelt.ref('sql_l2_8')
 GROUP BY device_type

@@ -2,13 +2,15 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 SELECT
     duration_seconds,
     platform,
     order_id
-FROM smelt.ref('py_l2_338')
+FROM smelt.ref('sql_l2_200')
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_189') WHERE is_active = true
+    SELECT user_id FROM smelt.ref('sql_l2_31') WHERE is_active = true
 )

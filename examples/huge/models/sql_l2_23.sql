@@ -2,10 +2,10 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
-SELECT revenue, duration_seconds, created_at, 'source_0' AS source_tag FROM smelt.ref('sql_l1_35')
+SELECT revenue, duration_seconds, created_at, 'source_0' AS source_tag FROM smelt.ref('sql_l1_221')
 UNION ALL
-SELECT revenue, duration_seconds, created_at, 'source_1' AS source_tag FROM smelt.ref('py_l1_331')
-UNION ALL
-SELECT revenue, duration_seconds, created_at, 'source_2' AS source_tag FROM smelt.ref('py_l1_314')
+SELECT revenue, duration_seconds, created_at, 'source_1' AS source_tag FROM smelt.ref('sql_l1_143')

@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT user_id, segment, order_id
-    FROM smelt.ref('py_l3_375')
+    FROM smelt.ref('sql_l3_247')
     WHERE amount > 0
 ),
 aggregated AS (

@@ -14,6 +14,6 @@ SELECT
     a.user_id,
     a.event_time,
     b.amount
-FROM smelt.ref('sql_l2_136') a
-LEFT JOIN smelt.ref('sql_l2_85') b ON a.user_id = b.user_id
+FROM smelt.ref('py_l2_261') a
+LEFT JOIN smelt.ref('sql_l2_156') b ON a.user_id = b.user_id
 """

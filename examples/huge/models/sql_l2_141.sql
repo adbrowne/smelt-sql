@@ -2,11 +2,13 @@
 materialization: table
 incremental:
   enabled: true
+  event_time_column: event_time
   partition_column: event_date
+  granularity: day
 ---
 WITH filtered AS (
     SELECT event_type, os_name, email_domain
-    FROM smelt.ref('sql_l1_93')
+    FROM smelt.ref('sql_l1_75')
     WHERE is_active = true
 ),
 aggregated AS (
