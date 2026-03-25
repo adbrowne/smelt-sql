@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774407846377,
+  "lastUpdate": 1774410469931,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3759,6 +3759,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.809497,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e9462fddaef02c42c838ebbf95ad5ed2dcf94c8b",
+          "message": "Run Planner: select/exclude with CLI command preview\n\n- Add --exclude flag to CLI (RunArgs, BuildArgs) with selector syntax\n- Add exclude_models() and all_model_names() to DependencyGraph (both smelt-core and smelt-cli)\n- Use proper selector parsing in UI backend (build_run_plan, run_manager)\n  instead of simple name matching — supports tags, upstream/downstream\n- Add POST /api/resolve endpoint for lightweight selector resolution\n- Generate CLI command string in RunPlanResponse\n- Redesign RunPlanner UI:\n  - Text inputs for select/exclude (space-separated selector syntax)\n  - Model pills that toggle tokens in the text inputs (single source of truth)\n  - Shift+click pills to exclude (red/strikethrough)\n  - Pills highlight resolved models via /api/resolve (including upstream/downstream)\n  - CLI command box with copy button shown after preview\n  - Resolved models list shown after preview",
+          "timestamp": "2026-03-25T14:45:43+11:00",
+          "tree_id": "f7902d8488647981b91950503bed59a4307abd0f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e9462fddaef02c42c838ebbf95ad5ed2dcf94c8b"
+        },
+        "date": 1774410468998,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.766657,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.609398,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.5400280000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.308315,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0026249999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.67017,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.018194,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.011141,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009819,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.947297,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.113424,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.45588,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.04737,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.522515,
             "unit": "ms"
           }
         ]
