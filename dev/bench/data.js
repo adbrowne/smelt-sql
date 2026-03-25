@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774414295437,
+  "lastUpdate": 1774414296448,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5261,6 +5261,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.300819636550447,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5f13317efbd935a707ed4b64bc2a7d773389f1b8",
+          "message": "Rename smelt-optimizer to smelt-planner\n\nThe crate implements planning (execution strategy, materialization,\nbatching) rather than query optimization. This rename clarifies intent.\n\n- Crate: smelt-optimizer → smelt-planner\n- Struct: Optimizer → Planner, .optimize() → .plan()\n- Python: OptimizerRule → PlannerRule, entry point smelt.planner_rules\n- Docs: updated CLAUDE.md, ROADMAP.md, architecture_overview.md\n- Renamed optimization_rule_api_design.md → planner_rule_api_design.md\n- Test file: optimizer_test.rs → planner_test.rs\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T15:49:32+11:00",
+          "tree_id": "e899b17edab3bf7e8e9394518688d85a3c40d093",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5f13317efbd935a707ed4b64bc2a7d773389f1b8"
+        },
+        "date": 1774414296186,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.25880047265207,
             "unit": "MB/s"
           }
         ]
