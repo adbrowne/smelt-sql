@@ -13,10 +13,17 @@ Three ideas make smelt different from dbt:
 ## Compilation Pipeline
 
 ```
-                  ┌──────────┐
-                  │  .sql    │  smelt SQL models
-                  │  files   │  (superset dialect)
-                  └────┬─────┘
+          ┌──────────┐     ┌──────────┐
+          │  .sql    │     │  .py     │  Python models
+          │  files   │     │  files   │  (@model decorator)
+          └────┬─────┘     └────┬─────┘
+               │                │
+               │           ┌────▼──────┐
+               │           │ Discover  │  smelt-core (subprocess/PyO3)
+               │           │ Python    │  Extract SQL from decorators
+               │           └────┬──────┘
+               │                │ SQL strings
+               └───────┬───────┘
                        │
                   ┌────▼─────┐
                   │  Parse   │  smelt-parser (Rowan CST)
@@ -29,7 +36,7 @@ Three ideas make smelt different from dbt:
                   └────┬─────┘
                        │ CST + semantic info
                   ┌────▼─────┐
-                  │ Optimize │  smelt-optimizer (future)
+                  │ Optimize │  smelt-optimizer
                   │(optional)│  Model-graph transforms
                   └────┬─────┘
                        │ CST + graph edits
@@ -62,20 +69,24 @@ Three ideas make smelt different from dbt:
               ┌──────┼──────┼──────┤
               │      │      │      │
            smelt-lsp │   smelt-optimizer        (sync, model-graph transforms)
-              │      │      │      │             (future)
-              │      │      │      │
-              │   smelt-cli─┘      │
-              │      │             │
-              │   smelt-backend    │            (async, execution trait)
-              │      │             │
-              │   ┌──┴──────┐     │
-              │   │         │     │
-              │  duckdb   spark   │
-              │  backend  backend │
-              │      │      │     │
-              │   smelt-transpiler┘             (async, wraps backend + dialect)
+              │      │      │
+              │   smelt-cli─┘
+              │      │
+              │   smelt-backend                 (async, execution trait)
+              │      │
+              │   ┌──┴──────┐
+              │   │         │
+              │  duckdb   spark
+              │  backend  backend
               │
            (LSP binary)
+
+  Supporting crates (not in main pipeline):
+    smelt-state          (sync, run manifests + interval tracking)
+    smelt-ui             (async, web dashboard + run execution)
+    smelt-datagen        (standalone, test data generation)
+    smelt-bench          (standalone, benchmarks)
+    smelt-parser-compat  (testing, pg_query/sqlparser-rs/sqlglot compat)
 ```
 
 ### Concern → Crate → Sync/Async
@@ -84,28 +95,28 @@ Three ideas make smelt different from dbt:
 |---------|-------|------------|-------|
 | SQL data types | `smelt-types` | sync | `DataType`, `TypedColumn` |
 | Parsing | `smelt-parser` | sync | Rowan CST, error recovery |
-| Project config & discovery | `smelt-core` | sync | `Config`, `ModelFile`, `DependencyGraph` |
+| Project config & discovery | `smelt-core` | sync | `Config`, `ModelFile`, `DependencyGraph`, Python model discovery |
 | Incremental queries | `smelt-db` | sync | Salsa: parse, refs, types, diagnostics |
 | SQL dialects & printing | `smelt-dialect` | sync | `SqlDialect`, `BackendCapabilities`, dialect-aware printer |
-| Model-graph optimization | `smelt-optimizer` | sync | Graph transforms, new model generation (future) |
+| Model-graph optimization | `smelt-optimizer` | sync | Cube split, incremental detection, temporal analysis, batch safety |
 | LSP server | `smelt-lsp` | async (tower-lsp) | Thin async shell over sync Salsa queries |
 | Execution trait | `smelt-backend` | async | `Backend` trait, `ExecutionResult` |
 | DuckDB execution | `smelt-backend-duckdb` | async | `DuckDbBackend` |
 | Spark execution | `smelt-backend-spark` | async | `SparkBackend` |
-| SQL rewriting for backends | `smelt-transpiler` | sync* | Wraps backend + dialect printer |
+| Run state & history | `smelt-state` | sync | `RunManifest`, `IntervalStore`, `FileStore` |
+| Web dashboard | `smelt-ui` | async | React frontend, run execution, WebSocket streaming |
+| Compatibility testing | `smelt-parser-compat` | sync | pg_query, sqlparser-rs, sqlglot verification |
 
-\* The transpiler's core logic (CST walk + emit) is sync. The `TranspilingBackend<B>` wrapper is async because it delegates to an async `Backend`.
+### Why `smelt-dialect` is separate
 
-### Why extract `smelt-dialect`?
-
-The current `smelt-backend` crate contains `SqlDialect` and `BackendCapabilities` alongside async execution code that depends on Arrow, Tokio, and DuckDB. The LSP needs dialect information (to show "QUALIFY will be rewritten for PostgreSQL") but must not link against heavy async/native dependencies.
+The LSP needs dialect information (to show "QUALIFY will be rewritten for PostgreSQL") but must not link against heavy async/native dependencies like Arrow, Tokio, and DuckDB.
 
 `smelt-dialect` is a lightweight sync crate that holds:
 - `SqlDialect` enum (DuckDB, SparkSQL, PostgreSQL)
 - `BackendCapabilities` struct (feature flags per dialect)
 - The dialect-aware printer (CST → SQL string)
 
-Both `smelt-lsp` and `smelt-transpiler` depend on it. Neither needs to depend on `smelt-backend`.
+Both `smelt-lsp` and `smelt-cli` depend on it. Neither needs to depend on `smelt-backend`.
 
 ## Data Flow
 
@@ -132,11 +143,17 @@ Key queries:
 - `file_diagnostics()` → errors and warnings
 - `model_schema()` → column types
 
-### 3. Optimize (smelt-optimizer, future)
+### 3. Optimize (smelt-optimizer)
 
-**Input**: Model dependency graph + CSTs
-**Output**: Graph edits (new models, redirected refs, removed models)
+**Input**: Model dependency graph + CSTs + YAML frontmatter config
+**Output**: Graph edits (new models, redirected refs, execution plans) + analysis results
 **Representation**: A set of `Transformation` instructions, not mutated CSTs.
+
+Current capabilities:
+- **Cube split**: Detects models with multiple `COUNT(DISTINCT)` and splits into parallel sub-queries
+- **Incremental materialization**: Detects time-partitioned GROUP BY and generates DELETE+INSERT execution plans
+- **Temporal dependency inference**: Analyzes window functions, LAG/LEAD, JOIN intervals, WHERE interval patterns to determine lookback/lookahead requirements
+- **Batch safety analysis**: Classifies models as `FullyBatchSafe`, `BoundedSafe`, or `PerPartitionOnly` for backfill planning
 
 See [Optimizer Design](#optimizer-design) below.
 
@@ -158,21 +175,7 @@ The `Backend` trait is async because execution involves network I/O (Spark conne
 
 ## Dialect-Aware Printer Design
 
-The dialect-aware printer replaces the current transpiler's text-range string replacement approach. Instead of detecting byte offsets in the CST and splicing replacement strings from end to start, the printer walks the CST in a single forward pass and emits dialect-specific SQL.
-
-### Current approach (smelt-transpiler, to be replaced)
-
-```
-Parse → detect SyntaxKind nodes → extract byte ranges → compute replacement text
-→ sort replacements descending → apply via String::replace_range()
-```
-
-Problems:
-- **Multi-pass fragility**: Statement-level rewrites (QUALIFY) run first, then the output is re-parsed for expression-level rewrites (array literals). Rewrites can interact.
-- **Offset arithmetic**: Replacements must be sorted and applied end-to-start to avoid invalidating byte positions. Nested constructs require care.
-- **Not composable**: Each rewrite is an independent module that doesn't know about other rewrites. Combining them requires the multi-pass orchestrator.
-
-### New approach (dialect-aware printer)
+The dialect-aware printer in `smelt-dialect` walks the CST in a single forward pass and emits dialect-specific SQL. Each construct that needs translation is a match arm in the recursive walk — no multi-pass rewrites, no byte offset arithmetic.
 
 ```rust
 fn print(node: &SyntaxNode, dialect: &SqlDialect, caps: &BackendCapabilities) -> String {
@@ -362,29 +365,14 @@ When the optimizer detects opportunities, the LSP can surface them as code actio
 
 The LSP calls the optimizer's `detect` phase (sync, no execution needed) and presents `Opportunity` values as diagnostics. If the user accepts, the LSP applies the `Transformation` list as workspace edits.
 
-## Migration Path
+## Architecture Status
 
-The architecture described above is the target state. Here is the phased migration from the current codebase:
+The architecture described above is fully implemented. Key milestones:
 
-### Phase 1: Extract `smelt-dialect` (no behavior change)
-
-Move `SqlDialect`, `BackendCapabilities` from `smelt-backend` into a new `smelt-dialect` crate. Both `smelt-backend` and `smelt-transpiler` re-export or depend on `smelt-dialect`. No functional changes — pure crate extraction.
-
-### Phase 2: Dialect-aware printer in `smelt-dialect`
-
-Implement the CST-walking printer in `smelt-dialect`. Port the three existing rewrite rules (QUALIFY, array literals, DATE literals) from the transpiler's text-range approach to match arms in the printer. Verify with the transpiler's existing test suite.
-
-### Phase 3: Replace transpiler internals
-
-Replace `smelt-transpiler`'s multi-pass replacement logic with calls to the dialect-aware printer. `TranspilingBackend<B>` calls `smelt_dialect::print()` instead of the old `transpile()` function. The transpiler crate may shrink to just the `TranspilingBackend` wrapper or be absorbed into `smelt-cli`.
-
-### Phase 4: LSP dialect diagnostics
-
-Add `smelt-dialect` as a dependency of `smelt-lsp`. Walk the CST checking constructs against `BackendCapabilities` for the configured target. Emit informational diagnostics for constructs that will be rewritten.
-
-### Phase 5: Optimizer (future)
-
-Introduce `smelt-optimizer` crate. Implement the first optimization rule (shared materialization). Integrate with LSP for opportunity detection and code actions.
+- **`smelt-dialect`** extracted as lightweight sync crate — LSP can check dialect capabilities without linking to backends
+- **Dialect-aware printer** handles QUALIFY, array literals, DATE literals, JSON function remapping via single-pass CST walk
+- **`smelt-optimizer`** implements cube split, incremental materialization, temporal analysis, and batch safety
+- **LSP dialect diagnostics** planned but not yet implemented (the infrastructure is in place via `smelt-dialect`)
 
 ## Key Technical Decisions
 

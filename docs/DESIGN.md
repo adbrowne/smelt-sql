@@ -116,34 +116,6 @@ FROM events
 | `@` prefix | `@ref('model')` | Potential collision with SQL variables |
 | `$` prefix | `$metric.revenue` | Less familiar, edge cases in shells |
 
-### Reference Parameters
-
-```sql
-smelt.ref('model',
-  -- Data filtering
-  filter => <expr>,              -- Pushdown predicate
-  partitions => ['2024-01'],     -- Explicit partition list
-  sample => 0.1,                 -- Sampling ratio
-
-  -- Freshness/versioning
-  max_staleness => '1 hour',     -- Acceptable data age
-  as_of => '2024-01-01',         -- Time travel
-  version => 'v2',               -- Explicit model version
-
-  -- Optimizer hints
-  prefer_materialized => true,   -- Use cache if available
-  allow_approximate => true,     -- OK to use approximations
-  inline => true                 -- Don't materialize, inline SQL
-)
-
-smelt.metric('metric_name',
-  at => event_date,              -- Point-in-time evaluation
-  for => user_id,                -- Entity to compute for
-  grain => 'daily',              -- Rollup level
-  allow_approximate => true      -- HLL acceptable
-)
-```
-
 ### Trailing Commas (smelt extension)
 
 smelt allows trailing commas in SELECT and GROUP BY clauses, matching DuckDB's "friendly SQL" approach:
@@ -210,18 +182,24 @@ metric first_touch_attribution:
 Use standard SQL with smelt extensions to compose metrics and build complex transformations.
 
 ```sql
--- Model: daily_user_stats
--- (annotation syntax shown here is illustrative; YAML frontmatter is the current config surface)
--- @materialize: daily
--- @partition_by: event_date
+-- models/daily_user_stats.sql
+---
+name: daily_user_stats
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
 
 SELECT
   event_date,
   user_id,
-  smelt.metric('revenue', at => event_date) as daily_revenue,
-  smelt.metric('monthly_active_users', at => event_date) as mau_at_date
+  COUNT(*) as event_count,
+  SUM(amount) as daily_revenue
 FROM smelt.ref('events')
-GROUP BY 1, 2
+GROUP BY event_date, user_id
 ```
 
 ### Why Two Layers
@@ -260,7 +238,7 @@ SELECT CAST(a AS INT) + b FROM t  -- Explicit, correct
    - Similar to Rust: inference in functions, signatures explicit
 
 3. **Superset types with backend validation**
-   - IR can represent types not supported everywhere (e.g., HUGEINT)
+   - The type system can represent types not supported everywhere (e.g., HUGEINT)
    - Error raised only when deploying to a backend that doesn't support it
 
 4. **Literal handling**
@@ -284,85 +262,43 @@ SELECT CAST(a AS INT) + b FROM t  -- Explicit, correct
 
 ---
 
-## Intermediate Representation (IR)
+## Semantic Analysis
 
-### Computation Requirements
+### Temporal Dependency Inference
 
-The IR tracks what each computation *requires* semantically, not how to execute it:
+The optimizer analyzes model SQL (via CST inspection) to automatically determine how much historical context each incremental model needs. This drives batch safety decisions and backfill range computation.
+
+Analysis is performed by `smelt-optimizer/src/analysis/temporal.rs`:
 
 ```rust
-enum ComputationRequirement {
-    Stateless,           // Pure function of current row
-    PartitionLocal,      // Independent per partition key
-    RequiresOrdering,    // Needs rows in specific order within partition
-    Windowed {           // Needs N prior/future rows
-        preceding: WindowBound,
-        following: WindowBound,
-    },
-    Sessionized {        // Gap-based grouping
-        key: Vec<Column>,
-        gap: Duration,
-    },
-    Cumulative,          // Depends on all prior rows
+enum TemporalOffset {
+    Days(i64),
+    Rows(i64),
+    Unbounded,
 }
 ```
 
-### Backend Capability Declaration
+**Sources detected**: Window functions (`ROWS BETWEEN`, `RANGE`), `LAG`/`LEAD`, JOIN with interval offsets, WHERE with interval patterns.
 
-Each backend declares what it supports:
+### Batch Safety Analysis
 
-```rust
-struct BackendCapabilities {
-    supports_stateless: bool,
-    supports_partition_local: bool,
-    supports_ordering: bool,
-    supports_windowed: bool,
-    supports_sessionized: bool,      // Spark: native, DuckDB: via rewrite
-    supports_cumulative: bool,
-    supports_types: HashSet<DataType>,
-    // ... engine-specific capabilities
-}
-```
+Based on temporal dependencies, the optimizer classifies each incremental model's batch safety:
 
-### Validation Flow
+| Classification | Meaning | Execution |
+|---|---|---|
+| `FullyBatchSafe` | No temporal dependencies | Single query for any range |
+| `BoundedSafe(n)` | Bounded lookback/lookahead | Auto-sized chunks (3x context, clamped 7-90 days) |
+| `PerPartitionOnly` | Unbounded dependencies | Must process one partition at a time |
 
-1. Parse SQL + extensions → AST
-2. Resolve references (models, metrics) → Typed AST
-3. Analyze computation requirements → Annotated IR
-4. Match against target backend → Error or rewrite plan
+This drives the `smelt backbuild` command's automatic range expansion and batching strategy.
 
 ---
 
-## Rewrite Rules
+## Dialect Translation
 
-### Design: Engine-Specific Translations
+### Design: CST-Walking Printer
 
-Rewrite rules translate semantic concepts to engine-specific implementations. They live in the framework, not in user models.
-
-```python
-# Example: Sessionization
-@rule
-def sessionization_spark(node: SessionizedComputation, target: SparkBackend):
-    """Native session_window in Spark"""
-    return SparkSessionWindow(
-        keys=node.keys,
-        gap=node.gap,
-        timestamp_col=node.timestamp
-    )
-
-@rule(complexity="high")
-def sessionization_duckdb(node: SessionizedComputation, target: DuckDBBackend):
-    """Implement via window functions"""
-    return WindowBasedSessionization(
-        flag_expr=f"""
-            CASE WHEN {node.timestamp} - LAG({node.timestamp}) OVER (
-                PARTITION BY {', '.join(node.keys)} ORDER BY {node.timestamp}
-            ) > INTERVAL '{node.gap}'
-            THEN 1 ELSE 0 END
-        """,
-        session_id_expr="SUM(flag) OVER (PARTITION BY ... ORDER BY ...)"
-    )
-```
+The `smelt-dialect` crate provides a dialect-aware printer that walks the Rowan CST in a single forward pass and emits target-specific SQL. This replaces the concept of "rewrite rules" from earlier designs — dialect translation is handled by match arms in the printer, not a separate rule framework.
 
 ### Common Rewrites Needed
 
@@ -376,27 +312,16 @@ def sessionization_duckdb(node: SessionizedComputation, target: DuckDBBackend):
 | HUGEINT (128-bit) | DuckDB | NUMERIC/DECIMAL elsewhere |
 | Recursive CTEs | Postgres, DuckDB, Spark 3.x | Iterative unrolling (limited) |
 
-### Prior Art for Rewrite Systems
+### Model-Graph Optimization
 
-| System | Relevance | Key Ideas |
-|--------|-----------|-----------|
-| **Egg** (e-graphs) | Rule framework | Equality saturation, avoid ordering issues |
-| **MLIR** | Multi-level IR | Progressive lowering, dialects |
-| **Apache Calcite** | Query optimization | RelOptRule, cost-based selection |
-| **DataFusion optimizer** | Rust-native | Simple OptimizerRule trait |
-| **Substrait** | Cross-engine IR | Portable plan representation |
+Separately from dialect translation, the `smelt-optimizer` crate performs model-graph-level optimizations. These read CST structure to detect patterns, then produce `Transformation` instructions (new models, redirected refs, multi-step execution plans). They do **not** mutate existing CSTs.
 
-### Rule Interface (Proposed)
+Current optimization rules:
+- **Cube split**: Models with multiple `COUNT(DISTINCT)` aggregations are split into parallel sub-queries joined on GROUP BY keys, reducing memory pressure
+- **Incremental materialization**: Models with time-partitioned GROUP BY are detected and converted to incremental DELETE+INSERT patterns
+- **Temporal dependency inference**: Window functions, LAG/LEAD, and JOIN intervals are analyzed to determine backfill context requirements
 
-Rust core with Python bindings for rule authoring:
-
-```python
-@rule
-def my_rule(node: CountDistinct, ctx: RuleContext) -> Optional[Rewrite]:
-    if ctx.target.supports(ApproxCountDistinct) and ctx.has_annotation('approximate_ok'):
-        return HyperLogLog(node.column, precision=14)
-    return None  # No rewrite, use default
-```
+See [architecture_overview.md](architecture_overview.md) for the `Transformation` and `ExecutionStep` enums.
 
 ---
 
@@ -665,12 +590,17 @@ Incremental table builds are implemented through **rewrite rules**, not macros o
 
 Analyst writes pure business logic:
 
-> **Note**: The examples below use `@materialize` annotation syntax which is not yet implemented. The current config surface is YAML frontmatter. The conceptual design (separation of logical model from physical strategy) is accurate regardless of syntax. The `lookback_days` parameter shown in rewrite rules below has been superseded by two orthogonal mechanisms: AST-inferred temporal dependencies and per-column `data_latency` on upstream sources. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md) Phase 3.
-
 ```sql
 -- models/daily_revenue.sql
--- @materialize: incremental
--- @partition_by: order_date
+---
+name: daily_revenue
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+---
 
 SELECT
   order_date,
@@ -682,42 +612,36 @@ GROUP BY order_date, customer_id
 
 **No conditionals. No templating. Just what to compute.**
 
-### Example: Rewrite Rules for Different Backends
+### Example: Backend-Specific Execution
 
-Engineers write transformation rules that generate backend-specific physical SQL:
+The optimizer and backend crates generate backend-specific SQL from the pure logical model:
 
-#### Databricks/Delta Lake
+#### DuckDB (DELETE + INSERT)
 
-```python
-@rule
-def incremental_merge_delta(model: LogicalModel, backend: DeltaBackend, config: Config):
-    """Transform logical model into Delta MERGE for incrementalization"""
+```sql
+-- Generated by smelt for incremental run --start 2026-03-20 --end 2026-03-25
 
-    if not config.incremental_enabled:
-        return None  # Use default CREATE OR REPLACE
+-- Step 1: Delete affected partitions
+DELETE FROM daily_revenue
+WHERE order_date >= DATE '2026-03-20' AND order_date < DATE '2026-03-25';
 
-    partition_col = config.partition_by
-
-    return f"""
-    MERGE INTO {model.table_name} AS target
-    USING (
-        {model.select_sql}
-        WHERE {partition_col} >= current_date - INTERVAL {config.lookback_days} DAY
-    ) AS source
-    ON target.order_date = source.order_date
-       AND target.customer_id = source.customer_id
-    WHEN MATCHED THEN UPDATE SET *
-    WHEN NOT MATCHED THEN INSERT *
-    """
+-- Step 2: Insert fresh data
+INSERT INTO daily_revenue
+SELECT order_date, customer_id, SUM(amount) as total
+FROM orders
+WHERE order_date >= DATE '2026-03-20' AND order_date < DATE '2026-03-25'
+GROUP BY order_date, customer_id;
 ```
 
-**Generated SQL** (Databricks):
+#### Databricks/Delta Lake (MERGE)
+
 ```sql
+-- Future: Spark backend will generate MERGE for incremental
 MERGE INTO daily_revenue AS target
 USING (
     SELECT order_date, customer_id, SUM(amount) as total
     FROM orders
-    WHERE order_date >= current_date - INTERVAL 3 DAY
+    WHERE order_date >= DATE '2026-03-20' AND order_date < DATE '2026-03-25'
     GROUP BY order_date, customer_id
 ) AS source
 ON target.order_date = source.order_date
@@ -726,94 +650,7 @@ WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *
 ```
 
-**State management**: Delta Lake's transaction log tracks what partitions exist and their versions.
-
-#### Apache Flink (Streaming)
-
-```python
-@rule
-def streaming_upsert_flink(model: LogicalModel, backend: FlinkBackend, config: Config):
-    """Transform logical model into Flink streaming job"""
-
-    return f"""
-    CREATE TABLE {model.table_name} (
-        {model.schema_ddl}
-        PRIMARY KEY ({', '.join(config.unique_keys)}) NOT ENFORCED
-    ) WITH (
-        'connector' = 'upsert-kafka',
-        'topic' = '{model.table_name}',
-        'properties.bootstrap.servers' = '{backend.kafka_servers}'
-    );
-
-    INSERT INTO {model.table_name}
-    {model.select_sql}  -- Continuous query
-    """
-```
-
-**Generated SQL** (Flink):
-```sql
-CREATE TABLE daily_revenue (
-    order_date DATE,
-    customer_id INT,
-    total DECIMAL(10,2),
-    PRIMARY KEY (order_date, customer_id) NOT ENFORCED
-) WITH (
-    'connector' = 'upsert-kafka',
-    'topic' = 'daily_revenue'
-);
-
-INSERT INTO daily_revenue
-SELECT order_date, customer_id, SUM(amount) as total
-FROM orders
-GROUP BY order_date, customer_id;
-```
-
-**State management**: Flink checkpoints track stream position and aggregation state.
-
-#### DuckDB (Batch)
-
-```python
-@rule
-def batch_delete_insert_duckdb(model: LogicalModel, backend: DuckDBBackend, config: Config):
-    """Transform logical model into DELETE + INSERT for batch processing"""
-
-    if not config.incremental_enabled:
-        return None
-
-    partition_col = config.partition_by
-    lookback = config.lookback_days
-
-    return [
-        # Statement 1: Delete affected partitions
-        f"""
-        DELETE FROM {model.table_name}
-        WHERE {partition_col} >= current_date - INTERVAL {lookback} DAY
-        """,
-
-        # Statement 2: Insert fresh data
-        f"""
-        INSERT INTO {model.table_name}
-        {model.select_sql}
-        WHERE {partition_col} >= current_date - INTERVAL {lookback} DAY
-        """
-    ]
-```
-
-**Generated SQL** (DuckDB):
-```sql
--- Statement 1
-DELETE FROM daily_revenue
-WHERE order_date >= current_date - INTERVAL 3 DAY;
-
--- Statement 2
-INSERT INTO daily_revenue
-SELECT order_date, customer_id, SUM(amount) as total
-FROM orders
-WHERE order_date >= current_date - INTERVAL 3 DAY
-GROUP BY order_date, customer_id;
-```
-
-**State management**: DuckDB table state tracks what data exists. smelt queries the table to determine what's already processed.
+The logical model is identical regardless of backend — the framework generates the right execution strategy.
 
 ### What Each Layer Owns
 
@@ -828,9 +665,7 @@ GROUP BY order_date, customer_id;
 
 ### Configuration
 
-> **Status update**: The annotation syntax shown here (`@materialize`, `@lookback_days`) is not yet implemented. YAML frontmatter is the current config surface. The `lookback_days` concept has been superseded by AST-inferred temporal dependencies + per-column `data_latency` on upstream sources. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md).
-
-Models declare metadata through YAML frontmatter:
+Models declare metadata through YAML frontmatter or `smelt.yml`. Temporal dependencies (how much historical context each model needs) are inferred automatically from the SQL via AST analysis. Per-column `data_latency` on upstream sources can be specified for late-arriving data. See [docs/plans/20260322-incremental-model-support.md](plans/20260322-incremental-model-support.md).
 
 ```sql
 -- models/daily_revenue.sql
@@ -887,18 +722,21 @@ SELECT * FROM source
 SELECT * FROM smelt.ref('source')
 ```
 
-```python
-# ✅ CORRECT - Rewrite rule handles incrementalization
-@rule
-def make_incremental(model, backend, config):
-    if config.incremental:
-        return generate_delete_insert(model, config)
+```yaml
+# ✅ CORRECT - YAML frontmatter configures incrementalization
+---
+incremental:
+  enabled: true
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
 ```
 
 **Why**:
 - Logical models should express business logic, not execution strategy
 - Macros make models harder to analyze, optimize, and understand
-- Rewrite rules are explicit, testable, and backend-specific
+- The optimizer and backend handle incrementalization automatically
 
 #### ❌ NO COMPUTATIONAL STATE in smelt
 
@@ -1001,20 +839,20 @@ WHERE order_date >= '{{ var("start_date") }}'
 GROUP BY 1, 2
 ```
 
-**smelt approach** (rewrite rules separate from logic):
+**smelt approach** (config separate from logic):
 ```sql
--- Logical model (pure)
+-- Logical model (pure) with YAML frontmatter config
+---
+incremental:
+  enabled: true
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+---
 SELECT order_date, customer_id, SUM(amount)
 FROM smelt.ref('orders')
 GROUP BY order_date, customer_id
-```
-
-```python
-# Rewrite rule (separate)
-@rule
-def make_incremental(model, backend, config):
-    # Generate backend-specific incremental SQL
-    return generate_merge(model, backend)
+-- The optimizer and backend generate incremental SQL automatically
 ```
 
 **Key differences:**
@@ -1384,17 +1222,13 @@ COMMIT;
 
 1. **Metrics DSL syntax**: YAML? Custom DSL? SQL-like?
 
-2. **Config location**: Annotations, separate files, or both?
+2. **Substrait integration**: Use as IR layer? Just for DataFusion?
 
-3. **Rule language**: Pure Rust? Python bindings? Declarative DSL?
+3. **Testing strategy**: How to verify dialect translation correctness across engines? (Property tests cover type inference; dialect output correctness is less systematic.)
 
-4. **Substrait integration**: Use as IR layer? Just for DataFusion?
+4. **Lineage/Catalog integration**: How to expose to external catalogs?
 
-5. **Testing strategy**: How to verify rewrite correctness across engines?
-
-6. **Lineage/Catalog integration**: How to expose to external catalogs?
-
-7. **Secrets/connections**: How to configure database connections?
+5. **Secrets/connections**: How to configure database connections?
 
 ---
 
@@ -1417,49 +1251,43 @@ metric_param ::= identifier '=>' expr
 
 ## Appendix: Example End-to-End
 
-**Metric definition:**
-```yaml
-metric revenue:
-  measure: sum(amount)
-  entity: order
-  decomposable: true
-```
-
-**Model definition** *(uses annotation syntax not yet implemented; see YAML frontmatter for current config surface)*:
+**Model definition:**
 ```sql
 -- models/daily_revenue.sql
--- @materialize: daily
--- @partition_by: order_date
+---
+name: daily_revenue
+materialization: table
+incremental:
+  enabled: true
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+---
 
 SELECT
   order_date,
   customer_id,
-  smelt.metric('revenue') as daily_revenue
-FROM smelt.ref('orders', filter => order_date >= current_date - 90)
-GROUP BY 1, 2
+  SUM(amount) as daily_revenue
+FROM smelt.ref('orders')
+GROUP BY order_date, customer_id
 ```
 
-**Execution config:**
+**Project config:**
 ```yaml
-# execution/daily_revenue.yaml
-model: daily_revenue
-targets:
-  - name: dev
-    backend: duckdb
-  - name: prod
-    backend: spark
-    hints:
-      coalesce_partitions: 100
+# smelt.yml
+name: my_project
+models_dir: models
+backend: duckdb
 ```
 
-**Deploy:**
+**Run:**
 ```bash
-smelt deploy --model daily_revenue --target prod
+smelt run --start 2026-03-01 --end 2026-03-25
 # Framework:
-#   1. Parses model, resolves metric
-#   2. Checks Spark supports all requirements
-#   3. Applies rewrites if needed
-#   4. Generates Spark SQL
+#   1. Parses model, resolves refs
+#   2. Analyzes temporal dependencies
+#   3. Determines batch safety
+#   4. Generates dialect-specific SQL
 #   5. Creates incremental merge logic
 #   6. Outputs to configured location
 ```
