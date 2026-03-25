@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774417660392,
+  "lastUpdate": 1774417662016,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5384,6 +5384,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.25880047265207,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f31ca08bed91764bcb6fa960814010c7910c270b",
+          "message": "Per-model backend routing: route models to different targets in a single run\n\nAdd per-model target assignment so `smelt run` can execute models against\ndifferent backends. Users specify targets via SQL frontmatter (`target: spark_prod`)\nor smelt.yml model config, with precedence: frontmatter > smelt.yml > CLI --target.\n\n- Add `target` field to ModelConfig and ModelMetadata\n- Add Config::get_target() with 3-level precedence resolution\n- Add BackendRegistry (creates backends per-target) and CompilerRegistry (dialect-aware compilation per-target)\n- Add cross-backend ref validation (clear error when model refs span targets)\n- Update run, backbuild, and UI execution loops to use per-model backend/compiler/schema\n- Cross-backend data transfer deferred to future work\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T16:45:29+11:00",
+          "tree_id": "52140c850d511500aba3c3ae7de744781577d0b3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f31ca08bed91764bcb6fa960814010c7910c270b"
+        },
+        "date": 1774417661726,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.965258521718606,
             "unit": "MB/s"
           }
         ]
