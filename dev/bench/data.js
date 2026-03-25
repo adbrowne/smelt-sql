@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774410469931,
+  "lastUpdate": 1774410471615,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5015,6 +5015,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.01152225196382,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e9462fddaef02c42c838ebbf95ad5ed2dcf94c8b",
+          "message": "Run Planner: select/exclude with CLI command preview\n\n- Add --exclude flag to CLI (RunArgs, BuildArgs) with selector syntax\n- Add exclude_models() and all_model_names() to DependencyGraph (both smelt-core and smelt-cli)\n- Use proper selector parsing in UI backend (build_run_plan, run_manager)\n  instead of simple name matching — supports tags, upstream/downstream\n- Add POST /api/resolve endpoint for lightweight selector resolution\n- Generate CLI command string in RunPlanResponse\n- Redesign RunPlanner UI:\n  - Text inputs for select/exclude (space-separated selector syntax)\n  - Model pills that toggle tokens in the text inputs (single source of truth)\n  - Shift+click pills to exclude (red/strikethrough)\n  - Pills highlight resolved models via /api/resolve (including upstream/downstream)\n  - CLI command box with copy button shown after preview\n  - Resolved models list shown after preview",
+          "timestamp": "2026-03-25T14:45:43+11:00",
+          "tree_id": "f7902d8488647981b91950503bed59a4307abd0f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e9462fddaef02c42c838ebbf95ad5ed2dcf94c8b"
+        },
+        "date": 1774410470892,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.71907360462335,
             "unit": "MB/s"
           }
         ]
