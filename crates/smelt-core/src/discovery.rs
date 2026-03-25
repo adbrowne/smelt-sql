@@ -217,11 +217,14 @@ SELECT * FROM smelt.ref('staging_events')
         let mut file = std::fs::File::create(&file_path).unwrap();
         file.write_all(multi_model_content.as_bytes()).unwrap();
 
-        let discovery =
-            ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
+        let discovery = ModelDiscovery::new(dir.path().to_path_buf(), vec!["models".to_string()]);
         let models = discovery.discover_models().unwrap();
 
-        assert_eq!(models.len(), 2, "Should discover 2 models from multi-model file");
+        assert_eq!(
+            models.len(),
+            2,
+            "Should discover 2 models from multi-model file"
+        );
 
         let staging = models.iter().find(|m| m.name == "staging_events").unwrap();
         assert!(staging.model_id.is_multi_model);
@@ -237,7 +240,10 @@ SELECT * FROM smelt.ref('staging_events')
         // Virtual paths should be different
         assert_ne!(staging.path, cleaned.path);
         // But source paths should be the same
-        assert_eq!(staging.model_id.source_path(), cleaned.model_id.source_path());
+        assert_eq!(
+            staging.model_id.source_path(),
+            cleaned.model_id.source_path()
+        );
     }
 
     #[test]
