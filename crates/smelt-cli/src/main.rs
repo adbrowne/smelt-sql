@@ -9,8 +9,8 @@ use smelt_cli::{
     build_explain_output, compute_backbuild_plans, compute_batches_for_model,
     compute_incremental_windows, discover_python_models, executor, find_project_root,
     format_plan_summary, init_db, inject_time_filter, migration, parse_selector,
-    resolve_refs_in_sql, seed, BackendType, BackfillBatch, BackfillOptions, Config,
-    DependencyGraph, ModelDiscovery, SourcesConfig, SqlCompiler, TimeRange,
+    resolve_refs_in_sql, seed, BackendRegistry, BackendType, BackfillBatch, BackfillOptions,
+    CompilerRegistry, Config, DependencyGraph, ModelDiscovery, SourcesConfig, TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -19,7 +19,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::history::HistoryQuery;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "spark")]
@@ -351,9 +351,9 @@ async fn run(args: RunArgs) -> Result<()> {
 
     println!("Project: {} (version {})", config.name, config.version);
 
-    // Get target config
-    let target_config = config.targets.get(&args.target).ok_or_else(|| {
-        anyhow::anyhow!(
+    // Validate default target exists early
+    if !config.targets.contains_key(&args.target) {
+        return Err(anyhow::anyhow!(
             "Target '{}' not found in smelt.yml. Available targets: {}",
             args.target,
             config
@@ -362,8 +362,8 @@ async fn run(args: RunArgs) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        )
-    })?;
+        ));
+    }
 
     // Load source configuration (optional)
     let sources = SourcesConfig::load(&project_dir).ok();
@@ -490,12 +490,42 @@ async fn run(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 6. Create backend based on target type
-    let backend = create_backend(target_config, &project_dir, args.database).await?;
+    // 6. Compute per-model target assignments and create backends
+    let mut target_assignments: HashMap<String, String> = HashMap::new();
+    for model_name in &execution_order {
+        let model = graph.get_model(model_name)?;
+        let target = config.get_target(
+            model_name,
+            model.metadata.as_ref().map(|b| b.as_ref()),
+            &args.target,
+        );
+        target_assignments.insert(model_name.clone(), target);
+    }
+
+    // Validate no cross-backend references
+    graph
+        .validate_cross_backend_refs(&target_assignments)
+        .with_context(|| "Cross-backend reference validation failed")?;
+
+    let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
+    let registry = BackendRegistry::new(
+        &config.targets,
+        &needed_targets,
+        &project_dir,
+        args.database,
+    )
+    .await?;
+
+    let needed_target_configs: HashMap<String, _> = needed_targets
+        .iter()
+        .map(|name| (name.clone(), config.targets[name].clone()))
+        .collect();
+    let compilers = CompilerRegistry::new(&config, &needed_target_configs);
 
     // 7. Validate sources exist (if sources.yml present)
     if let Some(ref source_config) = sources {
-        executor::validate_sources(backend.as_ref(), source_config)
+        // Validate against the default target's backend
+        executor::validate_sources(registry.get(&args.target), source_config)
             .await
             .with_context(|| "Source validation failed")?;
     }
@@ -653,7 +683,6 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 10. Compile and execute each model
-    let compiler = SqlCompiler::new(config.clone(), target_config);
 
     // Initialize type inference DB for schema evolution
     let all_models: Vec<_> = execution_order
@@ -672,6 +701,10 @@ async fn run(args: RunArgs) -> Result<()> {
 
     for model_name in &execution_order {
         let model = graph.get_model(model_name)?;
+        let model_target = &target_assignments[model_name];
+        let backend = registry.get(model_target);
+        let compiler = compilers.get(model_target);
+        let schema = &registry.target_config(model_target).schema;
 
         // Determine execution mode from optimizer overrides or config
         let plan_steps = plan_overrides.get(model_name.as_str()).map(|steps| {
@@ -680,11 +713,11 @@ async fn run(args: RunArgs) -> Result<()> {
                 .map(|step| match step {
                     ExecutionStep::CreateTemp { name, sql } => ExecutionStep::CreateTemp {
                         name: name.clone(),
-                        sql: resolve_refs_in_sql(sql, &target_config.schema),
+                        sql: resolve_refs_in_sql(sql, schema),
                     },
                     ExecutionStep::AppendToTemp { name, sql } => ExecutionStep::AppendToTemp {
                         name: name.clone(),
-                        sql: resolve_refs_in_sql(sql, &target_config.schema),
+                        sql: resolve_refs_in_sql(sql, schema),
                     },
                     ExecutionStep::FinalQuery { sql } => {
                         ExecutionStep::FinalQuery { sql: sql.clone() }
@@ -732,18 +765,15 @@ async fn run(args: RunArgs) -> Result<()> {
         // Schema evolution check for incremental table models
         let mut force_full_refresh = false;
         if let ModelExecution::Incremental { .. } = &execution {
-            if let Ok(true) = backend
-                .table_exists(&target_config.schema, model_name)
-                .await
-            {
+            if let Ok(true) = backend.table_exists(schema, model_name).await {
                 let inferred_columns = infer_deployed_columns(&type_db, model);
                 if !inferred_columns.is_empty() {
                     match migration::check_and_migrate(
-                        backend.as_ref(),
+                        backend,
                         &file_store,
                         model_name,
                         &model.content,
-                        &target_config.schema,
+                        schema,
                         &inferred_columns,
                         args.allow_column_removal,
                         args.dry_run,
@@ -838,10 +868,10 @@ async fn run(args: RunArgs) -> Result<()> {
                 };
 
                 executor::execute_plan_incremental(
-                    backend.as_ref(),
+                    backend,
                     model_name,
                     steps,
-                    &target_config.schema,
+                    schema,
                     partition,
                     &inc_config.event_time_column,
                     &windows.filter_range,
@@ -856,15 +886,9 @@ async fn run(args: RunArgs) -> Result<()> {
                 // Cube split only (full refresh)
                 println!("\n▶ Running model: {} (cube split)", model_name);
 
-                executor::execute_plan(
-                    backend.as_ref(),
-                    model_name,
-                    steps,
-                    &target_config.schema,
-                    args.show_results,
-                )
-                .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?
+                executor::execute_plan(backend, model_name, steps, schema, args.show_results)
+                    .await
+                    .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
             ModelExecution::Incremental {
                 config: inc_config,
@@ -963,7 +987,7 @@ async fn run(args: RunArgs) -> Result<()> {
                     })?;
 
                     let compiled = compiler
-                        .compile_with_sql(model, &target_config.schema, &transformed_sql)
+                        .compile_with_sql(model, schema, &transformed_sql)
                         .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                     if args.verbose {
@@ -1004,9 +1028,9 @@ async fn run(args: RunArgs) -> Result<()> {
                     };
 
                     let result = executor::execute_model_incremental(
-                        backend.as_ref(),
+                        backend,
                         &compiled,
-                        &target_config.schema,
+                        schema,
                         partition,
                         resolved_strategy.clone(),
                         inc_config.unique_key.clone(),
@@ -1035,7 +1059,7 @@ async fn run(args: RunArgs) -> Result<()> {
                 }
 
                 let compiled = compiler
-                    .compile(model, &target_config.schema)
+                    .compile(model, schema)
                     .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                 if args.verbose {
@@ -1047,14 +1071,9 @@ async fn run(args: RunArgs) -> Result<()> {
                     println!("  {}", "─".repeat(58));
                 }
 
-                executor::execute_model(
-                    backend.as_ref(),
-                    &compiled,
-                    &target_config.schema,
-                    args.show_results,
-                )
-                .await
-                .with_context(|| format!("Failed to execute model: {}", model_name))?
+                executor::execute_model(backend, &compiled, schema, args.show_results)
+                    .await
+                    .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
         };
 
@@ -1111,7 +1130,8 @@ async fn run(args: RunArgs) -> Result<()> {
                 time_range: range,
                 ..
             } => {
-                let strategy = backend.resolve_strategy(inc);
+                let model_target = &target_assignments[&result.model_name];
+                let strategy = registry.get(model_target).resolve_strategy(inc);
                 (
                     strategy_label(&strategy).to_string(),
                     Some(TimeRangeRecord {
@@ -1181,8 +1201,8 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
 
     println!("Project: {} (version {})", config.name, config.version);
 
-    let target_config = config.targets.get(&args.target).ok_or_else(|| {
-        anyhow::anyhow!(
+    if !config.targets.contains_key(&args.target) {
+        return Err(anyhow::anyhow!(
             "Target '{}' not found in smelt.yml. Available targets: {}",
             args.target,
             config
@@ -1191,8 +1211,8 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        )
-    })?;
+        ));
+    }
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
@@ -1310,16 +1330,42 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 9. Execute
-    let backend = create_backend(target_config, &project_dir, args.database).await?;
+    // 9. Compute target assignments and create backends
+    let mut target_assignments: HashMap<String, String> = HashMap::new();
+    for model_name in &execution_order {
+        let model = graph.get_model(model_name)?;
+        let target = config.get_target(
+            model_name,
+            model.metadata.as_ref().map(|b| b.as_ref()),
+            &args.target,
+        );
+        target_assignments.insert(model_name.clone(), target);
+    }
+
+    graph
+        .validate_cross_backend_refs(&target_assignments)
+        .with_context(|| "Cross-backend reference validation failed")?;
+
+    let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
+    let registry = BackendRegistry::new(
+        &config.targets,
+        &needed_targets,
+        &project_dir,
+        args.database,
+    )
+    .await?;
+
+    let needed_target_configs: HashMap<String, _> = needed_targets
+        .iter()
+        .map(|name| (name.clone(), config.targets[name].clone()))
+        .collect();
+    let compilers = CompilerRegistry::new(&config, &needed_target_configs);
 
     if let Some(ref source_config) = sources {
-        executor::validate_sources(backend.as_ref(), source_config)
+        executor::validate_sources(registry.get(&args.target), source_config)
             .await
             .with_context(|| "Source validation failed")?;
     }
-
-    let compiler = SqlCompiler::new(config.clone(), target_config);
 
     println!("\n{}", "=".repeat(60));
     println!("Executing backbuild...");
@@ -1329,21 +1375,20 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
 
     for plan in &plans {
         let model = graph.get_model(&plan.model_name)?;
+        let model_target = &target_assignments[&plan.model_name];
+        let backend = registry.get(model_target);
+        let compiler = compilers.get(model_target);
+        let schema = &registry.target_config(model_target).schema;
 
         if !plan.is_incremental {
             println!("\n▶ {} (full refresh)", plan.model_name);
             let compiled = compiler
-                .compile(model, &target_config.schema)
+                .compile(model, schema)
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
 
-            let result = executor::execute_model(
-                backend.as_ref(),
-                &compiled,
-                &target_config.schema,
-                args.show_results,
-            )
-            .await
-            .with_context(|| format!("Failed to execute model: {}", plan.model_name))?;
+            let result = executor::execute_model(backend, &compiled, schema, args.show_results)
+                .await
+                .with_context(|| format!("Failed to execute model: {}", plan.model_name))?;
 
             println!(
                 "  ✓ {} ({} rows, {:?})",
@@ -1404,7 +1449,7 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .with_context(|| format!("Failed to transform SQL for model: {}", plan.model_name))?;
 
             let compiled = compiler
-                .compile_with_sql(model, &target_config.schema, &transformed_sql)
+                .compile_with_sql(model, schema, &transformed_sql)
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
 
             if args.verbose {
@@ -1428,9 +1473,9 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
             };
 
             let result = executor::execute_model_incremental(
-                backend.as_ref(),
+                backend,
                 &compiled,
-                &target_config.schema,
+                schema,
                 partition,
                 resolved_strategy.clone(),
                 inc_config.unique_key.clone(),

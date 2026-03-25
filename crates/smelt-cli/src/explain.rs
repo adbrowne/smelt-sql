@@ -228,6 +228,7 @@ mod tests {
                     safety_overrides: Default::default(),
                 }),
                 tags: vec!["revenue".to_string(), "daily".to_string()],
+                target: None,
             },
         )]);
 

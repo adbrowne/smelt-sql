@@ -963,6 +963,7 @@ def combined(project):
                 materialization: None,
                 incremental: None,
                 tags: vec!["event_source".to_string()],
+                target: None,
             },
         );
         model_config.insert(
@@ -971,6 +972,7 @@ def combined(project):
                 materialization: None,
                 incremental: None,
                 tags: vec!["event_source".to_string()],
+                target: None,
             },
         );
 
@@ -1047,6 +1049,7 @@ def circular_model(project):
                 materialization: None,
                 incremental: None,
                 tags: vec!["generated".to_string()],
+                target: None,
             },
         );
 

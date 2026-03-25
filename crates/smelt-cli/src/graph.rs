@@ -88,6 +88,44 @@ impl DependencyGraph {
         Ok(())
     }
 
+    /// Validate that no model references a model on a different target.
+    ///
+    /// Cross-backend references are not yet supported (data transfer between
+    /// backends is a future feature). This check ensures a clear error message
+    /// instead of a runtime failure.
+    pub fn validate_cross_backend_refs(
+        &self,
+        target_assignments: &HashMap<String, String>,
+    ) -> Result<()> {
+        let mut errors = Vec::new();
+
+        for (model_name, deps) in &self.dependencies {
+            let Some(model_target) = target_assignments.get(model_name) else {
+                continue;
+            };
+            for dep in deps {
+                if let Some(dep_target) = target_assignments.get(dep) {
+                    if model_target != dep_target {
+                        errors.push(format!(
+                            "Model '{}' (target: {}) references '{}' (target: {}). \
+                             Cross-backend references are not yet supported.",
+                            model_name, model_target, dep, dep_target
+                        ));
+                    }
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(GraphError::DependencyError {
+                message: errors.join("\n  "),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
     fn is_source(&self, name: &str) -> bool {
         // Check both plain name and schema.table format
         self.sources.contains(name)
@@ -484,6 +522,7 @@ mod tests {
                     materialization: None,
                     incremental: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
+                    target: None,
                 },
             );
         }

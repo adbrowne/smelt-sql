@@ -80,6 +80,40 @@ impl DependencyGraph {
         Ok(())
     }
 
+    /// Validate that no model references a model on a different target.
+    pub fn validate_cross_backend_refs(
+        &self,
+        target_assignments: &HashMap<String, String>,
+    ) -> Result<()> {
+        let mut errors = Vec::new();
+
+        for (model_name, deps) in &self.dependencies {
+            let Some(model_target) = target_assignments.get(model_name) else {
+                continue;
+            };
+            for dep in deps {
+                if let Some(dep_target) = target_assignments.get(dep) {
+                    if model_target != dep_target {
+                        errors.push(format!(
+                            "Model '{}' (target: {}) references '{}' (target: {}). \
+                             Cross-backend references are not yet supported.",
+                            model_name, model_target, dep, dep_target
+                        ));
+                    }
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(GraphError::DependencyError {
+                message: errors.join("\n  "),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
     fn is_source(&self, name: &str) -> bool {
         // Check both plain name and schema.table format
         self.sources.contains(name)
@@ -472,6 +506,7 @@ mod tests {
                     materialization: None,
                     incremental: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
+                    target: None,
                 },
             );
         }
@@ -660,5 +695,53 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("nonexistent"));
         assert!(err_msg.contains("not found"));
+    }
+
+    #[test]
+    fn test_cross_backend_refs_same_target_ok() {
+        let models = vec![
+            make_model("upstream", vec![]),
+            make_model("downstream", vec!["upstream"]),
+        ];
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        let mut assignments = HashMap::new();
+        assignments.insert("upstream".to_string(), "dev".to_string());
+        assignments.insert("downstream".to_string(), "dev".to_string());
+
+        assert!(graph.validate_cross_backend_refs(&assignments).is_ok());
+    }
+
+    #[test]
+    fn test_cross_backend_refs_different_target_rejected() {
+        let models = vec![
+            make_model("upstream", vec![]),
+            make_model("downstream", vec!["upstream"]),
+        ];
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        let mut assignments = HashMap::new();
+        assignments.insert("upstream".to_string(), "spark_prod".to_string());
+        assignments.insert("downstream".to_string(), "dev".to_string());
+
+        let result = graph.validate_cross_backend_refs(&assignments);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("downstream"));
+        assert!(err_msg.contains("upstream"));
+        assert!(err_msg.contains("Cross-backend"));
+    }
+
+    #[test]
+    fn test_cross_backend_refs_independent_models_ok() {
+        let models = vec![make_model("model_a", vec![]), make_model("model_b", vec![])];
+        let graph = DependencyGraph::build(models, None).unwrap();
+
+        let mut assignments = HashMap::new();
+        assignments.insert("model_a".to_string(), "dev".to_string());
+        assignments.insert("model_b".to_string(), "spark_prod".to_string());
+
+        // Independent models on different targets is fine
+        assert!(graph.validate_cross_backend_refs(&assignments).is_ok());
     }
 }

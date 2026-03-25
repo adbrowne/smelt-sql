@@ -56,6 +56,10 @@ pub struct ModelMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental: Option<IncrementalConfig>,
 
+    /// Target to execute this model on (overrides smelt.yml and CLI --target)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+
     /// Tags for organization/filtering
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -514,6 +518,34 @@ SELECT * FROM users"#;
                 assert_eq!(metadata.materialization, Some(Materialization::Table));
             }
             _ => panic!("Expected Single variant, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_target() {
+        let source =
+            "---\nname: my_model\ntarget: spark_prod\nmaterialization: table\n---\nSELECT 1";
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.target, Some("spark_prod".to_string()));
+                assert_eq!(metadata.materialization, Some(Materialization::Table));
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_without_target_is_none() {
+        let source = "---\nname: my_model\nmaterialization: table\n---\nSELECT 1";
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.target, None);
+            }
+            _ => panic!("Expected Single variant"),
         }
     }
 }

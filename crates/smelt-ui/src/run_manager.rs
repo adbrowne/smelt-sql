@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -159,16 +160,11 @@ impl RunManager {
         let run_start = Utc::now();
         let execution_start = Instant::now();
 
-        let target_config = config
-            .targets
-            .get(&request.target)
-            .ok_or_else(|| anyhow::anyhow!("Target '{}' not found", request.target))?
-            .clone();
+        if !config.targets.contains_key(&request.target) {
+            anyhow::bail!("Target '{}' not found", request.target);
+        }
 
-        // Create backend
-        let backend = create_backend(&target_config, &self.project_dir).await?;
-
-        // Resolve select/exclude into execution order
+        // Resolve select/exclude into execution order (hold graph lock for reads)
         let graph_lock = graph.lock().await;
 
         let mut selected_set = if request.select.is_empty() {
@@ -197,6 +193,30 @@ impl RunManager {
         }
 
         let selected: Vec<String> = graph_lock.filtered_execution_order(&selected_set)?;
+
+        // Compute per-model target assignments
+        let mut target_assignments: HashMap<String, String> = HashMap::new();
+        for model_name in &selected {
+            let model = graph_lock.get_model(model_name)?;
+            let target = config.get_target(model_name, model.metadata.as_deref(), &request.target);
+            target_assignments.insert(model_name.clone(), target);
+        }
+
+        graph_lock
+            .validate_cross_backend_refs(&target_assignments)
+            .with_context(|| "Cross-backend reference validation failed")?;
+
+        // Create backends for all needed targets
+        let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        for target_name in &needed_targets {
+            let target_config = config
+                .targets
+                .get(target_name)
+                .ok_or_else(|| anyhow::anyhow!("Target '{}' not found", target_name))?;
+            let backend = create_backend(target_name, target_config, &self.project_dir).await?;
+            backends.insert(target_name.clone(), backend);
+        }
 
         // Parse time range
         let start_date = NaiveDate::parse_from_str(&request.start, "%Y-%m-%d")
@@ -312,7 +332,6 @@ impl RunManager {
             total_batches,
         });
 
-        let schema = &target_config.schema;
         let file_store = FileStore::new(&self.project_dir);
         let mut manifest = RunManifest {
             run_id: run_id.clone(),
@@ -347,6 +366,10 @@ impl RunManager {
             let model_start = Instant::now();
             let mut total_rows = 0usize;
 
+            let model_target = &target_assignments[&plan.name];
+            let backend = backends[model_target].as_ref();
+            let schema = &config.targets[model_target].schema;
+
             let result: Result<()> = match &plan.incremental {
                 Some(inc_plan) => {
                     let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
@@ -372,7 +395,7 @@ impl RunManager {
                             &filter_end_str,
                         )?;
 
-                        let compiled_sql = compile_sql(&filtered_sql, schema);
+                        let compiled_sql = compile_sql(&filtered_sql, schema, backend);
 
                         let partition_values = generate_partition_values(
                             &batch.partition_start,
@@ -450,7 +473,7 @@ impl RunManager {
                 None => {
                     // Full refresh: compile and execute
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                    let compiled_sql = compile_sql(&clean_sql, schema);
+                    let compiled_sql = compile_sql(&clean_sql, schema, backend);
 
                     let mat = match plan.materialization {
                         smelt_core::config::Materialization::Table => Materialization::Table,
@@ -571,11 +594,12 @@ fn generate_partition_values(
 }
 
 /// Compile SQL by resolving smelt.ref() calls to schema-qualified table names.
-fn compile_sql(sql: &str, schema: &str) -> String {
+fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) -> String {
     let parse = smelt_parser::parse(sql);
+    let capabilities = backend.capabilities();
     let ctx = smelt_dialect::PrintContext {
-        dialect: &smelt_dialect::SqlDialect::DuckDB,
-        capabilities: &smelt_dialect::BackendCapabilities::duckdb(),
+        dialect: &backend.dialect(),
+        capabilities: &capabilities,
         schema,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
@@ -615,7 +639,9 @@ fn inject_time_filter(
     }
 }
 
+#[allow(unreachable_code, unused_variables)]
 async fn create_backend(
+    target_name: &str,
     target_config: &smelt_core::config::Target,
     project_dir: &Path,
 ) -> Result<Box<dyn Backend>> {
@@ -641,7 +667,7 @@ async fn create_backend(
             }
         }
         BackendType::Spark => {
-            anyhow::bail!("Spark backend not supported in UI mode")
+            anyhow::bail!("Spark backend not yet supported in UI mode")
         }
     }
 }

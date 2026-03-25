@@ -120,6 +120,9 @@ pub struct ModelConfig {
     pub incremental: Option<IncrementalConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Target to execute this model on (overrides CLI --target)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// Day of the week for weekly partition start.
@@ -357,6 +360,33 @@ impl Config {
         tags
     }
 
+    /// Get the target for a model
+    ///
+    /// **Precedence**: SQL file metadata > smelt.yml model config > default_target (CLI --target)
+    pub fn get_target(
+        &self,
+        model_name: &str,
+        sql_metadata: Option<&ModelMetadata>,
+        default_target: &str,
+    ) -> String {
+        // Check SQL metadata first
+        if let Some(metadata) = sql_metadata {
+            if let Some(ref target) = metadata.target {
+                return target.clone();
+            }
+        }
+
+        // Check smelt.yml model config
+        if let Some(model_config) = self.models.get(model_name) {
+            if let Some(ref target) = model_config.target {
+                return target.clone();
+            }
+        }
+
+        // Fall back to default (CLI --target)
+        default_target.to_string()
+    }
+
     /// Get incremental config with SQL metadata precedence
     ///
     /// **Precedence**: SQL file metadata > smelt.yml model config
@@ -528,5 +558,73 @@ targets:
         let yaml = r#""3 days""#;
         let latency: DataLatency = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(latency.to_days(), 3);
+    }
+
+    #[test]
+    fn test_model_config_target_field() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  model_a:
+    target: spark_prod
+  model_b:
+    materialization: table
+"#;
+
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.models.get("model_a").unwrap().target,
+            Some("spark_prod".to_string())
+        );
+        assert_eq!(config.models.get("model_b").unwrap().target, None);
+    }
+
+    #[test]
+    fn test_get_target_precedence() {
+        let yaml = r#"
+name: test
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+  spark_prod:
+    type: spark
+    connect_url: sc://host:15002
+    schema: prod
+models:
+  model_with_config_target:
+    target: spark_prod
+  model_no_target:
+    materialization: table
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        // No metadata, no config target → default
+        assert_eq!(config.get_target("model_no_target", None, "dev"), "dev");
+
+        // Config target set → config wins over default
+        assert_eq!(
+            config.get_target("model_with_config_target", None, "dev"),
+            "spark_prod"
+        );
+
+        // Metadata target overrides config target
+        let mut metadata = ModelMetadata::default();
+        metadata.target = Some("dev".to_string());
+        assert_eq!(
+            config.get_target("model_with_config_target", Some(&metadata), "dev"),
+            "dev"
+        );
+
+        // Unknown model → default
+        assert_eq!(config.get_target("unknown_model", None, "dev"), "dev");
     }
 }

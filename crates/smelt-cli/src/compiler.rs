@@ -6,6 +6,7 @@ use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_dialect::{wrap_with_type_casts, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::ast::File;
 use smelt_types::DataType;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct CompiledModel {
@@ -166,6 +167,30 @@ impl SqlCompiler {
             sql: compiled_sql,
             materialization,
         })
+    }
+}
+
+/// Registry of SQL compilers, one per target.
+///
+/// Each target may have a different dialect (DuckDB vs Spark), so we need
+/// one compiler per target to emit correct SQL.
+pub struct CompilerRegistry {
+    compilers: HashMap<String, SqlCompiler>,
+}
+
+impl CompilerRegistry {
+    /// Create compilers for all targets in the set.
+    pub fn new(config: &Config, targets: &HashMap<String, Target>) -> Self {
+        let mut compilers = HashMap::new();
+        for (name, target) in targets {
+            compilers.insert(name.clone(), SqlCompiler::new(config.clone(), target));
+        }
+        Self { compilers }
+    }
+
+    /// Get the compiler for a target name.
+    pub fn get(&self, target_name: &str) -> &SqlCompiler {
+        &self.compilers[target_name]
     }
 }
 
@@ -333,6 +358,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
                 materialization: Some(Materialization::Table),
                 incremental: None,
                 tags: Vec::new(),
+                target: None,
             },
         );
 
