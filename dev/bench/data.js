@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774388044155,
+  "lastUpdate": 1774407843968,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -3665,6 +3665,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.834748,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f42fe4d9c1651ed88917eb6d82fe27166a815cf6",
+          "message": "Consolidate all examples under examples/ directory\n\nMove scattered example/test workspaces into a unified structure:\n- examples/timeseries/ (was examples/) — 12 SQL user/event analytics models\n- examples/retail_analytics/ (was benchmarks/retail-analytics/) — 25 TPC-DS models\n- examples/broken/ (new) — 5 intentionally broken models for error testing\n- examples/test_workspace/ (was test-workspace/) — minimal VSCode/LSP testing\n- examples/huge/ (new) — 2000 auto-generated models for stress testing\n\nRefactored smelt-bench model_gen to support persistent output directories\nand added generate_static_workspace binary. Updated all integration test\npaths, documentation references, and .gitignore.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T14:02:19+11:00",
+          "tree_id": "6ce62defcf586a61e26d9d722292c006109cddc2",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f42fe4d9c1651ed88917eb6d82fe27166a815cf6"
+        },
+        "date": 1774407842960,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.091352,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 33.823328,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.63573,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.311323,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.005411,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.653574,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.020098,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014528,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.012874,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.19119,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.30085,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.128640000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 48.31555,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.809497,
             "unit": "ms"
           }
         ]
