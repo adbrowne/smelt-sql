@@ -138,6 +138,59 @@ SELECT * FROM __smelt_staging_events JOIN cleaned
 
 ---
 
+## Completed (March 26, 2026)
+
+- Phase 1: Enum expansion + validation ✅
+- Phase 2: EphemeralResolver + compile_with_ephemerals + printer changes ✅
+- Phase 3: MaterializedView backend trait methods + fallback ✅
+
+---
+
+## Remaining Work
+
+### Integration: Wire ephemeral models into execution loop
+
+**File: `crates/smelt-cli/src/main.rs`**
+
+1. Before the main execution loop, identify all ephemeral models from the execution order
+2. Compile their raw SQL into `Vec<(String, String)>` (name, sql) in topological order
+3. Build `EphemeralResolver::new(...)` with the collected models
+4. When compiling non-ephemeral models, call `compiler.compile_with_ephemerals(model, schema, &resolver)` instead of `compiler.compile(model, schema)`
+5. Skip ephemeral models in the execution loop body (print info message, continue)
+
+### Integration: Selector filtering for ephemeral models
+
+**File: `crates/smelt-cli/src/main.rs` or `crates/smelt-cli/src/selector.rs`**
+
+- When `--select` targets an ephemeral model directly, emit a clear error: "Cannot run ephemeral model 'X' directly — ephemeral models are inlined as CTEs into downstream models."
+- Ephemeral models selected as upstream deps (via `+model`) should be included for compilation but skipped during execution.
+
+### Integration: Graph validation
+
+**File: `crates/smelt-cli/src/graph.rs`**
+
+- After building the dependency graph, warn if an ephemeral model has no downstream consumers (it would never be inlined anywhere, making it useless).
+
+### Integration: Validation at config load
+
+**File: `crates/smelt-cli/src/main.rs`**
+
+- Call `config.validate_model_configs()` after loading config and metadata, and emit errors/warnings before execution begins.
+
+### Integration: `smelt explain` output
+
+**File: `crates/smelt-cli/src/explain.rs`**
+
+- Show ephemeral models in explain output with `materialization: ephemeral`
+- Optionally show which downstream models will inline them
+
+### Documentation
+
+- Update `docs/ROADMAP.md` with materialization types completion
+- Update `README.md` model configuration section with `ephemeral` and `materialized_view` examples
+
+---
+
 ## Verification
 
 After each phase:
