@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774425101164,
+  "lastUpdate": 1774425102909,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5999,6 +5999,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.734717867071797,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ae1dda244abeae11b8d5a26b01506996ded2488a",
+          "message": "Fix Linux wheel builds: use DUCKDB_CUSTOM_PLATFORM to bypass ABI check\n\nThe DuckDB platform.hpp #error for legacy CXX ABI cannot be bypassed\nwith DUCKDB_EXPLICIT_PLATFORM (it's only mentioned in the error text,\nnot actually checked). Use DUCKDB_CUSTOM_PLATFORM which short-circuits\nthe entire platform detection function.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T18:49:47+11:00",
+          "tree_id": "d51b5faec57f727ae7388189f009898f4ebb5248",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ae1dda244abeae11b8d5a26b01506996ded2488a"
+        },
+        "date": 1774425102199,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.823271211408713,
             "unit": "MB/s"
           }
         ]
