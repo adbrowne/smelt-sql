@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774422673685,
+  "lastUpdate": 1774423920157,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4417,6 +4417,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.739494,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9f59cafcb648fba442c5c0a7dc3802c064fb1fb7",
+          "message": "Fix Linux wheel builds: use CXXFLAGS define for DuckDB legacy ABI\n\nDUCKDB_EXPLICIT_PLATFORM must be a C++ preprocessor define, not a shell\nenv var. Pass it via CXXFLAGS which the cc crate reads for C++ builds.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T18:30:36+11:00",
+          "tree_id": "935a2f616c50fe61076ff905b7d4e987dac112f6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9f59cafcb648fba442c5c0a7dc3802c064fb1fb7"
+        },
+        "date": 1774423919174,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 38.271371,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.082256,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.572501,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.305882,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004127,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.440666,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.017482,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012223,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009378,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.108574,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.359302,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.01888,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.68498,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.063941,
             "unit": "ms"
           }
         ]
