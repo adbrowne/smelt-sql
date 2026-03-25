@@ -565,4 +565,33 @@ SELECT * FROM users"#;
             _ => panic!("Expected Single variant"),
         }
     }
+
+    #[test]
+    fn test_frontmatter_ephemeral_materialization() {
+        let source = "---\nname: staging\nmaterialization: ephemeral\n---\nSELECT 1";
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.materialization, Some(Materialization::Ephemeral));
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_materialized_view() {
+        let source = "---\nname: cached_report\nmaterialization: materialized_view\n---\nSELECT 1";
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(
+                    metadata.materialization,
+                    Some(Materialization::MaterializedView)
+                );
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
 }

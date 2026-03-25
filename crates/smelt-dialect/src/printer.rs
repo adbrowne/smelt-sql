@@ -15,6 +15,8 @@
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall, RefCall, SourceCall};
 
+use std::collections::HashSet;
+
 use crate::{BackendCapabilities, SqlDialect};
 
 /// Context for dialect-aware printing.
@@ -22,6 +24,8 @@ pub struct PrintContext<'a> {
     pub dialect: &'a SqlDialect,
     pub capabilities: &'a BackendCapabilities,
     pub schema: &'a str,
+    /// Model names that are ephemeral — refs to these emit `__smelt_{name}` instead of `schema.name`.
+    pub ephemeral_models: HashSet<&'a str>,
 }
 
 /// Print a CST node as dialect-specific SQL.
@@ -37,9 +41,14 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             if let Some(fc) = FunctionCall::cast(node.clone()) {
                 if let Some(ref_call) = RefCall::from_function_call(fc.clone()) {
                     if let Some(model_name) = ref_call.model_name() {
-                        out.push_str(ctx.schema);
-                        out.push('.');
-                        out.push_str(&model_name);
+                        if ctx.ephemeral_models.contains(model_name.as_str()) {
+                            out.push_str("__smelt_");
+                            out.push_str(&model_name);
+                        } else {
+                            out.push_str(ctx.schema);
+                            out.push('.');
+                            out.push_str(&model_name);
+                        }
                         return;
                     }
                 }
@@ -414,6 +423,7 @@ mod tests {
             dialect,
             capabilities: caps,
             schema,
+            ephemeral_models: HashSet::new(),
         };
         print(&parsed.syntax(), &ctx)
     }

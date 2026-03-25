@@ -62,6 +62,9 @@ pub struct BackendCapabilities {
 
     /// Supports native INSERT OVERWRITE for partition replacement
     pub supports_insert_overwrite: bool,
+
+    /// Supports CREATE MATERIALIZED VIEW
+    pub supports_materialized_views: bool,
 }
 
 impl BackendCapabilities {
@@ -80,6 +83,7 @@ impl BackendCapabilities {
             supports_double_colon_cast: true,
             supports_trailing_commas: true,
             supports_insert_overwrite: false, // Emulated via DELETE+INSERT
+            supports_materialized_views: false, // DuckDB doesn't support materialized views
         }
     }
 
@@ -98,6 +102,7 @@ impl BackendCapabilities {
             supports_double_colon_cast: false, // Uses CAST(expr AS type)
             supports_trailing_commas: false,
             supports_insert_overwrite: true, // Native in Spark/Delta
+            supports_materialized_views: true,
         }
     }
 
@@ -116,6 +121,7 @@ impl BackendCapabilities {
             supports_double_colon_cast: true,
             supports_trailing_commas: false,
             supports_insert_overwrite: false, // Not supported in PostgreSQL
+            supports_materialized_views: true,
         }
     }
 }

@@ -19,6 +19,10 @@ pub enum ConfigError {
 pub enum Materialization {
     Table,
     View,
+    /// Not materialized — inlined as a CTE into downstream models.
+    Ephemeral,
+    /// Backend-managed persistent view (e.g., PostgreSQL, Databricks).
+    MaterializedView,
 }
 
 impl<'de> Deserialize<'de> for Materialization {
@@ -30,8 +34,10 @@ impl<'de> Deserialize<'de> for Materialization {
         match s.to_lowercase().as_str() {
             "table" => Ok(Materialization::Table),
             "view" => Ok(Materialization::View),
+            "ephemeral" => Ok(Materialization::Ephemeral),
+            "materialized_view" => Ok(Materialization::MaterializedView),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid materialization type: {}. Must be 'table' or 'view'",
+                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', or 'materialized_view'",
                 s
             ))),
         }
@@ -46,6 +52,8 @@ impl Serialize for Materialization {
         match self {
             Materialization::Table => serializer.serialize_str("table"),
             Materialization::View => serializer.serialize_str("view"),
+            Materialization::Ephemeral => serializer.serialize_str("ephemeral"),
+            Materialization::MaterializedView => serializer.serialize_str("materialized_view"),
         }
     }
 }
@@ -407,6 +415,97 @@ impl Config {
         // Fall back to smelt.yml
         self.get_incremental(model_name)
     }
+
+    /// Validate model configuration for materialization constraints.
+    ///
+    /// Returns a list of (model_name, error_message) for hard errors
+    /// and prints warnings to stderr for soft issues.
+    pub fn validate_model_configs(
+        &self,
+        model_metadata: &HashMap<String, ModelMetadata>,
+    ) -> Vec<(String, String)> {
+        let mut errors = Vec::new();
+
+        // Collect all model names and their effective materialization + config
+        let mut all_models: HashMap<
+            &str,
+            (Materialization, Option<&IncrementalConfig>, Option<&str>),
+        > = HashMap::new();
+
+        // From smelt.yml
+        for (name, model_config) in &self.models {
+            let mat = model_config
+                .materialization
+                .clone()
+                .unwrap_or_else(|| self.default_materialization.clone());
+            all_models.insert(
+                name.as_str(),
+                (
+                    mat,
+                    model_config.incremental.as_ref(),
+                    model_config.target.as_deref(),
+                ),
+            );
+        }
+
+        // Override with SQL metadata (higher precedence)
+        for (name, metadata) in model_metadata {
+            let entry = all_models
+                .entry(name.as_str())
+                .or_insert_with(|| (self.default_materialization.clone(), None, None));
+            if let Some(mat) = &metadata.materialization {
+                entry.0 = mat.clone();
+            }
+            if let Some(inc) = &metadata.incremental {
+                entry.1 = Some(inc);
+            }
+            if let Some(target) = &metadata.target {
+                entry.2 = Some(target.as_str());
+            }
+        }
+
+        for (name, (mat, incremental, target)) in &all_models {
+            match mat {
+                Materialization::Ephemeral => {
+                    if incremental.is_some() {
+                        errors.push((
+                            name.to_string(),
+                            "Ephemeral models cannot have incremental configuration".to_string(),
+                        ));
+                    }
+                    if target.is_some() {
+                        errors.push((
+                            name.to_string(),
+                            "Ephemeral models cannot have a target override".to_string(),
+                        ));
+                    }
+                }
+                Materialization::View => {
+                    if let Some(inc) = incremental {
+                        if inc.enabled {
+                            eprintln!(
+                                "  Warning: model '{}' is a view but has incremental config — incremental only applies to tables",
+                                name
+                            );
+                        }
+                    }
+                }
+                Materialization::MaterializedView => {
+                    if let Some(inc) = incremental {
+                        if inc.enabled {
+                            eprintln!(
+                                "  Warning: model '{}' is a materialized view but has incremental config — materialized views are refreshed atomically",
+                                name
+                            );
+                        }
+                    }
+                }
+                Materialization::Table => {} // All config is valid for tables
+            }
+        }
+
+        errors
+    }
 }
 
 #[cfg(test)]
@@ -628,5 +727,144 @@ models:
 
         // Unknown model → default
         assert_eq!(config.get_target("unknown_model", None, "dev"), "dev");
+    }
+
+    #[test]
+    fn test_ephemeral_deserialization() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  staging_users:
+    materialization: ephemeral
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.models.get("staging_users").unwrap().materialization,
+            Some(Materialization::Ephemeral)
+        );
+    }
+
+    #[test]
+    fn test_materialized_view_deserialization() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  cached_report:
+    materialization: materialized_view
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.models.get("cached_report").unwrap().materialization,
+            Some(Materialization::MaterializedView)
+        );
+    }
+
+    #[test]
+    fn test_validate_ephemeral_with_incremental_errors() {
+        let config = Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            seed_paths: vec!["seeds".to_string()],
+            targets: HashMap::new(),
+            default_materialization: Materialization::View,
+            models: HashMap::new(),
+            python: None,
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "my_model".to_string(),
+            ModelMetadata {
+                materialization: Some(Materialization::Ephemeral),
+                incremental: Some(IncrementalConfig {
+                    enabled: true,
+                    event_time_column: "ts".to_string(),
+                    partition_column: "dt".to_string(),
+                    granularity: Granularity::Day,
+                    unique_key: vec![],
+                    safety_overrides: IncrementalSafetyOverrides::default(),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let errors = config.validate_model_configs(&metadata);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].1.contains("incremental"));
+    }
+
+    #[test]
+    fn test_validate_ephemeral_with_target_errors() {
+        let config = Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            seed_paths: vec!["seeds".to_string()],
+            targets: HashMap::new(),
+            default_materialization: Materialization::View,
+            models: HashMap::new(),
+            python: None,
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "my_model".to_string(),
+            ModelMetadata {
+                materialization: Some(Materialization::Ephemeral),
+                target: Some("spark_prod".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let errors = config.validate_model_configs(&metadata);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].1.contains("target"));
+    }
+
+    #[test]
+    fn test_validate_table_with_incremental_ok() {
+        let config = Config {
+            name: "test".to_string(),
+            version: 1,
+            model_paths: vec!["models".to_string()],
+            seed_paths: vec!["seeds".to_string()],
+            targets: HashMap::new(),
+            default_materialization: Materialization::View,
+            models: HashMap::new(),
+            python: None,
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "my_model".to_string(),
+            ModelMetadata {
+                materialization: Some(Materialization::Table),
+                incremental: Some(IncrementalConfig {
+                    enabled: true,
+                    event_time_column: "ts".to_string(),
+                    partition_column: "dt".to_string(),
+                    granularity: Granularity::Day,
+                    unique_key: vec![],
+                    safety_overrides: IncrementalSafetyOverrides::default(),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let errors = config.validate_model_configs(&metadata);
+        assert!(errors.is_empty());
     }
 }

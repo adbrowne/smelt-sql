@@ -21,6 +21,9 @@ pub struct ExecutionResult {
 }
 
 /// How a model should be materialized.
+///
+/// Note: `Ephemeral` is intentionally absent — ephemeral models are inlined
+/// as CTEs during compilation and never reach the backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Materialization {
     /// Materialize as a table (persisted).
@@ -29,6 +32,9 @@ pub enum Materialization {
     /// Materialize as a view (computed on query).
     #[default]
     View,
+
+    /// Backend-managed persistent view (e.g., PostgreSQL, Databricks).
+    MaterializedView,
 }
 
 impl std::fmt::Display for Materialization {
@@ -36,6 +42,7 @@ impl std::fmt::Display for Materialization {
         match self {
             Materialization::Table => write!(f, "table"),
             Materialization::View => write!(f, "view"),
+            Materialization::MaterializedView => write!(f, "materialized_view"),
         }
     }
 }
@@ -47,6 +54,7 @@ impl std::str::FromStr for Materialization {
         match s.to_lowercase().as_str() {
             "table" => Ok(Materialization::Table),
             "view" => Ok(Materialization::View),
+            "materialized_view" => Ok(Materialization::MaterializedView),
             _ => Err(format!("Unknown materialization: {}", s)),
         }
     }

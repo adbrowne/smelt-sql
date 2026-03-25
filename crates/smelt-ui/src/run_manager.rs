@@ -478,6 +478,12 @@ impl RunManager {
                     let mat = match plan.materialization {
                         smelt_core::config::Materialization::Table => Materialization::Table,
                         smelt_core::config::Materialization::View => Materialization::View,
+                        smelt_core::config::Materialization::MaterializedView => {
+                            Materialization::MaterializedView
+                        }
+                        smelt_core::config::Materialization::Ephemeral => {
+                            unreachable!("Ephemeral models should be inlined as CTEs, not executed")
+                        }
                     };
 
                     let exec_result = backend
@@ -601,6 +607,7 @@ fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) ->
         dialect: &backend.dialect(),
         capabilities: &capabilities,
         schema,
+        ephemeral_models: std::collections::HashSet::new(),
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }

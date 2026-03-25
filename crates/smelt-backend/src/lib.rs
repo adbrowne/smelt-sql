@@ -91,6 +91,16 @@ pub trait Backend: Send + Sync {
                 self.drop_view_if_exists(schema, name).await?;
                 self.create_view_as(schema, name, sql).await?;
             }
+            Materialization::MaterializedView => {
+                if self.capabilities().supports_materialized_views {
+                    self.drop_materialized_view_if_exists(schema, name).await?;
+                    self.create_materialized_view_as(schema, name, sql).await?;
+                } else {
+                    eprintln!("  Warning: backend doesn't support materialized views, using table for '{}'", name);
+                    self.drop_table_if_exists(schema, name).await?;
+                    self.create_table_as(schema, name, sql).await?;
+                }
+            }
         }
 
         let duration = start.elapsed();
@@ -125,9 +135,21 @@ pub trait Backend: Send + Sync {
         let start = std::time::Instant::now();
 
         match (materialization, strategy) {
-            (Materialization::View, _) => {
-                self.drop_view_if_exists(schema, name).await?;
-                self.create_view_as(schema, name, sql).await?;
+            (Materialization::View | Materialization::MaterializedView, _) => {
+                // Views and materialized views can't be incremental — full refresh
+                self.execute_model(schema, name, sql, materialization, show_preview)
+                    .await?;
+                // Return early to avoid double row count/preview
+                return Ok(ExecutionResult {
+                    model_name: name.to_string(),
+                    duration: start.elapsed(),
+                    row_count: self.get_row_count(schema, name).await?,
+                    preview: if show_preview {
+                        Some(self.get_preview(schema, name, 10).await?)
+                    } else {
+                        None
+                    },
+                });
             }
             (Materialization::Table, MaterializationStrategy::FullRefresh) => {
                 self.drop_table_if_exists(schema, name).await?;
@@ -232,4 +254,28 @@ pub trait Backend: Send + Sync {
         sql: &str,
         partition: &PartitionSpec,
     ) -> Result<(), BackendError>;
+
+    /// Create a materialized view from a SQL query.
+    ///
+    /// Default implementation falls back to `create_table_as` with a warning.
+    async fn create_materialized_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        eprintln!("  Warning: backend does not support materialized views, falling back to table");
+        self.create_table_as(schema, name, sql).await
+    }
+
+    /// Drop a materialized view if it exists.
+    ///
+    /// Default implementation falls back to `drop_table_if_exists`.
+    async fn drop_materialized_view_if_exists(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<(), BackendError> {
+        self.drop_table_if_exists(schema, name).await
+    }
 }

@@ -18,6 +18,10 @@ pub async fn execute_model(
     let materialization = match compiled.materialization {
         crate::config::Materialization::Table => Materialization::Table,
         crate::config::Materialization::View => Materialization::View,
+        crate::config::Materialization::MaterializedView => Materialization::MaterializedView,
+        crate::config::Materialization::Ephemeral => {
+            unreachable!("Ephemeral models should be inlined as CTEs, not executed directly")
+        }
     };
 
     backend

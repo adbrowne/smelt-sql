@@ -20,7 +20,10 @@ pub use backfill::{
     compute_backbuild_plans, compute_batches_for_model, compute_range_run_plans,
     format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
 };
-pub use compiler::{resolve_refs_in_sql, CompiledModel, CompilerRegistry, SqlCompiler};
+pub use compiler::{
+    prepend_ephemeral_ctes, resolve_refs_in_sql, CompiledModel, CompilerRegistry,
+    EphemeralResolver, SqlCompiler,
+};
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
 };
