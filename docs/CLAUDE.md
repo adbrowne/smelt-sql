@@ -41,7 +41,7 @@ This directory is dedicated to **planning, design documentation, and architectur
 - **architecture_overview.md** - System design and component interactions
 - **lsp_architecture.md** - LSP implementation details and design decisions
 - **lsp_quickstart.md** - Getting started with the LSP
-- **optimization_rule_api_design.md** - Future optimizer API design
+- **planner_rule_api_design.md** - Future planner API design
 
 ### Analysis and Insights
 - **example1_insights.md** - Analysis of common intermediate aggregation optimization
@@ -68,7 +68,7 @@ When the user is working in `docs/`, they're typically:
 
 4. **Design discussions**
    - Exploring syntax alternatives
-   - Designing optimizer APIs
+   - Designing planner APIs
    - Planning LSP features
 
 ## Workflow for Documentation Tasks

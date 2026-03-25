@@ -8,7 +8,7 @@
 use super::*;
 use smelt_cli::{compute_batches_for_model, BackfillOptions, TimeRange};
 use smelt_core::{Granularity, IncrementalConfig};
-use smelt_optimizer::BatchSafety;
+use smelt_planner::BatchSafety;
 
 /// Simple GROUP BY aggregation — fully batch safe.
 const BATCH_SAFE_SQL: &str = r#"

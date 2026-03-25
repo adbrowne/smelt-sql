@@ -3753,8 +3753,8 @@ dependencies = [
  "serde_yaml",
  "smelt-core",
  "smelt-db",
- "smelt-optimizer",
  "smelt-parser",
+ "smelt-planner",
  "tempfile",
 ]
 
@@ -3777,8 +3777,8 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
- "smelt-optimizer",
  "smelt-parser",
+ "smelt-planner",
  "smelt-state",
  "smelt-types",
  "smelt-ui",
@@ -3872,20 +3872,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smelt-optimizer"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "rowan",
- "serde",
- "serde_json",
- "serde_yaml",
- "smelt-core",
- "smelt-parser",
- "smelt-types",
-]
-
-[[package]]
 name = "smelt-parser"
 version = "0.1.0"
 dependencies = [
@@ -3907,6 +3893,20 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "smelt-planner"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "rowan",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "smelt-core",
+ "smelt-parser",
+ "smelt-types",
 ]
 
 [[package]]
@@ -3948,8 +3948,8 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
- "smelt-optimizer",
  "smelt-parser",
+ "smelt-planner",
  "smelt-state",
  "tokio",
  "tokio-util",

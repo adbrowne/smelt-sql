@@ -147,8 +147,8 @@ pub fn build_model_details(
 
         // Build batch safety info
         let batch_safety = inc_config.map(|inc| {
-            use smelt_optimizer::analyze_batch_safety;
-            use smelt_optimizer::ModelInfo;
+            use smelt_planner::analyze_batch_safety;
+            use smelt_planner::ModelInfo;
 
             let model_info = ModelInfo {
                 name: name.to_string(),
@@ -158,13 +158,13 @@ pub fn build_model_details(
             };
             let safety = analyze_batch_safety(&model_info);
             match safety {
-                smelt_optimizer::BatchSafety::FullyBatchSafe => BatchSafetyInfo {
+                smelt_planner::BatchSafety::FullyBatchSafe => BatchSafetyInfo {
                     level: "fully_batch_safe".to_string(),
                     max_chunk_days: None,
                     context_days: None,
                     reason: None,
                 },
-                smelt_optimizer::BatchSafety::BoundedSafe {
+                smelt_planner::BatchSafety::BoundedSafe {
                     max_chunk_days,
                     context_days,
                     reason,
@@ -174,7 +174,7 @@ pub fn build_model_details(
                     context_days: Some(context_days),
                     reason: Some(reason),
                 },
-                smelt_optimizer::BatchSafety::PerPartitionOnly { reason } => BatchSafetyInfo {
+                smelt_planner::BatchSafety::PerPartitionOnly { reason } => BatchSafetyInfo {
                     level: "per_partition_only".to_string(),
                     max_chunk_days: None,
                     context_days: None,
@@ -279,7 +279,7 @@ pub fn build_run_plan(
     config: &Config,
     request: &crate::types::RunPlanRequest,
 ) -> anyhow::Result<crate::types::RunPlanResponse> {
-    use smelt_optimizer::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+    use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
 
     let start = NaiveDate::parse_from_str(&request.start, "%Y-%m-%d")
         .map_err(|_| anyhow::anyhow!("Invalid start date: {}", request.start))?;

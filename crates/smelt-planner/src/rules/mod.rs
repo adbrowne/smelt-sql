@@ -4,16 +4,16 @@ pub mod incremental;
 use crate::graph::ModelGraph;
 use crate::types::Transformation;
 
-/// The optimizer runs all registered rules against a model graph.
-pub struct Optimizer {
+/// The planner runs all registered rules against a model graph.
+pub struct Planner {
     enable_cube_split: bool,
     enable_incremental: bool,
     #[cfg(feature = "python")]
     enable_python_rules: bool,
 }
 
-impl Optimizer {
-    /// Create an optimizer with all rules enabled.
+impl Planner {
+    /// Create a planner with all rules enabled.
     pub fn new() -> Self {
         Self {
             enable_cube_split: true,
@@ -24,7 +24,7 @@ impl Optimizer {
     }
 
     /// Run all enabled rules, returning transformations and any errors.
-    pub fn optimize(&self, graph: &ModelGraph) -> (Vec<Transformation>, Vec<String>) {
+    pub fn plan(&self, graph: &ModelGraph) -> (Vec<Transformation>, Vec<String>) {
         let mut transformations = Vec::new();
         let mut errors = Vec::new();
 
@@ -59,7 +59,7 @@ impl Optimizer {
     }
 }
 
-impl Default for Optimizer {
+impl Default for Planner {
     fn default() -> Self {
         Self::new()
     }

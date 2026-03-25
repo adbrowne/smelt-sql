@@ -1,6 +1,6 @@
-//! PyO3 bridge for running Python optimizer rules.
+//! PyO3 bridge for running Python planner rules.
 //!
-//! Discovers rules registered via `smelt.optimizer_rules` entry points,
+//! Discovers rules registered via `smelt.planner_rules` entry points,
 //! converts Rust types to Python `smelt_sdk` dataclasses, calls
 //! `detect`/`rewrite` on each rule, and converts results back to Rust.
 
@@ -11,9 +11,9 @@ use crate::analysis::{analyze_select, SelectAnalysis, SelectItemKind};
 use crate::graph::ModelInfo;
 use crate::types::{ExecutionStep, Transformation};
 
-/// Discover all Python optimizer rules registered via entry points.
+/// Discover all Python planner rules registered via entry points.
 ///
-/// Calls `importlib.metadata.entry_points(group="smelt.optimizer_rules")`,
+/// Calls `importlib.metadata.entry_points(group="smelt.planner_rules")`,
 /// loads each entry point, and instantiates the rule class.
 fn discover_python_rules(py: Python<'_>) -> PyResult<Vec<PyObject>> {
     let locals = PyDict::new(py);
@@ -22,7 +22,7 @@ fn discover_python_rules(py: Python<'_>) -> PyResult<Vec<PyObject>> {
             "import importlib.metadata\n\
              rules = []\n\
              try:\n\
-             \teps = importlib.metadata.entry_points(group='smelt.optimizer_rules')\n\
+             \teps = importlib.metadata.entry_points(group='smelt.planner_rules')\n\
              \tfor ep in eps:\n\
              \t\tcls = ep.load()\n\
              \t\trules.append(cls())\n\
@@ -183,7 +183,7 @@ struct PythonRuleResult {
     transformation: Transformation,
 }
 
-/// Run all discovered Python optimizer rules against the given models.
+/// Run all discovered Python planner rules against the given models.
 ///
 /// For each model, pre-computes `SelectAnalysis` in Rust and passes it
 /// to Python rules as a dataclass. Returns transformations and errors.

@@ -1,4 +1,4 @@
-"""smelt SDK — base classes and types for writing optimizer rules in Python."""
+"""smelt SDK — base classes and types for writing planner rules in Python."""
 
 from smelt_sdk.types import (
     CountDistinct,
@@ -15,7 +15,7 @@ from smelt_sdk.types import (
     SelectAnalysis,
     SetIncremental,
 )
-from smelt_sdk.rule import OptimizerRule
+from smelt_sdk.rule import PlannerRule
 
 __all__ = [
     "CountDistinct",
@@ -27,7 +27,7 @@ __all__ = [
     "IncrementalConfig",
     "ModelInfo",
     "Opportunity",
-    "OptimizerRule",
+    "PlannerRule",
     "OtherAggregate",
     "ReplaceWithPlan",
     "SelectAnalysis",

@@ -1,4 +1,4 @@
-"""Python port of the Rust incremental optimizer rule."""
+"""Python port of the Rust incremental planner rule."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from smelt_sdk import (
     GroupByKey,
     ModelInfo,
     Opportunity,
-    OptimizerRule,
+    PlannerRule,
     ReplaceWithPlan,
     SelectAnalysis,
     SetIncremental,
@@ -42,7 +42,7 @@ def _extract_time_column(expr: str) -> str | None:
     return None
 
 
-class IncrementalPythonRule(OptimizerRule):
+class IncrementalPythonRule(PlannerRule):
     def name(self) -> str:
         return "incremental_python"
 

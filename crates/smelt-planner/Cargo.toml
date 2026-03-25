@@ -1,5 +1,5 @@
 [package]
-name = "smelt-optimizer"
+name = "smelt-planner"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

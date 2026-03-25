@@ -12,7 +12,7 @@ use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
 use smelt_core::SourcesConfig;
-use smelt_optimizer::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};

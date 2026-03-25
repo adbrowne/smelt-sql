@@ -4,7 +4,7 @@ use crate::graph::DependencyGraph;
 use anyhow::Result;
 use serde::Serialize;
 use smelt_core::{Granularity, IncrementalConfig, Materialization};
-use smelt_optimizer::{analyze_batch_safety, BatchSafety, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
 use std::collections::BTreeMap;
 
 /// Top-level JSON output for `smelt explain --json`.

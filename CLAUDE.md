@@ -41,10 +41,10 @@ A next-generation data pipeline tool designed to improve upon dbt by:
   - `lsp_architecture.md`: LSP implementation details
   - `lsp_quickstart.md`: Getting started with the LSP
   - `example1_insights.md`, `example2_insights.md`: Optimization pattern analysis
-  - `optimization_rule_api_design.md`: Future optimizer API design
+  - `planner_rule_api_design.md`: Future planner API design
 
 - **docs/plans/**: Implementation plans committed to the repo
-  - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-optimizer-api.md`)
+  - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
   - Created before non-trivial implementation work
 
 ## Commands
@@ -99,25 +99,25 @@ npm run watch
 
 smelt is a **compiler and orchestrator**, not a query engine:
 ```
-User DSL → Parser → Logical IR → Optimizer → Physical IR → SQL for Target Engines
+User DSL → Parser → Logical IR → Planner → Physical IR → SQL for Target Engines
 ```
 
 - **Logical IR**: Represents WHAT to compute (correctness specification)
 - **Physical IR**: Represents HOW to execute (engine selection, materialization decisions)
-- **Optimizer**: Transforms logical IR into optimized physical IR while preserving correctness
+- **Planner**: Transforms logical IR into optimized physical IR while preserving correctness
 
 ### Parser Architecture
 
 The parser is separated into reusable layers:
 ```
 smelt-parser (pure parser)  →  smelt-db (Salsa queries)  →  smelt-lsp (LSP server)
-                          ↘  smelt-optimizer (future)
+                          ↘  smelt-planner (future)
                           ↘  smelt-cli (future)
 ```
 
 - **smelt-parser**: Standalone Rowan-based parser (no Salsa dependency)
   - Pure function: text → CST with error recovery
-  - Reusable in any context (LSP, optimizer, CLI)
+  - Reusable in any context (LSP, planner, CLI)
   - Fast one-shot parsing for non-incremental use cases
 
 - **smelt-db**: Salsa wrapper around smelt-parser
@@ -125,14 +125,14 @@ smelt-parser (pure parser)  →  smelt-db (Salsa queries)  →  smelt-lsp (LSP s
   - Caches parse results and derived queries
   - Automatic invalidation when files change
 
-This separation allows the LSP to get incremental parsing via Salsa, while the optimizer and CLI can use fast one-shot parsing directly from smelt-parser.
+This separation allows the LSP to get incremental parsing via Salsa, while the planner and CLI can use fast one-shot parsing directly from smelt-parser.
 
 ### Key Dependencies
 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)
 - **Rowan**: Lossless CST library (error-recovery parser foundation)
 - **tower-lsp**: Language Server Protocol implementation
-- **DataFusion**: SQL parsing, logical plan representation, optimizer framework
+- **DataFusion**: SQL parsing, logical plan representation, planner framework
 - **DuckDB**: Local execution engine for testing (bundled, no system install needed)
 - **Arrow**: Data interchange format between components
 
@@ -172,8 +172,8 @@ All examples live under `examples/`:
 
 ## Key Differentiators from dbt
 
-1. **Logical/Physical Separation**: Users specify logic, optimizer decides execution strategy
-2. **Engineer controls optimizations**: Optimizer is not a black box - the API will allow data engineers to refactor specific logical plans to optimize - the framework should make it easy to do these and know that correctness is preserved - or where not - what has been lost.
+1. **Logical/Physical Separation**: Users specify logic, planner decides execution strategy
+2. **Engineer controls planning**: Planner is not a black box - the API will allow data engineers to refactor specific logical plans to optimize - the framework should make it easy to do these and know that correctness is preserved - or where not - what has been lost.
 3. **Cross-Model Optimization**: Can fuse or split queries across model boundaries
 4. **Multi-Backend**: Automatically distribute work across engines (e.g., DuckDB for small data, Databricks for large)
 5. **Proper Language**: No Jinja templates, proper compilation with type checking
@@ -230,13 +230,13 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 9. Update docs/ROADMAP.md with completion status and date
 10. **Commit** with descriptive message (includes ROADMAP.md update)
 
-### For Optimizer Features (Future)
+### For Planner Features (Future)
 
 1. Start with concrete examples showing optimization opportunities
 2. Manually write both naive and optimized versions
-3. Analyze what the optimizer needs to detect and transform
+3. Analyze what the planner needs to detect and transform
 4. Extract API patterns from successful optimizations
-5. Generalize into optimizer framework
+5. Generalize into planner framework
 
 ### Before Ending a Conversation
 
@@ -264,7 +264,7 @@ Before wrapping up, write any unfinished work and open decisions to `docs/TODO.m
 
 Plans are committed to the repo under `docs/plans/` as markdown files.
 
-**Naming convention:** `YYYYMMDD-short-name.md` (e.g., `20260321-optimizer-api.md`)
+**Naming convention:** `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
 
 - Create a plan before starting non-trivial implementation work
 - Plans should be committed alongside or before the implementation they describe

@@ -6,8 +6,8 @@ smelt is a **SQL-to-SQL compiler and orchestrator** for data pipelines. It takes
 
 Three ideas make smelt different from dbt:
 
-1. **Logical/Physical Separation**: Users write WHAT to compute; the optimizer and dialect-aware printer decide HOW it executes on each backend.
-2. **Cross-Model Optimization**: The optimizer operates at the model-graph level — creating shared materializations, redirecting refs, merging models — not at the expression level (that's the backend engine's job).
+1. **Logical/Physical Separation**: Users write WHAT to compute; the planner and dialect-aware printer decide HOW it executes on each backend.
+2. **Cross-Model Planning**: The planner operates at the model-graph level — creating shared materializations, redirecting refs, merging models — not at the expression level (that's the backend engine's job).
 3. **First-Class Editor Support**: LSP + Salsa + Rowan for incremental compilation and real-time diagnostics, including dialect-specific hints.
 
 ## Compilation Pipeline
@@ -36,7 +36,7 @@ Three ideas make smelt different from dbt:
                   └────┬─────┘
                        │ CST + semantic info
                   ┌────▼─────┐
-                  │ Optimize │  smelt-optimizer
+                  │   Plan   │  smelt-planner
                   │(optional)│  Model-graph transforms
                   └────┬─────┘
                        │ CST + graph edits
@@ -68,7 +68,7 @@ Three ideas make smelt different from dbt:
                      │      │      │
               ┌──────┼──────┼──────┤
               │      │      │      │
-           smelt-lsp │   smelt-optimizer        (sync, model-graph transforms)
+           smelt-lsp │   smelt-planner        (sync, model-graph transforms)
               │      │      │
               │   smelt-cli─┘
               │      │
@@ -98,7 +98,7 @@ Three ideas make smelt different from dbt:
 | Project config & discovery | `smelt-core` | sync | `Config`, `ModelFile`, `DependencyGraph`, Python model discovery |
 | Incremental queries | `smelt-db` | sync | Salsa: parse, refs, types, diagnostics |
 | SQL dialects & printing | `smelt-dialect` | sync | `SqlDialect`, `BackendCapabilities`, dialect-aware printer |
-| Model-graph optimization | `smelt-optimizer` | sync | Cube split, incremental detection, temporal analysis, batch safety |
+| Model-graph optimization | `smelt-planner` | sync | Cube split, incremental detection, temporal analysis, batch safety |
 | LSP server | `smelt-lsp` | async (tower-lsp) | Thin async shell over sync Salsa queries |
 | Execution trait | `smelt-backend` | async | `Backend` trait, `ExecutionResult` |
 | DuckDB execution | `smelt-backend-duckdb` | async | `DuckDbBackend` |
@@ -143,7 +143,7 @@ Key queries:
 - `file_diagnostics()` → errors and warnings
 - `model_schema()` → column types
 
-### 3. Optimize (smelt-optimizer)
+### 3. Plan (smelt-planner)
 
 **Input**: Model dependency graph + CSTs + YAML frontmatter config
 **Output**: Graph edits (new models, redirected refs, execution plans) + analysis results
@@ -155,7 +155,7 @@ Current capabilities:
 - **Temporal dependency inference**: Analyzes window functions, LAG/LEAD, JOIN intervals, WHERE interval patterns to determine lookback/lookahead requirements
 - **Batch safety analysis**: Classifies models as `FullyBatchSafe`, `BoundedSafe`, or `PerPartitionOnly` for backfill planning
 
-See [Optimizer Design](#optimizer-design) below.
+See [Planner Design](#planner-design) below.
 
 ### 4. Generate (smelt-dialect, dialect-aware printer)
 
@@ -228,15 +228,15 @@ fn print_node(node: &SyntaxNode, dialect: &SqlDialect, caps: &BackendCapabilitie
 
 For the "native" dialect (DuckDB, which supports the full smelt superset), the printer should emit SQL identical to the input (modulo smelt extension resolution). This is a strong correctness invariant that can be property-tested.
 
-## Optimizer Design
+## Planner Design
 
-The optimizer is smelt's key differentiator. It inspects model SQL (via the CST) and the model dependency graph, then produces transformations: new models, redirected refs, changed materialization strategies, and multi-step execution plans.
+The planner is smelt's key differentiator. It inspects model SQL (via the CST) and the model dependency graph, then produces transformations: new models, redirected refs, changed materialization strategies, and multi-step execution plans.
 
-**What the optimizer does vs. what it doesn't**: The optimizer does not replicate work that backend engines already do well — predicate pushdown, join reordering, cost-based plan selection within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers for that. Instead, smelt's optimizer handles patterns that no single engine can optimize because they span multiple models or require restructuring how a query is executed.
+**What the planner does vs. what it doesn't**: The planner does not replicate work that backend engines already do well — predicate pushdown, join reordering, cost-based plan selection within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers for that. Instead, smelt's planner handles patterns that no single engine can optimize because they span multiple models or require restructuring how a query is executed.
 
-### What the optimizer does
+### What the planner does
 
-The optimizer reads CST structure to detect patterns, then emits new SQL as strings (parsed normally) and execution instructions. It does **not** mutate existing CSTs.
+The planner reads CST structure to detect patterns, then emits new SQL as strings (parsed normally) and execution instructions. It does **not** mutate existing CSTs.
 
 #### Cross-model graph transforms
 
@@ -246,11 +246,11 @@ The optimizer reads CST structure to detect patterns, then emits new SQL as stri
 
 #### Single-model execution transforms
 
-The optimizer also inspects a model's SQL to decide *how* it should be executed:
+The planner also inspects a model's SQL to decide *how* it should be executed:
 
 4. **Incremental materialization detection**: A model that aggregates by a time window (e.g., `GROUP BY date_trunc('day', timestamp)`) can be converted to an incremental model that only processes new partitions instead of full-refreshing.
 
-5. **Query splitting**: A large cube query with many COUNT DISTINCT expressions causes massive memory pressure on engines like Spark and DuckDB (hash tables for each distinct spill to disk). The optimizer can split it into N smaller queries, each computing a subset of the distincts, appending results to a temp table. This keeps intermediate state in memory and avoids spills.
+5. **Query splitting**: A large cube query with many COUNT DISTINCT expressions causes massive memory pressure on engines like Spark and DuckDB (hash tables for each distinct spill to disk). The planner can split it into N smaller queries, each computing a subset of the distincts, appending results to a temp table. This keeps intermediate state in memory and avoids spills.
 
 These transforms read CST structure (detecting GROUP BY patterns, counting DISTINCT aggregations) but output new SQL strings and execution plans — they don't modify the original CST in place.
 
@@ -298,9 +298,9 @@ enum ExecutionStep {
 }
 ```
 
-Transformations produce new SQL strings (parsed normally by `smelt-parser`) and execution instructions. They do **not** mutate existing CSTs. This keeps the optimizer's output easy to inspect: "the optimizer split `big_cube` into 4 queries" or "the optimizer added model `_session_summary` and redirected 3 refs to it."
+Transformations produce new SQL strings (parsed normally by `smelt-parser`) and execution instructions. They do **not** mutate existing CSTs. This keeps the planner's output easy to inspect: "the planner split `big_cube` into 4 queries" or "the planner added model `_session_summary` and redirected 3 refs to it."
 
-### Optimizer rules
+### Planner rules
 
 Rules are explicit, named, and user-controllable:
 
@@ -315,11 +315,11 @@ struct OptimizationRule {
 }
 ```
 
-The optimizer runs all rules, collects opportunities, and applies transformations. Users can enable/disable rules and inspect what was applied.
+The planner runs all rules, collects opportunities, and applies transformations. Users can enable/disable rules and inspect what was applied.
 
 ### Scope boundary
 
-The optimizer does **not**:
+The planner does **not**:
 - Perform expression-level algebraic optimization (predicate pushdown, join reordering) — that's the backend engine's job
 - Perform cost estimation (future work, requires backend statistics)
 - Mutate existing CSTs — it reads them to detect patterns, then produces new SQL strings
@@ -354,16 +354,16 @@ This enables dialect-specific informational hints in the editor:
 
 These are informational (not errors) because the dialect-aware printer handles the rewriting. They help developers understand what will happen when their code runs on a different backend.
 
-### Optimizer suggestions (future)
+### Planner suggestions (future)
 
-When the optimizer detects opportunities, the LSP can surface them as code actions:
+When the planner detects opportunities, the LSP can surface them as code actions:
 
 ```
 ℹ️ Optimization available: 3 models share session computation
    → Create shared materialization 'session_summary'
 ```
 
-The LSP calls the optimizer's `detect` phase (sync, no execution needed) and presents `Opportunity` values as diagnostics. If the user accepts, the LSP applies the `Transformation` list as workspace edits.
+The LSP calls the planner's `detect` phase (sync, no execution needed) and presents `Opportunity` values as diagnostics. If the user accepts, the LSP applies the `Transformation` list as workspace edits.
 
 ## Architecture Status
 
@@ -371,7 +371,7 @@ The architecture described above is fully implemented. Key milestones:
 
 - **`smelt-dialect`** extracted as lightweight sync crate — LSP can check dialect capabilities without linking to backends
 - **Dialect-aware printer** handles QUALIFY, array literals, DATE literals, JSON function remapping via single-pass CST walk
-- **`smelt-optimizer`** implements cube split, incremental materialization, temporal analysis, and batch safety
+- **`smelt-planner`** implements cube split, incremental materialization, temporal analysis, and batch safety
 - **LSP dialect diagnostics** planned but not yet implemented (the infrastructure is in place via `smelt-dialect`)
 
 ## Key Technical Decisions
@@ -394,7 +394,7 @@ Developers write invalid code most of the time while editing. The parser must pr
 
 ### Expression optimization is the engine's job
 
-smelt does not attempt predicate pushdown, join reordering, or cost-based optimization within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers. smelt's value is in cross-model optimization that no single engine can do because it doesn't see the full pipeline.
+smelt does not attempt predicate pushdown, join reordering, or cost-based optimization within a single query. DuckDB, Spark, and BigQuery all have mature query optimizers. smelt's value is in cross-model planning that no single engine can do because it doesn't see the full pipeline.
 
 ### Sync core, async edges
 

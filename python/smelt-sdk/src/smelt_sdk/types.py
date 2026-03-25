@@ -1,4 +1,4 @@
-"""Dataclass mirrors of Rust optimizer types."""
+"""Dataclass mirrors of Rust planner types."""
 
 from __future__ import annotations
 

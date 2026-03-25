@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};
 use smelt_core::{Granularity, IncrementalConfig};
-use smelt_optimizer::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
 
 use crate::graph::DependencyGraph;
 use crate::temporal::compute_incremental_windows;

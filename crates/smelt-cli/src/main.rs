@@ -14,9 +14,7 @@ use smelt_cli::{
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
-use smelt_optimizer::{
-    ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Optimizer, Transformation,
-};
+use smelt_planner::{ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Planner, Transformation};
 use smelt_state::file_store::FileStore;
 use smelt_state::history::HistoryQuery;
 use smelt_state::intervals::compute_model_hash;
@@ -592,15 +590,15 @@ async fn run(args: RunArgs) -> Result<()> {
         });
     }
 
-    let optimizer = Optimizer::new();
-    let (transformations, opt_errors) = optimizer.optimize(&opt_graph);
+    let planner = Planner::new();
+    let (transformations, plan_errors) = planner.plan(&opt_graph);
 
-    for err in &opt_errors {
-        eprintln!("  Optimizer error: {}", err);
+    for err in &plan_errors {
+        eprintln!("  Planner error: {}", err);
     }
 
     // Build lookup maps for transformations
-    let mut plan_overrides: std::collections::HashMap<String, Vec<smelt_optimizer::ExecutionStep>> =
+    let mut plan_overrides: std::collections::HashMap<String, Vec<smelt_planner::ExecutionStep>> =
         std::collections::HashMap::new();
     let mut incremental_overrides: std::collections::HashMap<
         String,
@@ -631,7 +629,7 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     if !plan_overrides.is_empty() || !incremental_overrides.is_empty() {
-        println!("\nOptimizer:");
+        println!("\nPlanner:");
         for model in plan_overrides.keys() {
             println!("  {} → cube split", model);
         }
@@ -701,7 +699,7 @@ async fn run(args: RunArgs) -> Result<()> {
         let execution = if let Some((event_time_col, partition_col, granularity)) =
             incremental_overrides.get(model_name.as_str())
         {
-            // Optimizer detected incremental
+            // Planner detected incremental
             ModelExecution::Incremental {
                 config: IncrementalConfig {
                     enabled: true,
@@ -901,8 +899,8 @@ async fn run(args: RunArgs) -> Result<()> {
 
                 let batch_count = batches.len().max(1);
                 let safety_label = match &batch_safety {
-                    smelt_optimizer::BatchSafety::FullyBatchSafe => "batch-safe".to_string(),
-                    smelt_optimizer::BatchSafety::BoundedSafe {
+                    smelt_planner::BatchSafety::FullyBatchSafe => "batch-safe".to_string(),
+                    smelt_planner::BatchSafety::BoundedSafe {
                         max_chunk_days,
                         context_days,
                         ..
@@ -910,7 +908,7 @@ async fn run(args: RunArgs) -> Result<()> {
                         "bounded {}d chunks/{}d context",
                         max_chunk_days, context_days
                     ),
-                    smelt_optimizer::BatchSafety::PerPartitionOnly { .. } => {
+                    smelt_planner::BatchSafety::PerPartitionOnly { .. } => {
                         "per-partition".to_string()
                     }
                 };

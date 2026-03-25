@@ -28,9 +28,9 @@ This document summarizes where each area of smelt stands and what's next. For de
 - LSP quick-fixes for type errors (CAST suggestions, COALESCE for NULLs)
 - Stricter boundary type checking (explicit input/output schemas)
 
-## Optimizer
+## Planner
 
-**Current state**: `smelt-optimizer` crate with model-graph-level optimizations:
+**Current state**: `smelt-planner` crate with model-graph-level planning:
 
 - Cube split: splits multi-`COUNT(DISTINCT)` queries into parallel sub-queries
 - Incremental materialization: detects time-partitioned GROUP BY, generates DELETE+INSERT

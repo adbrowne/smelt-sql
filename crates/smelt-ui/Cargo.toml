@@ -10,7 +10,7 @@ publish = false
 # Core smelt dependencies
 smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
-smelt-optimizer = { path = "../smelt-optimizer" }
+smelt-planner = { path = "../smelt-planner" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true }
 smelt-state = { path = "../smelt-state" }

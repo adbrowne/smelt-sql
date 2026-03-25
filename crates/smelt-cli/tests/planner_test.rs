@@ -1,9 +1,9 @@
 #![cfg(feature = "duckdb")]
-//! Integration tests for optimizer: cube split, incremental, and composed.
+//! Integration tests for planner: cube split, incremental, and composed.
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_optimizer::{ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Optimizer};
+use smelt_planner::{ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Planner};
 use tempfile::TempDir;
 
 /// Create an in-memory DuckDB backend for testing.
@@ -94,7 +94,7 @@ async fn test_cube_split_matches_naive() {
         .await
         .unwrap();
 
-    // Run optimizer on annotated SQL
+    // Run planner on annotated SQL
     let annotated_sql = r#"SELECT
         date_trunc('day', event_time) as event_date,
         country,
@@ -115,14 +115,14 @@ async fn test_cube_split_matches_naive() {
     let mut graph = ModelGraph::new();
     graph.add_model(model.clone());
 
-    let optimizer = Optimizer::new();
-    let (transformations, errors) = optimizer.optimize(&graph);
-    assert!(errors.is_empty(), "Optimizer errors: {:?}", errors);
+    let planner = Planner::new();
+    let (transformations, errors) = planner.plan(&graph);
+    assert!(errors.is_empty(), "Planner errors: {:?}", errors);
     assert_eq!(transformations.len(), 1);
 
     // Extract steps and execute
     let steps = match &transformations[0] {
-        smelt_optimizer::Transformation::ReplaceWithPlan { steps, .. } => steps,
+        smelt_planner::Transformation::ReplaceWithPlan { steps, .. } => steps,
         _ => panic!("Expected ReplaceWithPlan"),
     };
 
@@ -194,7 +194,7 @@ async fn test_cube_split_with_ref_calls() {
     let (backend, _dir) = create_backend().await;
     seed_events(&backend).await;
 
-    // Model uses smelt.ref('events') — optimizer preserves it, we resolve manually
+    // Model uses smelt.ref('events') — planner preserves it, we resolve manually
     let annotated_sql = r#"SELECT
         country,
         COUNT(DISTINCT user_id) as unique_users,
@@ -212,12 +212,12 @@ async fn test_cube_split_with_ref_calls() {
     let mut graph = ModelGraph::new();
     graph.add_model(model);
 
-    let optimizer = Optimizer::new();
-    let (transformations, errors) = optimizer.optimize(&graph);
+    let planner = Planner::new();
+    let (transformations, errors) = planner.plan(&graph);
     assert!(errors.is_empty());
 
     let steps = match &transformations[0] {
-        smelt_optimizer::Transformation::ReplaceWithPlan { steps, .. } => steps,
+        smelt_planner::Transformation::ReplaceWithPlan { steps, .. } => steps,
         _ => panic!("Expected ReplaceWithPlan"),
     };
 
@@ -287,7 +287,7 @@ SELECT
 FROM raw_events
 GROUP BY 1, 2"#;
 
-    // Detect incremental config via optimizer
+    // Detect incremental config via planner
     let frontmatter = Frontmatter::parse(model_sql).unwrap();
     let model = ModelInfo {
         name: "daily_events".to_string(),
@@ -299,13 +299,13 @@ GROUP BY 1, 2"#;
     let mut graph = ModelGraph::new();
     graph.add_model(model);
 
-    let optimizer = Optimizer::new();
-    let (transformations, errors) = optimizer.optimize(&graph);
+    let planner = Planner::new();
+    let (transformations, errors) = planner.plan(&graph);
     assert!(errors.is_empty());
     assert_eq!(transformations.len(), 1);
 
     let (event_time_col, partition_col) = match &transformations[0] {
-        smelt_optimizer::Transformation::SetIncremental {
+        smelt_planner::Transformation::SetIncremental {
             event_time_column,
             partition_column,
             ..
@@ -426,8 +426,8 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
     let mut graph = ModelGraph::new();
     graph.add_model(model);
 
-    let optimizer = Optimizer::new();
-    let (transformations, errors) = optimizer.optimize(&graph);
+    let planner = Planner::new();
+    let (transformations, errors) = planner.plan(&graph);
     assert!(errors.is_empty());
     assert_eq!(
         transformations.len(),
@@ -441,10 +441,10 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
 
     for t in &transformations {
         match t {
-            smelt_optimizer::Transformation::ReplaceWithPlan { steps, .. } => {
+            smelt_planner::Transformation::ReplaceWithPlan { steps, .. } => {
                 plan_steps = Some(steps.clone());
             }
-            smelt_optimizer::Transformation::SetIncremental {
+            smelt_planner::Transformation::SetIncremental {
                 event_time_column,
                 partition_column,
                 ..
@@ -561,16 +561,16 @@ SELECT date_trunc('day', event_time) as event_date, COUNT(*) as cnt FROM events 
     let mut graph = ModelGraph::new();
     graph.add_model(model);
 
-    let optimizer = Optimizer::new();
-    let (transformations, errors) = optimizer.optimize(&graph);
+    let planner = Planner::new();
+    let (transformations, errors) = planner.plan(&graph);
     assert!(errors.is_empty());
 
     // Check that SetIncremental was produced
     let has_incremental = transformations
         .iter()
-        .any(|t| matches!(t, smelt_optimizer::Transformation::SetIncremental { .. }));
+        .any(|t| matches!(t, smelt_planner::Transformation::SetIncremental { .. }));
     assert!(
         has_incremental,
-        "Optimizer should detect incremental model from frontmatter"
+        "Planner should detect incremental model from frontmatter"
     );
 }

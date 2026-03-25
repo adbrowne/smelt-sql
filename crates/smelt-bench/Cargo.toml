@@ -11,7 +11,7 @@ publish = false
 smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
-smelt-optimizer = { path = "../smelt-optimizer" }
+smelt-planner = { path = "../smelt-planner" }
 
 # RNG (deterministic)
 rand = { workspace = true }

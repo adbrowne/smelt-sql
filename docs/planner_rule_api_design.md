@@ -1,8 +1,8 @@
-# Optimization Rule API Design
+# Planner Rule API Design
 
 ## Overview
 
-smelt supports optimizer rules written in both Rust and Python. Rust rules are compiled into the optimizer; Python rules are discovered at runtime via entry points and executed through a PyO3 bridge.
+smelt supports planner rules written in both Rust and Python. Rust rules are compiled into the planner; Python rules are discovered at runtime via entry points and executed through a PyO3 bridge.
 
 Python support is gated behind the `python` cargo feature flag. Without it, only Rust rules run and there is no Python dependency.
 
@@ -10,7 +10,7 @@ Python support is gated behind the `python` cargo feature flag. Without it, only
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Optimizer (smelt-optimizer)                        │
+│  Planner (smelt-planner)                            │
 │                                                     │
 │  ┌─────────────┐  ┌──────────────┐                  │
 │  │ Rust rules  │  │ Python bridge│ (feature=python) │
@@ -21,7 +21,7 @@ Python support is gated behind the `python` cargo feature flag. Without it, only
                            │
               ┌────────────▼────────────────┐
               │  Python entry points        │
-              │  smelt.optimizer_rules      │
+              │  smelt.planner_rules      │
               │                             │
               │  ┌────────────────────────┐ │
               │  │ smelt-rules-builtin    │ │
@@ -52,7 +52,7 @@ my-smelt-rules/
 
 ```python
 from smelt_sdk import (
-    OptimizerRule,
+    PlannerRule,
     ModelInfo,
     SelectAnalysis,
     Opportunity,
@@ -66,7 +66,7 @@ from smelt_sdk import (
 )
 
 
-class MyRule(OptimizerRule):
+class MyRule(PlannerRule):
     def name(self) -> str:
         return "my_rule"
 
@@ -110,7 +110,7 @@ In `pyproject.toml`:
 name = "my-smelt-rules"
 dependencies = ["smelt-sdk"]
 
-[project.entry-points."smelt.optimizer_rules"]
+[project.entry-points."smelt.planner_rules"]
 my_rule = "my_rules.my_rule:MyRule"
 ```
 
@@ -166,9 +166,9 @@ cargo run --features python -p smelt-cli -- run
 
 ## How It Works
 
-1. The Rust optimizer runs all built-in Rust rules first
+1. The Rust planner runs all built-in Rust rules first
 2. When the `python` feature is enabled, it then calls `python_bridge::run_python_rules()`
-3. The bridge discovers all Python rules registered under the `smelt.optimizer_rules` entry point group
+3. The bridge discovers all Python rules registered under the `smelt.planner_rules` entry point group
 4. For each model, the Rust parser pre-computes `SelectAnalysis` and converts it to a Python dataclass
 5. Each Python rule's `rewrite()` method is called with the model and analysis
 6. Returned `ReplaceWithPlan` or `SetIncremental` objects are converted back to Rust `Transformation` values

@@ -98,7 +98,7 @@ pub async fn execute_model_incremental(
 pub async fn execute_plan(
     backend: &dyn Backend,
     model_name: &str,
-    steps: &[smelt_optimizer::ExecutionStep],
+    steps: &[smelt_planner::ExecutionStep],
     schema: &str,
     show_results: bool,
 ) -> Result<ExecutionResult> {
@@ -106,7 +106,7 @@ pub async fn execute_plan(
 
     for step in steps {
         match step {
-            smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
+            smelt_planner::ExecutionStep::CreateTemp { name, sql } => {
                 let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, sql);
                 backend
                     .execute_sql(&create_sql)
@@ -117,7 +117,7 @@ pub async fn execute_plan(
                         source: e.into(),
                     })?;
             }
-            smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
+            smelt_planner::ExecutionStep::AppendToTemp { name, sql } => {
                 let insert_sql = format!("INSERT INTO {} {}", name, sql);
                 backend
                     .execute_sql(&insert_sql)
@@ -128,7 +128,7 @@ pub async fn execute_plan(
                         source: e.into(),
                     })?;
             }
-            smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
+            smelt_planner::ExecutionStep::FinalQuery { sql } => {
                 backend
                     .drop_table_if_exists(schema, model_name)
                     .await
@@ -146,7 +146,7 @@ pub async fn execute_plan(
                         source: e.into(),
                     })?;
             }
-            smelt_optimizer::ExecutionStep::DropTemp { name } => {
+            smelt_planner::ExecutionStep::DropTemp { name } => {
                 let drop_sql = format!("DROP TABLE IF EXISTS {}", name);
                 // Best-effort cleanup — don't fail the whole plan if drop fails
                 let _ = backend.execute_sql(&drop_sql).await;
@@ -179,7 +179,7 @@ pub async fn execute_plan(
 pub async fn execute_plan_incremental(
     backend: &dyn Backend,
     model_name: &str,
-    steps: &[smelt_optimizer::ExecutionStep],
+    steps: &[smelt_planner::ExecutionStep],
     schema: &str,
     partition: PartitionSpec,
     event_time_column: &str,
@@ -211,7 +211,7 @@ pub async fn execute_plan_incremental(
 
     for step in steps {
         match step {
-            smelt_optimizer::ExecutionStep::CreateTemp { name, sql } => {
+            smelt_planner::ExecutionStep::CreateTemp { name, sql } => {
                 let filtered_sql = inject_time_filter(sql, event_time_column, time_range)
                     .map_err(|e| anyhow::anyhow!("Failed to inject time filter: {}", e))?;
                 let create_sql = format!("CREATE TEMP TABLE {} AS {}", name, filtered_sql);
@@ -224,7 +224,7 @@ pub async fn execute_plan_incremental(
                         source: e.into(),
                     })?;
             }
-            smelt_optimizer::ExecutionStep::AppendToTemp { name, sql } => {
+            smelt_planner::ExecutionStep::AppendToTemp { name, sql } => {
                 let filtered_sql = inject_time_filter(sql, event_time_column, time_range)
                     .map_err(|e| anyhow::anyhow!("Failed to inject time filter: {}", e))?;
                 let insert_sql = format!("INSERT INTO {} {}", name, filtered_sql);
@@ -237,7 +237,7 @@ pub async fn execute_plan_incremental(
                         source: e.into(),
                     })?;
             }
-            smelt_optimizer::ExecutionStep::FinalQuery { sql } => {
+            smelt_planner::ExecutionStep::FinalQuery { sql } => {
                 if !table_exists {
                     backend
                         .create_table_as(schema, model_name, sql)
@@ -293,7 +293,7 @@ pub async fn execute_plan_incremental(
                     }
                 }
             }
-            smelt_optimizer::ExecutionStep::DropTemp { name } => {
+            smelt_planner::ExecutionStep::DropTemp { name } => {
                 let drop_sql = format!("DROP TABLE IF EXISTS {}", name);
                 let _ = backend.execute_sql(&drop_sql).await;
             }

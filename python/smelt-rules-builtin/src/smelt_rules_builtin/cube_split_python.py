@@ -1,4 +1,4 @@
-"""Python port of the Rust cube_split optimizer rule."""
+"""Python port of the Rust cube_split planner rule."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from smelt_sdk import (
     GroupByKey,
     ModelInfo,
     Opportunity,
-    OptimizerRule,
+    PlannerRule,
     OtherAggregate,
     ReplaceWithPlan,
     SelectAnalysis,
@@ -18,7 +18,7 @@ from smelt_sdk import (
 )
 
 
-class CubeSplitPythonRule(OptimizerRule):
+class CubeSplitPythonRule(PlannerRule):
     def name(self) -> str:
         return "cube_split_python"
 

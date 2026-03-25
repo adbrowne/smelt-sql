@@ -11,7 +11,7 @@ pub use analysis::temporal::{
 };
 pub use graph::{ModelGraph, ModelInfo};
 pub use rules::incremental::{analyze_batch_safety, BatchSafety};
-pub use rules::Optimizer;
+pub use rules::Planner;
 pub use types::{
     ExecutionStep, Frontmatter, Granularity, IncrementalConfig, IncrementalSafetyOverrides,
     IncrementalStrategy, Opportunity, OpportunityData, Transformation, Weekday,

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smelt-rules-builtin"
 version = "0.1.0"
-description = "Built-in smelt optimizer rules implemented in Python"
+description = "Built-in smelt planner rules implemented in Python"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = ["smelt-sdk>=0.1.0"]
 
-[project.entry-points."smelt.optimizer_rules"]
+[project.entry-points."smelt.planner_rules"]
 cube_split_python = "smelt_rules_builtin.cube_split_python:CubeSplitPythonRule"
 incremental_python = "smelt_rules_builtin.incremental_python:IncrementalPythonRule"
 

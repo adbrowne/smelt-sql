@@ -1,4 +1,4 @@
-"""Abstract base class for optimizer rules."""
+"""Abstract base class for planner rules."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from smelt_sdk.types import (
 )
 
 
-class OptimizerRule(ABC):
-    """Base class for smelt optimizer rules written in Python.
+class PlannerRule(ABC):
+    """Base class for smelt planner rules written in Python.
 
     Subclass this and implement ``name``, ``detect``, and ``rewrite``.
-    Register via a ``[project.entry-points."smelt.optimizer_rules"]``
+    Register via a ``[project.entry-points."smelt.planner_rules"]``
     entry in your package's ``pyproject.toml``.
     """
 

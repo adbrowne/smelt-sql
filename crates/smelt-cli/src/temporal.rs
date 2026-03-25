@@ -4,7 +4,7 @@
 //! to compute the effective filter window for incremental model execution.
 
 use smelt_core::{DataLatency, Granularity, IncrementalConfig, SourcesConfig};
-use smelt_optimizer::{
+use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days,
     EffectiveWindow,
 };

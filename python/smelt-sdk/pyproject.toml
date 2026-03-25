@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smelt-sdk"
 version = "0.1.0"
-description = "SDK for writing smelt optimizer rules in Python"
+description = "SDK for writing smelt planner rules in Python"
 license = "MIT"
 requires-python = ">=3.10"
 
