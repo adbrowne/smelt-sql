@@ -617,8 +617,10 @@ models:
         );
 
         // Metadata target overrides config target
-        let mut metadata = ModelMetadata::default();
-        metadata.target = Some("dev".to_string());
+        let metadata = ModelMetadata {
+            target: Some("dev".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             config.get_target("model_with_config_target", Some(&metadata), "dev"),
             "dev"
