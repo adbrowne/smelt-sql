@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774435315260,
+  "lastUpdate": 1774435316299,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6491,6 +6491,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.582257663820048,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "162cca5d729f276b07c2570b02b31b06f538e831",
+          "message": "Add plan for logical-to-physical graph architecture\n\nIntroduces a two-stage graph design separating user-authored models\n(logical graph) from the execution plan (physical graph). The physical\ngraph removes ephemeral nodes, adds planner-created intermediates as\nfirst-class nodes, and carries concrete execution strategies. This\ngives planner rule authors a clear contract and follows patterns from\nDataFusion, Spark Catalyst, and Apache Calcite.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T21:39:01+11:00",
+          "tree_id": "5b1ee3e27ffce2c58c250fdabb6b6a8a64a71beb",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/162cca5d729f276b07c2570b02b31b06f538e831"
+        },
+        "date": 1774435316026,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.49758649280813,
             "unit": "MB/s"
           }
         ]
