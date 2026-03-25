@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774422672569,
+  "lastUpdate": 1774422673685,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5753,6 +5753,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.833425032763063,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a19feda9e0199170d1fdd92f5ae6f28c29d8d6b2",
+          "message": "Fix CI: clippy field_reassign_with_default and DuckDB manylinux CXX ABI\n\n- Use struct initializer syntax instead of field reassignment in config test\n- Set DUCKDB_PLATFORM env var in manylinux Docker containers to fix\n  DuckDB bundled build failing on legacy CXX ABI\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T18:09:53+11:00",
+          "tree_id": "c9d73afbdf5a91c0511118e1a07c8e69fc8bbcf5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a19feda9e0199170d1fdd92f5ae6f28c29d8d6b2"
+        },
+        "date": 1774422673379,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.26399447262191,
             "unit": "MB/s"
           }
         ]
