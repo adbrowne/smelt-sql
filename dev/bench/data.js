@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774417899366,
+  "lastUpdate": 1774422672569,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4323,6 +4323,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.021158,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a19feda9e0199170d1fdd92f5ae6f28c29d8d6b2",
+          "message": "Fix CI: clippy field_reassign_with_default and DuckDB manylinux CXX ABI\n\n- Use struct initializer syntax instead of field reassignment in config test\n- Set DUCKDB_PLATFORM env var in manylinux Docker containers to fix\n  DuckDB bundled build failing on legacy CXX ABI\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T18:09:53+11:00",
+          "tree_id": "c9d73afbdf5a91c0511118e1a07c8e69fc8bbcf5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a19feda9e0199170d1fdd92f5ae6f28c29d8d6b2"
+        },
+        "date": 1774422672149,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 43.345685,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 41.891962,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.760104,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.342612,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0034470000000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 41.102353,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.034064,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.017122,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011962,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.468641,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.497979,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.24099,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.24742,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.739494,
             "unit": "ms"
           }
         ]
