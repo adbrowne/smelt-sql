@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774423921825,
+  "lastUpdate": 1774425101164,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4511,6 +4511,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.063941,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ae1dda244abeae11b8d5a26b01506996ded2488a",
+          "message": "Fix Linux wheel builds: use DUCKDB_CUSTOM_PLATFORM to bypass ABI check\n\nThe DuckDB platform.hpp #error for legacy CXX ABI cannot be bypassed\nwith DUCKDB_EXPLICIT_PLATFORM (it's only mentioned in the error text,\nnot actually checked). Use DUCKDB_CUSTOM_PLATFORM which short-circuits\nthe entire platform detection function.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T18:49:47+11:00",
+          "tree_id": "d51b5faec57f727ae7388189f009898f4ebb5248",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ae1dda244abeae11b8d5a26b01506996ded2488a"
+        },
+        "date": 1774425100134,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 38.288903,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.075174,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.573132,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.316957,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002575,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 33.340473,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.01651,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.010168,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.007984,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.908514,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.141499,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.62422,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.83414,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.025545,
             "unit": "ms"
           }
         ]
