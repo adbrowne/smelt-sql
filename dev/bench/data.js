@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774407843968,
+  "lastUpdate": 1774407846377,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -4892,6 +4892,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.960290493722383,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f42fe4d9c1651ed88917eb6d82fe27166a815cf6",
+          "message": "Consolidate all examples under examples/ directory\n\nMove scattered example/test workspaces into a unified structure:\n- examples/timeseries/ (was examples/) — 12 SQL user/event analytics models\n- examples/retail_analytics/ (was benchmarks/retail-analytics/) — 25 TPC-DS models\n- examples/broken/ (new) — 5 intentionally broken models for error testing\n- examples/test_workspace/ (was test-workspace/) — minimal VSCode/LSP testing\n- examples/huge/ (new) — 2000 auto-generated models for stress testing\n\nRefactored smelt-bench model_gen to support persistent output directories\nand added generate_static_workspace binary. Updated all integration test\npaths, documentation references, and .gitignore.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T14:02:19+11:00",
+          "tree_id": "6ce62defcf586a61e26d9d722292c006109cddc2",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f42fe4d9c1651ed88917eb6d82fe27166a815cf6"
+        },
+        "date": 1774407845619,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.01152225196382,
             "unit": "MB/s"
           }
         ]
