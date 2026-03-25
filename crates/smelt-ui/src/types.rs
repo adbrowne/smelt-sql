@@ -113,6 +113,22 @@ pub struct DiagnosticInfo {
     pub column: Option<u32>,
 }
 
+// --- Selector Resolution Types ---
+
+#[derive(Clone, Deserialize)]
+pub struct ResolveRequest {
+    #[serde(default)]
+    pub select: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ResolveResponse {
+    pub selected: Vec<String>,
+    pub excluded: Vec<String>,
+}
+
 // --- Run Planner Types ---
 
 #[derive(Clone, Deserialize)]
@@ -125,6 +141,8 @@ pub struct RunPlanRequest {
     pub per_partition: bool,
     #[serde(default)]
     pub select: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -132,6 +150,7 @@ pub struct RunPlanResponse {
     pub models: Vec<PlanModel>,
     pub execution_order: Vec<String>,
     pub total_batches: usize,
+    pub cli_command: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -171,6 +190,8 @@ pub struct RunExecuteRequest {
     pub per_partition: bool,
     #[serde(default)]
     pub select: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
     #[serde(default = "default_target")]
     pub target: String,
 }

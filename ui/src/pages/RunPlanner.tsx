@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { fetchGraph, fetchRunPlan, executeRun, cancelRun } from '../api'
+import { fetchGraph, fetchRunPlan, executeRun, cancelRun, resolveSelectors } from '../api'
 import { useRunStatus } from '../hooks/useRunStatus'
 import { RunProgress } from '../components/RunProgress'
 import type { RunPlanResponse, PlanModel } from '../types'
@@ -9,13 +9,68 @@ function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10)
 }
 
+/** Parse a space-separated selector string into tokens. */
+function parseTokens(text: string): string[] {
+  return text.trim().split(/\s+/).filter(Boolean)
+}
+
+/** Add a token to a space-separated string (if not already present). */
+function addToken(text: string, token: string): string {
+  const tokens = parseTokens(text)
+  if (tokens.includes(token)) return text
+  return [...tokens, token].join(' ')
+}
+
+/** Remove a token from a space-separated string. */
+function removeToken(text: string, token: string): string {
+  return parseTokens(text).filter(t => t !== token).join(' ')
+}
+
 function PlanPreview({ plan, onExecute, isExecuting }: {
   plan: RunPlanResponse
   onExecute: () => void
   isExecuting: boolean
 }) {
+  const [copied, setCopied] = useState(false)
+
+  function handleCopy() {
+    navigator.clipboard.writeText(plan.cli_command).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      {/* CLI Command */}
+      <div className="bg-gray-900 rounded-lg p-3 font-mono text-sm text-gray-100 flex items-start gap-2">
+        <code className="flex-1 break-all">{plan.cli_command}</code>
+        <button
+          onClick={handleCopy}
+          className="shrink-0 text-gray-400 hover:text-white px-2 py-0.5 rounded text-xs border border-gray-700 hover:border-gray-500 transition-colors"
+        >
+          {copied ? 'Copied!' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Resolved models */}
+      <div>
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+          Resolved models ({plan.execution_order.length})
+        </span>
+        <div className="flex gap-1.5 flex-wrap mt-1">
+          {plan.execution_order.map(name => (
+            <span
+              key={name}
+              className="text-xs px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 font-mono"
+            >
+              {name}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary + Execute */}
       <div className="flex items-center gap-4">
         <span className="text-sm text-gray-600">{plan.execution_order.length} model(s)</span>
         <span className="text-sm text-gray-600">{plan.total_batches} batch(es)</span>
@@ -111,6 +166,93 @@ function ModelPlanRow({ model }: { model: PlanModel }) {
   )
 }
 
+function SelectorInput({ label, value, onChange, placeholder, disabled }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+  disabled: boolean
+}) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm font-mono disabled:opacity-50 placeholder:text-gray-400"
+      />
+      <p className="text-xs text-gray-400 mt-0.5">
+        Space-separated. Supports: model_name, tag:X, +model (upstream), model+ (downstream)
+      </p>
+    </div>
+  )
+}
+
+function ModelPills({ models, selectedModels, excludedModels, selectText, excludeText, onSelectChange, onExcludeChange, disabled }: {
+  models: string[]
+  selectedModels: Set<string>
+  excludedModels: Set<string>
+  selectText: string
+  excludeText: string
+  onSelectChange: (v: string) => void
+  onExcludeChange: (v: string) => void
+  disabled: boolean
+}) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700 mb-1">
+        Models
+        <span className="text-gray-400 font-normal ml-1">click to select, shift+click to exclude</span>
+      </label>
+      <div className="flex gap-1.5 flex-wrap">
+        {models.map(name => {
+          const isExcluded = excludedModels.has(name)
+          const isSelected = selectedModels.has(name)
+
+          let className = 'text-xs px-2 py-0.5 rounded border transition-colors disabled:opacity-50 '
+          if (isExcluded) {
+            className += 'bg-red-50 border-red-300 text-red-700 line-through'
+          } else if (isSelected) {
+            className += 'bg-blue-50 border-blue-300 text-blue-700'
+          } else {
+            className += 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
+          }
+
+          return (
+            <button
+              key={name}
+              onClick={(e) => {
+                if (e.shiftKey) {
+                  if (isExcluded) {
+                    onExcludeChange(removeToken(excludeText, name))
+                  } else {
+                    onExcludeChange(addToken(excludeText, name))
+                    onSelectChange(removeToken(selectText, name))
+                  }
+                } else {
+                  if (isSelected) {
+                    onSelectChange(removeToken(selectText, name))
+                  } else {
+                    onSelectChange(addToken(selectText, name))
+                    onExcludeChange(removeToken(excludeText, name))
+                  }
+                }
+              }}
+              disabled={disabled}
+              className={className}
+            >
+              {name}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export function RunPlanner() {
   const today = formatDate(new Date())
   const thirtyDaysAgo = formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
@@ -119,7 +261,8 @@ export function RunPlanner() {
   const [end, setEnd] = useState(today)
   const [batchSize, setBatchSize] = useState('')
   const [perPartition, setPerPartition] = useState(false)
-  const [selectedModels, setSelectedModels] = useState<string[]>([])
+  const [selectText, setSelectText] = useState('')
+  const [excludeText, setExcludeText] = useState('')
 
   const { data: graphData } = useQuery({
     queryKey: ['graph'],
@@ -144,13 +287,38 @@ export function RunPlanner() {
     .map(n => n.id)
     .sort() ?? []
 
+  const selectTokens = useMemo(() => parseTokens(selectText), [selectText])
+  const excludeTokens = useMemo(() => parseTokens(excludeText), [excludeText])
+
+  // Resolve selectors via backend API for pill highlighting
+  const hasSelectors = selectTokens.length > 0 || excludeTokens.length > 0
+  const { data: resolved } = useQuery({
+    queryKey: ['resolve', selectTokens, excludeTokens],
+    queryFn: () => resolveSelectors({
+      select: selectTokens.length > 0 ? selectTokens : undefined,
+      exclude: excludeTokens.length > 0 ? excludeTokens : undefined,
+    }),
+    enabled: hasSelectors,
+    placeholderData: (prev) => prev,
+  })
+
+  const selectedModels = useMemo(
+    () => new Set(resolved?.selected ?? []),
+    [resolved?.selected]
+  )
+  const excludedModels = useMemo(
+    () => new Set(resolved?.excluded ?? []),
+    [resolved?.excluded]
+  )
+
   function handlePreview() {
     planMutation.mutate({
       start,
       end,
       batch_size_days: batchSize ? parseInt(batchSize) : undefined,
       per_partition: perPartition,
-      select: selectedModels.length > 0 ? selectedModels : undefined,
+      select: selectTokens.length > 0 ? selectTokens : undefined,
+      exclude: excludeTokens.length > 0 ? excludeTokens : undefined,
     })
   }
 
@@ -160,7 +328,8 @@ export function RunPlanner() {
       end,
       batch_size_days: batchSize ? parseInt(batchSize) : undefined,
       per_partition: perPartition,
-      select: selectedModels.length > 0 ? selectedModels : undefined,
+      select: selectTokens.length > 0 ? selectTokens : undefined,
+      exclude: excludeTokens.length > 0 ? excludeTokens : undefined,
     })
   }
 
@@ -187,8 +356,8 @@ export function RunPlanner() {
           </div>
         )}
 
-        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
               <input
@@ -238,37 +407,36 @@ export function RunPlanner() {
             </div>
           </div>
 
+          {/* Select / Exclude inputs */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <SelectorInput
+              label={`Select${selectedModels.size > 0 ? ` (${selectedModels.size} models)` : ''}`}
+              value={selectText}
+              onChange={setSelectText}
+              placeholder="e.g. +tag:revenue daily_revenue"
+              disabled={isRunning}
+            />
+            <SelectorInput
+              label={`Exclude${excludedModels.size > 0 ? ` (${excludedModels.size} models)` : ''}`}
+              value={excludeText}
+              onChange={setExcludeText}
+              placeholder="e.g. staging_model tag:debug"
+              disabled={isRunning}
+            />
+          </div>
+
+          {/* Model pills — click to toggle in the text inputs */}
           {allModels.length > 0 && (
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Models
-                <span className="text-gray-400 font-normal ml-1">
-                  {selectedModels.length === 0 ? 'all' : `${selectedModels.length} selected`}
-                </span>
-              </label>
-              <div className="flex gap-1.5 flex-wrap">
-                {allModels.map(name => (
-                  <button
-                    key={name}
-                    onClick={() => {
-                      setSelectedModels(prev =>
-                        prev.includes(name)
-                          ? prev.filter(n => n !== name)
-                          : [...prev, name]
-                      )
-                    }}
-                    disabled={isRunning}
-                    className={`text-xs px-2 py-0.5 rounded border transition-colors disabled:opacity-50 ${
-                      selectedModels.includes(name)
-                        ? 'bg-blue-50 border-blue-300 text-blue-700'
-                        : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
-                    }`}
-                  >
-                    {name}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <ModelPills
+              models={allModels}
+              selectedModels={selectedModels}
+              excludedModels={excludedModels}
+              selectText={selectText}
+              excludeText={excludeText}
+              onSelectChange={setSelectText}
+              onExcludeChange={setExcludeText}
+              disabled={isRunning}
+            />
           )}
 
           <button

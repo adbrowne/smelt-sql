@@ -78,6 +78,18 @@ export interface DiagnosticInfo {
   column?: number;
 }
 
+// --- Selector Resolution Types ---
+
+export interface ResolveRequest {
+  select?: string[];
+  exclude?: string[];
+}
+
+export interface ResolveResponse {
+  selected: string[];
+  excluded: string[];
+}
+
 // --- Run Planner Types ---
 
 export interface RunPlanRequest {
@@ -86,12 +98,14 @@ export interface RunPlanRequest {
   batch_size_days?: number;
   per_partition?: boolean;
   select?: string[];
+  exclude?: string[];
 }
 
 export interface RunPlanResponse {
   models: PlanModel[];
   execution_order: string[];
   total_batches: number;
+  cli_command: string;
 }
 
 export interface PlanModel {
@@ -118,6 +132,7 @@ export interface RunExecuteRequest {
   batch_size_days?: number;
   per_partition?: boolean;
   select?: string[];
+  exclude?: string[];
   target?: string;
 }
 

@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionSpec};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
+use smelt_core::parse_selector;
 use smelt_core::SourcesConfig;
 use smelt_optimizer::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
 use smelt_state::file_store::FileStore;
@@ -167,19 +168,35 @@ impl RunManager {
         // Create backend
         let backend = create_backend(&target_config, &self.project_dir).await?;
 
-        // Get execution order from graph
+        // Resolve select/exclude into execution order
         let graph_lock = graph.lock().await;
-        let execution_order = graph_lock.execution_order()?;
 
-        let selected: Vec<String> = if request.select.is_empty() {
-            execution_order.clone()
+        let mut selected_set = if request.select.is_empty() {
+            graph_lock.all_model_names()
         } else {
-            execution_order
+            let selectors: Vec<_> = request
+                .select
                 .iter()
-                .filter(|name| request.select.iter().any(|s| s == *name))
-                .cloned()
-                .collect()
+                .map(|s| {
+                    parse_selector(s)
+                        .map_err(|e| anyhow::anyhow!("Invalid selector '{}': {}", s, e))
+                })
+                .collect::<Result<_, _>>()?;
+            graph_lock.select_models(&selectors, &config)?
         };
+
+        if !request.exclude.is_empty() {
+            let excludes: Vec<_> = request
+                .exclude
+                .iter()
+                .map(|s| {
+                    parse_selector(s).map_err(|e| anyhow::anyhow!("Invalid exclude '{}': {}", s, e))
+                })
+                .collect::<Result<_, _>>()?;
+            selected_set = graph_lock.exclude_models(&selected_set, &excludes, &config)?;
+        }
+
+        let selected: Vec<String> = graph_lock.filtered_execution_order(&selected_set)?;
 
         // Parse time range
         let start_date = NaiveDate::parse_from_str(&request.start, "%Y-%m-%d")

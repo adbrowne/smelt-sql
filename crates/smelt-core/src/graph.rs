@@ -208,6 +208,19 @@ impl DependencyGraph {
         Ok(selected)
     }
 
+    /// Remove models matching the given exclude selectors from the selected set.
+    ///
+    /// Uses the same matching logic as `select_models` but subtracts instead of adding.
+    pub fn exclude_models(
+        &self,
+        selected: &HashSet<String>,
+        excludes: &[Selector],
+        config: &Config,
+    ) -> Result<HashSet<String>> {
+        let to_exclude = self.select_models(excludes, config)?;
+        Ok(selected.difference(&to_exclude).cloned().collect())
+    }
+
     /// Collect all upstream dependencies recursively.
     fn collect_upstream(&self, model_name: &str, result: &mut HashSet<String>) {
         if let Some(deps) = self.dependencies.get(model_name) {
@@ -268,6 +281,11 @@ impl DependencyGraph {
 
     pub fn model_count(&self) -> usize {
         self.models.len()
+    }
+
+    /// Return the set of all model names.
+    pub fn all_model_names(&self) -> HashSet<String> {
+        self.models.keys().cloned().collect()
     }
 
     pub fn iter_models(&self) -> impl Iterator<Item = (&str, &ModelFile)> {
