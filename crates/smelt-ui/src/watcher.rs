@@ -142,6 +142,7 @@ async fn refresh_state(state: &AppState, project_dir: &Path, model_paths: &[Stri
             refs: m.refs.clone(),
             parse_errors: m.parse_errors.clone(),
             metadata: m.metadata.clone(),
+            model_id: m.model_id.clone(),
         })
         .collect();
 

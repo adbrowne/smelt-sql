@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 pub use smelt_core::extract_refs;
 pub use smelt_core::RefInfo;
-use smelt_core::{extract_file_metadata, FileMetadata, ModelMetadata};
+use smelt_core::{extract_file_metadata, FileMetadata, ModelId, ModelMetadata};
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -21,6 +21,7 @@ pub enum ModelKind {
 #[derive(Debug, Clone)]
 pub struct ModelFile {
     pub name: String,
+    /// Path used as the Salsa query key (virtual for multi-model files).
     pub path: PathBuf,
     pub content: String,
     pub refs: Vec<RefInfo>,
@@ -29,6 +30,8 @@ pub struct ModelFile {
     pub metadata: Option<Box<ModelMetadata>>,
     /// Whether this model is from a SQL file or Python generation.
     pub kind: ModelKind,
+    /// Canonical model identifier.
+    pub model_id: ModelId,
 }
 
 pub struct ModelDiscovery {
@@ -65,8 +68,8 @@ impl ModelDiscovery {
                 let path = entry.path();
 
                 if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                    let model = self.parse_model_file(path)?;
-                    models.push(model);
+                    let parsed = self.parse_model_file(path)?;
+                    models.extend(parsed);
                 }
             }
         }
@@ -109,62 +112,93 @@ impl ModelDiscovery {
         Ok(python_files)
     }
 
-    fn parse_model_file(&self, path: &Path) -> Result<ModelFile> {
+    fn parse_model_file(&self, path: &Path) -> Result<Vec<ModelFile>> {
         // Read file content
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read model file: {:?}", path))?;
 
         // Extract metadata from YAML frontmatter
-        let file_metadata = extract_file_metadata(&content).ok();
-        let model_metadata = match file_metadata {
-            Some(FileMetadata::Single { metadata, .. }) => Some(metadata),
-            Some(FileMetadata::Multi { models }) => {
-                // For multi-model files, we need to handle each model separately
-                // For now, just use the first model's metadata if it matches the filename
-                let filename_stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string());
-
-                models
-                    .into_iter()
-                    .find(|section| section.metadata.name.as_ref() == filename_stem.as_ref())
-                    .map(|section| Box::new(section.metadata))
+        let file_metadata = match extract_file_metadata(&content) {
+            Ok(fm) => Some(fm),
+            Err(e) => {
+                eprintln!("Warning: {}: {}", path.display(), e);
+                None
             }
-            Some(FileMetadata::Empty) | None => None,
         };
 
-        // Determine model name: from metadata if present, otherwise from filename
-        let name = model_metadata
-            .as_ref()
-            .and_then(|m| m.name.clone())
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-            })
-            .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+        match file_metadata {
+            Some(FileMetadata::Multi { models }) => {
+                // Multi-model file: create one ModelFile per section
+                let mut result = Vec::with_capacity(models.len());
+                for section in models {
+                    let model_name =
+                        section.metadata.name.clone().ok_or_else(|| {
+                            anyhow!("Multi-model section missing name in {:?}", path)
+                        })?;
 
-        // Parse using smelt-parser (strip frontmatter to avoid false parse errors)
-        let clean_content = smelt_parser::strip_frontmatter(&content);
-        let parse = smelt_parser::parse(&clean_content);
+                    let sql_content = &content[section.sql_range.clone()];
+                    let clean_content = smelt_parser::strip_frontmatter(sql_content);
+                    let parse = smelt_parser::parse(&clean_content);
+                    let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+                        extract_refs(&file)
+                    } else {
+                        Vec::new()
+                    };
 
-        // Extract refs using AST
-        let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
-            extract_refs(&file)
-        } else {
-            Vec::new()
-        };
+                    let model_id = ModelId::multi_model(path.to_path_buf(), model_name.clone());
 
-        Ok(ModelFile {
-            name,
-            path: path.to_path_buf(),
-            content,
-            refs,
-            parse_errors: parse.errors,
-            metadata: model_metadata,
-            kind: ModelKind::Sql,
-        })
+                    result.push(ModelFile {
+                        name: model_name,
+                        path: model_id.salsa_key(),
+                        content: sql_content.to_string(),
+                        refs,
+                        parse_errors: parse.errors,
+                        metadata: Some(Box::new(section.metadata)),
+                        kind: ModelKind::Sql,
+                        model_id,
+                    });
+                }
+                Ok(result)
+            }
+            _ => {
+                // Single-model or no frontmatter: existing behavior
+                let model_metadata = match file_metadata {
+                    Some(FileMetadata::Single { metadata, .. }) => Some(metadata),
+                    _ => None,
+                };
+
+                let name = model_metadata
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .or_else(|| {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .ok_or_else(|| anyhow!("Cannot determine model name from {:?}", path))?;
+
+                let clean_content = smelt_parser::strip_frontmatter(&content);
+                let parse = smelt_parser::parse(&clean_content);
+                let refs = if let Some(file) = AstFile::cast(parse.syntax()) {
+                    extract_refs(&file)
+                } else {
+                    Vec::new()
+                };
+
+                let model_id = ModelId::from_path(path.to_path_buf());
+
+                Ok(vec![ModelFile {
+                    name,
+                    path: path.to_path_buf(),
+                    content,
+                    refs,
+                    parse_errors: parse.errors,
+                    metadata: model_metadata,
+                    kind: ModelKind::Sql,
+                    model_id,
+                }])
+            }
+        }
     }
 }
 

@@ -2270,6 +2270,7 @@ async fn ui(args: UiArgs) -> Result<()> {
             refs: m.refs.clone(),
             parse_errors: m.parse_errors.clone(),
             metadata: m.metadata.clone(),
+            model_id: m.model_id.clone(),
         })
         .collect();
     let graph = smelt_core::graph::DependencyGraph::build(core_models, sources.as_ref())

@@ -153,8 +153,13 @@ fn parse_file(db: &dyn Syntax, path: PathBuf) -> Arc<smelt_parser::Parse> {
 }
 
 fn parse_model(db: &dyn Syntax, path: PathBuf) -> Option<Arc<Model>> {
-    // Extract model name from file path (e.g., models/users.sql -> users)
-    let model_name = path.file_stem()?.to_str()?.to_string();
+    // Extract model name: from virtual path suffix (multi-model) or file stem (single-model)
+    let path_str = path.to_str().unwrap_or("");
+    let (model_name, source_path) = if let Some((file_part, name)) = path_str.rsplit_once("::") {
+        (name.to_string(), PathBuf::from(file_part))
+    } else {
+        (path.file_stem()?.to_str()?.to_string(), path.clone())
+    };
 
     // Parse file and check if it contains a valid SELECT statement
     let parse = db.parse_file(path.clone());
@@ -167,6 +172,7 @@ fn parse_model(db: &dyn Syntax, path: PathBuf) -> Option<Arc<Model>> {
     Some(Arc::new(Model {
         name: model_name,
         path: path.clone(),
+        source_path,
     }))
 }
 
@@ -603,6 +609,9 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<
 pub struct Model {
     pub name: String,
     pub path: PathBuf,
+    /// Physical file path on disk (same as `path` for single-model files,
+    /// differs for multi-model files where `path` is a virtual key).
+    pub source_path: PathBuf,
 }
 
 /// Reference location with position information

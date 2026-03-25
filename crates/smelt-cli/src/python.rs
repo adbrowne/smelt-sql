@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::discovery::{ModelFile, ModelKind};
 use crate::errors::CliError;
 use crate::metadata::{extract_file_metadata, FileMetadata};
+use smelt_core::ModelId;
 
 /// Data passed to Python models as project context.
 #[derive(Debug, Serialize)]
@@ -367,19 +368,21 @@ pub fn discover_python_models(
                 };
 
                 // Extract metadata from generated SQL frontmatter
-                let model_metadata =
-                    extract_file_metadata(&output.sql)
-                        .ok()
-                        .and_then(|fm| match fm {
-                            FileMetadata::Single { metadata, .. } => Some(metadata),
-                            FileMetadata::Multi { models } => models
-                                .into_iter()
-                                .find(|section| {
-                                    section.metadata.name.as_deref() == Some(&output.name)
-                                })
-                                .map(|section| Box::new(section.metadata)),
-                            FileMetadata::Empty => None,
-                        });
+                let model_metadata = match extract_file_metadata(&output.sql) {
+                    Ok(fm) => Some(fm),
+                    Err(e) => {
+                        eprintln!("Warning: Python model {}: {}", output.name, e);
+                        None
+                    }
+                }
+                .and_then(|fm| match fm {
+                    FileMetadata::Single { metadata, .. } => Some(metadata),
+                    FileMetadata::Multi { models } => models
+                        .into_iter()
+                        .find(|section| section.metadata.name.as_deref() == Some(&output.name))
+                        .map(|section| Box::new(section.metadata)),
+                    FileMetadata::Empty => None,
+                });
 
                 // Convert parse errors, attributing them to the Python file
                 let parse_errors: Vec<smelt_parser::ParseError> = parse
@@ -396,6 +399,7 @@ pub fn discover_python_models(
                     })
                     .collect();
 
+                let model_id = ModelId::from_path(file_path.clone());
                 new_models.push(ModelFile {
                     name: output.name.clone(),
                     path: file_path.clone(),
@@ -415,6 +419,7 @@ pub fn discover_python_models(
                             })
                             .collect(),
                     },
+                    model_id,
                 });
             }
         }
@@ -733,6 +738,7 @@ def union_model(project):
             parse_errors: vec![],
             metadata: None,
             kind: ModelKind::Sql,
+            model_id: ModelId::from_path(PathBuf::from("test.sql")),
         };
         let model_b = ModelFile {
             name: "beta".to_string(),
@@ -742,6 +748,7 @@ def union_model(project):
             parse_errors: vec![],
             metadata: None,
             kind: ModelKind::Sql,
+            model_id: ModelId::from_path(PathBuf::from("test.sql")),
         };
 
         let set1 = vec![model_a.clone(), model_b.clone()];
@@ -759,6 +766,7 @@ def union_model(project):
             parse_errors: vec![],
             metadata: None,
             kind: ModelKind::Sql,
+            model_id: ModelId::from_path(PathBuf::from("test.sql")),
         };
         let model_b = ModelFile {
             name: "same_name".to_string(),
@@ -768,6 +776,7 @@ def union_model(project):
             parse_errors: vec![],
             metadata: None,
             kind: ModelKind::Sql,
+            model_id: ModelId::from_path(PathBuf::from("test.sql")),
         };
 
         assert!(!models_equal(&[model_a], &[model_b]));
@@ -1398,6 +1407,7 @@ def colliding(project):
                     directory: None,
                 }],
             },
+            model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
         };
 
         let config = crate::config::Config {
@@ -1438,6 +1448,7 @@ def colliding(project):
                     directory: None,
                 }],
             },
+            model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
         };
 
         let config = crate::config::Config {

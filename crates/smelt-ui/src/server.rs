@@ -220,6 +220,7 @@ mod tests {
             refs: vec![],
             parse_errors: vec![],
             metadata: None,
+            model_id: smelt_core::ModelId::from_path("models/test_model.sql".into()),
         }];
 
         let graph = DependencyGraph::build(models.clone(), None).unwrap();
