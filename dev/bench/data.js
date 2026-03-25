@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774423920157,
+  "lastUpdate": 1774423921825,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5876,6 +5876,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.26399447262191,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9f59cafcb648fba442c5c0a7dc3802c064fb1fb7",
+          "message": "Fix Linux wheel builds: use CXXFLAGS define for DuckDB legacy ABI\n\nDUCKDB_EXPLICIT_PLATFORM must be a C++ preprocessor define, not a shell\nenv var. Pass it via CXXFLAGS which the cc crate reads for C++ builds.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-25T18:30:36+11:00",
+          "tree_id": "935a2f616c50fe61076ff905b7d4e987dac112f6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9f59cafcb648fba442c5c0a7dc3802c064fb1fb7"
+        },
+        "date": 1774423921175,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.734717867071797,
             "unit": "MB/s"
           }
         ]
