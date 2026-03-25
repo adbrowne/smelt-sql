@@ -78,7 +78,7 @@ cargo build
 cargo test
 
 # Run the CLI
-cargo run -p smelt-cli -- run --project-dir test-workspace
+cargo run -p smelt-cli -- run --project-dir examples/timeseries
 
 # Run the LSP server
 cargo run -p smelt-lsp

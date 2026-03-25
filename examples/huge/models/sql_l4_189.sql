@@ -1,0 +1,22 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+WITH filtered AS (
+    SELECT amount, session_id, region
+    FROM smelt.ref('py_l3_272')
+    WHERE score >= 50
+),
+aggregated AS (
+    SELECT amount, COUNT(*) AS cnt
+    FROM filtered
+    GROUP BY amount
+)
+SELECT
+    a.amount,
+    a.cnt,
+    f.session_id
+FROM aggregated a
+INNER JOIN filtered f ON a.amount = f.amount

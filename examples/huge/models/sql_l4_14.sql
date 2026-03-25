@@ -1,0 +1,17 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+WITH base AS (
+    SELECT cost, created_at, ip_address
+    FROM smelt.ref('sql_l3_24')
+    WHERE is_active = true
+)
+SELECT
+    b.cost,
+    COUNT(DISTINCT user_id) AS agg_val
+FROM base b
+INNER JOIN smelt.ref('sql_l3_24') j ON b.user_id = j.user_id
+GROUP BY b.cost

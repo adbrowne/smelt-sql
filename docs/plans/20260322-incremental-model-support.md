@@ -1044,5 +1044,5 @@ After each phase, verify:
 1. `cargo fmt --all && cargo clippy --all-targets` — clean
 2. `cargo test` — all existing tests pass
 3. Phase-specific integration tests pass
-4. `smelt run` on test-workspace with daily_revenue model works for both full-refresh and incremental
+4. `smelt run` on examples/timeseries with daily_revenue model works for both full-refresh and incremental
 5. Backfill: verify single-query backfill for batch-safe model produces same result as per-partition

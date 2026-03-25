@@ -1,0 +1,22 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+WITH filtered AS (
+    SELECT event_type, os_name, email_domain
+    FROM smelt.ref('sql_l1_93')
+    WHERE is_active = true
+),
+aggregated AS (
+    SELECT event_type, COUNT(*) AS cnt
+    FROM filtered
+    GROUP BY event_type
+)
+SELECT
+    a.event_type,
+    a.cnt,
+    f.os_name
+FROM aggregated a
+INNER JOIN filtered f ON a.event_type = f.event_type

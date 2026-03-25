@@ -4,4 +4,4 @@ pub mod model_gen;
 
 pub use harness::{BuildMetrics, ParserMetrics, SalsaMetrics};
 pub use metrics::BenchmarkResult;
-pub use model_gen::{generate_workspace, GraphSpec};
+pub use model_gen::{generate_workspace, generate_workspace_to_path, GraphSpec};

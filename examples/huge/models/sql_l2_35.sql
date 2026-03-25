@@ -1,0 +1,22 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+WITH filtered AS (
+    SELECT category, profit, product_id
+    FROM smelt.ref('sql_l1_2')
+    WHERE is_active = true
+),
+aggregated AS (
+    SELECT category, COUNT(*) AS cnt
+    FROM filtered
+    GROUP BY category
+)
+SELECT
+    a.category,
+    a.cnt,
+    f.profit
+FROM aggregated a
+INNER JOIN filtered f ON a.category = f.category

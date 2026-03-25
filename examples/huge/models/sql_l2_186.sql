@@ -1,0 +1,12 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+SELECT
+    a.amount,
+    a.event_type,
+    b.cohort_date
+FROM smelt.ref('py_l1_411') a
+LEFT JOIN smelt.ref('sql_l1_175') b ON a.user_id = b.user_id

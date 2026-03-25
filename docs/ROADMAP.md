@@ -166,7 +166,7 @@ targets:
   - `discovery.rs` - Extract metadata when discovering models
   - `compiler.rs` - Use metadata when compiling models
   - `main.rs` - Check metadata for incremental execution
-  - Example: `examples/models/user_summary.sql` with frontmatter
+  - Example: `examples/timeseries/models/user_summary.sql` with frontmatter
 
 - **Comprehensive test coverage**
   - 13 new unit tests in `metadata.rs`
@@ -268,7 +268,7 @@ SELECT ...
    - Updated Quick Example with frontmatter
    - Configuration precedence documentation
 
-8. **examples/models/user_summary.sql** (MODIFIED)
+8. **examples/timeseries/models/user_summary.sql** (MODIFIED)
    - Added frontmatter example
 
 ### Test Results
@@ -1437,9 +1437,9 @@ All 12 parser tests passing, including:
   - Spark backend updated with stub implementations
 
 - **SQL model examples** demonstrating materialization strategies
-  - `examples/models/transactions.sql` - Source model with timestamped events
-  - `examples/models/daily_revenue.sql` - Daily aggregation using incremental materialization
-  - Configuration in `examples/smelt.yml` with incremental settings
+  - `examples/timeseries/models/transactions.sql` - Source model with timestamped events
+  - `examples/timeseries/models/daily_revenue.sql` - Daily aggregation using incremental materialization
+  - Configuration in `examples/timeseries/smelt.yml` with incremental settings
   - Source data setup with 30 days of transaction data (setup_sources.sql)
   - sources.yml updated with transactions table schema
 
@@ -1471,7 +1471,7 @@ All 12 parser tests passing, including:
 - Implements insert_into_from_query using standard SQL
 - Auto-creates table on first run if it doesn't exist
 
-**SQL Examples** (`examples/`):
+**SQL Examples** (`examples/timeseries/`):
 - `models/daily_revenue.sql` - Aggregates transactions by date and user
 - `smelt.yml` - Configures incremental: { enabled: true, partition_column: revenue_date }
 - `sources.yml` - Defines transactions table schema

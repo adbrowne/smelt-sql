@@ -60,9 +60,9 @@ The server communicates via stdin/stdout using the LSP protocol.
 
 ## Testing with VSCode
 
-### Option 1: Manual Testing with test-workspace
+### Option 1: Manual Testing with test_workspace
 
-1. Open `test-workspace/` in VSCode
+1. Open `examples/test_workspace/` in VSCode
 2. Install a generic LSP client extension
 3. Configure it to run: `cargo run -p smelt-lsp`
 4. Open the SQL files and observe:
@@ -75,7 +75,7 @@ We'll eventually create a proper VSCode extension at `editors/vscode/`.
 
 ## Example Models
 
-See `test-workspace/models/`:
+See `examples/test_workspace/models/`:
 
 ```sql
 -- raw_events.sql (base model)
@@ -145,7 +145,7 @@ The beauty of Salsa: we just update the input and query the output. Incremental 
 
 ## Performance
 
-Current performance (test-workspace with 4 models):
+Current performance (test_workspace with 4 models):
 
 - Cold start: ~5ms
 - File edit → diagnostics: ~2ms

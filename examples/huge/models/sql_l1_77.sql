@@ -1,0 +1,15 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+SELECT
+    order_id,
+    MIN(created_at) AS agg_0,
+    SUM(quantity) AS agg_1,
+    SUM(revenue) AS agg_2,
+    SUM(amount) AS agg_3,
+    COUNT(DISTINCT user_id) AS agg_4
+FROM smelt.ref('reviews')
+GROUP BY order_id

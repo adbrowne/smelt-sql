@@ -1,0 +1,14 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+SELECT
+    a.cost,
+    b.revenue,
+    c.tier,
+    c.event_type
+FROM smelt.ref('shipments') a
+INNER JOIN smelt.ref('shipments') b ON a.user_id = b.user_id
+LEFT JOIN smelt.ref('shipments') c ON a.user_id = c.user_id

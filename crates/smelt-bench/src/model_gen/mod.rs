@@ -30,15 +30,17 @@ impl GeneratedWorkspace {
     }
 }
 
-/// Generate a complete workspace with models and configuration.
+/// Generate models and config files into the given directory.
 ///
-/// Creates a temporary directory with:
+/// Writes into `root`:
 /// - `models/` containing SQL and Python model files
 /// - `smelt.yml` project configuration
 /// - `sources.yml` source definitions
-pub fn generate_workspace(spec: &GraphSpec) -> Result<GeneratedWorkspace> {
-    let dir = TempDir::new()?;
-    let models_dir = dir.path().join("models");
+fn generate_workspace_into(
+    spec: &GraphSpec,
+    root: &Path,
+) -> Result<(Vec<ModelSpec>, Vec<(String, String)>)> {
+    let models_dir = root.join("models");
     std::fs::create_dir_all(&models_dir)?;
 
     // Build the dependency graph
@@ -68,14 +70,33 @@ pub fn generate_workspace(spec: &GraphSpec) -> Result<GeneratedWorkspace> {
 
     // Generate configuration files
     let smelt_yml = config_gen::generate_smelt_yml(spec, &model_specs);
-    std::fs::write(dir.path().join("smelt.yml"), smelt_yml)?;
+    std::fs::write(root.join("smelt.yml"), smelt_yml)?;
 
     let sources_yml = config_gen::generate_sources_yml(spec);
-    std::fs::write(dir.path().join("sources.yml"), sources_yml)?;
+    std::fs::write(root.join("sources.yml"), sources_yml)?;
+
+    Ok((model_specs, sql_contents))
+}
+
+/// Generate a complete workspace with models and configuration.
+///
+/// Creates a temporary directory with models, smelt.yml, and sources.yml.
+pub fn generate_workspace(spec: &GraphSpec) -> Result<GeneratedWorkspace> {
+    let dir = TempDir::new()?;
+    let (model_specs, sql_contents) = generate_workspace_into(spec, dir.path())?;
 
     Ok(GeneratedWorkspace {
         dir,
         model_specs,
         sql_contents,
     })
+}
+
+/// Generate a workspace into a persistent directory (not a TempDir).
+///
+/// Useful for creating static example workspaces that are committed to the repo.
+pub fn generate_workspace_to_path(spec: &GraphSpec, output: &Path) -> Result<Vec<ModelSpec>> {
+    std::fs::create_dir_all(output)?;
+    let (model_specs, _) = generate_workspace_into(spec, output)?;
+    Ok(model_specs)
 }

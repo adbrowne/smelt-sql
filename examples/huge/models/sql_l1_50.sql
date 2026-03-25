@@ -1,0 +1,22 @@
+---
+materialization: table
+incremental:
+  enabled: true
+  partition_column: event_date
+---
+WITH filtered AS (
+    SELECT country, is_verified, browser
+    FROM smelt.ref('errors')
+    WHERE platform = 'web'
+),
+aggregated AS (
+    SELECT country, COUNT(*) AS cnt
+    FROM filtered
+    GROUP BY country
+)
+SELECT
+    a.country,
+    a.cnt,
+    f.is_verified
+FROM aggregated a
+INNER JOIN filtered f ON a.country = f.country
