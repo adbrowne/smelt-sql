@@ -203,10 +203,18 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 6. ✅ 8 unit tests covering strategy resolution, ephemeral filtering, resolver construction
 7. ⏸️ `backbuild()` not yet migrated -- uses its own execution pattern, deferred to follow-up
 
-### Phase C: Wire up planner transformations
-1. Add new `Transformation` variants (CreateNode, RemoveNode, RedirectRef, SetMaterialization)
-2. `PhysicalGraphBuilder` applies transformations during construction
-3. Existing transformations (ReplaceWithPlan, SetIncremental) map to PhysicalStrategy variants
+### Phase C: Wire up planner transformations ✅ (March 26, 2026)
+1. ✅ Added 4 new `Transformation` variants to `smelt-planner/src/types.rs`: `CreateNode`, `RemoveNode`, `RedirectRef`, `SetMaterialization`
+2. ✅ `PhysicalGraphBuilder::build()` applies all transformation types during construction:
+   - `CreateNode`: adds synthetic `PhysicalNode`s with correct dependency ordering and `logical_origins`
+   - `RemoveNode`: excludes models from physical graph
+   - `RedirectRef`: rewrites `smelt.ref()` calls in model SQL content
+   - `SetMaterialization`: overrides materialization from logical graph
+3. ✅ `validate_transformations()` checks all graph-level transformations before applying (unknown models, name conflicts, missing dependencies)
+4. ✅ `PhysicalNode` now carries `logical_origins` field for tracing back to user-authored models
+5. ✅ `PhysicalGraph::filter_for_selection()` maps `--select` logical names to physical nodes (includes synthetic intermediates)
+6. ✅ Strategy resolution extracted into `resolve_strategy()` and `resolve_plan_steps()` helper methods
+7. ✅ 18 unit tests (8 existing + 10 new covering all transformation types and validation errors)
 
 ### Phase D: Explain output
 1. Add `physical_graph` section to `smelt explain` showing nodes, strategies, origins
