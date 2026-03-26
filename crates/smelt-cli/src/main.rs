@@ -10,7 +10,8 @@ use smelt_cli::{
     compute_incremental_windows, discover_python_models, executor, find_project_root,
     format_plan_summary, init_db, inject_time_filter, migration, parse_selector,
     resolve_refs_in_sql, seed, BackendRegistry, BackendType, BackfillBatch, BackfillOptions,
-    CompilerRegistry, Config, DependencyGraph, ModelDiscovery, SourcesConfig, TimeRange,
+    CompilerRegistry, Config, DependencyGraph, Materialization, ModelDiscovery, SourcesConfig,
+    TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -423,6 +424,28 @@ async fn run(args: RunArgs) -> Result<()> {
         }
     }
 
+    // Validate materialization configs (e.g. ephemeral + incremental conflicts)
+    {
+        let metadata_map: HashMap<String, smelt_cli::ModelMetadata> = models
+            .iter()
+            .filter_map(|m| {
+                m.metadata
+                    .as_ref()
+                    .map(|md| (m.name.clone(), md.as_ref().clone()))
+            })
+            .collect();
+        let config_errors = config.validate_model_configs(&metadata_map);
+        if !config_errors.is_empty() {
+            for (model, msg) in &config_errors {
+                eprintln!("Error: model '{}': {}", model, msg);
+            }
+            return Err(anyhow::anyhow!(
+                "Model configuration validation failed ({} error(s))",
+                config_errors.len()
+            ));
+        }
+    }
+
     // 4. Build dependency graph
     let graph = DependencyGraph::build(models, sources.as_ref())
         .with_context(|| "Failed to build dependency graph")?;
@@ -430,6 +453,8 @@ async fn run(args: RunArgs) -> Result<()> {
     graph
         .validate()
         .with_context(|| "Dependency validation failed")?;
+
+    graph.warn_unused_ephemerals(&config);
 
     // 5. Determine execution order (with optional selector filtering)
     let execution_order = if args.select.is_empty() && args.exclude.is_empty() {
@@ -445,6 +470,26 @@ async fn run(args: RunArgs) -> Result<()> {
                 .iter()
                 .map(|s| parse_selector(s).with_context(|| format!("Invalid selector '{}'", s)))
                 .collect::<Result<_, _>>()?;
+
+            // Check if any directly-selected model is ephemeral
+            for selector in &selectors {
+                if let smelt_cli::SelectionMethod::ModelName(name) = &selector.method {
+                    if !selector.include_upstream && !selector.include_downstream {
+                        if let Ok(model) = graph.get_model(name) {
+                            let mat = config.get_materialization_with_metadata(
+                                name,
+                                model.metadata.as_ref().map(|b| b.as_ref()),
+                            );
+                            if mat == Materialization::Ephemeral {
+                                return Err(anyhow::anyhow!(
+                                    "Cannot run ephemeral model '{}' directly — ephemeral models are inlined as CTEs into downstream models.",
+                                    name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
 
             graph
                 .select_models(&selectors, &config)
@@ -693,6 +738,35 @@ async fn run(args: RunArgs) -> Result<()> {
     let type_db = init_db(&project_dir, &all_models);
     let file_store = FileStore::new(&project_dir);
 
+    // Build ephemeral resolvers per target
+    let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut ephemeral_set: HashSet<String> = HashSet::new();
+    for model_name in &execution_order {
+        let model = graph.get_model(model_name)?;
+        let mat = config.get_materialization_with_metadata(
+            model_name,
+            model.metadata.as_ref().map(|b| b.as_ref()),
+        );
+        if mat == Materialization::Ephemeral {
+            ephemeral_set.insert(model_name.clone());
+            let target = &target_assignments[model_name];
+            ephemeral_models_by_target
+                .entry(target.clone())
+                .or_default()
+                .push((model_name.clone(), model.content.clone()));
+        }
+    }
+
+    let mut ephemeral_resolvers: HashMap<String, smelt_cli::EphemeralResolver> = HashMap::new();
+    for (target_name, models) in &ephemeral_models_by_target {
+        let compiler = compilers.get(target_name);
+        let schema = &registry.target_config(target_name).schema;
+        ephemeral_resolvers.insert(
+            target_name.clone(),
+            compiler.build_ephemeral_resolver(models, schema),
+        );
+    }
+
     println!("\n{}", "=".repeat(60));
     println!("Executing models...");
     println!("{}", "=".repeat(60));
@@ -700,11 +774,21 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut results = Vec::new();
 
     for model_name in &execution_order {
+        // Skip ephemeral models — they are inlined as CTEs into downstream models
+        if ephemeral_set.contains(model_name.as_str()) {
+            println!("\n  {} (ephemeral — inlined as CTE)", model_name);
+            continue;
+        }
+
         let model = graph.get_model(model_name)?;
         let model_target = &target_assignments[model_name];
         let backend = registry.get(model_target);
         let compiler = compilers.get(model_target);
         let schema = &registry.target_config(model_target).schema;
+        let empty_resolver = smelt_cli::EphemeralResolver::empty();
+        let resolver = ephemeral_resolvers
+            .get(model_target)
+            .unwrap_or(&empty_resolver);
 
         // Determine execution mode from optimizer overrides or config
         let plan_steps = plan_overrides.get(model_name.as_str()).map(|steps| {
@@ -987,7 +1071,7 @@ async fn run(args: RunArgs) -> Result<()> {
                     })?;
 
                     let compiled = compiler
-                        .compile_with_sql(model, schema, &transformed_sql)
+                        .compile_with_sql_and_ephemerals(model, schema, &transformed_sql, resolver)
                         .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                     if args.verbose {
@@ -1059,7 +1143,7 @@ async fn run(args: RunArgs) -> Result<()> {
                 }
 
                 let compiled = compiler
-                    .compile(model, schema)
+                    .compile_with_ephemerals(model, schema, resolver)
                     .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                 if args.verbose {
@@ -1367,6 +1451,34 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .with_context(|| "Source validation failed")?;
     }
 
+    // Build ephemeral resolvers for backbuild
+    let mut bb_ephemeral_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut bb_ephemeral_set: HashSet<String> = HashSet::new();
+    for plan in &plans {
+        let model = graph.get_model(&plan.model_name)?;
+        let mat = config.get_materialization_with_metadata(
+            &plan.model_name,
+            model.metadata.as_ref().map(|b| b.as_ref()),
+        );
+        if mat == Materialization::Ephemeral {
+            bb_ephemeral_set.insert(plan.model_name.clone());
+            let target = &target_assignments[&plan.model_name];
+            bb_ephemeral_by_target
+                .entry(target.clone())
+                .or_default()
+                .push((plan.model_name.clone(), model.content.clone()));
+        }
+    }
+    let mut bb_resolvers: HashMap<String, smelt_cli::EphemeralResolver> = HashMap::new();
+    for (target_name, models) in &bb_ephemeral_by_target {
+        let compiler = compilers.get(target_name);
+        let schema = &registry.target_config(target_name).schema;
+        bb_resolvers.insert(
+            target_name.clone(),
+            compiler.build_ephemeral_resolver(models, schema),
+        );
+    }
+
     println!("\n{}", "=".repeat(60));
     println!("Executing backbuild...");
     println!("{}", "=".repeat(60));
@@ -1374,16 +1486,24 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
     let mut total_results = Vec::new();
 
     for plan in &plans {
+        // Skip ephemeral models
+        if bb_ephemeral_set.contains(&plan.model_name) {
+            println!("\n  {} (ephemeral — inlined as CTE)", plan.model_name);
+            continue;
+        }
+
         let model = graph.get_model(&plan.model_name)?;
         let model_target = &target_assignments[&plan.model_name];
         let backend = registry.get(model_target);
         let compiler = compilers.get(model_target);
         let schema = &registry.target_config(model_target).schema;
+        let empty_resolver = smelt_cli::EphemeralResolver::empty();
+        let resolver = bb_resolvers.get(model_target).unwrap_or(&empty_resolver);
 
         if !plan.is_incremental {
             println!("\n▶ {} (full refresh)", plan.model_name);
             let compiled = compiler
-                .compile(model, schema)
+                .compile_with_ephemerals(model, schema, resolver)
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
 
             let result = executor::execute_model(backend, &compiled, schema, args.show_results)
@@ -1449,7 +1569,7 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .with_context(|| format!("Failed to transform SQL for model: {}", plan.model_name))?;
 
             let compiled = compiler
-                .compile_with_sql(model, schema, &transformed_sql)
+                .compile_with_sql_and_ephemerals(model, schema, &transformed_sql, resolver)
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
 
             if args.verbose {

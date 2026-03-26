@@ -133,7 +133,14 @@ impl SqlCompiler {
 
         let col_names: Vec<String> = items
             .iter()
-            .map(|item| item.alias().unwrap_or_else(|| "?".to_string()))
+            .map(|item| {
+                item.alias().unwrap_or_else(|| {
+                    // Fallback: infer name from expression (e.g. bare column ref "user_id")
+                    item.expression()
+                        .and_then(|e| e.infer_name())
+                        .unwrap_or_else(|| "?".to_string())
+                })
+            })
             .collect();
         let col_name_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
         let col_type_refs: Vec<DataType> =
@@ -171,6 +178,66 @@ impl SqlCompiler {
             materialization,
         })
     }
+
+    /// Build an `EphemeralResolver` using this compiler's dialect/capabilities.
+    pub fn build_ephemeral_resolver(
+        &self,
+        ephemeral_models: &[(String, String)],
+        schema: &str,
+    ) -> EphemeralResolver {
+        EphemeralResolver::new(ephemeral_models, &self.dialect, &self.capabilities, schema)
+    }
+
+    /// Like `compile_with_sql`, but also inlines referenced ephemeral models as CTEs.
+    pub fn compile_with_sql_and_ephemerals(
+        &self,
+        model: &ModelFile,
+        schema: &str,
+        sql: &str,
+        resolver: &EphemeralResolver,
+    ) -> Result<CompiledModel> {
+        let ephemeral_refs: HashSet<&str> = resolver
+            .ephemeral_names
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        let parse = smelt_parser::parse(sql);
+        let ctx = PrintContext {
+            dialect: &self.dialect,
+            capabilities: &self.capabilities,
+            schema,
+            ephemeral_models: ephemeral_refs,
+        };
+        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.apply_type_casts(&compiled_sql);
+
+        // Collect which ephemeral models this model references
+        let referenced: Vec<&str> = model
+            .refs
+            .iter()
+            .filter(|r| resolver.ephemeral_names.contains(&r.model_name))
+            .map(|r| r.model_name.as_str())
+            .collect();
+
+        let final_sql = if referenced.is_empty() {
+            compiled_sql
+        } else {
+            let cte_list = resolver.get_cte_list(&referenced);
+            prepend_ephemeral_ctes(&compiled_sql, &cte_list)
+        };
+
+        let materialization = self.config.get_materialization_with_metadata(
+            &model.name,
+            model.metadata.as_ref().map(|b| b.as_ref()),
+        );
+
+        Ok(CompiledModel {
+            name: model.name.clone(),
+            sql: final_sql,
+            materialization,
+        })
+    }
 }
 
 /// Resolved ephemeral models ready for CTE inlining.
@@ -191,6 +258,15 @@ pub struct EphemeralResolver {
 }
 
 impl EphemeralResolver {
+    /// Create an empty resolver (no ephemeral models).
+    pub fn empty() -> Self {
+        Self {
+            order: Vec::new(),
+            cte_fragments: HashMap::new(),
+            ephemeral_names: HashSet::new(),
+        }
+    }
+
     /// Build an EphemeralResolver from a set of ephemeral models.
     ///
     /// Models must be provided in topological order (dependencies first).

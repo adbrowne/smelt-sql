@@ -349,6 +349,28 @@ impl DependencyGraph {
         self.collect_upstream(model_name, &mut result);
         result
     }
+
+    /// Warn if any ephemeral model has no downstream consumers.
+    pub fn warn_unused_ephemerals(&self, config: &Config) {
+        use smelt_core::Materialization;
+
+        let dependents = self.build_dependents_map();
+        for (name, model) in &self.models {
+            let mat = config.get_materialization_with_metadata(
+                name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
+            );
+            if mat == Materialization::Ephemeral {
+                let has_consumers = dependents.get(name).is_some_and(|d| !d.is_empty());
+                if !has_consumers {
+                    eprintln!(
+                        "Warning: Ephemeral model '{}' has no downstream consumers and will never be inlined.",
+                        name
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
