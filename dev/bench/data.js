@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774518690201,
+  "lastUpdate": 1774518691355,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6983,6 +6983,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.155576888209016,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "8efaff8240a6abc9c3e774766fe18664eec924be",
+          "message": "Add physical graph section to smelt explain output (Phase D)\n\nsmelt explain now runs the planner and shows the physical execution plan\nalongside the logical graph — strategies, ephemerals, and planner\noptimizations are visible without connecting to any database.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T20:49:25+11:00",
+          "tree_id": "ceeb10ab3ed6b4b878117299c87f6eb27489ed90",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/8efaff8240a6abc9c3e774766fe18664eec924be"
+        },
+        "date": 1774518691061,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.323430729929783,
             "unit": "MB/s"
           }
         ]
