@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774519166309,
+  "lastUpdate": 1774519167391,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7106,6 +7106,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.323430729929783,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "296e5afeda5721c8ab3d91e760f4e38fd179b21b",
+          "message": "Remove smelt-cli DependencyGraph, use PhysicalGraph in backbuild\n\n- Delete crates/smelt-cli/src/graph.rs (duplicate of smelt-core's)\n- Migrate python.rs tests and integration tests to LogicalGraph\n- backbuild() now uses PhysicalGraph for ephemeral resolver ownership\n  instead of manually constructing resolvers\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T20:57:53+11:00",
+          "tree_id": "e5e084d5277fe45c2fb635acc11ad82c6a399dff",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/296e5afeda5721c8ab3d91e760f4e38fd179b21b"
+        },
+        "date": 1774519167083,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.76809544675935,
             "unit": "MB/s"
           }
         ]
