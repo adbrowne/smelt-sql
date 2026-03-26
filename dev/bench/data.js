@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774474077387,
+  "lastUpdate": 1774510515043,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5075,6 +5075,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.24477,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "4812ff3c405ebb50ad7a2257ca6ab45c650272af",
+          "message": "Wire ephemeral models into CLI execution loop with example\n\n- Build EphemeralResolver per target and use compile_with_ephemerals for\n  all model compilation in run() and backbuild() loops\n- Skip ephemeral models during execution (print info, continue)\n- Validate materialization configs at startup (ephemeral+incremental etc)\n- Warn on unused ephemeral models with no downstream consumers\n- Error when --select directly targets an ephemeral model\n- Add compile_with_sql_and_ephemerals for incremental code path\n- Fix type-cast column name inference to use Expr::infer_name() instead\n  of \"?\" placeholder for bare column references\n- Add examples/ephemeral_demo/ demonstrating CTE inlining\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T18:32:57+11:00",
+          "tree_id": "3c494311abe186f68ca089a72ab66e65203e56eb",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4812ff3c405ebb50ad7a2257ca6ab45c650272af"
+        },
+        "date": 1774510514270,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 38.723645,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.331218,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.707854,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.369832,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004558,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.605227000000006,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.02704,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013535,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011281,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.450325,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.609224,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.98881,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.661609999999996,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.997447,
             "unit": "ms"
           }
         ]
