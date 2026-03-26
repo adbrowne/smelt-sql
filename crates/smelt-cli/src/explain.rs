@@ -1,6 +1,5 @@
-use crate::config::Config;
 use crate::discovery::ModelFile;
-use crate::graph::DependencyGraph;
+use crate::logical_graph::LogicalGraph;
 use anyhow::Result;
 use serde::Serialize;
 use smelt_core::{Granularity, IncrementalConfig, Materialization};
@@ -38,20 +37,17 @@ pub struct ExplainIncremental {
     pub batch_safety: String,
 }
 
-/// Build the explain output from the dependency graph and config.
-pub fn build_explain_output(graph: &DependencyGraph, config: &Config) -> Result<ExplainOutput> {
+/// Build the explain output from the logical graph (config already resolved on nodes).
+pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
     let mut models = BTreeMap::new();
-    for (name, model_file) in graph.models() {
+    for node in graph.iter_nodes() {
+        let model_file = &node.model_file;
         let metadata = model_file.metadata.as_deref();
 
-        let materialization = config.get_materialization_with_metadata(name, metadata);
-
-        let incremental_config = config.get_incremental_with_metadata(name, metadata);
-
-        let incremental = incremental_config.map(|inc| {
-            let batch_safety = compute_batch_safety_label(name, model_file, inc);
+        let incremental = node.incremental.as_ref().map(|inc| {
+            let batch_safety = compute_batch_safety_label(&node.name, model_file, inc);
             ExplainIncremental {
                 granularity: inc.granularity.clone(),
                 partition_column: inc.partition_column.clone(),
@@ -61,19 +57,16 @@ pub fn build_explain_output(graph: &DependencyGraph, config: &Config) -> Result<
             }
         });
 
-        let tags = config.get_tags(name, metadata);
         let owner = metadata.and_then(|m| m.owner.clone());
-
-        // Get dependencies, filtering out external sources
-        let dependencies = graph.get_upstream(name);
+        let dependencies = graph.get_upstream(&node.name);
 
         models.insert(
-            name.clone(),
+            node.name.clone(),
             ExplainModel {
                 dependencies,
-                materialization,
+                materialization: node.materialization.clone(),
                 incremental,
-                tags,
+                tags: node.tags.clone(),
                 owner,
             },
         );
@@ -117,12 +110,13 @@ fn compute_batch_safety_label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModelConfig, Target};
+    use crate::config::{Config, ModelConfig, Target};
+    use crate::discovery::ModelKind;
     use rowan::TextRange;
     use smelt_core::RefInfo;
     use std::collections::HashMap;
 
-    fn make_model(name: &str, deps: Vec<&str>, content: &str) -> ModelFile {
+    fn make_model(name: &str, deps: Vec<&str>, content: &str) -> crate::discovery::ModelFile {
         let refs = deps
             .into_iter()
             .map(|dep| RefInfo {
@@ -133,7 +127,7 @@ mod tests {
             .collect();
 
         let path: std::path::PathBuf = format!("{}.sql", name).into();
-        ModelFile {
+        crate::discovery::ModelFile {
             name: name.to_string(),
             model_id: smelt_core::ModelId::from_path(path.clone()),
             path,
@@ -141,7 +135,7 @@ mod tests {
             refs,
             parse_errors: Vec::new(),
             metadata: None,
-            kind: crate::discovery::ModelKind::Sql,
+            kind: ModelKind::Sql,
         }
     }
 
@@ -185,10 +179,10 @@ mod tests {
                 "SELECT date, SUM(amount) FROM smelt.ref('orders') GROUP BY date",
             ),
         ];
-        let graph = DependencyGraph::build(models, None).unwrap();
         let config = make_config(vec![]);
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph, &config).unwrap();
+        let output = build_explain_output(&graph).unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -216,7 +210,6 @@ mod tests {
                 "SELECT date, SUM(amount) FROM smelt.ref('orders') GROUP BY date",
             ),
         ];
-        let graph = DependencyGraph::build(models, None).unwrap();
         let config = make_config(vec![(
             "daily_revenue",
             ModelConfig {
@@ -233,8 +226,9 @@ mod tests {
                 target: None,
             },
         )]);
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph, &config).unwrap();
+        let output = build_explain_output(&graph).unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -249,10 +243,10 @@ mod tests {
     #[test]
     fn test_explain_json_serialization() {
         let models = vec![make_model("a", vec![], "SELECT 1")];
-        let graph = DependencyGraph::build(models, None).unwrap();
         let config = make_config(vec![]);
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph, &config).unwrap();
+        let output = build_explain_output(&graph).unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
@@ -271,10 +265,10 @@ mod tests {
         }));
 
         let models = vec![model];
-        let graph = DependencyGraph::build(models, None).unwrap();
         let config = make_config(vec![]);
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
 
-        let output = build_explain_output(&graph, &config).unwrap();
+        let output = build_explain_output(&graph).unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")

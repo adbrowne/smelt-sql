@@ -185,12 +185,14 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 
 ## Implementation Phases
 
-### Phase A: Consolidate graph types
-1. Merge smelt-cli's `DependencyGraph` extensions (`warn_unused_ephemerals()`, `ModelKind`, etc.) into smelt-core's `DependencyGraph`
-2. Rename `DependencyGraph` to `LogicalGraph`
-3. Add `LogicalNode` with eagerly-resolved config cascade (absorb the resolution logic currently scattered through `main.rs`)
-4. Update all consumers (cli, planner) to use the unified type
-5. Remove `smelt-cli/src/graph.rs` duplicate
+### Phase A: Consolidate graph types ✅ (March 26, 2026)
+1. ✅ Added missing methods (`models()`, `get_upstream()`, `all_upstream()`, `warn_unused_ephemerals()`) to smelt-core's `DependencyGraph`
+2. ✅ Created `LogicalGraph` and `LogicalNode` in `smelt-cli/src/logical_graph.rs` (lives in smelt-cli due to `ModelFile`/`ModelKind` type difference between smelt-core and smelt-cli)
+3. ✅ `LogicalNode` eagerly resolves config cascade: materialization, target, incremental, tags
+4. ✅ Migrated `run()`, `backbuild()`, `explain()` in main.rs to use `LogicalGraph`
+5. ✅ Migrated `backfill.rs` and `explain.rs` -- dropped `Config` param from `compute_backbuild_plans`, `compute_range_run_plans`, `build_explain_output`
+6. ✅ `select_models()`, `exclude_models()`, `warn_unused_ephemerals()`, `validate_cross_backend_refs()` no longer require `Config` param
+7. ⏸️ Old `smelt-cli/src/graph.rs` kept for now (still used by `python.rs` tests); smelt-core `DependencyGraph` kept for smelt-ui
 
 ### Phase B: Introduce PhysicalGraph
 1. Create `smelt-core/src/physical_graph.rs` with types above

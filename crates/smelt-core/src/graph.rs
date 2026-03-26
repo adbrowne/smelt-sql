@@ -27,7 +27,7 @@ pub struct DependencyGraph {
 impl DependencyGraph {
     pub fn build(models: Vec<ModelFile>, sources: Option<&SourcesConfig>) -> Result<Self> {
         let mut dependencies = HashMap::new();
-        let mut models_map = HashMap::new();
+        let mut models_map: HashMap<String, ModelFile> = HashMap::new();
 
         // Build source set (schema.table format)
         let mut source_set = HashSet::new();
@@ -43,6 +43,14 @@ impl DependencyGraph {
         for model in models {
             let deps: Vec<String> = model.refs.iter().map(|r| r.model_name.clone()).collect();
 
+            if let Some(existing) = models_map.get(&model.name) {
+                eprintln!(
+                    "Warning: Duplicate model name '{}'. Model at {} overwrites model at {}.",
+                    model.name,
+                    model.path.display(),
+                    existing.path.display()
+                );
+            }
             dependencies.insert(model.name.clone(), deps);
             models_map.insert(model.name.clone(), model);
         }
@@ -334,6 +342,50 @@ impl DependencyGraph {
 
     pub fn iter_sources(&self) -> impl Iterator<Item = &str> {
         self.sources.iter().map(|s| s.as_str())
+    }
+
+    pub fn models(&self) -> &HashMap<String, ModelFile> {
+        &self.models
+    }
+
+    /// Get the upstream dependencies for a model (model names it references).
+    pub fn get_upstream(&self, model_name: &str) -> Vec<String> {
+        self.dependencies
+            .get(model_name)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|dep| self.models.contains_key(dep))
+            .collect()
+    }
+
+    /// Collect all upstream dependencies recursively (public wrapper).
+    pub fn all_upstream(&self, model_name: &str) -> HashSet<String> {
+        let mut result = HashSet::new();
+        self.collect_upstream(model_name, &mut result);
+        result
+    }
+
+    /// Warn if any ephemeral model has no downstream consumers.
+    pub fn warn_unused_ephemerals(&self, config: &Config) {
+        use crate::config::Materialization;
+
+        let dependents = self.build_dependents_map();
+        for (name, model) in &self.models {
+            let mat = config.get_materialization_with_metadata(
+                name,
+                model.metadata.as_ref().map(|b| b.as_ref()),
+            );
+            if mat == Materialization::Ephemeral {
+                let has_consumers = dependents.get(name).is_some_and(|d| !d.is_empty());
+                if !has_consumers {
+                    eprintln!(
+                        "Warning: Ephemeral model '{}' has no downstream consumers and will never be inlined.",
+                        name
+                    );
+                }
+            }
+        }
     }
 }
 

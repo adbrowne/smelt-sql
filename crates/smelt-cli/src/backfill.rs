@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};
 use smelt_core::{Granularity, IncrementalConfig};
-use smelt_planner::{analyze_batch_safety, BatchSafety, Frontmatter, ModelInfo};
+use smelt_planner::{analyze_batch_safety, BatchSafety, ModelInfo};
 
-use crate::graph::DependencyGraph;
+use crate::logical_graph::LogicalGraph;
 use crate::temporal::compute_incremental_windows;
 use crate::transformer::TimeRange;
 
@@ -55,8 +55,7 @@ pub struct BackfillOptions {
 /// Each model's batch strategy is determined by its batch safety analysis.
 pub fn compute_range_run_plans(
     execution_order: &[String],
-    graph: &DependencyGraph,
-    config: &crate::config::Config,
+    graph: &LogicalGraph,
     sources: Option<&smelt_core::SourcesConfig>,
     requested_range: &TimeRange,
     options: &BackfillOptions,
@@ -64,13 +63,10 @@ pub fn compute_range_run_plans(
     let mut plans = Vec::new();
 
     for model_name in execution_order {
-        let model = graph.get_model(model_name)?;
-        let frontmatter = Frontmatter::parse(&model.content);
+        let node = graph.get_node(model_name)?;
+        let model = &node.model_file;
 
-        let inc_config = config
-            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()))
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let inc_config = node.incremental.clone();
 
         let refs = graph.get_upstream(model_name);
         let plan = match inc_config {
@@ -107,8 +103,7 @@ pub fn compute_range_run_plans(
 pub fn compute_backbuild_plans(
     target_model: &str,
     execution_order: &[String],
-    graph: &DependencyGraph,
-    config: &crate::config::Config,
+    graph: &LogicalGraph,
     sources: Option<&smelt_core::SourcesConfig>,
     requested_range: &TimeRange,
     options: &BackfillOptions,
@@ -127,13 +122,10 @@ pub fn compute_backbuild_plans(
             None => continue,
         };
 
-        let model = graph.get_model(model_name)?;
-        let frontmatter = Frontmatter::parse(&model.content);
+        let node = graph.get_node(model_name)?;
+        let model = &node.model_file;
 
-        let inc_config = config
-            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()))
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let inc_config = node.incremental.clone();
 
         if let Some(ref inc) = inc_config {
             // Compute the effective window for this model
@@ -176,13 +168,10 @@ pub fn compute_backbuild_plans(
             None => continue,
         };
 
-        let model = graph.get_model(model_name)?;
-        let frontmatter = Frontmatter::parse(&model.content);
+        let node = graph.get_node(model_name)?;
+        let model = &node.model_file;
 
-        let inc_config = config
-            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()))
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+        let inc_config = node.incremental.clone();
 
         let refs = graph.get_upstream(model_name);
         let plan = match inc_config {

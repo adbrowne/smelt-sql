@@ -5,13 +5,13 @@ use clap::{Parser, Subcommand};
 use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 #[cfg(feature = "duckdb")]
 use smelt_backend_duckdb::DuckDbBackend;
+use smelt_cli::LogicalGraph;
 use smelt_cli::{
     build_explain_output, compute_backbuild_plans, compute_batches_for_model,
     compute_incremental_windows, discover_python_models, executor, find_project_root,
     format_plan_summary, init_db, inject_time_filter, migration, parse_selector,
     resolve_refs_in_sql, seed, BackendRegistry, BackendType, BackfillBatch, BackfillOptions,
-    CompilerRegistry, Config, DependencyGraph, Materialization, ModelDiscovery, SourcesConfig,
-    TimeRange,
+    CompilerRegistry, Config, Materialization, ModelDiscovery, SourcesConfig, TimeRange,
 };
 use smelt_core::{Granularity, IncrementalConfig, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
@@ -446,15 +446,15 @@ async fn run(args: RunArgs) -> Result<()> {
         }
     }
 
-    // 4. Build dependency graph
-    let graph = DependencyGraph::build(models, sources.as_ref())
-        .with_context(|| "Failed to build dependency graph")?;
+    // 4. Build logical graph (eagerly resolves config per model)
+    let graph = LogicalGraph::build(models, sources.as_ref(), &config, &args.target)
+        .with_context(|| "Failed to build logical graph")?;
 
     graph
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
-    graph.warn_unused_ephemerals(&config);
+    graph.warn_unused_ephemerals();
 
     // 5. Determine execution order (with optional selector filtering)
     let execution_order = if args.select.is_empty() && args.exclude.is_empty() {
@@ -475,12 +475,8 @@ async fn run(args: RunArgs) -> Result<()> {
             for selector in &selectors {
                 if let smelt_cli::SelectionMethod::ModelName(name) = &selector.method {
                     if !selector.include_upstream && !selector.include_downstream {
-                        if let Ok(model) = graph.get_model(name) {
-                            let mat = config.get_materialization_with_metadata(
-                                name,
-                                model.metadata.as_ref().map(|b| b.as_ref()),
-                            );
-                            if mat == Materialization::Ephemeral {
+                        if let Ok(node) = graph.get_node(name) {
+                            if node.materialization == Materialization::Ephemeral {
                                 return Err(anyhow::anyhow!(
                                     "Cannot run ephemeral model '{}' directly — ephemeral models are inlined as CTEs into downstream models.",
                                     name
@@ -492,7 +488,7 @@ async fn run(args: RunArgs) -> Result<()> {
             }
 
             graph
-                .select_models(&selectors, &config)
+                .select_models(&selectors)
                 .with_context(|| "Failed to select models")?
         };
 
@@ -506,7 +502,7 @@ async fn run(args: RunArgs) -> Result<()> {
                 .collect::<Result<_, _>>()?;
 
             selected = graph
-                .exclude_models(&selected, &excludes, &config)
+                .exclude_models(&selected, &excludes)
                 .with_context(|| "Failed to apply exclude selectors")?;
         }
 
@@ -536,20 +532,19 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 6. Compute per-model target assignments and create backends
-    let mut target_assignments: HashMap<String, String> = HashMap::new();
-    for model_name in &execution_order {
-        let model = graph.get_model(model_name)?;
-        let target = config.get_target(
-            model_name,
-            model.metadata.as_ref().map(|b| b.as_ref()),
-            &args.target,
-        );
-        target_assignments.insert(model_name.clone(), target);
-    }
+    // Target assignments are eagerly resolved on LogicalNode, but we still need
+    // the HashMap for BackendRegistry and the execution loop.
+    let target_assignments: HashMap<String, String> = execution_order
+        .iter()
+        .map(|name| {
+            let node = graph.get_node(name).unwrap();
+            (name.clone(), node.target.clone())
+        })
+        .collect();
 
     // Validate no cross-backend references
     graph
-        .validate_cross_backend_refs(&target_assignments)
+        .validate_cross_backend_refs()
         .with_context(|| "Cross-backend reference validation failed")?;
 
     let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
@@ -742,18 +737,13 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut ephemeral_set: HashSet<String> = HashSet::new();
     for model_name in &execution_order {
-        let model = graph.get_model(model_name)?;
-        let mat = config.get_materialization_with_metadata(
-            model_name,
-            model.metadata.as_ref().map(|b| b.as_ref()),
-        );
-        if mat == Materialization::Ephemeral {
+        let node = graph.get_node(model_name)?;
+        if node.materialization == Materialization::Ephemeral {
             ephemeral_set.insert(model_name.clone());
-            let target = &target_assignments[model_name];
             ephemeral_models_by_target
-                .entry(target.clone())
+                .entry(node.target.clone())
                 .or_default()
-                .push((model_name.clone(), model.content.clone()));
+                .push((model_name.clone(), node.model_file.content.clone()));
         }
     }
 
@@ -829,8 +819,10 @@ async fn run(args: RunArgs) -> Result<()> {
                 time_range: time_range.as_ref().unwrap().clone(),
                 plan_steps,
             }
-        } else if let Some(inc) = config
-            .get_incremental_with_metadata(model_name, model.metadata.as_ref().map(|b| b.as_ref()))
+        } else if let Some(inc) = graph
+            .get_node(model_name)?
+            .incremental
+            .as_ref()
             .filter(|_| time_range.is_some())
         {
             // Config-based incremental (smelt.yml or frontmatter)
@@ -1329,9 +1321,9 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
         ));
     }
 
-    // 4. Build dependency graph
-    let graph = DependencyGraph::build(models, sources.as_ref())
-        .with_context(|| "Failed to build dependency graph")?;
+    // 4. Build logical graph
+    let graph = LogicalGraph::build(models, sources.as_ref(), &config, &args.target)
+        .with_context(|| "Failed to build logical graph")?;
 
     graph
         .validate()
@@ -1348,7 +1340,7 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
     }];
 
     let selected = graph
-        .select_models(&selectors, &config)
+        .select_models(&selectors)
         .with_context(|| "Failed to select models")?;
 
     if selected.is_empty() {
@@ -1398,7 +1390,6 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
         target_model,
         &execution_order,
         &graph,
-        &config,
         sources.as_ref(),
         &requested_range,
         &backfill_options,
@@ -1415,19 +1406,16 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
     }
 
     // 9. Compute target assignments and create backends
-    let mut target_assignments: HashMap<String, String> = HashMap::new();
-    for model_name in &execution_order {
-        let model = graph.get_model(model_name)?;
-        let target = config.get_target(
-            model_name,
-            model.metadata.as_ref().map(|b| b.as_ref()),
-            &args.target,
-        );
-        target_assignments.insert(model_name.clone(), target);
-    }
+    let target_assignments: HashMap<String, String> = execution_order
+        .iter()
+        .map(|name| {
+            let node = graph.get_node(name).unwrap();
+            (name.clone(), node.target.clone())
+        })
+        .collect();
 
     graph
-        .validate_cross_backend_refs(&target_assignments)
+        .validate_cross_backend_refs()
         .with_context(|| "Cross-backend reference validation failed")?;
 
     let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
@@ -1455,18 +1443,13 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
     let mut bb_ephemeral_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut bb_ephemeral_set: HashSet<String> = HashSet::new();
     for plan in &plans {
-        let model = graph.get_model(&plan.model_name)?;
-        let mat = config.get_materialization_with_metadata(
-            &plan.model_name,
-            model.metadata.as_ref().map(|b| b.as_ref()),
-        );
-        if mat == Materialization::Ephemeral {
+        let node = graph.get_node(&plan.model_name)?;
+        if node.materialization == Materialization::Ephemeral {
             bb_ephemeral_set.insert(plan.model_name.clone());
-            let target = &target_assignments[&plan.model_name];
             bb_ephemeral_by_target
-                .entry(target.clone())
+                .entry(node.target.clone())
                 .or_default()
-                .push((plan.model_name.clone(), model.content.clone()));
+                .push((plan.model_name.clone(), node.model_file.content.clone()));
         }
     }
     let mut bb_resolvers: HashMap<String, smelt_cli::EphemeralResolver> = HashMap::new();
@@ -2167,14 +2150,21 @@ async fn explain(args: ExplainArgs) -> Result<()> {
         models.extend(python_models);
     }
 
-    let graph = DependencyGraph::build(models, sources.as_ref())
-        .with_context(|| "Failed to build dependency graph")?;
+    // Explain doesn't execute, so use the first target as default
+    let default_target = config
+        .targets
+        .keys()
+        .next()
+        .map(|s| s.as_str())
+        .unwrap_or("dev");
+    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target)
+        .with_context(|| "Failed to build logical graph")?;
 
     graph
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
-    let output = build_explain_output(&graph, &config)?;
+    let output = build_explain_output(&graph)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
