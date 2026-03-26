@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774519576747,
+  "lastUpdate": 1774519578422,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7229,6 +7229,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.76809544675935,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "132425beac5a4f387d9d6c678d2e52e822946048",
+          "message": "Update graph stages plan: all deferred items resolved\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T21:04:04+11:00",
+          "tree_id": "a3c218b5195498542168b4f1b44182f13cd8b8b8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/132425beac5a4f387d9d6c678d2e52e822946048"
+        },
+        "date": 1774519578019,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.758207997323982,
             "unit": "MB/s"
           }
         ]
