@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774511609212,
+  "lastUpdate": 1774511610719,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6860,6 +6860,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.888433264176953,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3a7c82f5fd6f4c668143120c4f76b76335c42872",
+          "message": "Update graph stages plan with landed ephemeral support\n\nRefresh the logical-to-physical graph plan now that ephemeral model\nsupport (Materialization::Ephemeral, EphemeralResolver, CTE inlining)\nhas landed on main. Key updates: reference existing EphemeralResolver\nfor reuse, add CreateMaterializedView strategy, note which validations\nalready exist, and detail the graph consolidation (delete smelt-cli's\nduplicate DependencyGraph).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T18:51:57+11:00",
+          "tree_id": "e1e9ef52ba4e6dec28f7d687e51b8d3f3c26b664",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3a7c82f5fd6f4c668143120c4f76b76335c42872"
+        },
+        "date": 1774511610403,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.155576888209016,
             "unit": "MB/s"
           }
         ]
