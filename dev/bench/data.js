@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774527149980,
+  "lastUpdate": 1774527151817,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7721,6 +7721,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.490149137283876,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "bb11359241e5ab9712b974f3948451726ee27cfa",
+          "message": "Add reusable SQL patterns as unsolved roadmap problem\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T23:10:37+11:00",
+          "tree_id": "dc1c3b30f18fc1148ab271f72759a9e57adade8c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bb11359241e5ab9712b974f3948451726ee27cfa"
+        },
+        "date": 1774527151134,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.700255402994465,
             "unit": "MB/s"
           }
         ]
