@@ -194,12 +194,14 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 6. ✅ `select_models()`, `exclude_models()`, `warn_unused_ephemerals()`, `validate_cross_backend_refs()` no longer require `Config` param
 7. ⏸️ Old `smelt-cli/src/graph.rs` kept for now (still used by `python.rs` tests); smelt-core `DependencyGraph` kept for smelt-ui
 
-### Phase B: Introduce PhysicalGraph
-1. Create `smelt-core/src/physical_graph.rs` with types above
-2. Create `PhysicalGraphBuilder` -- initially 1:1 mapping (no transformations)
-3. Move ephemeral inlining from `main.rs` ad-hoc logic into `PhysicalGraphBuilder` (reuse `EphemeralResolver` from `compiler.rs`)
-4. Wire executor to consume `PhysicalGraph` instead of `LogicalGraph`
-5. Existing behavior preserved, just going through the new layer
+### Phase B: Introduce PhysicalGraph ✅ (March 26, 2026)
+1. ✅ Created `smelt-cli/src/physical_graph.rs` with `PhysicalStrategy`, `PhysicalNode`, `PhysicalGraph`, `PhysicalGraphBuilder` (lives in smelt-cli due to `ModelFile`/`CompilerRegistry`/`EphemeralResolver` dependencies)
+2. ✅ `PhysicalGraphBuilder::build()` absorbs three blocks from `run()`: transformation parsing, ephemeral resolver construction, per-model strategy resolution
+3. ✅ `PhysicalGraph` owns `EphemeralResolver`s per target -- ephemerals filtered out of execution order
+4. ✅ `run()` execution loop iterates `physical_graph.iter_in_order()` instead of raw execution_order
+5. ✅ Deleted `ModelExecution` enum -- replaced by `PhysicalStrategy`
+6. ✅ 8 unit tests covering strategy resolution, ephemeral filtering, resolver construction
+7. ⏸️ `backbuild()` not yet migrated -- uses its own execution pattern, deferred to follow-up
 
 ### Phase C: Wire up planner transformations
 1. Add new `Transformation` variants (CreateNode, RemoveNode, RedirectRef, SetMaterialization)

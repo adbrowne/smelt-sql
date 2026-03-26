@@ -83,6 +83,9 @@ This document summarizes where each area of smelt stands and what's next. For de
 - `smelt type` — function type signatures
 - Smart batching based on batch safety analysis
 - `smelt-state` crate for run manifests + interval tracking (`.smelt/` directory)
+- Two-stage graph architecture: `LogicalGraph` (user intent) → `PhysicalGraph` (execution plan)
+  - `LogicalGraph` with eagerly-resolved config per node (March 26, 2026)
+  - `PhysicalGraph` with strategy resolution, ephemeral resolver ownership (March 26, 2026)
 
 **Next steps**:
 - `smelt diff` — show pending schema changes

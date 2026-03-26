@@ -9,13 +9,14 @@ use smelt_cli::LogicalGraph;
 use smelt_cli::{
     build_explain_output, compute_backbuild_plans, compute_batches_for_model,
     compute_incremental_windows, discover_python_models, executor, find_project_root,
-    format_plan_summary, init_db, inject_time_filter, migration, parse_selector,
-    resolve_refs_in_sql, seed, BackendRegistry, BackendType, BackfillBatch, BackfillOptions,
-    CompilerRegistry, Config, Materialization, ModelDiscovery, SourcesConfig, TimeRange,
+    format_plan_summary, init_db, inject_time_filter, migration, parse_selector, seed,
+    BackendRegistry, BackendType, BackfillBatch, BackfillOptions, CompilerRegistry, Config,
+    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
+    TimeRange,
 };
-use smelt_core::{Granularity, IncrementalConfig, Weekday};
+use smelt_core::{Granularity, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
-use smelt_planner::{ExecutionStep, Frontmatter, ModelGraph, ModelInfo, Planner, Transformation};
+use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
 use smelt_state::file_store::FileStore;
 use smelt_state::history::HistoryQuery;
 use smelt_state::intervals::compute_model_hash;
@@ -531,23 +532,17 @@ async fn run(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 6. Compute per-model target assignments and create backends
-    // Target assignments are eagerly resolved on LogicalNode, but we still need
-    // the HashMap for BackendRegistry and the execution loop.
-    let target_assignments: HashMap<String, String> = execution_order
-        .iter()
-        .map(|name| {
-            let node = graph.get_node(name).unwrap();
-            (name.clone(), node.target.clone())
-        })
-        .collect();
-
+    // 6. Create backends for needed targets
     // Validate no cross-backend references
     graph
         .validate_cross_backend_refs()
         .with_context(|| "Cross-backend reference validation failed")?;
 
-    let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
+    let needed_targets: HashSet<String> = execution_order
+        .iter()
+        .filter_map(|name| graph.get_node(name).ok())
+        .map(|node| node.target.clone())
+        .collect();
     let registry = BackendRegistry::new(
         &config.targets,
         &needed_targets,
@@ -667,180 +662,75 @@ async fn run(args: RunArgs) -> Result<()> {
         eprintln!("  Planner error: {}", err);
     }
 
-    // Build lookup maps for transformations
-    let mut plan_overrides: std::collections::HashMap<String, Vec<smelt_planner::ExecutionStep>> =
-        std::collections::HashMap::new();
-    let mut incremental_overrides: std::collections::HashMap<
-        String,
-        (String, String, Granularity),
-    > = std::collections::HashMap::new(); // model -> (event_time_column, partition_column, granularity)
+    // 10. Build physical graph (resolves strategies, ephemeral resolvers)
+    let target_schemas: HashMap<String, String> = needed_targets
+        .iter()
+        .map(|name| (name.clone(), registry.target_config(name).schema.clone()))
+        .collect();
 
-    for t in &transformations {
-        match t {
-            Transformation::ReplaceWithPlan { model, steps } => {
-                plan_overrides.insert(model.clone(), steps.clone());
-            }
-            Transformation::SetIncremental {
-                model,
-                event_time_column,
-                partition_column,
-                granularity,
-            } => {
-                incremental_overrides.insert(
-                    model.clone(),
-                    (
-                        event_time_column.clone(),
-                        partition_column.clone(),
-                        granularity.clone(),
-                    ),
-                );
-            }
-        }
-    }
+    let physical_graph = PhysicalGraphBuilder::new(
+        &graph,
+        &transformations,
+        time_range.clone(),
+        &compilers,
+        target_schemas,
+    )
+    .build()
+    .with_context(|| "Failed to build physical graph")?;
 
-    if !plan_overrides.is_empty() || !incremental_overrides.is_empty() {
+    // Print planner summary
+    let planner_summary = physical_graph.planner_summary();
+    if !planner_summary.is_empty() {
         println!("\nPlanner:");
-        for model in plan_overrides.keys() {
-            println!("  {} → cube split", model);
-        }
-        for (model, (_, partition_col, _)) in &incremental_overrides {
-            println!("  {} → incremental (partition: {})", model, partition_col);
+        for (model, desc) in &planner_summary {
+            println!("  {} → {}", model, desc);
         }
     }
 
-    // Mandatory time range check: if any model has SetIncremental and no time range provided
-    if !incremental_overrides.is_empty() && time_range.is_none() {
-        let inc_models: Vec<&String> = incremental_overrides.keys().collect();
-        return Err(anyhow::anyhow!(
-            "Incremental models selected for run ({}) but --event-time-start and --event-time-end not provided.\n\
-             These are required when running incremental models, similar to dbt's microbatch parameters.",
-            inc_models
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+    // Mandatory time range check: if any model has planner-detected incremental and no time range
+    if time_range.is_none() {
+        let inc_models: Vec<&str> = physical_graph
+            .iter_in_order()
+            .filter(|n| matches!(n.strategy, PhysicalStrategy::Incremental { .. }))
+            .map(|n| n.name.as_str())
+            .collect();
+        if !inc_models.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Incremental models selected for run ({}) but --event-time-start and --event-time-end not provided.\n\
+                 These are required when running incremental models, similar to dbt's microbatch parameters.",
+                inc_models.join(", ")
+            ));
+        }
     }
 
-    // 10. Compile and execute each model
+    // 11. Compile and execute each model
 
     // Initialize type inference DB for schema evolution
-    let all_models: Vec<_> = execution_order
-        .iter()
-        .filter_map(|name| graph.get_model(name).ok())
+    let all_models: Vec<_> = physical_graph
+        .iter_in_order()
+        .map(|node| &node.model_file)
         .cloned()
         .collect();
     let type_db = init_db(&project_dir, &all_models);
     let file_store = FileStore::new(&project_dir);
 
-    // Build ephemeral resolvers per target
-    let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut ephemeral_set: HashSet<String> = HashSet::new();
-    for model_name in &execution_order {
-        let node = graph.get_node(model_name)?;
-        if node.materialization == Materialization::Ephemeral {
-            ephemeral_set.insert(model_name.clone());
-            ephemeral_models_by_target
-                .entry(node.target.clone())
-                .or_default()
-                .push((model_name.clone(), node.model_file.content.clone()));
-        }
-    }
-
-    let mut ephemeral_resolvers: HashMap<String, smelt_cli::EphemeralResolver> = HashMap::new();
-    for (target_name, models) in &ephemeral_models_by_target {
-        let compiler = compilers.get(target_name);
-        let schema = &registry.target_config(target_name).schema;
-        ephemeral_resolvers.insert(
-            target_name.clone(),
-            compiler.build_ephemeral_resolver(models, schema),
-        );
-    }
-
     println!("\n{}", "=".repeat(60));
     println!("Executing models...");
     println!("{}", "=".repeat(60));
 
-    let mut results = Vec::new();
+    let mut results: Vec<(smelt_backend::ExecutionResult, PhysicalStrategy)> = Vec::new();
 
-    for model_name in &execution_order {
-        // Skip ephemeral models — they are inlined as CTEs into downstream models
-        if ephemeral_set.contains(model_name.as_str()) {
-            println!("\n  {} (ephemeral — inlined as CTE)", model_name);
-            continue;
-        }
-
-        let model = graph.get_model(model_name)?;
-        let model_target = &target_assignments[model_name];
-        let backend = registry.get(model_target);
-        let compiler = compilers.get(model_target);
-        let schema = &registry.target_config(model_target).schema;
-        let empty_resolver = smelt_cli::EphemeralResolver::empty();
-        let resolver = ephemeral_resolvers
-            .get(model_target)
-            .unwrap_or(&empty_resolver);
-
-        // Determine execution mode from optimizer overrides or config
-        let plan_steps = plan_overrides.get(model_name.as_str()).map(|steps| {
-            steps
-                .iter()
-                .map(|step| match step {
-                    ExecutionStep::CreateTemp { name, sql } => ExecutionStep::CreateTemp {
-                        name: name.clone(),
-                        sql: resolve_refs_in_sql(sql, schema),
-                    },
-                    ExecutionStep::AppendToTemp { name, sql } => ExecutionStep::AppendToTemp {
-                        name: name.clone(),
-                        sql: resolve_refs_in_sql(sql, schema),
-                    },
-                    ExecutionStep::FinalQuery { sql } => {
-                        ExecutionStep::FinalQuery { sql: sql.clone() }
-                    }
-                    ExecutionStep::DropTemp { name } => {
-                        ExecutionStep::DropTemp { name: name.clone() }
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-
-        let execution = if let Some((event_time_col, partition_col, granularity)) =
-            incremental_overrides.get(model_name.as_str())
-        {
-            // Planner detected incremental
-            ModelExecution::Incremental {
-                config: IncrementalConfig {
-                    enabled: true,
-                    event_time_column: event_time_col.clone(),
-                    partition_column: partition_col.clone(),
-                    granularity: granularity.clone(),
-                    unique_key: vec![],
-                    safety_overrides: Default::default(),
-                },
-                time_range: time_range.as_ref().unwrap().clone(),
-                plan_steps,
-            }
-        } else if let Some(inc) = graph
-            .get_node(model_name)?
-            .incremental
-            .as_ref()
-            .filter(|_| time_range.is_some())
-        {
-            // Config-based incremental (smelt.yml or frontmatter)
-            ModelExecution::Incremental {
-                config: inc.clone(),
-                time_range: time_range.as_ref().unwrap().clone(),
-                plan_steps,
-            }
-        } else if let Some(steps) = plan_steps {
-            // Cube split only (full refresh with plan)
-            ModelExecution::CubeSplit { steps }
-        } else {
-            ModelExecution::FullRefresh
-        };
+    for phys_node in physical_graph.iter_in_order() {
+        let model_name = &phys_node.name;
+        let model = &phys_node.model_file;
+        let backend = registry.get(&phys_node.target);
+        let compiler = compilers.get(&phys_node.target);
+        let schema = &registry.target_config(&phys_node.target).schema;
+        let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
 
         // Schema evolution check for incremental table models
         let mut force_full_refresh = false;
-        if let ModelExecution::Incremental { .. } = &execution {
+        if let PhysicalStrategy::Incremental { .. } = &phys_node.strategy {
             if let Ok(true) = backend.table_exists(schema, model_name).await {
                 let inferred_columns = infer_deployed_columns(&type_db, model);
                 if !inferred_columns.is_empty() {
@@ -890,15 +780,15 @@ async fn run(args: RunArgs) -> Result<()> {
             }
         }
 
-        // If schema evolution requires full refresh, override the execution mode
-        let execution = if force_full_refresh {
-            ModelExecution::FullRefresh
+        // If schema evolution requires full refresh, override the strategy
+        let effective_strategy = if force_full_refresh {
+            &PhysicalStrategy::FullRefresh
         } else {
-            execution
+            &phys_node.strategy
         };
 
-        let result = match &execution {
-            ModelExecution::Incremental {
+        let result = match effective_strategy {
+            PhysicalStrategy::Incremental {
                 config: inc_config,
                 time_range: range,
                 plan_steps: Some(steps),
@@ -958,7 +848,7 @@ async fn run(args: RunArgs) -> Result<()> {
                 .await
                 .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
-            ModelExecution::CubeSplit { steps } => {
+            PhysicalStrategy::CubeSplit { steps } => {
                 // Cube split only (full refresh)
                 println!("\n▶ Running model: {} (cube split)", model_name);
 
@@ -966,7 +856,7 @@ async fn run(args: RunArgs) -> Result<()> {
                     .await
                     .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
-            ModelExecution::Incremental {
+            PhysicalStrategy::Incremental {
                 config: inc_config,
                 time_range: range,
                 plan_steps: None,
@@ -1124,7 +1014,7 @@ async fn run(args: RunArgs) -> Result<()> {
 
                 last_result.unwrap()
             }
-            ModelExecution::FullRefresh => {
+            PhysicalStrategy::FullRefresh => {
                 if time_range.is_some() {
                     println!(
                         "\n▶ Running model: {} (full refresh - not configured for incremental)",
@@ -1185,7 +1075,7 @@ async fn run(args: RunArgs) -> Result<()> {
             }
         }
 
-        results.push((result, execution));
+        results.push((result, phys_node.strategy.clone()));
     }
 
     // 9. Save run manifest and update intervals
@@ -1199,17 +1089,18 @@ async fn run(args: RunArgs) -> Result<()> {
 
     let mut interval_store = file_store.load_intervals().unwrap_or_default();
 
-    for (result, execution) in &results {
-        let (strategy_name, tr, partitions, batch_safety_label) = match execution {
-            ModelExecution::Incremental {
+    for (result, strategy) in &results {
+        let (strategy_name, tr, partitions, batch_safety_label) = match strategy {
+            PhysicalStrategy::Incremental {
                 config: inc,
                 time_range: range,
                 ..
             } => {
-                let model_target = &target_assignments[&result.model_name];
-                let strategy = registry.get(model_target).resolve_strategy(inc);
+                let phys_node = physical_graph.get_node(&result.model_name);
+                let model_target = phys_node.map(|n| n.target.as_str()).unwrap_or(&args.target);
+                let backend_strategy = registry.get(model_target).resolve_strategy(inc);
                 (
-                    strategy_label(&strategy).to_string(),
+                    strategy_label(&backend_strategy).to_string(),
                     Some(TimeRangeRecord {
                         start: range.start.clone(),
                         end: range.end.clone(),
@@ -1219,8 +1110,8 @@ async fn run(args: RunArgs) -> Result<()> {
                     Some("incremental".to_string()),
                 )
             }
-            ModelExecution::CubeSplit { .. } => ("cube_split".to_string(), None, vec![], None),
-            ModelExecution::FullRefresh => ("full_refresh".to_string(), None, vec![], None),
+            PhysicalStrategy::CubeSplit { .. } => ("cube_split".to_string(), None, vec![], None),
+            PhysicalStrategy::FullRefresh => ("full_refresh".to_string(), None, vec![], None),
         };
 
         manifest.models.insert(
@@ -1605,19 +1496,6 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
     println!("  Total time: {:?}", total_duration);
 
     Ok(())
-}
-
-/// Describes how a model should be executed.
-enum ModelExecution {
-    FullRefresh,
-    CubeSplit {
-        steps: Vec<ExecutionStep>,
-    },
-    Incremental {
-        config: IncrementalConfig,
-        time_range: TimeRange,
-        plan_steps: Option<Vec<ExecutionStep>>,
-    },
 }
 
 fn granularity_label(g: &Granularity) -> &'static str {
