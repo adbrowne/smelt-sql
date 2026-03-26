@@ -1,30 +1,47 @@
 # Logical Graph → Physical Graph: Two-Stage Graph Architecture
 
-**Date**: 2025-03-25
+**Date**: 2026-03-25 (updated 2026-03-26 after ephemeral support landed)
 
 ## Context
 
-smelt's planner rules can create intermediate tables, inline ephemeral models, fuse models, and redirect references — but there's no clean boundary between "what the user authored" and "what gets executed." The current `DependencyGraph` serves both purposes, and the `smelt-cli` crate has a near-duplicate with extra fields. Planner transformations (`Transformation` enum) produce instructions but don't modify the graph structure itself.
+smelt's planner rules can create intermediate tables, inline ephemeral models, fuse models, and redirect references -- but there's no clean boundary between "what the user authored" and "what gets executed." The current `DependencyGraph` serves both purposes, and the `smelt-cli` crate has a near-duplicate with extra fields. Planner transformations (`Transformation` enum) produce instructions but don't modify the graph structure itself.
 
-This plan introduces a **two-stage graph architecture** — a Logical Graph (user intent) and a Physical Graph (execution plan) — with a well-defined transition between them. This is the same pattern used by DataFusion (LogicalPlan → ExecutionPlan), Spark Catalyst, and Apache Calcite, adapted to smelt's model-level granularity rather than query-level.
+This plan introduces a **two-stage graph architecture** -- a Logical Graph (user intent) and a Physical Graph (execution plan) -- with a well-defined transition between them. This is the same pattern used by DataFusion (LogicalPlan to ExecutionPlan), Spark Catalyst, and Apache Calcite, adapted to smelt's model-level granularity rather than query-level.
 
 **Goal**: Create a clear contract so that planner rule authors know exactly what they're working with (logical graph in, transformations out, physical graph produced).
+
+### What already exists (as of 2026-03-26)
+
+The ephemeral model support has landed on main. Key pieces we can build on:
+
+- **`Materialization` enum** now has `Table`, `View`, `Ephemeral`, `MaterializedView` (`smelt-core/src/config.rs`)
+- **`EphemeralResolver`** in `smelt-cli/src/compiler.rs` -- already handles CTE inlining with:
+  - Topological ordering of ephemeral dependencies
+  - CTE namespace deduplication (`__smelt_{model}` naming)
+  - Internal CTE hoisting and namespacing (`__smelt_{model}__{cte_name}`)
+  - Flat hoisting strategy (Spark-safe, no nested CTEs)
+- **Validation** already in place:
+  - `Config::validate_model_configs()` -- ephemeral+incremental error, ephemeral+target error
+  - `graph.warn_unused_ephemerals()` -- warns about leaf ephemeral models
+  - Selector validation -- error when `--select` targets an ephemeral directly
+- **CLI execution loop** skips ephemeral models and passes `EphemeralResolver` to `compile_with_ephemerals()`
+- **smelt-cli still has its own `DependencyGraph`** in `smelt-cli/src/graph.rs` (duplicate of smelt-core's)
 
 ## Design
 
 ### The Two Graphs
 
-**Logical Graph** — what users author:
+**Logical Graph** -- what users author:
 - 1:1 with source files (every `.sql` model is a node)
 - Includes all models regardless of materialization (table, view, ephemeral, etc.)
 - Edges are `smelt.ref()` dependencies
 - Used for: validation, model selection (`--select`), lineage, LSP, documentation
 - Each node eagerly resolves its config cascade (SQL metadata > smelt.yml > default)
 
-**Physical Graph** — what gets executed:
-- Ephemeral nodes removed (their SQL inlined as CTEs into dependents)
+**Physical Graph** -- what gets executed:
+- Ephemeral nodes removed (their SQL inlined as CTEs into dependents via existing `EphemeralResolver`)
 - Planner-created intermediates are first-class nodes (shared sub-expressions, incremental staging tables, cube split temps)
-- Each node carries a concrete execution strategy (CreateTable, CreateView, Incremental, MultiStep)
+- Each node carries a concrete execution strategy (CreateTable, CreateView, CreateMaterializedView, Incremental, MultiStep)
 - The executor operates exclusively on this graph
 
 ### The Transition Pipeline
@@ -83,6 +100,7 @@ pub enum PhysicalNodeId {
 pub enum PhysicalStrategy {
     CreateTable { sql: String },
     CreateView { sql: String },
+    CreateMaterializedView { sql: String },
     Incremental { sql: String, config: IncrementalConfig, strategy: IncrementalStrategy },
     MultiStep { steps: Vec<ExecutionStep> },
     Inlined,  // ephemeral -- kept for lineage, skipped by executor
@@ -119,14 +137,17 @@ pub enum Transformation {
 }
 ```
 
-### Ephemeral Model Handling
+### Ephemeral Model Handling (already implemented -- to be absorbed)
 
-This plan is designed independently of the ephemeral models session. The architecture accommodates ephemeral naturally:
+Ephemeral support has landed. The `PhysicalGraphBuilder` reuses the existing `EphemeralResolver` (`smelt-cli/src/compiler.rs`) during the logical-to-physical transition:
 
-- **Where ephemeral fits**: When `Materialization::Ephemeral` exists, the `PhysicalGraphBuilder` inlines those models as CTEs during the logical-to-physical transition
-- **Cross-backend**: Ephemeral models have no backend. When inlined into a dependent on backend X, the SQL is compiled with backend X's dialect. If referenced by models on different backends, it's compiled separately per dependent
-- **Multiple references**: If ephemeral model E is referenced by models A and B, E's SQL becomes a CTE in both A and B independently (same as dbt)
+- **CTE inlining**: `EphemeralResolver` already handles topological ordering, namespace deduplication (`__smelt_{model}`), internal CTE hoisting, and flat hoisting (Spark-safe)
+- **Cross-backend**: Ephemeral models inherit the dependent's backend dialect. Multi-backend refs compile separately per dependent -- already handled by `PrintContext.ephemeral_models`
+- **Multiple references**: Each dependent gets its own copy of the ephemeral CTE (same as dbt)
 - **Lineage**: The physical graph keeps an `Inlined` node for ephemeral models so lineage tracking still works
+- **Validation**: `Config::validate_model_configs()` already rejects ephemeral+incremental, ephemeral+target. `warn_unused_ephemerals()` catches leaf ephemerals. Selector validation prevents `--select` on ephemerals.
+
+The key refactoring opportunity: the current ephemeral logic is spread across `main.rs` (resolver construction, skip logic) and `compiler.rs` (EphemeralResolver). The `PhysicalGraphBuilder` centralizes this -- ephemeral inlining becomes a step in the logical-to-physical transition rather than ad-hoc logic in the execution loop.
 
 ### Rule Interaction
 
@@ -136,18 +157,19 @@ Rules are applied heuristically in a fixed phase order (no cost model). Cross-mo
 
 ### Validation Split
 
-**Logical graph** (before transformation):
-- All refs resolve to models or sources
-- No circular dependencies
-- Frontmatter validity
-- Ephemeral models cannot be incremental
-- Ephemeral models that are leaf nodes produce a warning
+**Logical graph** (before transformation) -- mostly already implemented:
+- All refs resolve to models or sources *(existing: `DependencyGraph::validate()`)*
+- No circular dependencies *(existing: `execution_order()` detects cycles)*
+- Frontmatter validity *(existing: metadata parsing)*
+- Ephemeral models cannot be incremental *(existing: `validate_model_configs()`)*
+- Ephemeral models that are leaf nodes produce a warning *(existing: `warn_unused_ephemerals()`)*
+- MaterializedView+incremental produces a warning *(existing: `validate_model_configs()`)*
 
 **Physical graph** (after transformation):
 - No cross-backend references remain
 - All synthetic node dependencies exist
 - No cycles introduced by transformations
-- Incremental models are tables (not views)
+- Incremental models are tables (not views or materialized views)
 
 ### Model Selection to Physical Nodes
 
@@ -164,21 +186,23 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 ## Implementation Phases
 
 ### Phase A: Consolidate graph types
-1. Merge smelt-cli's `DependencyGraph`/`ModelFile` extensions into smelt-core
+1. Merge smelt-cli's `DependencyGraph` extensions (`warn_unused_ephemerals()`, `ModelKind`, etc.) into smelt-core's `DependencyGraph`
 2. Rename `DependencyGraph` to `LogicalGraph`
-3. Add `LogicalNode` with eagerly-resolved config cascade
+3. Add `LogicalNode` with eagerly-resolved config cascade (absorb the resolution logic currently scattered through `main.rs`)
 4. Update all consumers (cli, planner) to use the unified type
+5. Remove `smelt-cli/src/graph.rs` duplicate
 
 ### Phase B: Introduce PhysicalGraph
 1. Create `smelt-core/src/physical_graph.rs` with types above
 2. Create `PhysicalGraphBuilder` -- initially 1:1 mapping (no transformations)
-3. Wire executor to consume `PhysicalGraph` instead of `LogicalGraph`
-4. Existing behavior preserved, just going through the new layer
+3. Move ephemeral inlining from `main.rs` ad-hoc logic into `PhysicalGraphBuilder` (reuse `EphemeralResolver` from `compiler.rs`)
+4. Wire executor to consume `PhysicalGraph` instead of `LogicalGraph`
+5. Existing behavior preserved, just going through the new layer
 
 ### Phase C: Wire up planner transformations
 1. Add new `Transformation` variants (CreateNode, RemoveNode, RedirectRef, SetMaterialization)
 2. `PhysicalGraphBuilder` applies transformations during construction
-3. Add ephemeral inlining step (when Ephemeral materialization exists)
+3. Existing transformations (ReplaceWithPlan, SetIncremental) map to PhysicalStrategy variants
 
 ### Phase D: Explain output
 1. Add `physical_graph` section to `smelt explain` showing nodes, strategies, origins
@@ -188,13 +212,15 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 
 | File | Change |
 |------|--------|
-| `crates/smelt-core/src/graph.rs` | Rename DependencyGraph to LogicalGraph, add LogicalNode |
+| `crates/smelt-core/src/graph.rs` | Absorb smelt-cli extensions, rename DependencyGraph to LogicalGraph, add LogicalNode |
 | `crates/smelt-core/src/physical_graph.rs` | **New** -- PhysicalGraph, PhysicalNode, PhysicalStrategy, PhysicalGraphBuilder |
-| `crates/smelt-core/src/config.rs` | Materialization enum (add Ephemeral when ready) |
+| `crates/smelt-core/src/config.rs` | Already has Ephemeral/MaterializedView -- no changes needed |
+| `crates/smelt-cli/src/graph.rs` | **Delete** -- consolidated into smelt-core |
+| `crates/smelt-cli/src/compiler.rs` | `EphemeralResolver` stays here, called by PhysicalGraphBuilder |
+| `crates/smelt-cli/src/main.rs` | Simplify: build LogicalGraph to PhysicalGraph to execute. Remove ad-hoc ephemeral/materialization logic |
+| `crates/smelt-cli/src/executor.rs` | Executor consumes PhysicalGraph |
 | `crates/smelt-planner/src/types.rs` | Extend Transformation enum with graph-level variants |
 | `crates/smelt-planner/src/rules/mod.rs` | Phased rule execution (cross-model then single-model) |
-| `crates/smelt-cli/src/main.rs` | Executor rewrite to consume PhysicalGraph |
-| `crates/smelt-cli/src/executor.rs` | Executor rewrite to consume PhysicalGraph |
 
 ## Prior Art
 
