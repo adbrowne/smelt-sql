@@ -192,7 +192,8 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 4. ✅ Migrated `run()`, `backbuild()`, `explain()` in main.rs to use `LogicalGraph`
 5. ✅ Migrated `backfill.rs` and `explain.rs` -- dropped `Config` param from `compute_backbuild_plans`, `compute_range_run_plans`, `build_explain_output`
 6. ✅ `select_models()`, `exclude_models()`, `warn_unused_ephemerals()`, `validate_cross_backend_refs()` no longer require `Config` param
-7. ⏸️ Old `smelt-cli/src/graph.rs` kept for now (still used by `python.rs` tests); smelt-core `DependencyGraph` kept for smelt-ui
+7. ✅ Deleted `smelt-cli/src/graph.rs` — migrated python.rs tests and integration tests to `LogicalGraph` (March 26, 2026)
+8. smelt-core `DependencyGraph` kept — used by smelt-ui, smelt-bench, and CLI UI server (not UI-only)
 
 ### Phase B: Introduce PhysicalGraph ✅ (March 26, 2026)
 1. ✅ Created `smelt-cli/src/physical_graph.rs` with `PhysicalStrategy`, `PhysicalNode`, `PhysicalGraph`, `PhysicalGraphBuilder` (lives in smelt-cli due to `ModelFile`/`CompilerRegistry`/`EphemeralResolver` dependencies)
@@ -201,7 +202,7 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 4. ✅ `run()` execution loop iterates `physical_graph.iter_in_order()` instead of raw execution_order
 5. ✅ Deleted `ModelExecution` enum -- replaced by `PhysicalStrategy`
 6. ✅ 8 unit tests covering strategy resolution, ephemeral filtering, resolver construction
-7. ⏸️ `backbuild()` not yet migrated -- uses its own execution pattern, deferred to follow-up
+7. ✅ `backbuild()` migrated to use `PhysicalGraph` for ephemeral resolver ownership (March 26, 2026)
 
 ### Phase C: Wire up planner transformations ✅ (March 26, 2026)
 1. ✅ Added 4 new `Transformation` variants to `smelt-planner/src/types.rs`: `CreateNode`, `RemoveNode`, `RedirectRef`, `SetMaterialization`
@@ -229,15 +230,14 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 
 | File | Change |
 |------|--------|
-| `crates/smelt-core/src/graph.rs` | Absorb smelt-cli extensions, rename DependencyGraph to LogicalGraph, add LogicalNode |
-| `crates/smelt-core/src/physical_graph.rs` | **New** -- PhysicalGraph, PhysicalNode, PhysicalStrategy, PhysicalGraphBuilder |
-| `crates/smelt-core/src/config.rs` | Already has Ephemeral/MaterializedView -- no changes needed |
-| `crates/smelt-cli/src/graph.rs` | **Delete** -- consolidated into smelt-core |
+| `crates/smelt-cli/src/logical_graph.rs` | **New** -- LogicalGraph, LogicalNode, eager config resolution |
+| `crates/smelt-cli/src/physical_graph.rs` | **New** -- PhysicalGraph, PhysicalNode, PhysicalStrategy, PhysicalGraphBuilder |
+| `crates/smelt-cli/src/explain.rs` | Extended with ExplainPhysical, build_physical_explain() |
+| `crates/smelt-cli/src/graph.rs` | **Deleted** -- replaced by LogicalGraph |
 | `crates/smelt-cli/src/compiler.rs` | `EphemeralResolver` stays here, called by PhysicalGraphBuilder |
-| `crates/smelt-cli/src/main.rs` | Simplify: build LogicalGraph to PhysicalGraph to execute. Remove ad-hoc ephemeral/materialization logic |
-| `crates/smelt-cli/src/executor.rs` | Executor consumes PhysicalGraph |
-| `crates/smelt-planner/src/types.rs` | Extend Transformation enum with graph-level variants |
-| `crates/smelt-planner/src/rules/mod.rs` | Phased rule execution (cross-model then single-model) |
+| `crates/smelt-cli/src/main.rs` | run(), backbuild(), explain() all use LogicalGraph → PhysicalGraph pipeline |
+| `crates/smelt-planner/src/types.rs` | Extended Transformation enum with 4 graph-level variants |
+| `crates/smelt-core/src/graph.rs` | DependencyGraph kept for smelt-ui/smelt-bench |
 
 ## Prior Art
 
