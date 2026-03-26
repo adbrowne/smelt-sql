@@ -195,4 +195,5 @@ Items here are interesting design problems without committed timelines.
 - **Metrics DSL**: Declarative metric definitions with semantic metadata (decomposability, temporal behavior)
 - **Schema evolution**: Efficient migrations when model definitions change (ALTER TABLE + selective backfill)
 - **Substrait integration**: Portable plan representation, DataFusion interop
+- **Reusable SQL patterns**: dbt solves SQL reuse with Jinja macros, which smelt deliberately avoids. The problem is real — common patterns like date spine generation, surrogate key hashing, and standard metric calculations get copy-pasted across models. No clear solution yet. Possible directions: parameterized SQL includes, a lightweight macro system that doesn't compromise the parser, leveraging Python models as generators, or something entirely different. Open design problem.
 - **Learning from history**: Use run statistics to suggest optimizations
