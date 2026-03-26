@@ -76,6 +76,35 @@ SELECT ... INTERSECT SELECT ...
 SELECT ... EXCEPT SELECT ...
 ```
 
+## GROUP BY extensions
+
+```sql
+GROUP BY CUBE(a, b)
+GROUP BY ROLLUP(a, b)
+GROUP BY GROUPING SETS ((a, b), (a), ())
+```
+
+## Subqueries
+
+```sql
+-- Scalar subquery
+SELECT (SELECT MAX(amount) FROM orders) as max_amount
+
+-- EXISTS
+WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
+
+-- IN subquery
+WHERE user_id IN (SELECT user_id FROM active_users)
+```
+
+## Type casting
+
+```sql
+CAST(x AS INTEGER)
+x::INTEGER          -- PostgreSQL-style
+TRY_CAST(x AS DATE) -- Returns NULL on failure
+```
+
 ## Multi-dialect features
 
 These features are parsed in smelt SQL and rewritten to target-specific syntax:

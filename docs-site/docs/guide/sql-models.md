@@ -45,11 +45,16 @@ Use `smelt.ref()` to reference other models:
 SELECT * FROM smelt.ref('upstream_model')
 ```
 
-Named parameters are supported:
+The parser supports named parameters using `=>` syntax:
 
 ```sql
-SELECT * FROM smelt.ref('events', filter => date > '2024-01-01', limit => 1000)
+SELECT * FROM smelt.ref('events', filter => date > '2024-01-01')
 ```
+
+!!! note
+    Named parameter support in `smelt.ref()` is parsed but not yet used at runtime. The primary use case is `smelt.ref('model_name')`.
+
+For more on defining external sources, see [Sources](sources.md).
 
 ## Sources
 
@@ -70,10 +75,15 @@ Frontmatter in SQL files overrides project-level `smelt.yml` settings.
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Model name (optional, inferred from filename) |
-| `materialization` | `table` \| `view` | How to materialize |
+| `materialization` | `table` \| `view` \| `ephemeral` \| `materialized_view` | How to materialize. See [Materializations](materializations.md) for details on each type. |
 | `incremental.enabled` | boolean | Enable incremental updates |
 | `incremental.event_time_column` | string | Column for time-based filtering |
 | `incremental.partition_column` | string | Column for partition deletion |
+| `incremental.granularity` | `hour` \| `day` \| `week` \| `month` \| `quarter` \| `year` | Time granularity for partitioning |
+| `incremental.unique_key` | string \| string[] | Columns for row-level merge (optional) |
+
+See [Incremental Models](incremental-models.md) for a complete guide.
+
 | `tags` | string[] | Organization tags |
 | `owner` | string | Responsible team or person |
 | `description` | string | Model documentation |

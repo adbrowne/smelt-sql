@@ -52,3 +52,13 @@ smelt run --dry-run --verbose
 | Type checking | None (runtime errors) | Static analysis with LSP |
 | Cross-engine | One target per project | Split work across engines |
 | Optimization | Manual | Rule-based with learning |
+
+## Documentation
+
+**New to smelt?** Start with [Installation](getting-started/installation.md) and the [Quickstart](getting-started/quickstart.md) guide.
+
+**Understanding smelt**: Learn [how smelt works](concepts/how-it-works.md) and see how a [project is structured](concepts/project-structure.md).
+
+**Building pipelines**: The [Guide](guide/sql-models.md) covers models, sources, materializations, incremental processing, and more.
+
+**Reference**: Full [CLI command reference](reference/cli.md), [project configuration](reference/smelt-yml.md), and [language specification](reference/language.md).
