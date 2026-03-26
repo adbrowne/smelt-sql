@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774510516888,
+  "lastUpdate": 1774511609212,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -5169,6 +5169,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 11.997447,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3a7c82f5fd6f4c668143120c4f76b76335c42872",
+          "message": "Update graph stages plan with landed ephemeral support\n\nRefresh the logical-to-physical graph plan now that ephemeral model\nsupport (Materialization::Ephemeral, EphemeralResolver, CTE inlining)\nhas landed on main. Key updates: reference existing EphemeralResolver\nfor reuse, add CreateMaterializedView strategy, note which validations\nalready exist, and detail the graph consolidation (delete smelt-cli's\nduplicate DependencyGraph).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T18:51:57+11:00",
+          "tree_id": "e1e9ef52ba4e6dec28f7d687e51b8d3f3c26b664",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3a7c82f5fd6f4c668143120c4f76b76335c42872"
+        },
+        "date": 1774511608769,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 39.301932,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.862258,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.713502,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.391569,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002764,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.178115000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.024426999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.011998,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009104,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.081756,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.357192,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.54373,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 27.331679999999995,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.321226,
             "unit": "ms"
           }
         ]
