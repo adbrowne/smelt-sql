@@ -6,7 +6,6 @@ pub mod discovery;
 pub mod errors;
 pub mod executor;
 pub mod explain;
-pub mod graph;
 pub mod logical_graph;
 pub mod metadata;
 pub mod migration;
@@ -32,7 +31,6 @@ pub use config::{
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
 pub use explain::{build_explain_output, build_physical_explain, ExplainOutput};
-pub use graph::{DependencyGraph, GraphError};
 pub use logical_graph::{LogicalGraph, LogicalNode};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use physical_graph::{PhysicalGraph, PhysicalGraphBuilder, PhysicalNode, PhysicalStrategy};

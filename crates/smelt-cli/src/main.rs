@@ -1296,20 +1296,15 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 9. Compute target assignments and create backends
-    let target_assignments: HashMap<String, String> = execution_order
-        .iter()
-        .map(|name| {
-            let node = graph.get_node(name).unwrap();
-            (name.clone(), node.target.clone())
-        })
-        .collect();
-
+    // 9. Compute needed targets and create backends
     graph
         .validate_cross_backend_refs()
         .with_context(|| "Cross-backend reference validation failed")?;
 
-    let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
+    let needed_targets: HashSet<String> = execution_order
+        .iter()
+        .map(|name| graph.get_node(name).unwrap().target.clone())
+        .collect();
     let registry = BackendRegistry::new(
         &config.targets,
         &needed_targets,
@@ -1330,28 +1325,20 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .with_context(|| "Source validation failed")?;
     }
 
-    // Build ephemeral resolvers for backbuild
-    let mut bb_ephemeral_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut bb_ephemeral_set: HashSet<String> = HashSet::new();
-    for plan in &plans {
-        let node = graph.get_node(&plan.model_name)?;
-        if node.materialization == Materialization::Ephemeral {
-            bb_ephemeral_set.insert(plan.model_name.clone());
-            bb_ephemeral_by_target
-                .entry(node.target.clone())
-                .or_default()
-                .push((plan.model_name.clone(), node.model_file.content.clone()));
-        }
-    }
-    let mut bb_resolvers: HashMap<String, smelt_cli::EphemeralResolver> = HashMap::new();
-    for (target_name, models) in &bb_ephemeral_by_target {
-        let compiler = compilers.get(target_name);
-        let schema = &registry.target_config(target_name).schema;
-        bb_resolvers.insert(
-            target_name.clone(),
-            compiler.build_ephemeral_resolver(models, schema),
-        );
-    }
+    // Build physical graph for ephemeral resolver construction
+    let target_schemas: HashMap<String, String> = needed_targets
+        .iter()
+        .map(|name| (name.clone(), registry.target_config(name).schema.clone()))
+        .collect();
+    let physical_graph = PhysicalGraphBuilder::new(
+        &graph,
+        &[],
+        Some(requested_range.clone()),
+        &compilers,
+        target_schemas,
+    )
+    .build()
+    .with_context(|| "Failed to build physical graph for backbuild")?;
 
     println!("\n{}", "=".repeat(60));
     println!("Executing backbuild...");
@@ -1360,19 +1347,19 @@ async fn backbuild(args: BackbuildArgs) -> Result<()> {
     let mut total_results = Vec::new();
 
     for plan in &plans {
-        // Skip ephemeral models
-        if bb_ephemeral_set.contains(&plan.model_name) {
+        // Skip ephemeral models (absorbed into physical graph's resolvers)
+        let node = graph.get_node(&plan.model_name)?;
+        if node.materialization == Materialization::Ephemeral {
             println!("\n  {} (ephemeral — inlined as CTE)", plan.model_name);
             continue;
         }
 
         let model = graph.get_model(&plan.model_name)?;
-        let model_target = &target_assignments[&plan.model_name];
+        let model_target = &node.target;
         let backend = registry.get(model_target);
         let compiler = compilers.get(model_target);
         let schema = &registry.target_config(model_target).schema;
-        let empty_resolver = smelt_cli::EphemeralResolver::empty();
-        let resolver = bb_resolvers.get(model_target).unwrap_or(&empty_resolver);
+        let resolver = physical_graph.ephemeral_resolver(model_target);
 
         if !plan.is_incremental {
             println!("\n▶ {} (full refresh)", plan.model_name);

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use smelt_cli::{Config, DependencyGraph, ModelDiscovery, SourcesConfig};
+use smelt_cli::{Config, LogicalGraph, ModelDiscovery, SourcesConfig};
 
 fn project_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,7 +56,13 @@ fn test_retail_analytics_no_undefined_refs() {
     let models = discovery.discover_models().unwrap();
     let sources = SourcesConfig::load(&project_dir).ok();
 
-    let graph = DependencyGraph::build(models, sources.as_ref()).unwrap();
+    let default_target = config
+        .targets
+        .keys()
+        .next()
+        .map(|s| s.as_str())
+        .unwrap_or("dev");
+    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target).unwrap();
     graph
         .validate()
         .expect("All refs in retail-analytics models should resolve to other models or sources.");
@@ -73,7 +79,13 @@ fn test_retail_analytics_dag_is_acyclic() {
     let models = discovery.discover_models().unwrap();
     let sources = SourcesConfig::load(&project_dir).ok();
 
-    let graph = DependencyGraph::build(models, sources.as_ref()).unwrap();
+    let default_target = config
+        .targets
+        .keys()
+        .next()
+        .map(|s| s.as_str())
+        .unwrap_or("dev");
+    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target).unwrap();
     let order = graph.execution_order();
     assert!(order.is_ok(), "DAG should be acyclic: {:?}", order.err());
 }
