@@ -1,5 +1,6 @@
 use crate::discovery::ModelFile;
 use crate::logical_graph::LogicalGraph;
+use crate::physical_graph::{PhysicalGraph, PhysicalStrategy};
 use anyhow::Result;
 use serde::Serialize;
 use smelt_core::{Granularity, IncrementalConfig, Materialization};
@@ -11,6 +12,8 @@ use std::collections::BTreeMap;
 pub struct ExplainOutput {
     pub models: BTreeMap<String, ExplainModel>,
     pub execution_order: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical: Option<ExplainPhysical>,
 }
 
 /// Per-model metadata in the explain output.
@@ -35,6 +38,30 @@ pub struct ExplainIncremental {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unique_key: Vec<String>,
     pub batch_safety: String,
+}
+
+/// Physical execution plan section of explain output.
+#[derive(Debug, Serialize)]
+pub struct ExplainPhysical {
+    pub execution_order: Vec<String>,
+    pub nodes: BTreeMap<String, ExplainPhysicalNode>,
+    pub ephemerals: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transformations: Vec<String>,
+}
+
+/// Per-node metadata in the physical explain output.
+#[derive(Debug, Serialize)]
+pub struct ExplainPhysicalNode {
+    pub strategy: String,
+    pub materialization: Materialization,
+    pub target: String,
+    #[serde(skip_serializing_if = "is_self_origin")]
+    pub logical_origins: Vec<String>,
+}
+
+fn is_self_origin(origins: &[String]) -> bool {
+    origins.len() == 1
 }
 
 /// Build the explain output from the logical graph (config already resolved on nodes).
@@ -75,7 +102,69 @@ pub fn build_explain_output(graph: &LogicalGraph) -> Result<ExplainOutput> {
     Ok(ExplainOutput {
         models,
         execution_order,
+        physical: None,
     })
+}
+
+/// Build physical explain section from a PhysicalGraph and the logical graph (for ephemeral list).
+pub fn build_physical_explain(physical: &PhysicalGraph, logical: &LogicalGraph) -> ExplainPhysical {
+    let mut nodes = BTreeMap::new();
+    for node in physical.iter_in_order() {
+        let strategy = match &node.strategy {
+            PhysicalStrategy::FullRefresh => "full_refresh".to_string(),
+            PhysicalStrategy::CubeSplit { steps } => {
+                format!("cube_split ({} steps)", steps.len())
+            }
+            PhysicalStrategy::Incremental {
+                config, plan_steps, ..
+            } => {
+                let base = format!(
+                    "incremental (partition: {}, granularity: {})",
+                    config.partition_column,
+                    serde_json::to_value(&config.granularity)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "?".to_string()),
+                );
+                if plan_steps.is_some() {
+                    format!("{} + plan steps", base)
+                } else {
+                    base
+                }
+            }
+        };
+
+        nodes.insert(
+            node.name.clone(),
+            ExplainPhysicalNode {
+                strategy,
+                materialization: node.materialization.clone(),
+                target: node.target.clone(),
+                logical_origins: node.logical_origins.clone(),
+            },
+        );
+    }
+
+    // Collect ephemeral models from logical graph
+    let ephemerals: Vec<String> = logical
+        .iter_nodes()
+        .filter(|n| n.materialization == Materialization::Ephemeral)
+        .map(|n| n.name.clone())
+        .collect();
+
+    // Planner summary as transformation descriptions
+    let transformations: Vec<String> = physical
+        .planner_summary()
+        .into_iter()
+        .map(|(model, desc)| format!("{} → {}", model, desc))
+        .collect();
+
+    ExplainPhysical {
+        execution_order: physical.execution_order().to_vec(),
+        nodes,
+        ephemerals,
+        transformations,
+    }
 }
 
 fn compute_batch_safety_label(
@@ -252,6 +341,121 @@ mod tests {
         assert!(json.contains("\"models\""));
         assert!(json.contains("\"execution_order\""));
         assert!(json.contains("\"a\""));
+    }
+
+    #[test]
+    fn test_physical_explain_basic() {
+        use crate::physical_graph::PhysicalGraphBuilder;
+
+        let models = vec![
+            make_model("orders", vec![], "SELECT * FROM raw_orders"),
+            make_model(
+                "daily_revenue",
+                vec!["orders"],
+                "SELECT date, SUM(amount) FROM smelt.ref('orders') GROUP BY date",
+            ),
+        ];
+        let config = make_config(vec![]);
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+
+        let target_schemas: HashMap<String, String> = config
+            .targets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.schema.clone()))
+            .collect();
+        let pg = PhysicalGraphBuilder::for_explain(&graph, &[], target_schemas)
+            .build()
+            .unwrap();
+
+        let phys = build_physical_explain(&pg, &graph);
+
+        assert_eq!(phys.execution_order.len(), 2);
+        assert_eq!(phys.execution_order[0], "orders");
+        assert_eq!(phys.execution_order[1], "daily_revenue");
+        assert!(phys.ephemerals.is_empty());
+        assert!(phys.transformations.is_empty());
+
+        let orders_node = &phys.nodes["orders"];
+        assert_eq!(orders_node.strategy, "full_refresh");
+        assert_eq!(orders_node.target, "dev");
+    }
+
+    #[test]
+    fn test_physical_explain_with_ephemeral() {
+        use crate::physical_graph::PhysicalGraphBuilder;
+
+        let models = vec![
+            make_model("staging", vec![], "SELECT * FROM raw"),
+            make_model(
+                "mart",
+                vec!["staging"],
+                "SELECT * FROM smelt.ref('staging')",
+            ),
+        ];
+        let mut config = make_config(vec![(
+            "staging",
+            ModelConfig {
+                materialization: Some(Materialization::Ephemeral),
+                incremental: None,
+                tags: vec![],
+                target: None,
+            },
+        )]);
+        // Need mart to be non-ephemeral
+        config
+            .models
+            .entry("mart".to_string())
+            .or_insert(ModelConfig {
+                materialization: Some(Materialization::Table),
+                incremental: None,
+                tags: vec![],
+                target: None,
+            });
+
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+
+        let target_schemas: HashMap<String, String> = config
+            .targets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.schema.clone()))
+            .collect();
+        let pg = PhysicalGraphBuilder::for_explain(&graph, &[], target_schemas)
+            .build()
+            .unwrap();
+
+        let phys = build_physical_explain(&pg, &graph);
+
+        // Ephemeral should not be in physical execution order
+        assert_eq!(phys.execution_order.len(), 1);
+        assert_eq!(phys.execution_order[0], "mart");
+        // But should appear in ephemerals list
+        assert_eq!(phys.ephemerals, vec!["staging"]);
+    }
+
+    #[test]
+    fn test_physical_explain_json_includes_physical() {
+        use crate::physical_graph::PhysicalGraphBuilder;
+
+        let models = vec![make_model("a", vec![], "SELECT 1")];
+        let config = make_config(vec![]);
+        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+
+        let target_schemas: HashMap<String, String> = config
+            .targets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.schema.clone()))
+            .collect();
+        let pg = PhysicalGraphBuilder::for_explain(&graph, &[], target_schemas)
+            .build()
+            .unwrap();
+
+        let mut output = build_explain_output(&graph).unwrap();
+        output.physical = Some(build_physical_explain(&pg, &graph));
+
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(json.contains("\"physical\""));
+        assert!(json.contains("\"full_refresh\""));
+        assert!(json.contains("\"ephemerals\""));
     }
 
     #[test]

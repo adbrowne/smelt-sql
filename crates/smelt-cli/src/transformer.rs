@@ -8,7 +8,7 @@ use smelt_parser::{parse, File};
 use thiserror::Error;
 
 /// Time range for filtering (inclusive start, exclusive end)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TimeRange {
     pub start: String, // ISO 8601 date: YYYY-MM-DD
     pub end: String,   // ISO 8601 date: YYYY-MM-DD (exclusive)

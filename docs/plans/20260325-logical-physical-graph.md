@@ -216,9 +216,14 @@ Deterministic names: `__smelt__{origin}__{purpose}__{content_hash_8}` (e.g., `__
 6. ✅ Strategy resolution extracted into `resolve_strategy()` and `resolve_plan_steps()` helper methods
 7. ✅ 18 unit tests (8 existing + 10 new covering all transformation types and validation errors)
 
-### Phase D: Explain output
-1. Add `physical_graph` section to `smelt explain` showing nodes, strategies, origins
-2. Show which transformations were applied
+### Phase D: Explain output ✅ (March 26, 2026)
+1. ✅ Added `ExplainPhysical` section to `smelt explain` output with physical nodes, strategies, ephemeral list, and planner transformations
+2. ✅ Added `PhysicalGraphBuilder::for_explain()` — builds physical graph without CompilerRegistry (skips ephemeral resolver construction and ref resolution)
+3. ✅ Added `Serialize` derive to `PhysicalStrategy` and `TimeRange` for JSON output
+4. ✅ `smelt explain` now runs planner and shows physical execution plan alongside logical graph
+5. ✅ Human-readable output shows: "Logical Graph" section, then "Physical Graph" section with ephemerals, planner optimizations, execution order, and per-node strategy
+6. ✅ JSON output includes `physical` field with `execution_order`, `nodes`, `ephemerals`, `transformations`
+7. ✅ 3 new tests: basic physical explain, ephemeral filtering, JSON serialization with physical section
 
 ## Key Files
 

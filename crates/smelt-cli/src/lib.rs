@@ -31,7 +31,7 @@ pub use config::{
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
-pub use explain::{build_explain_output, ExplainOutput};
+pub use explain::{build_explain_output, build_physical_explain, ExplainOutput};
 pub use graph::{DependencyGraph, GraphError};
 pub use logical_graph::{LogicalGraph, LogicalNode};
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};

@@ -86,6 +86,8 @@ This document summarizes where each area of smelt stands and what's next. For de
 - Two-stage graph architecture: `LogicalGraph` (user intent) → `PhysicalGraph` (execution plan)
   - `LogicalGraph` with eagerly-resolved config per node (March 26, 2026)
   - `PhysicalGraph` with strategy resolution, ephemeral resolver ownership (March 26, 2026)
+  - Graph-level planner transformations: `CreateNode`, `RemoveNode`, `RedirectRef`, `SetMaterialization` (March 26, 2026)
+  - `smelt explain` shows physical execution plan with strategies, ephemerals, planner optimizations (March 26, 2026)
 
 **Next steps**:
 - `smelt diff` — show pending schema changes

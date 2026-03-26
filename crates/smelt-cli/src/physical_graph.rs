@@ -9,7 +9,7 @@ use smelt_planner::{ExecutionStep, Transformation};
 use std::collections::{HashMap, HashSet};
 
 /// How a physical node should be executed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum PhysicalStrategy {
     /// Full refresh: DROP + CREATE TABLE AS or CREATE VIEW AS.
     FullRefresh,
@@ -181,7 +181,7 @@ pub struct PhysicalGraphBuilder<'a> {
     logical_graph: &'a LogicalGraph,
     transformations: &'a [Transformation],
     time_range: Option<TimeRange>,
-    compilers: &'a CompilerRegistry,
+    compilers: Option<&'a CompilerRegistry>,
     target_schemas: HashMap<String, String>,
 }
 
@@ -197,7 +197,25 @@ impl<'a> PhysicalGraphBuilder<'a> {
             logical_graph,
             transformations,
             time_range,
-            compilers,
+            compilers: Some(compilers),
+            target_schemas,
+        }
+    }
+
+    /// Create a builder for explain mode (no compilers needed).
+    ///
+    /// Skips ephemeral resolver construction and ref resolution in plan steps,
+    /// but still resolves strategies and applies transformations.
+    pub fn for_explain(
+        logical_graph: &'a LogicalGraph,
+        transformations: &'a [Transformation],
+        target_schemas: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            logical_graph,
+            transformations,
+            time_range: None,
+            compilers: None,
             target_schemas,
         }
     }
@@ -287,13 +305,15 @@ impl<'a> PhysicalGraphBuilder<'a> {
         }
 
         let mut ephemeral_resolvers: HashMap<String, EphemeralResolver> = HashMap::new();
-        for (target_name, models) in &ephemeral_models_by_target {
-            let compiler = self.compilers.get(target_name);
-            let schema = &self.target_schemas[target_name];
-            ephemeral_resolvers.insert(
-                target_name.clone(),
-                compiler.build_ephemeral_resolver(models, schema),
-            );
+        if let Some(compilers) = self.compilers {
+            for (target_name, models) in &ephemeral_models_by_target {
+                let compiler = compilers.get(target_name);
+                let schema = &self.target_schemas[target_name];
+                ephemeral_resolvers.insert(
+                    target_name.clone(),
+                    compiler.build_ephemeral_resolver(models, schema),
+                );
+            }
         }
 
         // 4. Build physical nodes for non-ephemeral, non-removed models
@@ -326,10 +346,15 @@ impl<'a> PhysicalGraphBuilder<'a> {
                 apply_ref_redirects(&node.model_file, &ref_redirects)
             };
 
-            let schema = &self.target_schemas[&node.target];
+            let schema = self.target_schemas.get(&node.target).map(|s| s.as_str());
 
-            // Resolve plan steps with ref resolution
-            let plan_steps = self.resolve_plan_steps(model_name, &plan_overrides, schema);
+            // Resolve plan steps with ref resolution (skipped in explain mode)
+            let plan_steps = if self.compilers.is_some() {
+                self.resolve_plan_steps(model_name, &plan_overrides, schema.unwrap_or("main"))
+            } else {
+                // In explain mode, keep plan steps as-is (no ref resolution)
+                plan_overrides.get(model_name).cloned()
+            };
 
             // Resolve execution strategy
             let strategy = self.resolve_strategy(

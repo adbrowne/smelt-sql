@@ -7,10 +7,10 @@ use smelt_backend::{Backend, IncrementalStrategy, PartitionSpec};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_cli::LogicalGraph;
 use smelt_cli::{
-    build_explain_output, compute_backbuild_plans, compute_batches_for_model,
-    compute_incremental_windows, discover_python_models, executor, find_project_root,
-    format_plan_summary, init_db, inject_time_filter, migration, parse_selector, seed,
-    BackendRegistry, BackendType, BackfillBatch, BackfillOptions, CompilerRegistry, Config,
+    build_explain_output, build_physical_explain, compute_backbuild_plans,
+    compute_batches_for_model, compute_incremental_windows, discover_python_models, executor,
+    find_project_root, format_plan_summary, init_db, inject_time_filter, migration, parse_selector,
+    seed, BackendRegistry, BackendType, BackfillBatch, BackfillOptions, CompilerRegistry, Config,
     Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
     TimeRange,
 };
@@ -2042,7 +2042,37 @@ async fn explain(args: ExplainArgs) -> Result<()> {
         .validate()
         .with_context(|| "Dependency validation failed")?;
 
-    let output = build_explain_output(&graph)?;
+    let mut output = build_explain_output(&graph)?;
+
+    // Build physical graph via planner (no backends needed for explain)
+    let execution_order = graph.execution_order()?;
+    let mut opt_graph = ModelGraph::new();
+    for model_name in &execution_order {
+        let model = graph.get_model(model_name)?;
+        let frontmatter = Frontmatter::parse(&model.content);
+        opt_graph.add_model(ModelInfo {
+            name: model.name.clone(),
+            sql: model.content.clone(),
+            refs: model.refs.iter().map(|r| r.model_name.clone()).collect(),
+            incremental_config: frontmatter.as_ref().and_then(|f| f.incremental.clone()),
+        });
+    }
+
+    let planner = Planner::new();
+    let (transformations, _plan_errors) = planner.plan(&opt_graph);
+
+    let target_schemas: HashMap<String, String> = config
+        .targets
+        .iter()
+        .map(|(k, v)| (k.clone(), v.schema.clone()))
+        .collect();
+
+    let physical_graph =
+        PhysicalGraphBuilder::for_explain(&graph, &transformations, target_schemas)
+            .build()
+            .with_context(|| "Failed to build physical graph for explain")?;
+
+    output.physical = Some(build_physical_explain(&physical_graph, &graph));
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -2056,6 +2086,7 @@ async fn explain(args: ExplainArgs) -> Result<()> {
         );
         println!();
 
+        println!("Logical Graph:");
         for name in &output.execution_order {
             if let Some(model) = output.models.get(name) {
                 let mat = serde_json::to_value(&model.materialization)
@@ -2090,6 +2121,38 @@ async fn explain(args: ExplainArgs) -> Result<()> {
                 }
 
                 println!();
+            }
+        }
+
+        if let Some(ref phys) = output.physical {
+            println!("\nPhysical Graph:");
+            if !phys.ephemerals.is_empty() {
+                println!(
+                    "  Ephemeral (inlined as CTEs): {}",
+                    phys.ephemerals.join(", ")
+                );
+            }
+            if !phys.transformations.is_empty() {
+                println!("  Planner optimizations:");
+                for t in &phys.transformations {
+                    println!("    {}", t);
+                }
+            }
+            println!("  Execution order: {}", phys.execution_order.join(" → "));
+            for name in &phys.execution_order {
+                if let Some(node) = phys.nodes.get(name) {
+                    let mat = serde_json::to_value(&node.materialization)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    print!("  {} [{}] {}", name, mat, node.strategy);
+                    if node.logical_origins.len() > 1
+                        || (node.logical_origins.len() == 1 && node.logical_origins[0] != *name)
+                    {
+                        print!(" (from: {})", node.logical_origins.join(", "));
+                    }
+                    println!();
+                }
             }
         }
 
