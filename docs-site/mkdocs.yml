@@ -10,9 +10,11 @@ theme:
     - navigation.sections
     - navigation.expand
     - navigation.top
+    - navigation.tabs
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.tabs.link
   palette:
     - scheme: default
       primary: indigo
@@ -37,14 +39,32 @@ markdown_extensions:
   - pymdownx.details
   - toc:
       permalink: true
+  - def_list
 
 nav:
   - Home: index.md
   - Getting Started:
     - Installation: getting-started/installation.md
     - Quickstart: getting-started/quickstart.md
+  - Concepts:
+    - How smelt Works: concepts/how-it-works.md
+    - Project Structure: concepts/project-structure.md
   - Guide:
     - SQL Models: guide/sql-models.md
+    - Sources: guide/sources.md
+    - Materializations: guide/materializations.md
+    - Incremental Models: guide/incremental-models.md
+    - Seeds: guide/seeds.md
+    - Model Selection: guide/model-selection.md
+    - Python Models: guide/python-models.md
+    - Targets & Backends: guide/targets.md
+    - Web UI: guide/web-ui.md
     - Editor Setup: guide/editor-setup.md
   - Reference:
+    - CLI Commands: reference/cli.md
+    - Project Configuration: reference/smelt-yml.md
+    - Sources Configuration: reference/sources-yml.md
     - Language Spec: reference/language.md
+  - Developing smelt:
+    - Architecture: developing/architecture.md
+    - Contributing: developing/contributing.md

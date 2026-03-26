@@ -1,0 +1,410 @@
+# CLI Commands Reference
+
+The `smelt` command-line interface provides commands for running models, inspecting schemas, managing incremental state, and more.
+
+## Common Flags
+
+The following flags appear on most commands:
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to the smelt project root (directory containing `smelt.yml`) |
+| `--database` | path | _(from smelt.yml)_ | Override the DuckDB database file path |
+| `--target` | string | `dev` | Target environment name as defined in `smelt.yml` |
+
+---
+
+## smelt run
+
+Run models and materialize them in the target database. This is the primary command for executing your data pipeline.
+
+**Usage:**
+
+```
+smelt run [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--database` | | path | _(from config)_ | DuckDB database file path |
+| `--target` | | string | `dev` | Target environment from smelt.yml |
+| `--show-results` | | bool | `false` | Display query results after execution |
+| `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
+| `--dry-run` | | bool | `false` | Parse and validate without executing |
+| `--event-time-start` | | string | | Start of event time range for incremental models (ISO 8601: YYYY-MM-DD). Requires `--event-time-end`. |
+| `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
+| `--start` | | string | | Alias for `--event-time-start` |
+| `--end` | | string | | Alias for `--event-time-end` |
+| `--select` | `-s` | string[] | | Select models to run (repeatable). Supports: `model_name`, `tag:X`, `+tag:X`, `tag:X+`, `+tag:X+` |
+| `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
+| `--batch-size` | | integer | | Override batch size in days for backfill chunking |
+| `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
+| `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
+| `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
+
+**Selector syntax:**
+
+The `--select` and `--exclude` flags support graph-aware selection:
+
+- `model_name` -- select a single model by name
+- `tag:analytics` -- select all models with the `analytics` tag
+- `+model_name` -- select the model and all its upstream dependencies
+- `model_name+` -- select the model and all its downstream dependents
+- `+model_name+` -- select the model, its upstreams, and its downstreams
+
+**Examples:**
+
+```bash
+# Run all models in the project
+smelt run
+
+# Run with incremental time range
+smelt run --start 2026-01-01 --end 2026-01-08
+
+# Run only models with the "staging" tag, showing compiled SQL
+smelt run --select tag:staging --verbose
+
+# Dry run to validate without executing
+smelt run --dry-run
+
+# Auto mode: process only new intervals
+smelt run --auto
+```
+
+---
+
+## smelt backbuild
+
+Rebuild a target model and all its upstream dependencies for a specified time range. Useful for backfilling historical data or repairing a specific model and everything it depends on.
+
+**Usage:**
+
+```
+smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `<SELECTOR>` | yes | Target model selector (e.g., `+daily_revenue`, `model_name`) |
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--start` | | string | _(required)_ | Start of time range (ISO 8601: YYYY-MM-DD) |
+| `--end` | | string | _(required)_ | End of time range (exclusive, ISO 8601: YYYY-MM-DD) |
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--database` | | path | _(from config)_ | DuckDB database file path |
+| `--target` | | string | `dev` | Target environment from smelt.yml |
+| `--show-results` | | bool | `false` | Display query results after execution |
+| `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
+| `--dry-run` | | bool | `false` | Show what would execute without running |
+| `--batch-size` | | integer | | Override batch size in days for backfill chunking |
+| `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
+
+**Examples:**
+
+```bash
+# Backbuild daily_revenue and all its upstreams for January
+smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
+
+# Preview what would be executed
+smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
+
+# Backbuild with per-partition execution
+smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
+```
+
+---
+
+## smelt build
+
+Seed the database with CSV files and then run all models. This is a convenience command that combines `smelt seed` followed by `smelt run`.
+
+**Usage:**
+
+```
+smelt build [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--database` | | path | _(from config)_ | DuckDB database file path |
+| `--target` | | string | `dev` | Target environment from smelt.yml |
+| `--show-results` | | bool | `false` | Display query results after execution |
+| `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
+| `--event-time-start` | | string | | Start of event time range for incremental models (ISO 8601: YYYY-MM-DD). Requires `--event-time-end`. |
+| `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
+| `--select` | `-s` | string[] | | Select models to run (repeatable). Same syntax as `smelt run`. |
+| `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
+
+**Examples:**
+
+```bash
+# Seed and run everything
+smelt build
+
+# Seed and run with incremental time range
+smelt build --event-time-start 2026-01-01 --event-time-end 2026-01-08
+
+# Seed and run only selected models
+smelt build --select daily_revenue --select transactions
+```
+
+---
+
+## smelt seed
+
+Load CSV seed files into the database. Seed files are CSV files placed in the directories specified by `seed_paths` in `smelt.yml` (default: `seeds/`).
+
+**Usage:**
+
+```
+smelt seed [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--database` | | path | _(from config)_ | DuckDB database file path |
+| `--target` | | string | `dev` | Target environment from smelt.yml |
+| `--show-results` | | bool | `false` | Display loaded data after seeding |
+| `--select` | `-s` | string[] | | Select specific seeds to load (by name or schema.name) |
+
+**Examples:**
+
+```bash
+# Load all seed files
+smelt seed
+
+# Load specific seeds
+smelt seed --select customers --select products
+
+# Load and display the data
+smelt seed --show-results
+```
+
+---
+
+## smelt table
+
+Show column names and types for a model. The schema is inferred by the smelt type checker without executing the model.
+
+**Usage:**
+
+```
+smelt table [OPTIONS] <MODEL_NAME>
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `<MODEL_NAME>` | yes | Name of the model to inspect |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--format` | string | `table` | Output format: `table` (human-readable) or `json` |
+
+**Examples:**
+
+```bash
+# Show column types for a model
+smelt table daily_revenue
+
+# Output as JSON
+smelt table daily_revenue --format json
+
+# Inspect a model in a different project
+smelt table users --project-dir ./my-project
+```
+
+---
+
+## smelt type
+
+Show the function type signature of models, displaying their input references and output columns. When called without a model name, shows signatures for all models in the project.
+
+**Usage:**
+
+```
+smelt type [OPTIONS] [MODEL_NAME]
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `[MODEL_NAME]` | no | Name of a specific model to inspect (omit to show all) |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+
+**Examples:**
+
+```bash
+# Show type signatures of all models
+smelt type
+
+# Show type signature of a specific model
+smelt type daily_revenue
+```
+
+---
+
+## smelt status
+
+Show interval coverage and gaps for incremental models. Reports which time intervals have been materialized and identifies any gaps in coverage.
+
+**Usage:**
+
+```
+smelt status [OPTIONS] [MODEL_NAME]
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `[MODEL_NAME]` | no | Specific model to show status for (omit for all incremental models) |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--since` | string | | Start of query range for gap detection (ISO 8601: YYYY-MM-DD) |
+| `--until` | string | | End of query range for gap detection (ISO 8601: YYYY-MM-DD, default: today) |
+
+**Examples:**
+
+```bash
+# Show status of all incremental models
+smelt status
+
+# Show status for a specific model
+smelt status daily_revenue
+
+# Check for gaps in a specific time range
+smelt status daily_revenue --since 2026-01-01 --until 2026-03-01
+```
+
+---
+
+## smelt history
+
+Show run history for the project. Displays past execution records including timestamps, durations, and which models were run.
+
+**Usage:**
+
+```
+smelt history [OPTIONS] [MODEL_NAME]
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `[MODEL_NAME]` | no | Specific model to show history for (omit for all runs) |
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--limit` | `-l` | integer | `10` | Number of runs to show |
+
+**Examples:**
+
+```bash
+# Show recent run history
+smelt history
+
+# Show last 20 runs
+smelt history --limit 20
+
+# Show history for a specific model
+smelt history daily_revenue
+```
+
+---
+
+## smelt explain
+
+Output model graph and configuration as JSON for orchestrator integration. Produces a machine-readable representation of the project's dependency graph, model configurations, and physical execution plan.
+
+**Usage:**
+
+```
+smelt explain [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--json` | | bool | `false` | Output as JSON (required for machine consumption) |
+| `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. |
+
+**Examples:**
+
+```bash
+# Show the explain output
+smelt explain
+
+# Output as JSON for scripting
+smelt explain --json
+
+# Explain only selected models and their dependencies
+smelt explain --select +daily_revenue --json
+```
+
+---
+
+## smelt ui
+
+Start a local web UI for visualizing the model graph and project structure.
+
+**Usage:**
+
+```
+smelt ui [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--port` | integer | `3000` | Port to serve the UI on |
+| `--host` | string | `127.0.0.1` | Host address to bind to |
+
+**Examples:**
+
+```bash
+# Start the web UI on default port
+smelt ui
+
+# Start on a custom port
+smelt ui --port 8080
+
+# Bind to all interfaces (for remote access)
+smelt ui --host 0.0.0.0 --port 3000
+```
