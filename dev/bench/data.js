@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774521155684,
+  "lastUpdate": 1774521157508,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7352,6 +7352,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.758207997323982,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5186d00289b577d19744d3163b7bede7f8e3b353",
+          "message": "Add comprehensive multi-perspective codebase review report\n\nReview from 10 professional viewpoints (dbt user, Director of Engineering,\nSQLMesh user, Data Architect, Analytics Engineer, Spark Engineer, Data Analyst,\nRust Architect, Rust Developer, Python Developer) with verdicts, evidence-backed\nanalysis, cross-cutting themes, and prioritized recommendations.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-26T21:31:17+11:00",
+          "tree_id": "0a66137a398cf4a2ce73c9faa29281c696edcd4a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5186d00289b577d19744d3163b7bede7f8e3b353"
+        },
+        "date": 1774521156824,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.14897981373263,
             "unit": "MB/s"
           }
         ]
