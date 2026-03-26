@@ -451,6 +451,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
             } => {
                 inc_config = Some((event_time_column.clone(), partition_column.clone()));
             }
+            _ => {}
         }
     }
 

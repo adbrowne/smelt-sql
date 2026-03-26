@@ -245,6 +245,7 @@ impl SqlCompiler {
 /// Holds the compiled SQL for each ephemeral model, with refs to other
 /// ephemeral models already resolved as `__smelt_{name}` CTE names.
 /// Internal CTEs of ephemeral models are hoisted and namespaced.
+#[derive(Debug)]
 pub struct EphemeralResolver {
     /// Ephemeral model names in topological order (dependencies first).
     pub order: Vec<String>,

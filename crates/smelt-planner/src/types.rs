@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 pub use smelt_core::config::{
-    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy, Weekday,
+    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
+    Materialization, Weekday,
 };
 
 /// A transformation the optimizer wants to apply to a model.
 #[derive(Debug, Clone, Serialize)]
 pub enum Transformation {
+    // -- Single-model transformations (existing) --
     /// Replace a model's execution with a multi-step plan (e.g., cube split).
     ReplaceWithPlan {
         model: String,
@@ -20,6 +22,26 @@ pub enum Transformation {
         partition_column: String,
         /// Partition granularity.
         granularity: Granularity,
+    },
+
+    // -- Graph-level transformations (new) --
+    /// Create a synthetic intermediate node (e.g., shared materialization, cube split temp).
+    CreateNode {
+        name: String,
+        sql: String,
+        dependencies: Vec<String>,
+        /// Which user-authored model spawned this node.
+        origin: String,
+        materialization: Materialization,
+    },
+    /// Remove a model from execution (e.g., fused into another model).
+    RemoveNode { model: String },
+    /// Redirect all references from one model to another (model fusion).
+    RedirectRef { from: String, to: String },
+    /// Override a model's materialization strategy.
+    SetMaterialization {
+        model: String,
+        materialization: Materialization,
     },
 }
 
