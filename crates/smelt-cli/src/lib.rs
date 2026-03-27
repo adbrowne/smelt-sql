@@ -15,6 +15,7 @@ pub mod seed;
 pub mod selector;
 pub mod temporal;
 pub mod test_compiler;
+pub mod test_runner;
 pub mod transformer;
 
 pub use backend_registry::BackendRegistry;
@@ -40,6 +41,7 @@ pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError
 pub use smelt_core::RefInfo;
 pub use temporal::{compute_incremental_windows, IncrementalWindows};
 pub use test_compiler::{extract_ctes, CteInfo};
+pub use test_runner::TestResult;
 pub use transformer::{inject_time_filter, TimeRange, TransformError};
 
 use std::path::Path;
