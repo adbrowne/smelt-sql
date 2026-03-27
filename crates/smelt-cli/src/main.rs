@@ -335,6 +335,10 @@ struct TestArgs {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     match cli.command {
         Commands::Run(args) => commands::run::run(args).await,
         Commands::Backbuild(args) => commands::backbuild::backbuild(args).await,

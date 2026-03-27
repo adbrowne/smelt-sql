@@ -5,6 +5,8 @@ use smelt_core::{Granularity, Weekday};
 use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
 use std::path::{Path, PathBuf};
 
+use tracing::info;
+
 use smelt_cli::BackendType;
 
 #[cfg(feature = "duckdb")]
@@ -81,8 +83,12 @@ pub fn generate_partition_values(
 
     match granularity {
         Granularity::Hour => {
-            let mut current = start_date.and_hms_opt(0, 0, 0).unwrap();
-            let end_dt = end_date.and_hms_opt(0, 0, 0).unwrap();
+            let mut current = start_date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is always valid");
+            let end_dt = end_date
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is always valid");
             while current < end_dt {
                 values.push(current.format("%Y-%m-%d %H:00:00").to_string());
                 current += Duration::hours(1);
@@ -121,7 +127,7 @@ pub fn generate_partition_values(
                 } else {
                     (current.year(), current.month() + 1)
                 };
-                current = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                current = NaiveDate::from_ymd_opt(y, m, 1).expect("first of month is always valid");
             }
         }
         Granularity::Quarter => {
@@ -136,14 +142,16 @@ pub fn generate_partition_values(
                 } else {
                     (current.year(), new_month)
                 };
-                current = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                current = NaiveDate::from_ymd_opt(y, m, 1)
+                    .expect("first of quarter month is always valid");
             }
         }
         Granularity::Year => {
             let mut current = start_date;
             while current < end_date {
                 values.push(format!("{}", current.year()));
-                current = NaiveDate::from_ymd_opt(current.year() + 1, 1, 1).unwrap();
+                current = NaiveDate::from_ymd_opt(current.year() + 1, 1, 1)
+                    .expect("January 1st is always valid");
             }
         }
     }
@@ -180,8 +188,8 @@ pub async fn create_backend(
                     .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
 
                 let db_path = database_override.unwrap_or_else(|| project_dir.join(database));
-                println!("\nBackend: DuckDB");
-                println!("Database: {}", db_path.display());
+                info!("Backend: DuckDB");
+                info!("Database: {}", db_path.display());
 
                 Ok(Box::new(
                     DuckDbBackend::new(&db_path, &target_config.schema)
@@ -207,9 +215,9 @@ pub async fn create_backend(
                 let default_catalog = "spark_catalog".to_string();
                 let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
 
-                println!("\nBackend: Spark");
-                println!("Connect URL: {}", connect_url);
-                println!("Catalog: {}", catalog);
+                info!("Backend: Spark");
+                info!("Connect URL: {}", connect_url);
+                info!("Catalog: {}", catalog);
 
                 Ok(Box::new(
                     SparkBackend::new(connect_url, catalog, &target_config.schema)
@@ -304,7 +312,10 @@ pub fn print_json(schema: &ModelSchema, model_name: &str) {
         "columns": columns
     });
 
-    println!("{}", to_string_pretty(&output).unwrap());
+    println!(
+        "{}",
+        to_string_pretty(&output).expect("JSON serialization of schema should not fail")
+    );
 }
 
 pub fn print_test_result(

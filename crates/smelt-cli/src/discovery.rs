@@ -139,7 +139,7 @@ impl ModelDiscovery {
         let file_metadata = match extract_file_metadata(&content) {
             Ok(fm) => Some(fm),
             Err(e) => {
-                eprintln!("Warning: {}: {}", path.display(), e);
+                tracing::warn!("{}: {}", path.display(), e);
                 None
             }
         };

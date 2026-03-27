@@ -72,7 +72,11 @@ fn discover_seeds_in_dir(
 
         if path.is_file() && path.extension().is_some_and(|ext| ext == "csv") {
             // Top-level CSV → target seed
-            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let name = path
+                .file_stem()
+                .expect("CSV file always has a stem")
+                .to_string_lossy()
+                .into_owned();
             seeds.push(SeedFile {
                 name,
                 path,
@@ -81,14 +85,22 @@ fn discover_seeds_in_dir(
             });
         } else if path.is_dir() {
             // Subdirectory → source schema name
-            let schema = path.file_name().unwrap().to_string_lossy().into_owned();
+            let schema = path
+                .file_name()
+                .expect("directory entry always has a file name")
+                .to_string_lossy()
+                .into_owned();
 
             for sub_entry in std::fs::read_dir(&path)? {
                 let sub_entry = sub_entry?;
                 let sub_path = sub_entry.path();
 
                 if sub_path.is_file() && sub_path.extension().is_some_and(|ext| ext == "csv") {
-                    let name = sub_path.file_stem().unwrap().to_string_lossy().into_owned();
+                    let name = sub_path
+                        .file_stem()
+                        .expect("CSV file always has a stem")
+                        .to_string_lossy()
+                        .into_owned();
                     seeds.push(SeedFile {
                         name,
                         path: sub_path,

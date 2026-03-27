@@ -10,6 +10,8 @@ use smelt_cli::{
 use smelt_planner::Frontmatter;
 use std::collections::{HashMap, HashSet};
 
+use tracing::{debug, info};
+
 use crate::helpers::{generate_partition_values, strategy_label};
 use crate::BackbuildArgs;
 
@@ -18,13 +20,13 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
-    println!("Project directory: {}", project_dir.display());
+    info!("Project directory: {}", project_dir.display());
 
     // 2. Load configuration
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
-    println!("Project: {} (version {})", config.name, config.version);
+    info!("Project: {} (version {})", config.name, config.version);
 
     if !config.targets.contains_key(&args.target) {
         return Err(anyhow::anyhow!(
@@ -96,7 +98,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         .with_context(|| "Failed to select models")?;
 
     if selected.is_empty() {
-        println!("No models matched the selector");
+        info!("No models matched the selector");
         return Ok(());
     }
 
@@ -104,14 +106,14 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         .filtered_execution_order(&selected)
         .with_context(|| "Failed to determine execution order")?;
 
-    println!(
-        "\nBackbuild execution order: {}",
+    info!(
+        "Backbuild execution order: {}",
         execution_order
             .iter()
             .enumerate()
             .map(|(i, name)| format!("{}. {}", i + 1, name))
             .collect::<Vec<_>>()
-            .join(" → ")
+            .join(" -> ")
     );
 
     // 6. Validate time range
@@ -125,7 +127,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     NaiveDate::parse_from_str(&args.end, "%Y-%m-%d")
         .with_context(|| format!("Invalid end date: {}", args.end))?;
 
-    println!("Target range: {} to {} (exclusive)", args.start, args.end);
+    info!("Target range: {} to {} (exclusive)", args.start, args.end);
 
     // 7. Compute DAG-aware backfill plans
     let target_model = selectors[0]
@@ -149,11 +151,11 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     .with_context(|| "Failed to compute backbuild plans")?;
 
     // 8. Display plan
-    println!("\nBackfill plan:");
-    println!("{}", format_plan_summary(&plans));
+    info!("Backfill plan:");
+    info!("{}", format_plan_summary(&plans));
 
     if args.dry_run {
-        println!("\n[DRY RUN] Skipping execution");
+        info!("[DRY RUN] Skipping execution");
         return Ok(());
     }
 
@@ -164,7 +166,13 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
 
     let needed_targets: HashSet<String> = execution_order
         .iter()
-        .map(|name| graph.get_node(name).unwrap().target.clone())
+        .map(|name| {
+            graph
+                .get_node(name)
+                .expect("execution_order only contains valid node names")
+                .target
+                .clone()
+        })
         .collect();
     let registry = BackendRegistry::new(
         &config.targets,
@@ -201,9 +209,9 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     .build()
     .with_context(|| "Failed to build physical graph for backbuild")?;
 
-    println!("\n{}", "=".repeat(60));
-    println!("Executing backbuild...");
-    println!("{}", "=".repeat(60));
+    info!("{}", "=".repeat(60));
+    info!("Executing backbuild...");
+    info!("{}", "=".repeat(60));
 
     let mut total_results = Vec::new();
 
@@ -211,7 +219,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         // Skip ephemeral models (absorbed into physical graph's resolvers)
         let node = graph.get_node(&plan.model_name)?;
         if node.materialization == Materialization::Ephemeral {
-            println!("\n  {} (ephemeral — inlined as CTE)", plan.model_name);
+            debug!("{} (ephemeral - inlined as CTE)", plan.model_name);
             continue;
         }
 
@@ -223,7 +231,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         let resolver = physical_graph.ephemeral_resolver(model_target);
 
         if !plan.is_incremental {
-            println!("\n▶ {} (full refresh)", plan.model_name);
+            info!("{} (full refresh)", plan.model_name);
             let compiled = compiler
                 .compile_with_ephemerals(model, schema, resolver)
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
@@ -232,8 +240,8 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
                 .await
                 .with_context(|| format!("Failed to execute model: {}", plan.model_name))?;
 
-            println!(
-                "  ✓ {} ({} rows, {:?})",
+            info!(
+                "{} done ({} rows, {:?})",
                 result.model_name, result.row_count, result.duration
             );
             total_results.push(result);
@@ -257,14 +265,14 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         let resolved_strategy = backend.resolve_strategy(&inc_config);
 
         if plan.batches.len() == 1 {
-            println!(
-                "\n▶ {} (incremental/{}, 1 batch)",
+            info!(
+                "{} (incremental/{}, 1 batch)",
                 plan.model_name,
                 strategy_label(&resolved_strategy),
             );
         } else {
-            println!(
-                "\n▶ {} (incremental/{}, {} batches)",
+            info!(
+                "{} (incremental/{}, {} batches)",
                 plan.model_name,
                 strategy_label(&resolved_strategy),
                 plan.batches.len(),
@@ -273,8 +281,8 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
 
         for (i, batch) in plan.batches.iter().enumerate() {
             if plan.batches.len() > 1 {
-                println!(
-                    "  Batch {}/{}: [{}, {})",
+                debug!(
+                    "Batch {}/{}: [{}, {})",
                     i + 1,
                     plan.batches.len(),
                     batch.partition_range.start,
@@ -295,12 +303,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
 
             if args.verbose {
-                println!("\n  Compiled SQL:");
-                println!("  {}", "─".repeat(58));
-                for line in compiled.sql.lines() {
-                    println!("  {}", line);
-                }
-                println!("  {}", "─".repeat(58));
+                debug!("Compiled SQL:\n{}", compiled.sql);
             }
 
             let partition_values = generate_partition_values(
@@ -326,8 +329,8 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .await
             .with_context(|| format!("Failed to execute model: {}", plan.model_name))?;
 
-            println!(
-                "  ✓ {} ({} rows, {:?})",
+            info!(
+                "{} done ({} rows, {:?})",
                 result.model_name, result.row_count, result.duration
             );
             total_results.push(result);
@@ -335,13 +338,13 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     }
 
     // Summary
-    println!("\n{}", "=".repeat(60));
-    println!("Backbuild Summary");
-    println!("{}", "=".repeat(60));
-    println!("✓ Executed {} step(s) successfully", total_results.len());
+    info!("{}", "=".repeat(60));
+    info!("Backbuild Summary");
+    info!("{}", "=".repeat(60));
+    info!("Executed {} step(s) successfully", total_results.len());
 
     let total_duration: std::time::Duration = total_results.iter().map(|r| r.duration).sum();
-    println!("  Total time: {:?}", total_duration);
+    info!("Total time: {:?}", total_duration);
 
     Ok(())
 }

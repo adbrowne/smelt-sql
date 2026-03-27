@@ -69,7 +69,7 @@ impl DuckDbBackend {
         let table_name = table_name.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.query_row(query, [&schema, &table_name], |row| row.get(0))
                 .unwrap_or(false)
         })
@@ -85,7 +85,7 @@ impl Backend for DuckDbBackend {
         let sql = sql.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             let mut stmt = conn
                 .prepare(&sql)
                 .map_err(|e| BackendError::execution_failed("query", e.to_string()))?;
@@ -111,7 +111,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&create_sql, [])
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
             Ok(())
@@ -131,7 +131,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&create_sql, [])
                 .map_err(|e| BackendError::execution_failed(view_name.clone(), e.to_string()))?;
             Ok(())
@@ -146,7 +146,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&drop_sql, [])
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
             Ok(())
@@ -161,7 +161,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&drop_sql, [])
                 .map_err(|e| BackendError::execution_failed(view_name.clone(), e.to_string()))?;
             Ok(())
@@ -176,7 +176,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.query_row(&sql, [], |row| row.get(0))
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))
         })
@@ -195,7 +195,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             let mut stmt = conn
                 .prepare(&sql)
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
@@ -219,7 +219,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&sql, [])
                 .map_err(|e| BackendError::execution_failed("schema", e.to_string()))?;
             Ok(())
@@ -260,7 +260,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&delete_sql, [])
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
             Ok(())
@@ -280,7 +280,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&insert_sql, [])
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
             Ok(())
@@ -314,7 +314,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&merge_sql, [])
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
             Ok(())
@@ -344,7 +344,7 @@ impl Backend for DuckDbBackend {
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().unwrap();
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&delete_sql, [])
                 .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
             conn.execute(&insert_sql, [])

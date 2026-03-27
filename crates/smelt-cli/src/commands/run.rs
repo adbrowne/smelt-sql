@@ -14,6 +14,8 @@ use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
 use std::collections::{HashMap, HashSet};
 
+use tracing::{debug, info, warn};
+
 use crate::helpers::{
     generate_partition_values, granularity_label, infer_deployed_columns, strategy_label,
 };
@@ -26,13 +28,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
-    println!("Project directory: {}", project_dir.display());
+    info!("Project directory: {}", project_dir.display());
 
     // 2. Load configuration
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
-    println!("Project: {} (version {})", config.name, config.version);
+    info!("Project: {} (version {})", config.name, config.version);
 
     // Validate default target exists early
     if !config.targets.contains_key(&args.target) {
@@ -53,7 +55,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     if let Some(ref source_config) = sources {
         let source_count: usize = source_config.sources.iter().map(|s| s.tables.len()).sum();
-        println!("Loaded {} source tables", source_count);
+        info!("Loaded {} source tables", source_count);
     }
 
     // 3. Discover models (SQL + Python)
@@ -81,7 +83,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .with_context(|| "Failed to discover Python models")?;
 
         if !python_models.is_empty() {
-            println!(
+            info!(
                 "Found {} Python model(s) from {} file(s)",
                 python_models.len(),
                 python_files.len()
@@ -97,14 +99,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
         ));
     }
 
-    println!("Found {} models total", models.len());
+    info!("Found {} models total", models.len());
 
     // Report any parse errors
     for model in &models {
         if !model.parse_errors.is_empty() {
-            eprintln!("\nWarning: Parse errors in {}:", model.name);
+            warn!("Parse errors in {}:", model.name);
             for error in &model.parse_errors {
-                eprintln!("  - {} at {:?}", error.message, error.range);
+                warn!("  - {} at {:?}", error.message, error.range);
             }
         }
     }
@@ -122,7 +124,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let config_errors = config.validate_model_configs(&metadata_map);
         if !config_errors.is_empty() {
             for (model, msg) in &config_errors {
-                eprintln!("Error: model '{}': {}", model, msg);
+                tracing::error!("model '{}': {}", model, msg);
             }
             return Err(anyhow::anyhow!(
                 "Model configuration validation failed ({} error(s))",
@@ -192,7 +194,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         }
 
         if selected.is_empty() {
-            println!("No models matched the selectors");
+            info!("No models matched the selectors");
             return Ok(());
         }
 
@@ -201,8 +203,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
             .with_context(|| "Failed to determine execution order")?
     };
 
-    println!(
-        "\nExecution order: {}",
+    info!(
+        "Execution order: {}",
         execution_order
             .iter()
             .enumerate()
@@ -212,7 +214,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     );
 
     if args.dry_run {
-        println!("\n[DRY RUN] Skipping execution");
+        info!("[DRY RUN] Skipping execution");
         return Ok(());
     }
 
@@ -264,7 +266,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 format!("Invalid end date format: {}. Expected YYYY-MM-DD", end)
             })?;
 
-            println!("\nTime range: {} to {} (exclusive)", start, end);
+            info!("Time range: {} to {} (exclusive)", start, end);
             Some(TimeRange {
                 start: start.clone(),
                 end: end.clone(),
@@ -284,8 +286,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let interval_store = match file_store.load_intervals() {
             Ok(store) => store,
             Err(e) => {
-                eprintln!(
-                    "Warning: failed to load interval store: {}. Starting with empty history.",
+                warn!(
+                    "Failed to load interval store: {}. Starting with empty history.",
                     e
                 );
                 smelt_state::intervals::IntervalStore::default()
@@ -308,13 +310,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         if let Some(start_date) = latest {
             let start = start_date.format("%Y-%m-%d").to_string();
-            println!(
-                "\n[AUTO] Time range: {} to {} (from interval store)",
+            info!(
+                "[AUTO] Time range: {} to {} (from interval store)",
                 start, today
             );
             Some(TimeRange { start, end: today })
         } else {
-            println!("\n[AUTO] No interval history found. Use --start/--end for initial run.");
+            info!("[AUTO] No interval history found. Use --start/--end for initial run.");
             None
         }
     } else {
@@ -343,7 +345,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let (transformations, plan_errors) = planner.plan(&opt_graph);
 
     for err in &plan_errors {
-        eprintln!("  Planner error: {}", err);
+        warn!("Planner error: {}", err);
     }
 
     // 10. Build physical graph (resolves strategies, ephemeral resolvers)
@@ -365,9 +367,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // Print planner summary
     let planner_summary = physical_graph.planner_summary();
     if !planner_summary.is_empty() {
-        println!("\nPlanner:");
+        info!("Planner:");
         for (model, desc) in &planner_summary {
-            println!("  {} → {}", model, desc);
+            info!("  {} -> {}", model, desc);
         }
     }
 
@@ -398,9 +400,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let type_db = init_db(&project_dir, &all_models);
     let file_store = FileStore::new(&project_dir);
 
-    println!("\n{}", "=".repeat(60));
-    println!("Executing models...");
-    println!("{}", "=".repeat(60));
+    info!("{}", "=".repeat(60));
+    info!("Executing models...");
+    info!("{}", "=".repeat(60));
 
     let mut results: Vec<(smelt_backend::ExecutionResult, PhysicalStrategy)> = Vec::new();
 
@@ -433,16 +435,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         Ok(migration::SchemaEvolutionResult::FirstDeployment) => {}
                         Ok(migration::SchemaEvolutionResult::NoChange) => {}
                         Ok(migration::SchemaEvolutionResult::Migrated { statements }) => {
-                            println!(
-                                "  Schema evolved ({} ALTER statement(s)):",
-                                statements.len()
-                            );
+                            info!("Schema evolved ({} ALTER statement(s)):", statements.len());
                             for stmt in &statements {
-                                println!("    {}", stmt);
+                                info!("    {}", stmt);
                             }
                         }
                         Ok(migration::SchemaEvolutionResult::FullRefreshRequired { reason }) => {
-                            println!("  Schema change requires full refresh: {}", reason);
+                            info!("Schema change requires full refresh: {}", reason);
                             force_full_refresh = true;
                         }
                         Ok(migration::SchemaEvolutionResult::ColumnRemovalBlocked { columns }) => {
@@ -454,8 +453,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                             ));
                         }
                         Err(e) => {
-                            eprintln!(
-                                "  Warning: Schema evolution check failed: {}. Continuing with incremental.",
+                            warn!(
+                                "Schema evolution check failed: {}. Continuing with incremental.",
                                 e
                             );
                         }
@@ -478,8 +477,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 plan_steps: Some(steps),
             } => {
                 let resolved_strategy = backend.resolve_strategy(inc_config);
-                println!(
-                    "\n▶ Running model: {} (cube split + incremental/{})",
+                info!(
+                    "Running model: {} (cube split + incremental/{})",
                     model_name,
                     strategy_label(&resolved_strategy),
                 );
@@ -501,10 +500,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 if windows.effective_window.lookback_days > 0
                     || windows.effective_window.lookahead_days > 0
                 {
-                    println!(
-                        "  Temporal window: {}",
-                        windows.effective_window.explanation
-                    );
+                    debug!("Temporal window: {}", windows.effective_window.explanation);
                 }
 
                 let partition_values = generate_partition_values(
@@ -534,7 +530,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
             PhysicalStrategy::CubeSplit { steps } => {
                 // Cube split only (full refresh)
-                println!("\n▶ Running model: {} (cube split)", model_name);
+                info!("Running model: {} (cube split)", model_name);
 
                 executor::execute_plan(backend, model_name, steps, schema, args.show_results)
                     .await
@@ -587,8 +583,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     }
                 };
 
-                println!(
-                    "\n▶ Running model: {} (incremental/{}, {} batch(es), {})",
+                info!(
+                    "Running model: {} (incremental/{}, {} batch(es), {})",
                     model_name,
                     strategy_label(&resolved_strategy),
                     batch_count,
@@ -598,10 +594,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 if windows.effective_window.lookback_days > 0
                     || windows.effective_window.lookahead_days > 0
                 {
-                    println!(
-                        "  Temporal window: {}",
-                        windows.effective_window.explanation
-                    );
+                    debug!("Temporal window: {}", windows.effective_window.explanation);
                 }
 
                 // Use computed batches, or fall back to single batch for the full range
@@ -617,8 +610,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let mut last_result = None;
                 for (i, batch) in effective_batches.iter().enumerate() {
                     if effective_batches.len() > 1 {
-                        println!(
-                            "  Batch {}/{}: [{}, {})",
+                        debug!(
+                            "Batch {}/{}: [{}, {})",
                             i + 1,
                             effective_batches.len(),
                             batch.partition_range.start,
@@ -641,12 +634,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                     if args.verbose {
-                        println!("\n  Transformed SQL:");
-                        println!("  {}", "─".repeat(58));
-                        for line in compiled.sql.lines() {
-                            println!("  {}", line);
-                        }
-                        println!("  {}", "─".repeat(58));
+                        debug!("Transformed SQL:\n{}", compiled.sql);
                     }
 
                     let partition_values = generate_partition_values(
@@ -656,15 +644,19 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     )?;
 
                     if effective_batches.len() == 1 {
-                        println!(
-                            "  Partitions to update: {} ({} {})",
+                        debug!(
+                            "Partitions to update: {} ({} {})",
                             if partition_values.len() <= 3 {
                                 partition_values.join(", ")
                             } else {
                                 format!(
                                     "{}, ..., {}",
-                                    partition_values.first().unwrap(),
-                                    partition_values.last().unwrap()
+                                    partition_values
+                                        .first()
+                                        .expect("partition_values is non-empty when len > 3"),
+                                    partition_values
+                                        .last()
+                                        .expect("partition_values is non-empty when len > 3")
                                 )
                             },
                             partition_values.len(),
@@ -690,22 +682,22 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     .with_context(|| format!("Failed to execute model: {}", model_name))?;
 
                     if effective_batches.len() > 1 {
-                        println!("    ✓ {} rows ({:?})", result.row_count, result.duration);
+                        debug!("batch {} rows ({:?})", result.row_count, result.duration);
                     }
 
                     last_result = Some(result);
                 }
 
-                last_result.unwrap()
+                last_result.expect("at least one batch must have been processed")
             }
             PhysicalStrategy::FullRefresh => {
                 if time_range.is_some() {
-                    println!(
-                        "\n▶ Running model: {} (full refresh - not configured for incremental)",
+                    info!(
+                        "Running model: {} (full refresh - not configured for incremental)",
                         model_name
                     );
                 } else {
-                    println!("\n▶ Running model: {}", model_name);
+                    info!("Running model: {}", model_name);
                 }
 
                 let compiled = compiler
@@ -713,12 +705,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                 if args.verbose {
-                    println!("\n  Compiled SQL:");
-                    println!("  {}", "─".repeat(58));
-                    for line in compiled.sql.lines() {
-                        println!("  {}", line);
-                    }
-                    println!("  {}", "─".repeat(58));
+                    debug!("Compiled SQL:\n{}", compiled.sql);
                 }
 
                 executor::execute_model(backend, &compiled, schema, args.show_results)
@@ -727,8 +714,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
         };
 
-        println!(
-            "  ✓ {} ({} rows, {:?})",
+        info!(
+            "{} done ({} rows, {:?})",
             result.model_name, result.row_count, result.duration
         );
 
@@ -754,7 +741,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     &inferred_columns,
                     existing_version,
                 ) {
-                    eprintln!("  Warning: Failed to save deployed schema: {}", e);
+                    warn!("Failed to save deployed schema: {}", e);
                 }
             }
         }
@@ -821,20 +808,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Save state (best-effort — don't fail the run if state can't be saved)
     if let Err(e) = file_store.save_run(&manifest) {
-        eprintln!("Warning: Failed to save run manifest: {}", e);
+        warn!("Failed to save run manifest: {}", e);
     }
     if let Err(e) = file_store.save_intervals(&interval_store) {
-        eprintln!("Warning: Failed to save interval store: {}", e);
+        warn!("Failed to save interval store: {}", e);
     }
 
     // 10. Summary
-    println!("\n{}", "=".repeat(60));
-    println!("Summary (run: {})", run_id);
-    println!("{}", "=".repeat(60));
-    println!("✓ Executed {} models successfully", results.len());
+    info!("{}", "=".repeat(60));
+    info!("Summary (run: {})", run_id);
+    info!("{}", "=".repeat(60));
+    info!("Executed {} models successfully", results.len());
 
     let total_duration: std::time::Duration = results.iter().map(|(r, _)| r.duration).sum();
-    println!("  Total time: {:?}", total_duration);
+    info!("Total time: {:?}", total_duration);
 
     Ok(())
 }

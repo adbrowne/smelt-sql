@@ -505,7 +505,11 @@ impl<'a> PhysicalGraphBuilder<'a> {
             // Config-based incremental (smelt.yml or frontmatter)
             PhysicalStrategy::Incremental {
                 config: inc.clone(),
-                time_range: self.time_range.as_ref().unwrap().clone(),
+                time_range: self
+                    .time_range
+                    .as_ref()
+                    .expect("time_range is Some when filter passes")
+                    .clone(),
                 plan_steps,
             }
         } else if let Some(steps) = plan_steps {

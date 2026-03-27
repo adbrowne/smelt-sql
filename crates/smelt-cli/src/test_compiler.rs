@@ -161,9 +161,12 @@ fn yaml_value_to_sql(v: &serde_yaml::Value) -> String {
     match v {
         serde_yaml::Value::Number(n) => {
             if n.is_i64() {
-                format!("{}", n.as_i64().unwrap())
+                format!("{}", n.as_i64().expect("checked is_i64() above"))
             } else {
-                format!("{}", n.as_f64().unwrap())
+                format!(
+                    "{}",
+                    n.as_f64().expect("serde_yaml Number is either i64 or f64")
+                )
             }
         }
         serde_yaml::Value::Bool(b) => {

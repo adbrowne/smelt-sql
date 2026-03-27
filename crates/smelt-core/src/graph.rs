@@ -147,8 +147,13 @@ impl DependencyGraph {
             for dep in deps {
                 // Only count model dependencies (skip sources)
                 if self.models.contains_key(dep) {
-                    *in_degree.get_mut(model_name).unwrap() += 1;
-                    dependents.get_mut(dep).unwrap().push(model_name.clone());
+                    *in_degree
+                        .get_mut(model_name)
+                        .expect("all model names were inserted into in_degree") += 1;
+                    dependents
+                        .get_mut(dep)
+                        .expect("all model names were inserted into dependents")
+                        .push(model_name.clone());
                 }
             }
         }
@@ -168,7 +173,9 @@ impl DependencyGraph {
             // Reduce in-degree for dependents
             if let Some(deps) = dependents.get(&model_name) {
                 for dependent in deps {
-                    let degree = in_degree.get_mut(dependent).unwrap();
+                    let degree = in_degree
+                        .get_mut(dependent)
+                        .expect("dependents only contains valid model names");
                     *degree -= 1;
 
                     if *degree == 0 {

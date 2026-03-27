@@ -33,7 +33,7 @@ pub async fn status(args: StatusArgs) -> Result<()> {
                 .get(name)
                 .map(|i| vec![(name, i)])
                 .unwrap_or_else(|| {
-                    eprintln!("Model '{}' not found in interval store", name);
+                    tracing::warn!("Model '{}' not found in interval store", name);
                     vec![]
                 })
         } else {

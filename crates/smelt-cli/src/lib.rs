@@ -63,7 +63,7 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
         Ok(Some(path)) => std::fs::read_to_string(&path).unwrap_or_default(),
         Ok(None) => String::new(),
         Err(msg) => {
-            eprintln!("Warning: {}", msg);
+            tracing::warn!("{}", msg);
             String::new()
         }
     };

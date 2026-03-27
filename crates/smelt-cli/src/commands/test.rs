@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use smelt_cli::{find_project_root, Config, ModelDiscovery};
 
+use tracing::{debug, warn};
+
 use crate::helpers::print_test_result;
 use crate::TestArgs;
 
@@ -60,7 +62,7 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
         let test_config = match test_model.test_config() {
             Some(tc) => tc,
             None => {
-                eprintln!("  SKIP {} (missing test configuration)", test_model.name);
+                warn!("SKIP {} (missing test configuration)", test_model.name);
                 continue;
             }
         };
@@ -151,9 +153,7 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
         };
 
         if args.verbose {
-            eprintln!("  Compiled SQL for {}:", test_model.name);
-            eprintln!("    {}", compiled_sql.replace('\n', "\n    "));
-            eprintln!();
+            debug!("Compiled SQL for {}:\n{}", test_model.name, compiled_sql);
         }
 
         // Run the test

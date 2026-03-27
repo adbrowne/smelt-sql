@@ -114,10 +114,12 @@ fn adjust_range(
 
     use chrono::{Duration, NaiveDate};
 
-    let start = NaiveDate::parse_from_str(&range.start, "%Y-%m-%d")
-        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
-    let end = NaiveDate::parse_from_str(&range.end, "%Y-%m-%d")
-        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2099, 12, 31).unwrap());
+    let start = NaiveDate::parse_from_str(&range.start, "%Y-%m-%d").unwrap_or_else(|_| {
+        NaiveDate::from_ymd_opt(2000, 1, 1).expect("2000-01-01 is always valid")
+    });
+    let end = NaiveDate::parse_from_str(&range.end, "%Y-%m-%d").unwrap_or_else(|_| {
+        NaiveDate::from_ymd_opt(2099, 12, 31).expect("2099-12-31 is always valid")
+    });
 
     let adjusted_start = start - Duration::days(lookback_days as i64);
     let adjusted_end = end + Duration::days(lookahead_days as i64);

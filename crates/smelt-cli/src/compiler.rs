@@ -492,7 +492,10 @@ fn extract_cte_parts(sql: &str) -> CteParts {
     let mut pos = 5; // Skip "WITH "
     let rest_upper = trimmed[pos..].trim_start().to_uppercase();
     if rest_upper.starts_with("RECURSIVE ") {
-        pos += trimmed[pos..].find("RECURSIVE").unwrap() + 10;
+        pos += trimmed[pos..]
+            .find("RECURSIVE")
+            .expect("starts_with check above guarantees RECURSIVE is present")
+            + 10;
     }
 
     let bytes = trimmed.as_bytes();

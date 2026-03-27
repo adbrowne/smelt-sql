@@ -1264,7 +1264,11 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
                 let unique_refs: std::collections::HashSet<&String> =
                     alias_to_ref.values().collect();
                 if unique_refs.len() == 1 {
-                    let ref_name = alias_to_ref.values().next().unwrap();
+                    // Unqualified with single ref: assume it comes from that ref
+                    let ref_name = alias_to_ref
+                        .values()
+                        .next()
+                        .expect("unique_refs.len() == 1 guarantees at least one value");
                     let final_type =
                         inferred_type.or_else(|| ctx.lookup_column(None, col_name).cloned());
                     record_constraint(ref_name, col_name, final_type, range);

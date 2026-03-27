@@ -65,8 +65,8 @@ pub async fn execute_model_incremental(
         compiled.materialization,
         crate::config::Materialization::View
     ) {
-        eprintln!(
-            "  Warning: {} is a view, using full refresh (views cannot be incremental)",
+        tracing::warn!(
+            "{} is a view, using full refresh (views cannot be incremental)",
             compiled.name
         );
         return execute_model(backend, compiled, schema, show_results).await;

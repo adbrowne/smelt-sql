@@ -71,7 +71,11 @@ impl BackendRegistry {
             "single_backend() called with {} backends",
             self.backends.len()
         );
-        self.backends.values().next().unwrap().as_ref()
+        self.backends
+            .values()
+            .next()
+            .expect("assert above guarantees exactly one backend")
+            .as_ref()
     }
 }
 
@@ -95,8 +99,8 @@ async fn create_backend(
                     .ok_or_else(|| anyhow::anyhow!("DuckDB target requires 'database' field"))?;
 
                 let db_path = database_override.unwrap_or_else(|| project_dir.join(database));
-                println!("\nBackend [{}]: DuckDB", target_name);
-                println!("Database: {}", db_path.display());
+                tracing::info!("Backend [{}]: DuckDB", target_name);
+                tracing::info!("Database: {}", db_path.display());
 
                 Ok(Box::new(
                     DuckDbBackend::new(&db_path, &target_config.schema)
@@ -124,9 +128,9 @@ async fn create_backend(
                 let default_catalog = "spark_catalog".to_string();
                 let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
 
-                println!("\nBackend [{}]: Spark", target_name);
-                println!("Connect URL: {}", connect_url);
-                println!("Catalog: {}", catalog);
+                tracing::info!("Backend [{}]: Spark", target_name);
+                tracing::info!("Connect URL: {}", connect_url);
+                tracing::info!("Catalog: {}", catalog);
 
                 Ok(Box::new(
                     SparkBackend::new(connect_url, catalog, &target_config.schema)

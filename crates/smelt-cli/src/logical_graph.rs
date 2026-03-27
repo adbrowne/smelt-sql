@@ -59,8 +59,8 @@ impl LogicalGraph {
 
             if let Some(existing) = nodes.get(&model.name) {
                 let existing: &LogicalNode = existing;
-                eprintln!(
-                    "Warning: Duplicate model name '{}'. Model at {} overwrites model at {}.",
+                tracing::warn!(
+                    "Duplicate model name '{}'. Model at {} overwrites model at {}.",
                     model.name,
                     model.path.display(),
                     existing.model_file.path.display()
@@ -157,8 +157,8 @@ impl LogicalGraph {
             if node.materialization == Materialization::Ephemeral {
                 let has_consumers = dependents.get(&node.name).is_some_and(|d| !d.is_empty());
                 if !has_consumers {
-                    eprintln!(
-                        "Warning: Ephemeral model '{}' has no downstream consumers and will never be inlined.",
+                    tracing::warn!(
+                        "Ephemeral model '{}' has no downstream consumers and will never be inlined.",
                         node.name
                     );
                 }
@@ -181,8 +181,13 @@ impl LogicalGraph {
         for node in self.nodes.values() {
             for dep in &node.dependencies {
                 if self.nodes.contains_key(dep) {
-                    *in_degree.get_mut(&node.name).unwrap() += 1;
-                    dependents.get_mut(dep).unwrap().push(node.name.clone());
+                    *in_degree
+                        .get_mut(&node.name)
+                        .expect("all node names were inserted into in_degree") += 1;
+                    dependents
+                        .get_mut(dep)
+                        .expect("all node names were inserted into dependents")
+                        .push(node.name.clone());
                 }
             }
         }
@@ -200,7 +205,9 @@ impl LogicalGraph {
 
             if let Some(deps) = dependents.get(&model_name) {
                 for dependent in deps {
-                    let degree = in_degree.get_mut(dependent).unwrap();
+                    let degree = in_degree
+                        .get_mut(dependent)
+                        .expect("dependents only contains valid node names");
                     *degree -= 1;
 
                     if *degree == 0 {

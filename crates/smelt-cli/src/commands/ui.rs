@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use smelt_cli::{find_project_root, init_db, Config, ModelDiscovery, SourcesConfig};
 
+use tracing::info;
+
 use crate::UiArgs;
 
 pub async fn ui(args: UiArgs) -> Result<()> {
@@ -17,7 +19,7 @@ pub async fn ui(args: UiArgs) -> Result<()> {
         .discover_models()
         .with_context(|| "Failed to discover models")?;
 
-    println!("Found {} models", models.len());
+    info!("Found {} models", models.len());
 
     // Initialize smelt-db for schema queries
     let db = init_db(&project_dir, &models);

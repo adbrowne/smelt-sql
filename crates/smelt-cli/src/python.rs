@@ -371,7 +371,7 @@ pub fn discover_python_models(
                 let model_metadata = match extract_file_metadata(&output.sql) {
                     Ok(fm) => Some(fm),
                     Err(e) => {
-                        eprintln!("Warning: Python model {}: {}", output.name, e);
+                        tracing::warn!("Python model {}: {}", output.name, e);
                         None
                     }
                 }
