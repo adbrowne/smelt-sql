@@ -15,6 +15,7 @@ pub mod seed;
 pub mod selector;
 pub mod temporal;
 pub mod test_compiler;
+pub mod test_property;
 pub mod test_runner;
 pub mod transformer;
 

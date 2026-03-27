@@ -29,6 +29,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use thiserror::Error;
 
+/// A test constraint on a column.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum ColumnTest {
+    /// Simple test like "not_null" or "unique"
+    Simple(String),
+    /// Parameterized test like {accepted_values: [a, b]} or {min: 0}
+    Parameterized(BTreeMap<String, serde_yaml::Value>),
+}
+
 /// Configuration for a test model
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct TestConfig {
@@ -52,7 +62,7 @@ pub struct TestConfig {
 }
 
 /// Per-column metadata declared in model frontmatter.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ColumnMetadata {
     /// How late data can arrive for this column.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +71,10 @@ pub struct ColumnMetadata {
     /// Human-readable description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Column-level test constraints (not_null, unique, accepted_values, min, max)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<ColumnTest>,
 }
 
 /// Metadata for a single model extracted from frontmatter

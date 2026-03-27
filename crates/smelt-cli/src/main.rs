@@ -339,6 +339,18 @@ struct TestArgs {
     /// Show passing tests too (default: only failures)
     #[arg(long)]
     show_all: bool,
+
+    /// Target environment from smelt.yml (for singular tests that query real data)
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// DuckDB database file path (overrides smelt.yml)
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Random seed for property-based tests (for reproducibility)
+    #[arg(long)]
+    seed: Option<u64>,
 }
 
 #[tokio::main]
@@ -2464,19 +2476,66 @@ async fn run_tests(args: TestArgs) -> Result<()> {
 
     println!("\nsmelt test\n");
 
+    // Compute database path for singular tests (that run against real data)
+    let target_config = config.targets.get(&args.target);
+    let database_path: Option<PathBuf> = args.database.clone().or_else(|| {
+        target_config.and_then(|t| t.database.as_ref()).map(|db| {
+            let p = PathBuf::from(db);
+            if p.is_relative() {
+                project_dir.join(p)
+            } else {
+                p
+            }
+        })
+    });
+    let schema = target_config
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+
     // 5. Run each test
     let mut passed = 0;
     let mut failed = 0;
     let mut results = Vec::new();
 
     for test_model in &selected_tests {
-        let test_config = match test_model.test_config() {
-            Some(tc) => tc,
-            None => {
-                eprintln!("  SKIP {} (missing test configuration)", test_model.name);
+        let test_config = test_model.test_config();
+
+        if test_config.is_none() {
+            // Singular test: SQL body is the test, pass if 0 rows returned
+            let clean = smelt_parser::strip_frontmatter(&test_model.content);
+            let trimmed = clean.trim();
+            if trimmed.is_empty() {
+                eprintln!("  SKIP {} (empty test body)", test_model.name);
                 continue;
             }
-        };
+
+            // Resolve smelt.ref() calls in the SQL
+            let resolved_sql = smelt_cli::resolve_refs_in_sql(trimmed, &schema);
+
+            if args.verbose {
+                println!("  Compiled SQL for {} (singular):", test_model.name);
+                println!("    {}", resolved_sql.replace('\n', "\n    "));
+                println!();
+            }
+
+            let result = smelt_cli::test_runner::run_singular_test(
+                &test_model.name,
+                &resolved_sql,
+                database_path.as_deref(),
+            );
+
+            if result.passed {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+
+            print_test_result(&result, args.verbose, args.show_all);
+            results.push(result);
+            continue;
+        }
+
+        let test_config = test_config.unwrap();
 
         // Find the model being tested
         let target_model = regular_models.iter().find(|m| m.name == test_config.model);
@@ -2564,12 +2623,92 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         };
 
         if args.verbose {
-            eprintln!("  Compiled SQL for {}:", test_model.name);
-            eprintln!("    {}", compiled_sql.replace('\n', "\n    "));
-            eprintln!();
+            println!("  Compiled SQL for {}:", test_model.name);
+            println!("    {}", compiled_sql.replace('\n', "\n    "));
+            println!();
         }
 
-        // Run the test
+        // Check if this is a property-based test (has cases: N)
+        if let Some(cases) = test_config.cases {
+            use smelt_cli::test_property::run_property_test;
+
+            let prop_result = run_property_test(
+                &test_model.name,
+                &test_config.model,
+                test_config.target_cte.as_deref(),
+                model_sql,
+                test_config,
+                cases,
+                args.seed,
+            );
+
+            let duration_str = format!("{:.2}s", prop_result.duration.as_secs_f64());
+            let cte_suffix = prop_result
+                .target_cte
+                .as_ref()
+                .map(|c| format!("::{}", c))
+                .unwrap_or_default();
+
+            if prop_result.passed {
+                passed += 1;
+                if args.show_all {
+                    println!(
+                        "  PASS {} ({}{})\t[{} cases]\t{}",
+                        prop_result.name, prop_result.model, cte_suffix, cases, duration_str
+                    );
+                }
+            } else {
+                failed += 1;
+                println!(
+                    "  FAIL {} ({}{})\t[case {}/{}]\t{}",
+                    prop_result.name,
+                    prop_result.model,
+                    cte_suffix,
+                    prop_result.failing_iteration.unwrap_or(0),
+                    cases,
+                    duration_str
+                );
+                if let Some(ref inner) = prop_result.inner_result {
+                    if let Some(ref err) = inner.error {
+                        println!("\n{}", err);
+                    }
+                    if args.verbose {
+                        println!("  Compiled SQL (failing iteration):");
+                        println!("    {}", inner.compiled_sql.replace('\n', "\n    "));
+                    }
+                }
+                if let Some(seed) = prop_result.failing_seed {
+                    println!(
+                        "  Reproduce with: smelt test --seed {} --select {}",
+                        seed, prop_result.name
+                    );
+                }
+                println!();
+            }
+
+            // Create a synthetic TestResult for the results vec
+            let synthetic = smelt_cli::test_runner::TestResult {
+                name: prop_result.name,
+                model: prop_result.model,
+                target_cte: prop_result.target_cte,
+                passed: prop_result.passed,
+                duration: prop_result.duration,
+                compiled_sql: prop_result
+                    .inner_result
+                    .as_ref()
+                    .map(|r| r.compiled_sql.clone())
+                    .unwrap_or(compiled_sql),
+                error: if prop_result.passed {
+                    None
+                } else {
+                    prop_result.inner_result.and_then(|r| r.error)
+                },
+            };
+            results.push(synthetic);
+            continue;
+        }
+
+        // Run the test (single iteration)
         let check_order = test_config.check_order.unwrap_or(false);
         let result = run_test(
             &test_model.name,
@@ -2590,7 +2729,76 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         results.push(result);
     }
 
-    // 6. Summary
+    // 6. Run column-level data quality tests
+    for model in &regular_models {
+        let metadata = match model.metadata.as_ref() {
+            Some(m) => m,
+            None => continue,
+        };
+
+        if metadata.columns.is_empty() {
+            continue;
+        }
+
+        for (col_name, col_meta) in &metadata.columns {
+            for test in &col_meta.tests {
+                let (test_display_name, test_sql) =
+                    match smelt_cli::test_compiler::compile_column_test(
+                        &schema,
+                        &model.name,
+                        col_name,
+                        test,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let result = smelt_cli::test_runner::TestResult {
+                                name: format!("{}.{}", model.name, col_name),
+                                model: model.name.clone(),
+                                target_cte: None,
+                                passed: false,
+                                duration: std::time::Duration::from_secs(0),
+                                compiled_sql: String::new(),
+                                error: Some(TestError::CompilationError(e)),
+                            };
+                            failed += 1;
+                            print_test_result(&result, args.verbose, args.show_all);
+                            results.push(result);
+                            continue;
+                        }
+                    };
+
+                // Apply selection filter to column tests too
+                if !args.select.is_empty()
+                    && !args.select.iter().any(|s| test_display_name.contains(s))
+                {
+                    continue;
+                }
+
+                if args.verbose {
+                    println!("  Compiled SQL for {} (column test):", test_display_name);
+                    println!("    {}", test_sql.replace('\n', "\n    "));
+                    println!();
+                }
+
+                let result = smelt_cli::test_runner::run_singular_test(
+                    &test_display_name,
+                    &test_sql,
+                    database_path.as_deref(),
+                );
+
+                if result.passed {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+
+                print_test_result(&result, args.verbose, args.show_all);
+                results.push(result);
+            }
+        }
+    }
+
+    // 7. Summary
     let total = passed + failed;
     let overall_duration = overall_start.elapsed();
     println!(
@@ -2615,27 +2823,29 @@ fn print_test_result(result: &smelt_cli::test_runner::TestResult, verbose: bool,
         .map(|c| format!("::{}", c))
         .unwrap_or_default();
 
+    let model_info = if result.model.is_empty() {
+        String::new()
+    } else {
+        format!(" ({}{})", result.model, cte_suffix)
+    };
+
     if result.passed {
         if show_all {
             println!(
-                "  PASS {} ({}{}){:>width$}",
+                "  PASS {}{}{:>width$}",
                 result.name,
-                result.model,
-                cte_suffix,
+                model_info,
                 format!("{:.2}s", result.duration.as_secs_f64()),
-                width = 40usize
-                    .saturating_sub(result.name.len() + result.model.len() + cte_suffix.len())
+                width = 40usize.saturating_sub(result.name.len() + model_info.len())
             );
         }
     } else {
         println!(
-            "  FAIL {} ({}{}){:>width$}",
+            "  FAIL {}{}{:>width$}",
             result.name,
-            result.model,
-            cte_suffix,
+            model_info,
             format!("{:.2}s", result.duration.as_secs_f64()),
-            width =
-                40usize.saturating_sub(result.name.len() + result.model.len() + cte_suffix.len())
+            width = 40usize.saturating_sub(result.name.len() + model_info.len())
         );
         if let Some(ref error) = result.error {
             println!("\n{}", error);

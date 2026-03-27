@@ -1,3 +1,6 @@
+-- NTILE(10) with 4 rows assigns one row per bucket: deciles 1, 2, 3, 4.
+-- Revenue ORDER BY DESC: 1000 > 800 > 500 > 100 → customers 1, 4, 2, 3.
+-- Frequency ORDER BY DESC: 10 > 8 > 5 > 2 → same ordering.
 --- name: test_customer_quantiles ---
 materialization: test
 test:

@@ -411,6 +411,55 @@ Interesting SQL patterns: JSON functions, incremental, cube.
 | Partial columns | Property-based testing | Novel capability. Leverages existing type inference and proptest-style infrastructure. |
 | Row comparison | Set by default, `check_order: true` for ordered | SQL results are unordered by default. Explicit frontmatter option avoids inferring behavior from SQL. |
 | Default PBT cases | 10 | Fast feedback. Configurable via `cases:` for thoroughness. |
+| Singular tests | SQL body = test, 0 rows = pass | Matches dbt convention. Simple, powerful for custom assertions. |
+| Column tests | Frontmatter `columns.*.tests` | Natural extension point. Keeps test definitions close to the model. |
+| Column test execution | Real database | Column tests validate actual data, not mocked inputs. |
+
+## Implementation Progress
+
+| Phase | Status | Date |
+|-------|--------|------|
+| Phase 1: Metadata & Discovery | ✅ Complete | March 27, 2026 |
+| Phase 2: CTE Extraction | ✅ Complete | March 27, 2026 |
+| Phase 3: YAML-to-SQL & Test Compilation | ✅ Complete | March 27, 2026 |
+| Phase 4: Property-Based Test Generation | ✅ Complete | March 27, 2026 |
+| Phase 5: Test Execution & Comparison | ✅ Complete | March 27, 2026 |
+| Phase 6: CLI Command | ✅ Complete | March 27, 2026 |
+| Phase 7: Integration & Polish | ✅ Complete | March 27, 2026 |
+| Phase 8: Example Tests | ✅ Complete | March 27, 2026 |
+| Phase 9: Singular Tests | ✅ Complete | March 27, 2026 |
+| Phase 10: Generic Data Quality Tests | ✅ Complete | March 27, 2026 |
+
+### Phase 9: Singular Tests (added post-design)
+
+Singular tests are test models with `materialization: test` and NO `test:` config block. The SQL body IS the test — it runs against the real database and passes if 0 rows are returned.
+
+```yaml
+--- name: assert_positive_revenue ---
+materialization: test
+---
+SELECT order_date, total_revenue
+FROM main.daily_revenue
+WHERE total_revenue < 0
+```
+
+Supports `--target` and `--database` flags for connecting to real DuckDB databases.
+
+### Phase 10: Generic Data Quality Tests (added post-design)
+
+Column-level test constraints defined in model frontmatter:
+
+```yaml
+columns:
+  order_date:
+    tests: [not_null]
+  order_count:
+    tests: [not_null, {min: 1}]
+  total_revenue:
+    tests: [not_null, {min: 0}]
+```
+
+Supported tests: `not_null`, `unique`, `accepted_values`, `min`, `max`. Each generates a SQL query against the real database.
 
 ## Open Questions
 
