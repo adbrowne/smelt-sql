@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774651066668,
+  "lastUpdate": 1774651068948,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8090,6 +8090,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.378492860052553,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5a8a9d59a957ab274a64dbd6e5e82150fd91acb4",
+          "message": "Add testing documentation: guide, CLI reference, and project structure\n\nCovers all test types: whole-model, CTE-level, property-based, advanced\n(SQL body), and co-located tests. Adds smelt test to CLI reference and\ntests/ directory to project structure docs.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T09:36:13+11:00",
+          "tree_id": "4c7c5495029e6447a913bec2d87a2087629f78ac",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5a8a9d59a957ab274a64dbd6e5e82150fd91acb4"
+        },
+        "date": 1774651068270,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.379221986254173,
             "unit": "MB/s"
           }
         ]
