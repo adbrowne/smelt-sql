@@ -33,6 +33,11 @@ pub enum TestError {
     RowCountMismatch { expected: usize, actual: usize },
     /// Compilation error
     CompilationError(String),
+    /// Singular test returned rows (expected 0)
+    SingularTestFailure {
+        row_count: usize,
+        sample_rows: Vec<BTreeMap<String, String>>,
+    },
 }
 
 impl fmt::Display for TestError {
@@ -62,6 +67,23 @@ impl fmt::Display for TestError {
                 }
                 Ok(())
             }
+            TestError::SingularTestFailure {
+                row_count,
+                sample_rows,
+            } => {
+                writeln!(
+                    f,
+                    "  Singular test returned {} row(s) (expected 0).",
+                    row_count
+                )?;
+                if !sample_rows.is_empty() {
+                    writeln!(f, "  First failing rows:")?;
+                    for row in sample_rows.iter().take(5) {
+                        writeln!(f, "    {:?}", row)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -79,6 +101,77 @@ pub fn execute_test_sql(sql: &str) -> Result<Vec<RecordBatch>, String> {
         .map_err(|e| format!("Failed to execute SQL: {}", e))?
         .collect();
     Ok(batches)
+}
+
+/// Execute SQL against a file-based DuckDB database and return RecordBatches.
+#[cfg(feature = "duckdb")]
+pub fn execute_sql_against_db(
+    sql: &str,
+    database_path: &std::path::Path,
+) -> Result<Vec<RecordBatch>, String> {
+    let conn = duckdb::Connection::open(database_path)
+        .map_err(|e| format!("Failed to open DuckDB at {:?}: {}", database_path, e))?;
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("Failed to prepare SQL: {}", e))?;
+    let batches: Vec<RecordBatch> = stmt
+        .query_arrow([])
+        .map_err(|e| format!("Failed to execute SQL: {}", e))?
+        .collect();
+    Ok(batches)
+}
+
+/// Run a singular test: execute SQL against a real database, pass if 0 rows returned.
+#[cfg(feature = "duckdb")]
+pub fn run_singular_test(
+    test_name: &str,
+    compiled_sql: &str,
+    database_path: Option<&std::path::Path>,
+) -> TestResult {
+    let start = Instant::now();
+
+    let batches = match database_path {
+        Some(path) => execute_sql_against_db(compiled_sql, path),
+        None => execute_test_sql(compiled_sql),
+    };
+
+    let batches = match batches {
+        Ok(b) => b,
+        Err(e) => {
+            return TestResult {
+                name: test_name.to_string(),
+                model: String::new(),
+                target_cte: None,
+                passed: false,
+                duration: start.elapsed(),
+                compiled_sql: compiled_sql.to_string(),
+                error: Some(TestError::ExecutionError(e)),
+            };
+        }
+    };
+
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let passed = row_count == 0;
+
+    let error = if passed {
+        None
+    } else {
+        let sample_rows = batches_to_rows(&batches);
+        Some(TestError::SingularTestFailure {
+            row_count,
+            sample_rows: sample_rows.into_iter().take(10).collect(),
+        })
+    };
+
+    TestResult {
+        name: test_name.to_string(),
+        model: String::new(),
+        target_cte: None,
+        passed,
+        duration: start.elapsed(),
+        compiled_sql: compiled_sql.to_string(),
+        error,
+    }
 }
 
 /// Convert Arrow RecordBatches to a list of row maps (column_name -> string value).

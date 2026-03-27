@@ -339,6 +339,14 @@ struct TestArgs {
     /// Show passing tests too (default: only failures)
     #[arg(long)]
     show_all: bool,
+
+    /// Target environment from smelt.yml (for singular tests that query real data)
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// DuckDB database file path (overrides smelt.yml)
+    #[arg(long)]
+    database: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -2464,19 +2472,66 @@ async fn run_tests(args: TestArgs) -> Result<()> {
 
     println!("\nsmelt test\n");
 
+    // Compute database path for singular tests (that run against real data)
+    let target_config = config.targets.get(&args.target);
+    let database_path: Option<PathBuf> = args.database.clone().or_else(|| {
+        target_config.and_then(|t| t.database.as_ref()).map(|db| {
+            let p = PathBuf::from(db);
+            if p.is_relative() {
+                project_dir.join(p)
+            } else {
+                p
+            }
+        })
+    });
+    let schema = target_config
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+
     // 5. Run each test
     let mut passed = 0;
     let mut failed = 0;
     let mut results = Vec::new();
 
     for test_model in &selected_tests {
-        let test_config = match test_model.test_config() {
-            Some(tc) => tc,
-            None => {
-                eprintln!("  SKIP {} (missing test configuration)", test_model.name);
+        let test_config = test_model.test_config();
+
+        if test_config.is_none() {
+            // Singular test: SQL body is the test, pass if 0 rows returned
+            let clean = smelt_parser::strip_frontmatter(&test_model.content);
+            let trimmed = clean.trim();
+            if trimmed.is_empty() {
+                eprintln!("  SKIP {} (empty test body)", test_model.name);
                 continue;
             }
-        };
+
+            // Resolve smelt.ref() calls in the SQL
+            let resolved_sql = smelt_cli::resolve_refs_in_sql(trimmed, &schema);
+
+            if args.verbose {
+                eprintln!("  Compiled SQL for {} (singular):", test_model.name);
+                eprintln!("    {}", resolved_sql.replace('\n', "\n    "));
+                eprintln!();
+            }
+
+            let result = smelt_cli::test_runner::run_singular_test(
+                &test_model.name,
+                &resolved_sql,
+                database_path.as_deref(),
+            );
+
+            if result.passed {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+
+            print_test_result(&result, args.verbose, args.show_all);
+            results.push(result);
+            continue;
+        }
+
+        let test_config = test_config.unwrap();
 
         // Find the model being tested
         let target_model = regular_models.iter().find(|m| m.name == test_config.model);
@@ -2615,27 +2670,29 @@ fn print_test_result(result: &smelt_cli::test_runner::TestResult, verbose: bool,
         .map(|c| format!("::{}", c))
         .unwrap_or_default();
 
+    let model_info = if result.model.is_empty() {
+        String::new()
+    } else {
+        format!(" ({}{})", result.model, cte_suffix)
+    };
+
     if result.passed {
         if show_all {
             println!(
-                "  PASS {} ({}{}){:>width$}",
+                "  PASS {}{}{:>width$}",
                 result.name,
-                result.model,
-                cte_suffix,
+                model_info,
                 format!("{:.2}s", result.duration.as_secs_f64()),
-                width = 40usize
-                    .saturating_sub(result.name.len() + result.model.len() + cte_suffix.len())
+                width = 40usize.saturating_sub(result.name.len() + model_info.len())
             );
         }
     } else {
         println!(
-            "  FAIL {} ({}{}){:>width$}",
+            "  FAIL {}{}{:>width$}",
             result.name,
-            result.model,
-            cte_suffix,
+            model_info,
             format!("{:.2}s", result.duration.as_secs_f64()),
-            width =
-                40usize.saturating_sub(result.name.len() + result.model.len() + cte_suffix.len())
+            width = 40usize.saturating_sub(result.name.len() + model_info.len())
         );
         if let Some(ref error) = result.error {
             println!("\n{}", error);
