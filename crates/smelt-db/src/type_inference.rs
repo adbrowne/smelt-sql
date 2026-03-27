@@ -7,10 +7,12 @@ use smelt_parser::ast::{
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Context for type inference - provides source and upstream model schemas
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct TypeContext {
+    // NOTE: PartialEq, Eq, Clone are implemented manually below to handle missed_lookups
     /// Source columns: source_name.table_name.column_name -> type
     source_columns: HashMap<String, TypedColumn>,
     /// Model columns: model_name.column_name -> type
@@ -21,6 +23,34 @@ pub struct TypeContext {
     cte_names: std::collections::HashSet<String>,
     /// Aliases in scope: alias -> qualified name
     aliases: HashMap<String, String>,
+    /// Column lookups that returned None (for property-based test column detection)
+    missed_lookups: Mutex<Vec<(Option<String>, String)>>,
+}
+
+impl PartialEq for TypeContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_columns == other.source_columns
+            && self.model_columns == other.model_columns
+            && self.cte_columns == other.cte_columns
+            && self.cte_names == other.cte_names
+            && self.aliases == other.aliases
+        // missed_lookups is intentionally excluded — it's transient tracking state
+    }
+}
+
+impl Eq for TypeContext {}
+
+impl Clone for TypeContext {
+    fn clone(&self) -> Self {
+        Self {
+            source_columns: self.source_columns.clone(),
+            model_columns: self.model_columns.clone(),
+            cte_columns: self.cte_columns.clone(),
+            cte_names: self.cte_names.clone(),
+            aliases: self.aliases.clone(),
+            missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
+        }
+    }
 }
 
 impl TypeContext {
@@ -97,9 +127,21 @@ impl TypeContext {
             .collect()
     }
 
-    /// Look up a column type by name (with optional qualifier)
+    /// Look up a column type by name (with optional qualifier).
     /// CTEs shadow outer scope, so we check them first.
+    /// Records missed lookups (when None is returned) for property-based test
+    /// column detection via `take_missed_lookups()`.
     pub fn lookup_column(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
+        let result = self.lookup_column_inner(qualifier, name);
+        if result.is_none() {
+            if let Ok(mut lookups) = self.missed_lookups.lock() {
+                lookups.push((qualifier.map(|s| s.to_string()), name.to_string()));
+            }
+        }
+        result
+    }
+
+    fn lookup_column_inner(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
         // If we have a qualifier, use it directly
         if let Some(q) = qualifier {
             // Check if qualifier is an alias
@@ -153,6 +195,15 @@ impl TypeContext {
         }
 
         None
+    }
+
+    /// Take and clear the list of column lookups that returned None.
+    /// Used by property-based tests to discover missing columns.
+    pub fn take_missed_lookups(&self) -> Vec<(Option<String>, String)> {
+        match self.missed_lookups.lock() {
+            Ok(mut lookups) => std::mem::take(&mut *lookups),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -979,6 +1030,126 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
 }
 
 /// Infer the column names and types from a CTE definition
+/// Recursively walk all sub-expressions, calling `lookup_column` on every
+/// column reference encountered. Unlike `infer_expression_type` which
+/// short-circuits (e.g., `||` returns Text without inspecting operands),
+/// this function visits ALL operands to ensure every column reference
+/// triggers a lookup — used by property-based tests to detect missing columns.
+pub fn walk_expression_columns(expr: &Expr, ctx: &TypeContext) {
+    // Leaf: column reference — trigger lookup
+    // Only treat as a leaf if there are no child expression nodes
+    // (avoids false-positive from as_column_ref on complex expressions
+    // where a bare IDENT token coexists with BINARY_EXPR children)
+    let has_expr_children = expr.syntax().children().any(|c| Expr::cast(c).is_some());
+    if !has_expr_children {
+        if let Some(col_ref) = expr.as_column_ref() {
+            let _ = ctx.lookup_column(col_ref.qualifier(), col_ref.name());
+            return;
+        }
+    }
+
+    // Subquery/EXISTS — skip (different scope)
+    if expr.as_exists().is_some() || expr.as_subquery().is_some() {
+        return;
+    }
+
+    // CASE — special handling for when_clauses/else
+    if let Some(case_expr) = expr.as_case() {
+        if let Some(case_value) = case_expr.case_value() {
+            walk_expression_columns(&case_value, ctx);
+        }
+        for when_clause in case_expr.when_clauses() {
+            if let Some(condition) = when_clause.condition() {
+                walk_expression_columns(&condition, ctx);
+            }
+            if let Some(result) = when_clause.result() {
+                walk_expression_columns(&result, ctx);
+            }
+        }
+        if let Some(else_expr) = case_expr.else_expr() {
+            walk_expression_columns(&else_expr, ctx);
+        }
+        // Also check for bare IDENT tokens as CASE value (parser artifact:
+        // `CASE status WHEN ...` may have `status` as a bare token, not wrapped
+        // in an EXPRESSION node). Scan the CASE_EXPR node's direct tokens.
+        for child in case_expr.syntax().children_with_tokens() {
+            if let Some(node) = child.as_node() {
+                if node.kind() == smelt_parser::SyntaxKind::WHEN_CLAUSE {
+                    break;
+                }
+            }
+            if let Some(token) = child.as_token() {
+                if token.kind() == smelt_parser::SyntaxKind::IDENT {
+                    let _ = ctx.lookup_column(None, token.text());
+                }
+            }
+        }
+        return;
+    }
+
+    // Function call — walk all arguments
+    if let Some(func) = expr.as_function_call() {
+        for arg in func.arguments() {
+            walk_expression_columns(&arg, ctx);
+        }
+        if let Some(filter) = func.filter_clause() {
+            if let Some(filter_expr) = filter.expression() {
+                walk_expression_columns(&filter_expr, ctx);
+            }
+        }
+        return;
+    }
+
+    // For all other expression types (binary, CAST, BETWEEN, IN, etc.):
+    // Walk all child nodes that can be cast to Expr, plus bare IDENT tokens.
+    // This handles the parser's flat structure for chained binary operators
+    // (e.g., `a || b || c` creates sibling BINARY_EXPR nodes).
+    for child in expr.syntax().children() {
+        if let Some(child_expr) = Expr::cast(child) {
+            walk_expression_columns(&child_expr, ctx);
+        }
+    }
+    for child in expr.syntax().children_with_tokens() {
+        if let Some(token) = child.as_token() {
+            if token.kind() == smelt_parser::SyntaxKind::IDENT {
+                let _ = ctx.lookup_column(None, token.text());
+            }
+        }
+    }
+}
+
+/// Walk all expressions in a SELECT statement to trigger column lookups.
+/// Covers SELECT list, WHERE, GROUP BY, HAVING, and QUALIFY clauses.
+pub fn walk_select_columns(select_stmt: &SelectStmt, ctx: &TypeContext) {
+    if let Some(select_list) = select_stmt.select_list() {
+        for item in select_list.items() {
+            if let Some(expr) = item.expression() {
+                walk_expression_columns(&expr, ctx);
+            }
+        }
+    }
+    if let Some(where_clause) = select_stmt.where_clause() {
+        if let Some(expr) = where_clause.expression() {
+            walk_expression_columns(&expr, ctx);
+        }
+    }
+    if let Some(group_by) = select_stmt.group_by_clause() {
+        for expr in group_by.expressions() {
+            walk_expression_columns(&expr, ctx);
+        }
+    }
+    if let Some(having) = select_stmt.having_clause() {
+        if let Some(expr) = having.expression() {
+            walk_expression_columns(&expr, ctx);
+        }
+    }
+    if let Some(qualify) = select_stmt.qualify_clause() {
+        if let Some(expr) = qualify.expression() {
+            walk_expression_columns(&expr, ctx);
+        }
+    }
+}
+
 ///
 /// This extracts columns from the CTE's query and optionally overrides
 /// the inferred names with explicit column names if provided.

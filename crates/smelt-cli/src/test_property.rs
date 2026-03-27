@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use smelt_parser::ast::{Expr, File as AstFile, SelectStmt};
-use smelt_types::DataType;
+use smelt_db::type_inference::{infer_cte_columns, walk_select_columns, TypeContext};
+use smelt_parser::ast::File as AstFile;
+use smelt_types::{DataType, TypedColumn};
 
-use crate::test_compiler::{compile_cte_test, compile_whole_model_test, extract_ctes};
+use crate::test_compiler::{compile_cte_test, compile_whole_model_test};
 use crate::test_runner::TestError;
 #[cfg(feature = "duckdb")]
 use crate::test_runner::{run_test, TestResult};
@@ -70,241 +71,111 @@ fn is_date_string(s: &str) -> bool {
         && bytes[8..10].iter().all(|b| b.is_ascii_digit())
 }
 
-/// Recursively collect all column references from an expression.
-///
-/// Uses typed AST methods (as_column_ref, as_case, as_function_call, etc.) for
-/// expression types that need special handling, then falls back to walking all
-/// child Expr nodes. This handles the parser's structure where chained binary
-/// operators (like `a || b || c`) create sibling BINARY_EXPR nodes rather than
-/// nested ones, so we can't rely solely on `as_binary().left()/right()`.
-fn collect_column_refs(expr: &Expr, refs: &mut Vec<(Option<String>, String)>) {
-    use smelt_parser::SyntaxKind;
-
-    // Leaf: column reference — only if there are no child expression nodes
-    // (as_column_ref can false-positive on complex expressions when a bare IDENT
-    // token like `first_name` is a direct child alongside BINARY_EXPR children)
-    let has_expr_children = expr.syntax().children().any(|c| Expr::cast(c).is_some());
-    if !has_expr_children {
-        if let Some(col_ref) = expr.as_column_ref() {
-            refs.push((
-                col_ref.qualifier().map(|s| s.to_string()),
-                col_ref.name().to_string(),
-            ));
-            return;
-        }
-    }
-
-    // EXISTS/subquery: skip (different scope)
-    if expr.as_exists().is_some() || expr.as_subquery().is_some() {
-        return;
-    }
-
-    // CASE expression: needs special handling for when_clauses/else
-    if let Some(case_expr) = expr.as_case() {
-        if let Some(case_value) = case_expr.case_value() {
-            collect_column_refs(&case_value, refs);
-        }
-        // The case value may be a bare IDENT token not wrapped in an EXPRESSION node
-        // (e.g., `CASE status WHEN ...`). Scan the CASE_EXPR node's direct tokens.
-        for child in case_expr.syntax().children_with_tokens() {
-            if let Some(node) = child.as_node() {
-                // Stop at WHEN_CLAUSE — tokens after this are condition/result values
-                if node.kind() == SyntaxKind::WHEN_CLAUSE {
-                    break;
-                }
-            }
-            if let Some(token) = child.as_token() {
-                if token.kind() == SyntaxKind::IDENT {
-                    refs.push((None, token.text().to_string()));
-                }
-            }
-        }
-        for when_clause in case_expr.when_clauses() {
-            if let Some(condition) = when_clause.condition() {
-                collect_column_refs(&condition, refs);
-            }
-            if let Some(result) = when_clause.result() {
-                collect_column_refs(&result, refs);
-            }
-        }
-        if let Some(else_expr) = case_expr.else_expr() {
-            collect_column_refs(&else_expr, refs);
-        }
-        return;
-    }
-
-    // Function call: recurse into arguments and filter clause
-    if let Some(func) = expr.as_function_call() {
-        for arg in func.arguments() {
-            collect_column_refs(&arg, refs);
-        }
-        if let Some(filter) = func.filter_clause() {
-            if let Some(filter_expr) = filter.expression() {
-                collect_column_refs(&filter_expr, refs);
-            }
-        }
-        return;
-    }
-
-    // For all other expression types (binary exprs, CAST, BETWEEN, IN, etc.),
-    // walk all child nodes that can be cast to Expr. This handles the parser's
-    // flat sibling structure for chained operators (e.g., `a || b || c` creates
-    // BINARY_EXPR siblings rather than nested children).
-    for child in expr.syntax().children() {
-        if let Some(child_expr) = Expr::cast(child) {
-            collect_column_refs(&child_expr, refs);
-        }
-    }
-
-    // Also check for bare IDENT tokens that are direct children (not wrapped
-    // in EXPRESSION nodes). This happens for the first operand of chained
-    // binary expressions: in `a || b || c`, `a` may be a bare IDENT token
-    // at the EXPRESSION level, while `b` and `c` are in EXPRESSION child nodes.
-    for child in expr.syntax().children_with_tokens() {
-        if let Some(token) = child.as_token() {
-            if token.kind() == SyntaxKind::IDENT {
-                let name = token.text().to_string();
-                refs.push((None, name));
-            }
-        }
-    }
-}
-
-/// Collect all column references from a SELECT statement (all clauses).
-fn collect_column_refs_from_select(
-    select_stmt: &SelectStmt,
-    refs: &mut Vec<(Option<String>, String)>,
-) {
-    // SELECT list
-    if let Some(select_list) = select_stmt.select_list() {
-        for item in select_list.items() {
-            if let Some(expr) = item.expression() {
-                collect_column_refs(&expr, refs);
-            }
-        }
-    }
-
-    // WHERE clause
-    if let Some(where_clause) = select_stmt.where_clause() {
-        if let Some(expr) = where_clause.expression() {
-            collect_column_refs(&expr, refs);
-        }
-    }
-
-    // GROUP BY clause
-    if let Some(group_by) = select_stmt.group_by_clause() {
-        for expr in group_by.expressions() {
-            collect_column_refs(&expr, refs);
-        }
-    }
-
-    // HAVING clause
-    if let Some(having) = select_stmt.having_clause() {
-        if let Some(expr) = having.expression() {
-            collect_column_refs(&expr, refs);
-        }
-    }
-
-    // QUALIFY clause
-    if let Some(qualify) = select_stmt.qualify_clause() {
-        if let Some(expr) = qualify.expression() {
-            collect_column_refs(&expr, refs);
-        }
-    }
-}
-
-/// Find columns referenced from a specific dependency in a CTE body SQL.
-///
-/// Uses recursive AST expression walking (mirroring the type inference dispatch
-/// pattern) to correctly find column references inside binary expressions,
-/// CASE WHEN, function arguments, etc.
-pub fn find_dependency_columns(
-    cte_body_sql: &str,
-    dependency_name: &str,
-    all_cte_names: &[String],
-) -> Vec<String> {
-    let parse = smelt_parser::parse(cte_body_sql);
-    let file = match AstFile::cast(parse.syntax()) {
-        Some(f) => f,
-        None => return vec![],
-    };
-    let select_stmt = match file.select_stmt() {
-        Some(s) => s,
-        None => return vec![],
-    };
-
-    // Determine if this dependency is the only source (for unqualified column resolution)
-    let is_only_source = {
-        let body_upper = cte_body_sql.to_uppercase();
-        let dep_upper = dependency_name.to_uppercase();
-        let other_sources = all_cte_names
-            .iter()
-            .filter(|name| {
-                let name_upper = name.to_uppercase();
-                name_upper != dep_upper && body_upper.contains(&name_upper)
-            })
-            .count();
-        other_sources == 0 && body_upper.contains(&dep_upper)
-    };
-
-    // Collect all column references from all clauses
-    let mut all_refs = Vec::new();
-    collect_column_refs_from_select(&select_stmt, &mut all_refs);
-
-    // Filter to columns belonging to the dependency
-    let mut columns = Vec::new();
-    let mut seen = HashSet::new();
-    for (qualifier, col_name) in all_refs {
-        if let Some(ref q) = qualifier {
-            // Qualified: dep.col
-            if q.eq_ignore_ascii_case(dependency_name) && seen.insert(col_name.clone()) {
-                columns.push(col_name);
-            }
-        } else if is_only_source && seen.insert(col_name.clone()) {
-            // Unqualified and this is the only source
-            columns.push(col_name);
-        }
-    }
-
-    columns
-}
-
 /// Find columns that are referenced in the CTE body but not provided in inputs.
+///
+/// Uses the type inference system from smelt-db: builds a TypeContext with
+/// the user-provided columns, then calls `infer_cte_columns()` on the target
+/// CTE. Column references that fail to resolve are recorded as missed lookups,
+/// which tells us exactly what columns are missing.
 pub fn find_missing_columns(
     model_sql: &str,
     target_cte: &str,
     inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
 ) -> BTreeMap<String, Vec<String>> {
-    let ctes = extract_ctes(model_sql);
-    let cte_names: Vec<String> = ctes.iter().map(|c| c.name.clone()).collect();
-
-    let target = match ctes.iter().find(|c| c.name == target_cte) {
-        Some(t) => t,
+    // 1. Parse the full model SQL to get AST CTE nodes
+    let clean = smelt_parser::strip_frontmatter(model_sql);
+    let parse = smelt_parser::parse(&clean);
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return BTreeMap::new(),
+    };
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return BTreeMap::new(),
+    };
+    let with_clause = match select_stmt.with_clause() {
+        Some(w) => w,
         None => return BTreeMap::new(),
     };
 
-    let mut missing = BTreeMap::new();
-
-    for dep in &target.dependencies {
-        let provided_cols: HashSet<String> = inputs
-            .get(dep)
-            .and_then(|rows| rows.first())
-            .map(|row| row.keys().cloned().collect())
-            .unwrap_or_default();
-
-        let referenced_cols = find_dependency_columns(&target.body, dep, &cte_names);
-
-        let missing_cols: Vec<String> = referenced_cols
-            .into_iter()
-            .filter(|c| !provided_cols.contains(c))
-            .collect();
-
-        if !missing_cols.is_empty() {
-            missing.insert(dep.clone(), missing_cols);
+    // 2. Build TypeContext with known columns from YAML inputs
+    let mut ctx = TypeContext::new();
+    for (dep_name, rows) in inputs {
+        if let Some(first_row) = rows.first() {
+            for (col_name, yaml_value) in first_row {
+                ctx.add_cte_column(
+                    dep_name,
+                    col_name,
+                    TypedColumn {
+                        data_type: yaml_value_to_datatype(yaml_value),
+                        nullable: true,
+                    },
+                );
+            }
         }
+        ctx.add_alias(dep_name, dep_name);
     }
 
-    missing
+    // 3. Walk CTEs in order until we reach the target
+    for cte in with_clause.ctes() {
+        let cte_name = match cte.name() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if cte_name == target_cte {
+            // Clear any lookups from building upstream context
+            ctx.take_missed_lookups();
+
+            // 4. Walk ALL expressions in the target CTE to trigger
+            //    lookup_column() for every column reference (SELECT, WHERE,
+            //    GROUP BY, HAVING, QUALIFY). Uses walk_select_columns which
+            //    recursively visits all sub-expressions, unlike
+            //    infer_expression_type which short-circuits.
+            if let Some(cte_select) = cte.query().and_then(|q| q.select_stmt()) {
+                walk_select_columns(&cte_select, &ctx);
+            }
+
+            // 6. Collect missed lookups — these are the missing columns
+            let missed = ctx.take_missed_lookups();
+
+            let mut result: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let mut seen: HashSet<(Option<String>, String)> = HashSet::new();
+            for (qualifier, col_name) in missed {
+                if !seen.insert((qualifier.clone(), col_name.clone())) {
+                    continue;
+                }
+                if let Some(dep) = qualifier {
+                    if inputs.contains_key(&dep) {
+                        result.entry(dep).or_default().push(col_name);
+                    }
+                } else {
+                    // Unqualified — attribute to the sole dependency if there's only one
+                    let dep_names: Vec<&String> = inputs.keys().collect();
+                    if dep_names.len() == 1 {
+                        result
+                            .entry(dep_names[0].clone())
+                            .or_default()
+                            .push(col_name);
+                    }
+                }
+            }
+            return result;
+        } else if !inputs.contains_key(&cte_name) {
+            // Not the target and not a mocked dependency — infer its
+            // columns from SQL and add to context for downstream CTEs
+            let columns = infer_cte_columns(&cte, &ctx);
+            for (col_name, typed_col) in columns {
+                ctx.add_cte_column(&cte_name, &col_name, typed_col);
+            }
+            ctx.add_alias(&cte_name, &cte_name);
+        }
+        // Mocked dependencies already have their columns in the context
+        // from step 2 (YAML inputs only — we intentionally don't infer
+        // additional columns from their SQL body)
+    }
+
+    BTreeMap::new()
 }
 
 /// Infer the type of a missing column by looking at provided data in the same
@@ -634,25 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dependency_columns_qualified() {
-        let cte_body = "SELECT dep.col1, dep.col2, SUM(dep.amount) FROM dep GROUP BY 1, 2";
-        let all_ctes = vec!["dep".to_string()];
-        let cols = find_dependency_columns(cte_body, "dep", &all_ctes);
-        assert!(cols.contains(&"col1".to_string()));
-        assert!(cols.contains(&"col2".to_string()));
-        assert!(cols.contains(&"amount".to_string()));
-    }
-
-    #[test]
-    fn test_find_dependency_columns_unqualified() {
-        let cte_body = "SELECT user_id, amount FROM cleaned WHERE status = 'completed'";
-        let all_ctes = vec!["cleaned".to_string()];
-        let cols = find_dependency_columns(cte_body, "cleaned", &all_ctes);
-        assert!(cols.contains(&"user_id".to_string()));
-        assert!(cols.contains(&"amount".to_string()));
-    }
-
-    #[test]
     fn test_augment_inputs_adds_missing() {
         let mut inputs = BTreeMap::new();
         let mut row = BTreeMap::new();
@@ -791,33 +643,6 @@ SELECT * FROM daily
     }
 
     #[test]
-    fn test_find_dependency_columns_concat() {
-        let cte_body = "SELECT user_id, first_name || ' ' || last_name AS full_name FROM users";
-        let all_ctes = vec!["users".to_string()];
-        let cols = find_dependency_columns(cte_body, "users", &all_ctes);
-        assert!(
-            cols.contains(&"last_name".to_string()),
-            "should find last_name in concat expr, got: {:?}",
-            cols
-        );
-        assert!(cols.contains(&"first_name".to_string()));
-        assert!(cols.contains(&"user_id".to_string()));
-    }
-
-    #[test]
-    fn test_find_dependency_columns_case() {
-        let cte_body = "SELECT ticket_id, CASE status WHEN 'open' THEN 'active' WHEN 'closed' THEN 'resolved' END AS status_label FROM tickets";
-        let all_ctes = vec!["tickets".to_string()];
-        let cols = find_dependency_columns(cte_body, "tickets", &all_ctes);
-        assert!(
-            cols.contains(&"status".to_string()),
-            "should find status in CASE expr, got: {:?}",
-            cols
-        );
-        assert!(cols.contains(&"ticket_id".to_string()));
-    }
-
-    #[test]
     fn test_find_missing_columns_concat() {
         let model_sql = r#"
 WITH users AS (
@@ -846,6 +671,38 @@ SELECT * FROM formatted
                 .get("users")
                 .is_some_and(|cols| cols.contains(&"last_name".to_string())),
             "last_name should be in missing columns, got: {:?}",
+            missing
+        );
+    }
+
+    #[test]
+    fn test_find_missing_columns_case() {
+        let model_sql = r#"
+WITH tickets AS (
+    SELECT ticket_id, status, priority FROM raw_tickets
+),
+classified AS (
+    SELECT
+        ticket_id,
+        CASE status
+            WHEN 'open' THEN 'active'
+            WHEN 'closed' THEN 'resolved'
+        END AS status_label
+    FROM tickets
+)
+SELECT * FROM classified
+"#;
+        let mut inputs = BTreeMap::new();
+        let mut row1 = BTreeMap::new();
+        row1.insert("ticket_id".to_string(), serde_yaml::Value::Number(1.into()));
+        inputs.insert("tickets".to_string(), vec![row1]);
+
+        let missing = find_missing_columns(model_sql, "classified", &inputs);
+        assert!(
+            missing
+                .get("tickets")
+                .is_some_and(|cols| cols.contains(&"status".to_string())),
+            "status should be in missing columns (inside CASE), got: {:?}",
             missing
         );
     }

@@ -1284,6 +1284,11 @@ impl CaseExpr {
         }
     }
 
+    /// Get the underlying syntax node
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
     /// Get the case value expression (for simple CASE)
     /// Returns None for searched CASE (CASE WHEN ...)
     pub fn case_value(&self) -> Option<Expr> {
@@ -1292,11 +1297,6 @@ impl CaseExpr {
             .children()
             .take_while(|n| n.kind() != WHEN_CLAUSE)
             .find_map(Expr::cast)
-    }
-
-    /// Get the underlying syntax node
-    pub fn syntax(&self) -> &SyntaxNode {
-        &self.0
     }
 
     /// Get all WHEN clauses
