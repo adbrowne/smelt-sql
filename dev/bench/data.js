@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774653495773,
+  "lastUpdate": 1774653791246,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6297,6 +6297,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.216694,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f6810b7a92377d0fc2a43c80659f4eeffc430978",
+          "message": "Fix LSP parse errors for multi-model SQL files\n\nThe LSP was feeding entire multi-model .sql files to the parser as a\nsingle unit, causing parse errors when test sections contained YAML\ninline mappings with { } characters. Now uses extract_file_metadata\nfrom smelt-core to split multi-model files into virtual paths, matching\nthe CLI's behavior.\n\nAlso updates goto-definition, hover, and completion handlers to resolve\nvirtual paths so LSP features work correctly within multi-model files.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T10:21:38+11:00",
+          "tree_id": "6b760ec1d33c54b47f3337457bd5b994f7f8b547",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f6810b7a92377d0fc2a43c80659f4eeffc430978"
+        },
+        "date": 1774653790208,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.673576,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.318506,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6852590000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.35271800000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002705,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.405245,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.024666,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013725,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009007000000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.196413,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.340849,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.61842,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.47141,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.128006,
             "unit": "ms"
           }
         ]
