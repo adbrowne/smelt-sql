@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774653494113,
+  "lastUpdate": 1774653495773,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8213,6 +8213,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.379221986254173,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "40a6c88055890806cbf46c1b113cca8f45ccb6b3",
+          "message": "Skip singular and column tests when database not built\n\nWhen running `smelt test` without first running `smelt build`, singular\ntests and column-level data quality tests would fail with a confusing\nIO error about the database file not existing. Now these tests are\nskipped with a clear message: \"database not built, run `smelt build` first\".\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T10:16:08+11:00",
+          "tree_id": "eebcd7fad8987d94c39843739cae2f06d22c8bd6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/40a6c88055890806cbf46c1b113cca8f45ccb6b3"
+        },
+        "date": 1774653495106,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.38793326574276,
             "unit": "MB/s"
           }
         ]
