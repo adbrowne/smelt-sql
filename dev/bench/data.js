@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774655878362,
+  "lastUpdate": 1774655879396,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8705,6 +8705,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.916970479299312,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5d0f5a6de1ad2fddb4f39e751fb7af1151ecdae6",
+          "message": "Update roadmap: mark Code Quality & Hardening as complete\n\nAll four sub-items completed on March 28, 2026:\n- Snapshot tests, CLI decomposition, structured logging, unwrap audit\n\nRenumber remaining items (Data Testing → #1, Spark → #2).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T10:56:07+11:00",
+          "tree_id": "90726cc83aaeeb4c31bd15920df1b4f47c9f54b0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5d0f5a6de1ad2fddb4f39e751fb7af1151ecdae6"
+        },
+        "date": 1774655879127,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.747499167384287,
             "unit": "MB/s"
           }
         ]
