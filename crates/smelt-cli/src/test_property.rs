@@ -100,8 +100,143 @@ pub fn find_dependency_columns(
         source_count <= 1 && body_upper.contains(&dep_upper)
     };
 
+    // SQL keywords and functions that should not be treated as column references
+    let sql_keywords: HashSet<&str> = [
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "GROUP",
+        "BY",
+        "ORDER",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
+        "AND",
+        "OR",
+        "NOT",
+        "IN",
+        "IS",
+        "NULL",
+        "AS",
+        "ON",
+        "JOIN",
+        "LEFT",
+        "RIGHT",
+        "INNER",
+        "OUTER",
+        "FULL",
+        "CROSS",
+        "UNION",
+        "ALL",
+        "DISTINCT",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "BETWEEN",
+        "LIKE",
+        "EXISTS",
+        "TRUE",
+        "FALSE",
+        "ASC",
+        "DESC",
+        "WITH",
+        "RECURSIVE",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "TABLE",
+        "VIEW",
+        "INDEX",
+        // Common SQL aggregate/scalar functions
+        "COUNT",
+        "SUM",
+        "AVG",
+        "MIN",
+        "MAX",
+        "ABS",
+        "ROUND",
+        "FLOOR",
+        "CEIL",
+        "CEILING",
+        "COALESCE",
+        "NULLIF",
+        "CAST",
+        "DATE",
+        "TIMESTAMP",
+        "INTERVAL",
+        "EXTRACT",
+        "DATE_TRUNC",
+        "DATE_PART",
+        "DATE_DIFF",
+        "DATEDIFF",
+        "ROW_NUMBER",
+        "RANK",
+        "DENSE_RANK",
+        "NTILE",
+        "LAG",
+        "LEAD",
+        "FIRST_VALUE",
+        "LAST_VALUE",
+        "NTH_VALUE",
+        "CONCAT",
+        "UPPER",
+        "LOWER",
+        "TRIM",
+        "LTRIM",
+        "RTRIM",
+        "SUBSTRING",
+        "SUBSTR",
+        "LENGTH",
+        "CHAR_LENGTH",
+        "REPLACE",
+        "POSITION",
+        "STRFTIME",
+        "TO_CHAR",
+        "SIGN",
+        "POWER",
+        "POW",
+        "SQRT",
+        "EXP",
+        "LN",
+        "LOG",
+        "LOG10",
+        "LOG2",
+        "MOD",
+        "GREATEST",
+        "LEAST",
+        "IF",
+        "IIF",
+        "GENERATE_SERIES",
+        "UNNEST",
+        "ARRAY_AGG",
+        "STRING_AGG",
+        "LISTAGG",
+        "BOOL_AND",
+        "BOOL_OR",
+        "EVERY",
+        "OVER",
+        "PARTITION",
+        "ROWS",
+        "RANGE",
+        "UNBOUNDED",
+        "PRECEDING",
+        "FOLLOWING",
+        "CURRENT",
+        "ROW",
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    // Strategy: walk all nodes looking for column references.
+    // Also scan for bare IDENT tokens inside expressions that might be columns
+    // (handles cases like `a || b` where operands may not be wrapped in EXPRESSION nodes).
     for node in parse.syntax().descendants() {
-        // Try to interpret expression-like nodes
         let kind = node.kind();
         if kind == SyntaxKind::EXPRESSION
             || kind == SyntaxKind::BINARY_EXPR
@@ -110,16 +245,60 @@ pub fn find_dependency_columns(
             if let Some(expr) = Expr::cast(node.clone()) {
                 if let Some(col_ref) = expr.as_column_ref() {
                     let col_name = col_ref.name().to_string();
+                    if sql_keywords.contains(col_name.to_uppercase().as_str()) {
+                        continue;
+                    }
                     if let Some(qualifier) = col_ref.qualifier() {
-                        // Qualified: dep.col
                         if qualifier.eq_ignore_ascii_case(dependency_name)
                             && seen.insert(col_name.clone())
                         {
                             columns.push(col_name);
                         }
                     } else if is_only_source && seen.insert(col_name.clone()) {
-                        // Unqualified and this is the only source
                         columns.push(col_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: look for any IDENT tokens inside SELECT_ITEM or EXPRESSION contexts
+    // that we might have missed (e.g., operands in binary expressions like `a || b`)
+    for node in parse.syntax().descendants() {
+        if node.kind() == SyntaxKind::BINARY_EXPR
+            || node.kind() == SyntaxKind::EXPRESSION
+            || node.kind() == SyntaxKind::SELECT_ITEM
+        {
+            for child in node.children_with_tokens() {
+                if let Some(token) = child.as_token() {
+                    if token.kind() == SyntaxKind::IDENT {
+                        let col_name = token.text().to_string();
+                        if sql_keywords.contains(col_name.to_uppercase().as_str()) {
+                            continue;
+                        }
+                        // Skip the dependency name itself (FROM table name)
+                        if col_name.eq_ignore_ascii_case(dependency_name) {
+                            continue;
+                        }
+                        // Skip alias names (after AS)
+                        let mut prev = token.prev_token();
+                        let is_alias = loop {
+                            match prev {
+                                Some(ref t) if t.text().trim().is_empty() => {
+                                    prev = t.prev_token();
+                                }
+                                Some(ref t) if t.text().eq_ignore_ascii_case("AS") => {
+                                    break true;
+                                }
+                                _ => break false,
+                            }
+                        };
+                        if is_alias {
+                            continue;
+                        }
+                        if is_only_source && seen.insert(col_name.clone()) {
+                            columns.push(col_name);
+                        }
                     }
                 }
             }
@@ -648,5 +827,38 @@ SELECT * FROM daily
             result.inner_result
         );
         assert_eq!(result.iterations, 5);
+    }
+
+    #[test]
+    fn test_find_missing_columns_concat() {
+        let model_sql = r#"
+WITH users AS (
+    SELECT user_id, first_name, last_name FROM raw_users
+),
+formatted AS (
+    SELECT
+        user_id,
+        first_name || ' ' || last_name AS full_name
+    FROM users
+)
+SELECT * FROM formatted
+"#;
+        let mut inputs = BTreeMap::new();
+        let mut row1 = BTreeMap::new();
+        row1.insert("user_id".to_string(), serde_yaml::Value::Number(1.into()));
+        row1.insert(
+            "first_name".to_string(),
+            serde_yaml::Value::String("Alice".to_string()),
+        );
+        inputs.insert("users".to_string(), vec![row1]);
+
+        let missing = find_missing_columns(model_sql, "formatted", &inputs);
+        assert!(
+            missing
+                .get("users")
+                .is_some_and(|cols| cols.contains(&"last_name".to_string())),
+            "last_name should be in missing columns, got: {:?}",
+            missing
+        );
     }
 }
