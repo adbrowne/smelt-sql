@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774655640251,
+  "lastUpdate": 1774655767870,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6485,6 +6485,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.199392,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "16434fa6662c62c8b641973c6fe1a8f149d4b11d",
+          "message": "Replace println!/eprintln! with tracing macros across smelt-cli\n\nAdd tracing and tracing-subscriber as workspace dependencies and\ninitialize the subscriber in main.rs with env-filter support\n(RUST_LOG). Convert status messages, progress updates, warnings,\nand errors to tracing::info!, debug!, warn!, and error! macros.\n\nProgram output (print_table, print_json, print_test_result, explain\nhuman-readable output, status, history, type display, Arrow preview)\nis deliberately kept as println! since users may pipe it.\n\nAlso includes linter auto-fixes (unwrap -> expect) in several files.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T10:54:13+11:00",
+          "tree_id": "ed21b284821db22a3fc2568ed037bbd2b9e120ef",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/16434fa6662c62c8b641973c6fe1a8f149d4b11d"
+        },
+        "date": 1774655767190,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.390454,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.981156,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.681144,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.389466,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002984,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 34.11374,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028783,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012128,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009374,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.102898,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.4090000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.597709999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.68591,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 11.985183,
             "unit": "ms"
           }
         ]
