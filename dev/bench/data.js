@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774604441221,
+  "lastUpdate": 1774604442903,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7844,6 +7844,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.700255402994465,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c504460ac09dbba9f8ad3a2246a10dbf800e6b32",
+          "message": "Merge pull request #88 from adbrowne/worktree-testing\n\nSQL unit testing design: CTE-as-function with property-based tests",
+          "timestamp": "2026-03-27T20:39:10+11:00",
+          "tree_id": "ecb24e2d74e4ff3f4d7c51f0597d127403b4ba27",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c504460ac09dbba9f8ad3a2246a10dbf800e6b32"
+        },
+        "date": 1774604442620,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.716186711952705,
             "unit": "MB/s"
           }
         ]
