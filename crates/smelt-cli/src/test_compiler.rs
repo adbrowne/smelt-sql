@@ -359,20 +359,37 @@ pub fn compile_column_test(
             "not_null" => Ok((
                 format!("{}.{}.not_null", table, column),
                 format!(
-                    "SELECT \"{}\" FROM {}.{} WHERE \"{}\" IS NULL LIMIT 1",
+                    "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE \"{}\" IS NULL LIMIT 1",
                     column, schema, table, column
                 ),
             )),
             "unique" => Ok((
                 format!("{}.{}.unique", table, column),
                 format!(
-                    "SELECT \"{col}\", COUNT(*) AS cnt FROM {schema}.{table} GROUP BY \"{col}\" HAVING COUNT(*) > 1 LIMIT 1",
+                    "SELECT \"{col}\", COUNT(*) AS cnt FROM \"{schema}\".\"{table}\" GROUP BY \"{col}\" HAVING COUNT(*) > 1 LIMIT 1",
                     col = column, schema = schema, table = table
                 ),
             )),
             other => Err(format!("Unknown column test: '{}'", other)),
         },
         smelt_core::metadata::ColumnTest::Parameterized(params) => {
+            // Reject entries with multiple constraint keys (e.g., {min: 0, max: 100})
+            // since the else-if chain would silently ignore all but the first.
+            // Each constraint should be its own entry: [{min: 0}, {max: 100}]
+            let constraint_keys: Vec<_> = params
+                .keys()
+                .filter(|k| {
+                    matches!(k.as_str(), "min" | "max" | "accepted_values")
+                })
+                .collect();
+            if constraint_keys.len() > 1 {
+                return Err(format!(
+                    "Column test has multiple constraints {:?} in a single entry. \
+                     Use separate entries instead: e.g., [{{min: 0}}, {{max: 100}}]",
+                    constraint_keys
+                ));
+            }
+
             if let Some(values) = params.get("accepted_values") {
                 let values_list = match values {
                     serde_yaml::Value::Sequence(seq) => seq
@@ -390,7 +407,7 @@ pub fn compile_column_test(
                 Ok((
                     format!("{}.{}.accepted_values", table, column),
                     format!(
-                        "SELECT \"{col}\" FROM {schema}.{table} WHERE \"{col}\" NOT IN ({values}) AND \"{col}\" IS NOT NULL LIMIT 1",
+                        "SELECT \"{col}\" FROM \"{schema}\".\"{table}\" WHERE \"{col}\" NOT IN ({values}) AND \"{col}\" IS NOT NULL LIMIT 1",
                         col = column, schema = schema, table = table, values = values_list
                     ),
                 ))
@@ -403,7 +420,7 @@ pub fn compile_column_test(
                 Ok((
                     format!("{}.{}.min", table, column),
                     format!(
-                        "SELECT \"{col}\" FROM {schema}.{table} WHERE \"{col}\" < {min} LIMIT 1",
+                        "SELECT \"{col}\" FROM \"{schema}\".\"{table}\" WHERE \"{col}\" < {min} LIMIT 1",
                         col = column, schema = schema, table = table, min = min_str
                     ),
                 ))
@@ -416,7 +433,7 @@ pub fn compile_column_test(
                 Ok((
                     format!("{}.{}.max", table, column),
                     format!(
-                        "SELECT \"{col}\" FROM {schema}.{table} WHERE \"{col}\" > {max} LIMIT 1",
+                        "SELECT \"{col}\" FROM \"{schema}\".\"{table}\" WHERE \"{col}\" > {max} LIMIT 1",
                         col = column, schema = schema, table = table, max = max_str
                     ),
                 ))
@@ -630,7 +647,7 @@ GROUP BY order_date
         let (name, sql) = compile_column_test("main", "orders", "order_id", &test).unwrap();
         assert_eq!(name, "orders.order_id.not_null");
         assert!(sql.contains("IS NULL"));
-        assert!(sql.contains("main.orders"));
+        assert!(sql.contains("\"main\".\"orders\""));
     }
 
     #[test]

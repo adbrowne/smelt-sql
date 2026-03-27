@@ -60,7 +60,7 @@ pub fn yaml_value_to_datatype(v: &serde_yaml::Value) -> DataType {
 
 /// Check if a string matches the YYYY-MM-DD date pattern.
 fn is_date_string(s: &str) -> bool {
-    if s.len() < 10 {
+    if s.len() != 10 {
         return false;
     }
     let bytes = s.as_bytes();
@@ -182,14 +182,14 @@ pub fn find_missing_columns(
 /// dependency or falling back to Text.
 pub fn infer_missing_column_type(
     dep_name: &str,
-    _col_name: &str,
+    col_name: &str,
     inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
 ) -> DataType {
     // Check if any row in the dependency provides a value for this column
     // (maybe some rows have it, others don't)
     if let Some(rows) = inputs.get(dep_name) {
         for row in rows {
-            if let Some(val) = row.get(_col_name) {
+            if let Some(val) = row.get(col_name) {
                 let dt = yaml_value_to_datatype(val);
                 if dt != DataType::Null && dt != DataType::Unknown {
                     return dt;
