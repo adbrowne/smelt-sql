@@ -168,7 +168,7 @@ Both work because tests reference models by name, not by file location.
 - **Trust dialect translation**: smelt's backend translation layer ensures SQL semantics are preserved across backends. If it works on DuckDB, it works on Spark/Postgres.
 - **Row comparison**:
   - Default: set comparison (order doesn't matter). Both sides sorted by all columns before comparing.
-  - If the test SQL includes ORDER BY: ordered row-by-row comparison.
+  - Ordered comparison: opt-in via `check_order: true` in test frontmatter. Compares rows positionally.
 - **Isolation**: Each test gets a fresh in-memory DuckDB connection. No shared state.
 
 ### CLI
@@ -252,7 +252,7 @@ Future LSP enhancements (not in initial implementation):
 
 **`smelt-core/src/config.rs`**: Add `Test` to `Materialization` enum.
 
-**`smelt-core/src/metadata.rs`**: Add `TestConfig` struct with fields: `model`, `target_cte`, `inputs`, `expect`, `cases`. Add `test: Option<TestConfig>` to `ModelMetadata`.
+**`smelt-core/src/metadata.rs`**: Add `TestConfig` struct with fields: `model`, `target_cte`, `inputs`, `expect`, `cases`, `check_order`. Add `test: Option<TestConfig>` to `ModelMetadata`.
 
 **`smelt-core/src/discovery.rs`**: Add `is_test()` and `test_config()` helpers to `ModelFile`.
 
@@ -313,8 +313,8 @@ Execution: `duckdb::Connection::open_in_memory()` per test. Execute compiled SQL
 Comparison:
 - Convert Arrow rows and YAML rows to a common `ComparableRow` type
 - Handle type coercion: Arrow Int32/64 ↔ YAML integer, Float64 ↔ YAML float (epsilon), Utf8 ↔ YAML string, Date32 ↔ YAML date string
-- Set comparison: sort both sides, diff
-- Ordered comparison: row-by-row when ORDER BY present
+- Set comparison (default): sort both sides, diff
+- Ordered comparison: row-by-row when `check_order: true` in test frontmatter
 
 Diff generation: missing rows, unexpected rows, column-level mismatches.
 
@@ -338,7 +338,7 @@ Exclude test models from `smelt run`, `build`, `explain` commands.
 | Execution engine | Always DuckDB | Fast, bundled, no deps. Trust dialect translation for other backends. |
 | CTE isolation | Mock ALL direct dependencies | Simpler mental model. Each test is self-contained. |
 | Partial columns | Property-based testing | Novel capability. Leverages existing type inference and proptest-style infrastructure. |
-| Row comparison | Set by default, ordered with ORDER BY | SQL results are unordered by default. Explicit ORDER BY signals intent. |
+| Row comparison | Set by default, `check_order: true` for ordered | SQL results are unordered by default. Explicit frontmatter option avoids inferring behavior from SQL. |
 | Default PBT cases | 10 | Fast feedback. Configurable via `cases:` for thoroughness. |
 
 ## Open Questions
