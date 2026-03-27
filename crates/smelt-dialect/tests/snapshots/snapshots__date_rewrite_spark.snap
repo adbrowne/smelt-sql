@@ -1,0 +1,6 @@
+---
+source: crates/smelt-dialect/tests/snapshots.rs
+assertion_line: 168
+expression: result
+---
+SELECT * FROM t WHERE d = DATE('2024-01-01')

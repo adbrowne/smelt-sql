@@ -1,0 +1,6 @@
+---
+source: crates/smelt-dialect/tests/snapshots.rs
+assertion_line: 343
+expression: result
+---
+SELECT CAST(x AS INTEGER), ARRAY(1, 2), EXPLODE(arr) FROM main.users WHERE d = DATE('2024-01-01')

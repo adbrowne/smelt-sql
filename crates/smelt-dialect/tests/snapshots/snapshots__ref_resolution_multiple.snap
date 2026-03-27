@@ -1,0 +1,6 @@
+---
+source: crates/smelt-dialect/tests/snapshots.rs
+assertion_line: 78
+expression: result
+---
+SELECT a.id, b.id FROM main.model_a a JOIN main.model_b b ON a.id = b.id

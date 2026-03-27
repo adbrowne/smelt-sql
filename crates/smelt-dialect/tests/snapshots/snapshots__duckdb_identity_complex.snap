@@ -1,0 +1,12 @@
+---
+source: crates/smelt-dialect/tests/snapshots.rs
+assertion_line: 47
+expression: result
+---
+SELECT u.id, COUNT(*) AS cnt
+FROM users u
+WHERE u.active = 1
+GROUP BY u.id
+HAVING COUNT(*) > 5
+ORDER BY cnt DESC
+LIMIT 10

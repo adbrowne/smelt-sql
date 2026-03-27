@@ -10,3 +10,6 @@ repository = "https://github.com/adbrowne/smelt-sql"
 [dependencies]
 smelt-parser = { path = "../smelt-parser", version = "0.1.0" }
 smelt-types = { path = "../smelt-types", version = "0.1.0" }
+
+[dev-dependencies]
+insta = "1"

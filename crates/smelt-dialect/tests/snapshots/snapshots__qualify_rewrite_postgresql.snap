@@ -1,0 +1,6 @@
+---
+source: crates/smelt-dialect/tests/snapshots.rs
+assertion_line: 114
+expression: result
+---
+SELECT * FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t ) _q WHERE rn = 1

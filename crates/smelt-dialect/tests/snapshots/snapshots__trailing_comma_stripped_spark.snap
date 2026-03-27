@@ -1,0 +1,6 @@
+---
+source: crates/smelt-dialect/tests/snapshots.rs
+assertion_line: 234
+expression: result
+---
+SELECT a, b FROM t
