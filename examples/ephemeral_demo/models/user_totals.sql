@@ -22,3 +22,18 @@ test:
     - {user_id: 100, order_count: 2, lifetime_value: 105.49}
     - {user_id: 101, order_count: 1, lifetime_value: 49.99}
 ---
+
+--- name: test_user_totals_property ---
+materialization: test
+test:
+  model: user_totals
+  cases: 10
+  inputs:
+    cleaned_orders:
+      - {user_id: 1, amount: 100.0}
+      - {user_id: 1, amount: 200.0}
+      - {user_id: 2, amount: 50.0}
+  expect:
+    - {user_id: 1, order_count: 2, lifetime_value: 300.0}
+    - {user_id: 2, order_count: 1, lifetime_value: 50.0}
+---

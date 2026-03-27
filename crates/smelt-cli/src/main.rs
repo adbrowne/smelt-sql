@@ -347,6 +347,10 @@ struct TestArgs {
     /// DuckDB database file path (overrides smelt.yml)
     #[arg(long)]
     database: Option<PathBuf>,
+
+    /// Random seed for property-based tests (for reproducibility)
+    #[arg(long)]
+    seed: Option<u64>,
 }
 
 #[tokio::main]
@@ -2624,7 +2628,87 @@ async fn run_tests(args: TestArgs) -> Result<()> {
             println!();
         }
 
-        // Run the test
+        // Check if this is a property-based test (has cases: N)
+        if let Some(cases) = test_config.cases {
+            use smelt_cli::test_property::run_property_test;
+
+            let prop_result = run_property_test(
+                &test_model.name,
+                &test_config.model,
+                test_config.target_cte.as_deref(),
+                model_sql,
+                test_config,
+                cases,
+                args.seed,
+            );
+
+            let duration_str = format!("{:.2}s", prop_result.duration.as_secs_f64());
+            let cte_suffix = prop_result
+                .target_cte
+                .as_ref()
+                .map(|c| format!("::{}", c))
+                .unwrap_or_default();
+
+            if prop_result.passed {
+                passed += 1;
+                if args.show_all {
+                    println!(
+                        "  PASS {} ({}{})\t[{} cases]\t{}",
+                        prop_result.name, prop_result.model, cte_suffix, cases, duration_str
+                    );
+                }
+            } else {
+                failed += 1;
+                println!(
+                    "  FAIL {} ({}{})\t[case {}/{}]\t{}",
+                    prop_result.name,
+                    prop_result.model,
+                    cte_suffix,
+                    prop_result.failing_iteration.unwrap_or(0),
+                    cases,
+                    duration_str
+                );
+                if let Some(ref inner) = prop_result.inner_result {
+                    if let Some(ref err) = inner.error {
+                        println!("\n{}", err);
+                    }
+                    if args.verbose {
+                        println!("  Compiled SQL (failing iteration):");
+                        println!("    {}", inner.compiled_sql.replace('\n', "\n    "));
+                    }
+                }
+                if let Some(seed) = prop_result.failing_seed {
+                    println!(
+                        "  Reproduce with: smelt test --seed {} --select {}",
+                        seed, prop_result.name
+                    );
+                }
+                println!();
+            }
+
+            // Create a synthetic TestResult for the results vec
+            let synthetic = smelt_cli::test_runner::TestResult {
+                name: prop_result.name,
+                model: prop_result.model,
+                target_cte: prop_result.target_cte,
+                passed: prop_result.passed,
+                duration: prop_result.duration,
+                compiled_sql: prop_result
+                    .inner_result
+                    .as_ref()
+                    .map(|r| r.compiled_sql.clone())
+                    .unwrap_or(compiled_sql),
+                error: if prop_result.passed {
+                    None
+                } else {
+                    prop_result.inner_result.and_then(|r| r.error)
+                },
+            };
+            results.push(synthetic);
+            continue;
+        }
+
+        // Run the test (single iteration)
         let check_order = test_config.check_order.unwrap_or(false);
         let result = run_test(
             &test_model.name,

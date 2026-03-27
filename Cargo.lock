@@ -3768,6 +3768,7 @@ dependencies = [
  "clap",
  "duckdb",
  "pyo3",
+ "rand 0.8.5",
  "rowan",
  "serde",
  "serde_json",

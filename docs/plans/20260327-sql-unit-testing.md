@@ -422,7 +422,7 @@ Interesting SQL patterns: JSON functions, incremental, cube.
 | Phase 1: Metadata & Discovery | ✅ Complete | March 27, 2026 |
 | Phase 2: CTE Extraction | ✅ Complete | March 27, 2026 |
 | Phase 3: YAML-to-SQL & Test Compilation | ✅ Complete | March 27, 2026 |
-| Phase 4: Property-Based Test Generation | ⏸️ Deferred | — |
+| Phase 4: Property-Based Test Generation | ✅ Complete | March 27, 2026 |
 | Phase 5: Test Execution & Comparison | ✅ Complete | March 27, 2026 |
 | Phase 6: CLI Command | ✅ Complete | March 27, 2026 |
 | Phase 7: Integration & Polish | ✅ Complete | March 27, 2026 |

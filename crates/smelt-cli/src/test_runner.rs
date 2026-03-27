@@ -36,6 +36,14 @@ pub enum TestError {
         row_count: usize,
         sample_rows: Vec<BTreeMap<String, String>>,
     },
+    /// Property-based test failure
+    PropertyTestFailure {
+        iteration: u32,
+        total: u32,
+        seed: u64,
+        inner: Box<TestError>,
+        generated_values: BTreeMap<String, Vec<BTreeMap<String, String>>>,
+    },
 }
 
 impl fmt::Display for TestError {
@@ -80,6 +88,35 @@ impl fmt::Display for TestError {
                         writeln!(f, "    {:?}", row)?;
                     }
                 }
+                Ok(())
+            }
+            TestError::PropertyTestFailure {
+                iteration,
+                total,
+                seed,
+                inner,
+                generated_values,
+            } => {
+                writeln!(
+                    f,
+                    "  Property test failed on iteration {}/{}",
+                    iteration, total
+                )?;
+                writeln!(
+                    f,
+                    "  Failing seed: 0x{:X} (reproduce with: smelt test --seed 0x{:X})",
+                    seed, seed
+                )?;
+                if !generated_values.is_empty() {
+                    writeln!(f, "  Generated values:")?;
+                    for (dep, rows) in generated_values {
+                        writeln!(f, "    {}:", dep)?;
+                        for row in rows {
+                            writeln!(f, "      {:?}", row)?;
+                        }
+                    }
+                }
+                write!(f, "{}", inner)?;
                 Ok(())
             }
         }
