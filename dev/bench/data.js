@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774655767870,
+  "lastUpdate": 1774655769153,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8582,6 +8582,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.426776678706613,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "16434fa6662c62c8b641973c6fe1a8f149d4b11d",
+          "message": "Replace println!/eprintln! with tracing macros across smelt-cli\n\nAdd tracing and tracing-subscriber as workspace dependencies and\ninitialize the subscriber in main.rs with env-filter support\n(RUST_LOG). Convert status messages, progress updates, warnings,\nand errors to tracing::info!, debug!, warn!, and error! macros.\n\nProgram output (print_table, print_json, print_test_result, explain\nhuman-readable output, status, history, type display, Arrow preview)\nis deliberately kept as println! since users may pipe it.\n\nAlso includes linter auto-fixes (unwrap -> expect) in several files.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T10:54:13+11:00",
+          "tree_id": "ed21b284821db22a3fc2568ed037bbd2b9e120ef",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/16434fa6662c62c8b641973c6fe1a8f149d4b11d"
+        },
+        "date": 1774655768703,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.916970479299312,
             "unit": "MB/s"
           }
         ]
