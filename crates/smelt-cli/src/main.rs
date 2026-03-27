@@ -2509,9 +2509,9 @@ async fn run_tests(args: TestArgs) -> Result<()> {
             let resolved_sql = smelt_cli::resolve_refs_in_sql(trimmed, &schema);
 
             if args.verbose {
-                eprintln!("  Compiled SQL for {} (singular):", test_model.name);
-                eprintln!("    {}", resolved_sql.replace('\n', "\n    "));
-                eprintln!();
+                println!("  Compiled SQL for {} (singular):", test_model.name);
+                println!("    {}", resolved_sql.replace('\n', "\n    "));
+                println!();
             }
 
             let result = smelt_cli::test_runner::run_singular_test(
@@ -2619,9 +2619,9 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         };
 
         if args.verbose {
-            eprintln!("  Compiled SQL for {}:", test_model.name);
-            eprintln!("    {}", compiled_sql.replace('\n', "\n    "));
-            eprintln!();
+            println!("  Compiled SQL for {}:", test_model.name);
+            println!("    {}", compiled_sql.replace('\n', "\n    "));
+            println!();
         }
 
         // Run the test
@@ -2691,9 +2691,9 @@ async fn run_tests(args: TestArgs) -> Result<()> {
                 }
 
                 if args.verbose {
-                    eprintln!("  Compiled SQL for {} (column test):", test_display_name);
-                    eprintln!("    {}", test_sql.replace('\n', "\n    "));
-                    eprintln!();
+                    println!("  Compiled SQL for {} (column test):", test_display_name);
+                    println!("    {}", test_sql.replace('\n', "\n    "));
+                    println!();
                 }
 
                 let result = smelt_cli::test_runner::run_singular_test(

@@ -88,8 +88,10 @@ pub fn extract_ctes(sql: &str) -> Vec<CteInfo> {
 }
 
 /// Check if `haystack` contains `word` as a whole word (not as a substring of a larger identifier).
+/// Skips SQL string literals to avoid false positives (e.g., `WHERE status = 'events'`).
 fn contains_word(haystack: &str, word: &str) -> bool {
-    let bytes = haystack.as_bytes();
+    let stripped = strip_string_literals(haystack);
+    let bytes = stripped.as_bytes();
     let word_bytes = word.as_bytes();
     let word_len = word_bytes.len();
 
@@ -105,6 +107,36 @@ fn contains_word(haystack: &str, word: &str) -> bool {
         }
     }
     false
+}
+
+/// Replace SQL string literals with spaces to avoid false matches in word search.
+fn strip_string_literals(sql: &str) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            result.push(' ');
+            i += 1;
+            // Skip until closing quote (handle escaped quotes '')
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 2; // Skip escaped quote
+                    } else {
+                        i += 1; // Closing quote
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
 }
 
 fn is_ident_char(b: u8) -> bool {
@@ -448,6 +480,25 @@ SELECT * FROM c
         assert!(contains_word("FROM CLEANED GROUP BY", "CLEANED"));
         assert!(!contains_word("FROM CLEANED_V2 GROUP BY", "CLEANED"));
         assert!(contains_word("CLEANED", "CLEANED"));
+    }
+
+    #[test]
+    fn test_contains_word_skips_string_literals() {
+        // Should NOT match CTE name inside a string literal
+        assert!(!contains_word(
+            "SELECT * FROM RAW WHERE STATUS = 'EVENTS'",
+            "EVENTS"
+        ));
+        // Should still match actual table reference
+        assert!(contains_word(
+            "SELECT * FROM EVENTS WHERE STATUS = 'ACTIVE'",
+            "EVENTS"
+        ));
+        // Escaped quotes should be handled
+        assert!(!contains_word(
+            "SELECT * FROM RAW WHERE NAME = 'IT''S EVENTS'",
+            "EVENTS"
+        ));
     }
 
     #[test]

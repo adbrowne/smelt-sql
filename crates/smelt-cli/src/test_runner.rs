@@ -24,8 +24,6 @@ pub enum TestError {
     ExecutionError(String),
     /// Results didn't match
     Mismatch {
-        expected_rows: Vec<BTreeMap<String, String>>,
-        actual_rows: Vec<BTreeMap<String, String>>,
         missing: Vec<BTreeMap<String, String>>,
         unexpected: Vec<BTreeMap<String, String>>,
     },
@@ -290,8 +288,6 @@ pub fn compare_rows(
         {
             if !rows_match(actual_row, expected_row) {
                 return Some(TestError::Mismatch {
-                    expected_rows: expected.to_vec(),
-                    actual_rows: filtered_actual.clone(),
                     missing: vec![expected_row.clone()],
                     unexpected: vec![filtered_actual[i].clone()],
                 });
@@ -328,8 +324,6 @@ pub fn compare_rows(
             None
         } else {
             Some(TestError::Mismatch {
-                expected_rows: expected.to_vec(),
-                actual_rows: filtered_actual,
                 missing,
                 unexpected,
             })
@@ -352,13 +346,16 @@ fn rows_match(actual: &BTreeMap<String, String>, expected: &BTreeMap<String, Str
 }
 
 /// Compare two string values with numeric tolerance.
+/// Uses relative epsilon for large values, absolute epsilon for values near zero.
 fn values_match(actual: &str, expected: &str) -> bool {
     if actual == expected {
         return true;
     }
-    // Try numeric comparison with epsilon
+    // Try numeric comparison with relative epsilon
     if let (Ok(a), Ok(e)) = (actual.parse::<f64>(), expected.parse::<f64>()) {
-        (a - e).abs() < 1e-6
+        let diff = (a - e).abs();
+        let scale = e.abs().max(a.abs()).max(1.0);
+        diff / scale < 1e-6
     } else {
         false
     }
