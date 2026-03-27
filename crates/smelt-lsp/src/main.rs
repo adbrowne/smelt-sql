@@ -10,6 +10,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use smelt_core::{
     find_config_file, find_project_root_by_walking_up, find_project_root_for_file,
     find_smelt_projects, is_sources_file,
+    metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
     Database, Diagnostic as DbDiagnostic, DiagnosticSeverity as DbSeverity, Inputs, Schema,
@@ -47,6 +48,9 @@ fn format_type(typed_col: &TypedColumn) -> String {
     format!("{}{}", typed_col.data_type, nullable_suffix)
 }
 
+/// (virtual_path, start_line_offset) for each section in a multi-model file.
+type MultiModelEntry = Vec<(PathBuf, u32)>;
+
 struct Backend {
     client: Client,
     db: Arc<Mutex<Database>>,
@@ -61,6 +65,11 @@ struct Backend {
     python_diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<lsp_types::Diagnostic>>>>,
     /// Project roots discovered during init (needed for file-change handling)
     project_roots: Arc<Mutex<Vec<PathBuf>>>,
+    /// Maps real file paths to their virtual sub-paths for multi-model files.
+    /// Each entry is (virtual_path, start_line_offset) where virtual_path uses
+    /// the `file.sql::model_name` convention and start_line_offset is the
+    /// 0-based line in the original file where the section's SQL begins.
+    multi_model_files: Arc<Mutex<HashMap<PathBuf, MultiModelEntry>>>,
 }
 
 impl Backend {
@@ -73,6 +82,7 @@ impl Backend {
             python_cache: Arc::new(Mutex::new(PythonModelCache::default())),
             python_diagnostics: Arc::new(Mutex::new(HashMap::new())),
             project_roots: Arc::new(Mutex::new(Vec::new())),
+            multi_model_files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -117,6 +127,86 @@ impl Backend {
         }
     }
 
+    /// For a multi-model file, resolve a cursor position to the virtual path
+    /// and adjusted line number within that section. Returns None for single-model files.
+    async fn resolve_virtual_path(
+        &self,
+        real_path: &std::path::Path,
+        line: u32,
+    ) -> Option<(PathBuf, u32)> {
+        let mm = self.multi_model_files.lock().await;
+        let entries = mm.get(real_path)?;
+
+        // Find the section that contains this line (last section whose start_line <= line)
+        let mut best: Option<&(PathBuf, u32)> = None;
+        for entry in entries {
+            if entry.1 <= line {
+                best = Some(entry);
+            }
+        }
+
+        best.map(|(vp, start_line)| (vp.clone(), line - start_line))
+    }
+
+    /// Register a SQL file's content in the Salsa database, handling multi-model
+    /// files by splitting them into virtual paths.
+    ///
+    /// Returns the list of paths that were registered (either `[real_path]` for
+    /// single-model files, or `[real_path::name1, real_path::name2, ...]` for
+    /// multi-model files).
+    async fn register_sql_content(
+        &self,
+        db: &mut Database,
+        real_path: &std::path::Path,
+        content: &str,
+        project_root: &std::path::Path,
+    ) -> Vec<PathBuf> {
+        let mut registered = Vec::new();
+
+        // Try to detect multi-model file
+        if let Ok(FileMetadata::Multi { models }) = extract_file_metadata(content) {
+            let mut virtual_entries = Vec::new();
+
+            for section in &models {
+                let model_name = match &section.metadata.name {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+
+                let virtual_path =
+                    PathBuf::from(format!("{}::{}", real_path.display(), model_name));
+                let sql_content = &content[section.sql_range.clone()];
+
+                // Calculate the starting line of this section's SQL in the original file
+                let start_line = content[..section.sql_range.start]
+                    .chars()
+                    .filter(|&c| c == '\n')
+                    .count() as u32;
+
+                db.set_file_text(virtual_path.clone(), Arc::new(sql_content.to_string()));
+                db.set_file_project_root(virtual_path.clone(), project_root.to_path_buf());
+
+                virtual_entries.push((virtual_path.clone(), start_line));
+                registered.push(virtual_path);
+            }
+
+            // Store the mapping for diagnostics aggregation
+            let mut mm = self.multi_model_files.lock().await;
+            mm.insert(real_path.to_path_buf(), virtual_entries);
+        } else {
+            // Single-model or no frontmatter: register as-is
+            db.set_file_text(real_path.to_path_buf(), Arc::new(content.to_string()));
+            db.set_file_project_root(real_path.to_path_buf(), project_root.to_path_buf());
+            registered.push(real_path.to_path_buf());
+
+            // Clean up any old multi-model mapping
+            let mut mm = self.multi_model_files.lock().await;
+            mm.remove(real_path);
+        }
+
+        registered
+    }
+
     /// Publish diagnostics for a file
     async fn publish_diagnostics(&self, uri: Url) {
         let path = match self.uri_to_path(&uri).await {
@@ -124,19 +214,48 @@ impl Backend {
             None => return,
         };
 
-        let db = self.db.lock().await;
-        let diagnostics = db.file_diagnostics(path.clone());
-        let type_diags = db.type_diagnostics(path);
+        // Check if this is a multi-model file
+        let mm = self.multi_model_files.lock().await;
+        if let Some(virtual_entries) = mm.get(&path) {
+            // Aggregate diagnostics from all virtual paths with line offset adjustment
+            let db = self.db.lock().await;
+            let mut lsp_diagnostics = Vec::new();
 
-        let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
-            .iter()
-            .chain(type_diags.iter())
-            .map(|d| self.to_lsp_diagnostic(d))
-            .collect();
+            for (virtual_path, start_line) in virtual_entries {
+                let diagnostics = db.file_diagnostics(virtual_path.clone());
+                let type_diags = db.type_diagnostics(virtual_path.clone());
 
-        self.client
-            .publish_diagnostics(uri, lsp_diagnostics, None)
-            .await;
+                for d in diagnostics.iter().chain(type_diags.iter()) {
+                    let mut lsp_diag = self.to_lsp_diagnostic(d);
+                    // Adjust line numbers to be relative to the original file
+                    lsp_diag.range.start.line += start_line;
+                    lsp_diag.range.end.line += start_line;
+                    lsp_diagnostics.push(lsp_diag);
+                }
+            }
+
+            drop(db);
+            drop(mm);
+            self.client
+                .publish_diagnostics(uri, lsp_diagnostics, None)
+                .await;
+        } else {
+            drop(mm);
+            let db = self.db.lock().await;
+            let diagnostics = db.file_diagnostics(path.clone());
+            let type_diags = db.type_diagnostics(path);
+
+            let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
+                .iter()
+                .chain(type_diags.iter())
+                .map(|d| self.to_lsp_diagnostic(d))
+                .collect();
+
+            drop(db);
+            self.client
+                .publish_diagnostics(uri, lsp_diagnostics, None)
+                .await;
+        }
     }
 
     /// Publish diagnostics for all known model files
@@ -146,7 +265,28 @@ impl Backend {
         let files = files.clone();
         drop(db);
 
+        // Collect real file paths for multi-model files
+        let mm = self.multi_model_files.lock().await;
+        let multi_model_real_paths: Vec<PathBuf> = mm.keys().cloned().collect();
+        // Collect all virtual paths so we can skip them in the main loop
+        let virtual_paths: std::collections::HashSet<PathBuf> = mm
+            .values()
+            .flat_map(|entries| entries.iter().map(|(vp, _)| vp.clone()))
+            .collect();
+        drop(mm);
+
         for path in files.iter() {
+            // Skip virtual paths — they'll be handled via their real file
+            if virtual_paths.contains(path) {
+                continue;
+            }
+            if let Ok(uri) = Url::from_file_path(path) {
+                self.publish_diagnostics(uri).await;
+            }
+        }
+
+        // Publish diagnostics for multi-model real files
+        for path in &multi_model_real_paths {
             if let Ok(uri) = Url::from_file_path(path) {
                 self.publish_diagnostics(uri).await;
             }
@@ -456,15 +596,15 @@ impl LanguageServer for Backend {
                                             {
                                                 match std::fs::read_to_string(&entry_path) {
                                                     Ok(content) => {
-                                                        db.set_file_text(
-                                                            entry_path.clone(),
-                                                            Arc::new(content),
-                                                        );
-                                                        db.set_file_project_root(
-                                                            entry_path.clone(),
-                                                            project_root.clone(),
-                                                        );
-                                                        all_files.push(entry_path);
+                                                        let paths = self
+                                                            .register_sql_content(
+                                                                &mut db,
+                                                                &entry_path,
+                                                                &content,
+                                                                &project_root,
+                                                            )
+                                                            .await;
+                                                        all_files.extend(paths);
                                                     }
                                                     Err(e) => {
                                                         init_errors.model_errors.push(format!(
@@ -707,13 +847,28 @@ impl LanguageServer for Backend {
                     db.set_file_project_root(path.clone(), project_root);
                 }
             }
-            // Register this file if not already known
+            // Register file content (handles multi-model splitting)
+            let project_root_for_reg = db
+                .all_project_roots()
+                .iter()
+                .find(|root| path.starts_with(root))
+                .cloned()
+                .unwrap_or_default();
+            let registered_paths = self
+                .register_sql_content(
+                    &mut db,
+                    &path,
+                    &params.text_document.text,
+                    &project_root_for_reg,
+                )
+                .await;
             let mut files = (*db.all_files()).clone();
-            if !files.contains(&path) {
-                files.push(path.clone());
-                db.set_all_files(Arc::new(files));
+            for rp in &registered_paths {
+                if !files.contains(rp) {
+                    files.push(rp.clone());
+                }
             }
-            db.set_file_text(path, Arc::new(params.text_document.text));
+            db.set_all_files(Arc::new(files));
             drop(db);
             self.publish_diagnostics(uri).await;
         } else if path.extension().and_then(|s| s.to_str()) != Some("py") {
@@ -743,6 +898,31 @@ impl LanguageServer for Backend {
                     drop(db);
                     self.publish_all_diagnostics().await;
                 }
+            } else if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+                let mut db = self.db.lock().await;
+                let project_root = db
+                    .all_project_roots()
+                    .iter()
+                    .find(|root| path.starts_with(root))
+                    .cloned()
+                    .unwrap_or_default();
+                let registered_paths = self
+                    .register_sql_content(&mut db, &path, &change.text, &project_root)
+                    .await;
+                // Ensure all registered paths are in all_files
+                let mut files = (*db.all_files()).clone();
+                let mut changed = false;
+                for rp in &registered_paths {
+                    if !files.contains(rp) {
+                        files.push(rp.clone());
+                        changed = true;
+                    }
+                }
+                if changed {
+                    db.set_all_files(Arc::new(files));
+                }
+                drop(db);
+                self.publish_diagnostics(uri).await;
             } else if path.extension().and_then(|s| s.to_str()) != Some("py") {
                 let mut db = self.db.lock().await;
                 db.set_file_text(path, Arc::new(change.text));
@@ -778,11 +958,26 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
+        // For multi-model files, resolve to the virtual path and adjust position
+        let (effective_path, effective_position) = if let Some((vp, adjusted_line)) =
+            self.resolve_virtual_path(&path, position.line).await
+        {
+            (
+                vp,
+                Position {
+                    line: adjusted_line,
+                    character: position.character,
+                },
+            )
+        } else {
+            (path.clone(), position)
+        };
+
         let db = self.db.lock().await;
 
         // Get file content and parse tree
-        let text = db.file_text(path.clone());
-        let parse = db.parse_file(path.clone());
+        let text = db.file_text(effective_path.clone());
+        let parse = db.parse_file(effective_path.clone());
         let syntax = parse.syntax();
 
         // Convert cursor position to offset
@@ -792,7 +987,7 @@ impl LanguageServer for Backend {
             let mut col = 0u32;
 
             for ch in text.chars() {
-                if line == position.line && col == position.character {
+                if line == effective_position.line && col == effective_position.character {
                     break;
                 }
                 if ch == '\n' {
@@ -859,11 +1054,26 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
+        // For multi-model files, resolve to the virtual path and adjust position
+        let (effective_path, effective_position) = if let Some((vp, adjusted_line)) =
+            self.resolve_virtual_path(&path, position.line).await
+        {
+            (
+                vp,
+                Position {
+                    line: adjusted_line,
+                    character: position.character,
+                },
+            )
+        } else {
+            (path.clone(), position)
+        };
+
         let db = self.db.lock().await;
 
         // Get file content and parse tree
-        let text = db.file_text(path.clone());
-        let parse = db.parse_file(path.clone());
+        let text = db.file_text(effective_path.clone());
+        let parse = db.parse_file(effective_path.clone());
         let syntax = parse.syntax();
 
         // Convert cursor position to offset
@@ -873,7 +1083,7 @@ impl LanguageServer for Backend {
             let mut col = 0u32;
 
             for ch in text.chars() {
-                if line == position.line && col == position.character {
+                if line == effective_position.line && col == effective_position.character {
                     break;
                 }
                 if ch == '\n' {
@@ -1010,7 +1220,7 @@ impl LanguageServer for Backend {
                         let qualified_name = source_call.qualified_name().unwrap_or_default();
 
                         // Try to resolve the source
-                        let project_root = db.file_project_root(path.clone());
+                        let project_root = db.file_project_root(effective_path.clone());
                         if let Some(table_def) =
                             db.resolve_source(project_root, source_name.clone(), table_name.clone())
                         {
@@ -1075,10 +1285,25 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
+        // For multi-model files, resolve to the virtual path and adjust position
+        let (effective_path, effective_position) = if let Some((vp, adjusted_line)) =
+            self.resolve_virtual_path(&path, position.line).await
+        {
+            (
+                vp,
+                Position {
+                    line: adjusted_line,
+                    character: position.character,
+                },
+            )
+        } else {
+            (path.clone(), position)
+        };
+
         let db = self.db.lock().await;
 
         // Get file content
-        let text = db.file_text(path.clone());
+        let text = db.file_text(effective_path.clone());
 
         // Convert cursor position to offset
         let cursor_offset = {
@@ -1087,7 +1312,7 @@ impl LanguageServer for Backend {
             let mut col = 0u32;
 
             for ch in text.chars() {
-                if line == position.line && col == position.character {
+                if line == effective_position.line && col == effective_position.character {
                     break;
                 }
                 if ch == '\n' {
@@ -1120,7 +1345,7 @@ impl LanguageServer for Backend {
             }
             CompletionContext::InsideSource => {
                 // Complete source.table names
-                let project_root = db.file_project_root(path.clone());
+                let project_root = db.file_project_root(effective_path.clone());
                 let config = db.sources_config(project_root);
                 let mut items = Vec::new();
 
@@ -1155,8 +1380,8 @@ impl LanguageServer for Backend {
             CompletionContext::ColumnName => {
                 // Complete column names from available columns
                 // Use typed schema for type information
-                let typed_schema = db.typed_model_schema(path.clone());
-                let available = db.available_columns(path);
+                let typed_schema = db.typed_model_schema(effective_path.clone());
+                let available = db.available_columns(effective_path.clone());
 
                 // Build a map of column names to types from the typed schema
                 let type_map: std::collections::HashMap<&str, &TypedColumn> = typed_schema
@@ -1217,7 +1442,7 @@ impl LanguageServer for Backend {
             CompletionContext::QualifiedColumn(alias) => {
                 // Complete columns for the specified table alias
                 // Parse the file to find what the alias refers to
-                let parse = db.parse_file(path.clone());
+                let parse = db.parse_file(effective_path.clone());
                 let syntax = parse.syntax();
 
                 if let Some(file) = smelt_parser::ast::File::cast(syntax) {
@@ -1233,7 +1458,7 @@ impl LanguageServer for Backend {
                                     table_name,
                                 } => {
                                     // Get columns from sources.yml
-                                    let project_root = db.file_project_root(path.clone());
+                                    let project_root = db.file_project_root(effective_path.clone());
                                     let config = db.sources_config(project_root);
                                     for source in &config.sources {
                                         if source.name == *source_name {
@@ -1311,7 +1536,7 @@ impl LanguageServer for Backend {
             }
             CompletionContext::FromClause => {
                 // Offer CTE names defined in the current query's WITH clause
-                let parse = db.parse_file(path.clone());
+                let parse = db.parse_file(effective_path.clone());
                 let syntax = parse.syntax();
 
                 let mut items = Vec::new();
@@ -1319,7 +1544,7 @@ impl LanguageServer for Backend {
                 if let Some(file) = smelt_parser::ast::File::cast(syntax) {
                     if let Some(select_stmt) = file.select_stmt() {
                         if let Some(with_clause) = select_stmt.with_clause() {
-                            let type_ctx = db.type_context(path.clone());
+                            let type_ctx = db.type_context(effective_path.clone());
 
                             for cte in with_clause.ctes() {
                                 if let Some(cte_name) = cte.name() {
