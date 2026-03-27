@@ -327,8 +327,79 @@ Exclude test models from `smelt run`, `build`, `explain` commands.
 ### Phase 7: Integration & Polish
 
 - Wire up modules in `smelt-cli/src/lib.rs`
-- Add test models to `examples/ephemeral_demo/` for dogfooding
 - Ensure LSP handles test models gracefully
+
+### Phase 8: Add Tests to Existing Examples
+
+Add unit tests to each example project, demonstrating the full range of testing capabilities. These serve as both dogfooding and documentation.
+
+#### `examples/ephemeral_demo/` — Whole-Model Tests
+
+Simple project, no CTEs. Good for demonstrating whole-model testing with mocked refs.
+
+1. **`test_cleaned_orders`** — test the ephemeral `cleaned_orders` model
+   - Mock `raw_orders` with a mix of completed/pending orders
+   - Assert only completed orders pass through and `created_at` is renamed to `order_date`
+
+2. **`test_daily_revenue`** — test `daily_revenue` end-to-end
+   - Mock `raw_orders` (the transitive ref, since `cleaned_orders` is ephemeral and gets inlined)
+   - Assert correct `COUNT(*)` and `SUM(amount)` grouped by date
+
+3. **`test_user_totals`** — test `user_totals` with partial columns (property-based)
+   - Mock `raw_orders` specifying only `user_id` and `amount` (omit `order_id`, `created_at`, `status`)
+   - Assert `total_amount` matches `SUM(amount)` per user for any random values of omitted columns
+
+#### `examples/retail_analytics/` — CTE Isolation Tests
+
+Rich CTE chains. Best showcase for the novel CTE-as-function testing.
+
+4. **`test_cohort_base`** — CTE test for `mart_cohort_retention::cohort_base`
+   - Mock `int_order_enriched` with a few orders spanning 2 months
+   - Assert correct `first_order_month` per customer (MIN of order dates)
+
+5. **`test_cohort_activity`** — CTE test for `mart_cohort_retention::cohort_activity`
+   - Mock `cohort_base` (customer→cohort mapping) and `int_order_enriched` (subsequent orders)
+   - Assert correct `months_since_first` calculation via date arithmetic
+
+6. **`test_customer_quantiles`** — CTE test for `int_customer_segments::customer_quantiles`
+   - Mock `customer_metrics` with known spend/frequency values
+   - Assert NTILE(10) window function assigns correct deciles
+
+7. **`test_store_baselines`** — CTE test for `mart_anomaly_detection::store_baselines`
+   - Mock `daily_revenue` CTE with 14+ days of known revenue per store
+   - Assert rolling 14-day average (`AVG() OVER ROWS BETWEEN 13 PRECEDING AND CURRENT ROW`) is correct
+   - Good candidate for `check_order: true` since window frame depends on row order
+
+8. **`test_order_history`** — CTE test for `mart_customer_lifetime_value::order_history`
+   - Mock upstream with a few orders per customer
+   - Assert cumulative `SUM() OVER (UNBOUNDED PRECEDING)` and `ROW_NUMBER()` are correct
+
+9. **`test_funnel_conversion`** — whole-model test for `int_funnel_analysis`
+   - Mock `int_order_enriched` with events of different types
+   - Assert conditional aggregation (`COUNT(CASE WHEN ...)`) produces correct funnel counts and conversion rates
+
+#### `examples/timeseries/` — Transformation Logic Tests
+
+Interesting SQL patterns: JSON functions, incremental, cube.
+
+10. **`test_event_properties`** — whole-model test for `event_properties`
+    - Mock `events` with JSON `properties` column containing known structures
+    - Assert `page_url` extraction (`->>`), `metadata` extraction (`->`), and `json_array_length` produce correct values
+
+11. **`test_daily_revenue_agg`** — whole-model test for `daily_revenue`
+    - Mock `raw.transactions` with transactions spanning 2 days
+    - Assert correct `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` per day
+
+12. **`test_session_rollup`** — whole-model test for `session_rollup`
+    - Mock `raw.sessions` with a few sessions across platforms/countries
+    - Assert CUBE() produces correct rollup rows including the `'all'` totals
+
+#### Test Placement
+
+- Each example project gets a `tests/` subdirectory (or co-located test sections in existing model files, whichever feels more natural per project)
+- `ephemeral_demo`: co-located tests in model files (small project, keeps things together)
+- `retail_analytics`: separate `tests/` directory (large project, keeps model files clean)
+- `timeseries`: separate `tests/` directory
 
 ## Design Decisions
 
