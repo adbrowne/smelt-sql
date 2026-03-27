@@ -1,4 +1,11 @@
 --- name: daily_revenue ---
+columns:
+  order_date:
+    tests: [not_null]
+  order_count:
+    tests: [not_null, {min: 1}]
+  total_revenue:
+    tests: [not_null, {min: 0}]
 ---
 -- Aggregates cleaned orders into daily revenue.
 -- The ephemeral ref to 'cleaned_orders' will be inlined as a CTE.
