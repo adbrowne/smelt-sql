@@ -2645,7 +2645,76 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         results.push(result);
     }
 
-    // 6. Summary
+    // 6. Run column-level data quality tests
+    for model in &regular_models {
+        let metadata = match model.metadata.as_ref() {
+            Some(m) => m,
+            None => continue,
+        };
+
+        if metadata.columns.is_empty() {
+            continue;
+        }
+
+        for (col_name, col_meta) in &metadata.columns {
+            for test in &col_meta.tests {
+                let (test_display_name, test_sql) =
+                    match smelt_cli::test_compiler::compile_column_test(
+                        &schema,
+                        &model.name,
+                        col_name,
+                        test,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let result = smelt_cli::test_runner::TestResult {
+                                name: format!("{}.{}", model.name, col_name),
+                                model: model.name.clone(),
+                                target_cte: None,
+                                passed: false,
+                                duration: std::time::Duration::from_secs(0),
+                                compiled_sql: String::new(),
+                                error: Some(TestError::CompilationError(e)),
+                            };
+                            failed += 1;
+                            print_test_result(&result, args.verbose, args.show_all);
+                            results.push(result);
+                            continue;
+                        }
+                    };
+
+                // Apply selection filter to column tests too
+                if !args.select.is_empty()
+                    && !args.select.iter().any(|s| test_display_name.contains(s))
+                {
+                    continue;
+                }
+
+                if args.verbose {
+                    eprintln!("  Compiled SQL for {} (column test):", test_display_name);
+                    eprintln!("    {}", test_sql.replace('\n', "\n    "));
+                    eprintln!();
+                }
+
+                let result = smelt_cli::test_runner::run_singular_test(
+                    &test_display_name,
+                    &test_sql,
+                    database_path.as_deref(),
+                );
+
+                if result.passed {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+
+                print_test_result(&result, args.verbose, args.show_all);
+                results.push(result);
+            }
+        }
+    }
+
+    // 7. Summary
     let total = passed + failed;
     let overall_duration = overall_start.elapsed();
     println!(

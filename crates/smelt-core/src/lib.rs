@@ -18,7 +18,7 @@ pub use config::{
 pub use discovery::{ModelDiscovery, ModelFile};
 pub use graph::{DependencyGraph, GraphError};
 pub use metadata::{
-    extract_file_metadata, ColumnMetadata, FileMetadata, MetadataError, ModelMetadata,
+    extract_file_metadata, ColumnMetadata, ColumnTest, FileMetadata, MetadataError, ModelMetadata,
     ModelSection, TestConfig,
 };
 pub use model_id::ModelId;

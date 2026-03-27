@@ -314,6 +314,90 @@ pub fn compile_whole_model_test(
     }
 }
 
+/// Compile a column-level test into a SQL query.
+/// Returns (test_display_name, sql) where the SQL returns failing rows (0 rows = pass).
+pub fn compile_column_test(
+    schema: &str,
+    table: &str,
+    column: &str,
+    test: &smelt_core::metadata::ColumnTest,
+) -> Result<(String, String), String> {
+    match test {
+        smelt_core::metadata::ColumnTest::Simple(name) => match name.as_str() {
+            "not_null" => Ok((
+                format!("{}.{}.not_null", table, column),
+                format!(
+                    "SELECT \"{}\" FROM {}.{} WHERE \"{}\" IS NULL LIMIT 1",
+                    column, schema, table, column
+                ),
+            )),
+            "unique" => Ok((
+                format!("{}.{}.unique", table, column),
+                format!(
+                    "SELECT \"{col}\", COUNT(*) AS cnt FROM {schema}.{table} GROUP BY \"{col}\" HAVING COUNT(*) > 1 LIMIT 1",
+                    col = column, schema = schema, table = table
+                ),
+            )),
+            other => Err(format!("Unknown column test: '{}'", other)),
+        },
+        smelt_core::metadata::ColumnTest::Parameterized(params) => {
+            if let Some(values) = params.get("accepted_values") {
+                let values_list = match values {
+                    serde_yaml::Value::Sequence(seq) => seq
+                        .iter()
+                        .map(|v| match v {
+                            serde_yaml::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                            serde_yaml::Value::Number(n) => n.to_string(),
+                            serde_yaml::Value::Bool(b) => b.to_string(),
+                            _ => format!("'{}'", v.as_str().unwrap_or("")),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    _ => return Err("accepted_values must be a list".to_string()),
+                };
+                Ok((
+                    format!("{}.{}.accepted_values", table, column),
+                    format!(
+                        "SELECT \"{col}\" FROM {schema}.{table} WHERE \"{col}\" NOT IN ({values}) AND \"{col}\" IS NOT NULL LIMIT 1",
+                        col = column, schema = schema, table = table, values = values_list
+                    ),
+                ))
+            } else if let Some(min_val) = params.get("min") {
+                let min_str = match min_val {
+                    serde_yaml::Value::Number(n) => n.to_string(),
+                    serde_yaml::Value::String(s) => format!("'{}'", s),
+                    _ => return Err("min value must be a number or string".to_string()),
+                };
+                Ok((
+                    format!("{}.{}.min", table, column),
+                    format!(
+                        "SELECT \"{col}\" FROM {schema}.{table} WHERE \"{col}\" < {min} LIMIT 1",
+                        col = column, schema = schema, table = table, min = min_str
+                    ),
+                ))
+            } else if let Some(max_val) = params.get("max") {
+                let max_str = match max_val {
+                    serde_yaml::Value::Number(n) => n.to_string(),
+                    serde_yaml::Value::String(s) => format!("'{}'", s),
+                    _ => return Err("max value must be a number or string".to_string()),
+                };
+                Ok((
+                    format!("{}.{}.max", table, column),
+                    format!(
+                        "SELECT \"{col}\" FROM {schema}.{table} WHERE \"{col}\" > {max} LIMIT 1",
+                        col = column, schema = schema, table = table, max = max_str
+                    ),
+                ))
+            } else {
+                Err(format!(
+                    "Unknown parameterized test: {:?}",
+                    params.keys().collect::<Vec<_>>()
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +570,56 @@ GROUP BY order_date
         assert!(result.contains("order_count"));
         // smelt.ref should be replaced
         assert!(!result.contains("smelt.ref"));
+    }
+
+    #[test]
+    fn test_compile_column_test_not_null() {
+        use smelt_core::metadata::ColumnTest;
+        let test = ColumnTest::Simple("not_null".to_string());
+        let (name, sql) = compile_column_test("main", "orders", "order_id", &test).unwrap();
+        assert_eq!(name, "orders.order_id.not_null");
+        assert!(sql.contains("IS NULL"));
+        assert!(sql.contains("main.orders"));
+    }
+
+    #[test]
+    fn test_compile_column_test_unique() {
+        use smelt_core::metadata::ColumnTest;
+        let test = ColumnTest::Simple("unique".to_string());
+        let (name, sql) = compile_column_test("main", "orders", "order_id", &test).unwrap();
+        assert_eq!(name, "orders.order_id.unique");
+        assert!(sql.contains("HAVING COUNT(*)"));
+    }
+
+    #[test]
+    fn test_compile_column_test_accepted_values() {
+        use smelt_core::metadata::ColumnTest;
+        let mut params = BTreeMap::new();
+        params.insert(
+            "accepted_values".to_string(),
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("a".to_string()),
+                serde_yaml::Value::String("b".to_string()),
+            ]),
+        );
+        let test = ColumnTest::Parameterized(params);
+        let (name, sql) = compile_column_test("main", "orders", "status", &test).unwrap();
+        assert_eq!(name, "orders.status.accepted_values");
+        assert!(sql.contains("NOT IN"));
+        assert!(sql.contains("'a'"));
+    }
+
+    #[test]
+    fn test_compile_column_test_min() {
+        use smelt_core::metadata::ColumnTest;
+        let mut params = BTreeMap::new();
+        params.insert(
+            "min".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(0)),
+        );
+        let test = ColumnTest::Parameterized(params);
+        let (name, sql) = compile_column_test("main", "orders", "amount", &test).unwrap();
+        assert_eq!(name, "orders.amount.min");
+        assert!(sql.contains("< 0"));
     }
 }
