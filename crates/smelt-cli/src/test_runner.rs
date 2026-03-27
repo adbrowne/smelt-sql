@@ -206,41 +206,30 @@ pub fn compare_rows(
         }
         None
     } else {
-        // Set comparison: sort both and diff
-        let mut sorted_actual = filtered_actual.clone();
-        let mut sorted_expected = expected.to_vec();
-        sort_rows(&mut sorted_actual);
-        sort_rows(&mut sorted_expected);
-
-        let mut missing = Vec::new();
+        // Set comparison: O(n²) with numeric-aware matching
+        let mut matched_expected = vec![false; expected.len()];
         let mut unexpected = Vec::new();
-        let mut ai = 0;
-        let mut ei = 0;
 
-        while ai < sorted_actual.len() && ei < sorted_expected.len() {
-            match compare_single_row(&sorted_actual[ai], &sorted_expected[ei]) {
-                std::cmp::Ordering::Equal => {
-                    ai += 1;
-                    ei += 1;
-                }
-                std::cmp::Ordering::Less => {
-                    unexpected.push(sorted_actual[ai].clone());
-                    ai += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    missing.push(sorted_expected[ei].clone());
-                    ei += 1;
+        for actual_row in &filtered_actual {
+            let mut found = false;
+            for (ei, expected_row) in expected.iter().enumerate() {
+                if !matched_expected[ei] && rows_match(actual_row, expected_row) {
+                    matched_expected[ei] = true;
+                    found = true;
+                    break;
                 }
             }
+            if !found {
+                unexpected.push(actual_row.clone());
+            }
         }
-        while ai < sorted_actual.len() {
-            unexpected.push(sorted_actual[ai].clone());
-            ai += 1;
-        }
-        while ei < sorted_expected.len() {
-            missing.push(sorted_expected[ei].clone());
-            ei += 1;
-        }
+
+        let missing: Vec<_> = expected
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !matched_expected[*i])
+            .map(|(_, row)| row.clone())
+            .collect();
 
         if missing.is_empty() && unexpected.is_empty() {
             None
@@ -280,27 +269,6 @@ fn values_match(actual: &str, expected: &str) -> bool {
     } else {
         false
     }
-}
-
-/// Sort rows for set comparison.
-fn sort_rows(rows: &mut [BTreeMap<String, String>]) {
-    rows.sort_by(compare_single_row);
-}
-
-/// Compare two rows for ordering.
-fn compare_single_row(
-    a: &BTreeMap<String, String>,
-    b: &BTreeMap<String, String>,
-) -> std::cmp::Ordering {
-    for (key, a_val) in a {
-        if let Some(b_val) = b.get(key) {
-            match a_val.cmp(b_val) {
-                std::cmp::Ordering::Equal => continue,
-                other => return other,
-            }
-        }
-    }
-    std::cmp::Ordering::Equal
 }
 
 /// Run a single test: compile, execute, compare.
