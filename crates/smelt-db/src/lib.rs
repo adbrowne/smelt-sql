@@ -19,7 +19,8 @@ pub use schema::{
     ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
 };
 pub use type_inference::{
-    infer_cte_columns, infer_expression_type, infer_select_column_types, TypeContext,
+    infer_cte_columns, infer_expression_type, infer_select_column_types,
+    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
 };
 
 /// Input queries - these are set by the LSP when files change
@@ -1241,171 +1242,37 @@ fn model_input_constraints(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Inpu
             entry.usage_sites.push(range);
         };
 
-    // Extract column references from expressions recursively
-    // `type_hint` is an optional type constraint inferred from the expression context
-    #[allow(clippy::type_complexity)]
-    fn collect_column_refs(
-        expr: &smelt_parser::ast::Expr,
-        alias_to_ref: &HashMap<String, String>,
-        ctx: &TypeContext,
-        type_hint: Option<&TypedColumn>,
-        record: &mut dyn FnMut(&str, &str, Option<TypedColumn>, TextRange),
-    ) {
-        if let Some(col_ref) = expr.as_column_ref() {
-            let col_name = col_ref.name().to_string();
+    // Use the shared expression walker with a visitor that resolves aliases
+    // and records constraints
+    {
+        let mut visitor = |qualifier: Option<&str>,
+                           col_name: &str,
+                           type_hint: Option<&TypedColumn>,
+                           range: TextRange| {
             if col_name == "*" {
                 return;
             }
-
-            // Use type_hint first, then fall back to ctx lookup
             let inferred_type = type_hint.cloned();
-
-            if let Some(qualifier) = col_ref.qualifier() {
-                // Qualified: t.column_name -> look up qualifier in alias map
-                let resolved = ctx
-                    .resolve_alias(qualifier)
-                    .unwrap_or_else(|| qualifier.to_string());
+            if let Some(q) = qualifier {
+                let resolved = ctx.resolve_alias(q).unwrap_or_else(|| q.to_string());
                 if let Some(ref_name) = alias_to_ref.get(&resolved) {
-                    let final_type = inferred_type
-                        .or_else(|| ctx.lookup_column(Some(qualifier), &col_name).cloned());
-                    record(ref_name, &col_name, final_type, expr.text_range());
+                    let final_type =
+                        inferred_type.or_else(|| ctx.lookup_column(Some(q), col_name).cloned());
+                    record_constraint(ref_name, col_name, final_type, range);
                 }
             } else {
                 let unique_refs: std::collections::HashSet<&String> =
                     alias_to_ref.values().collect();
                 if unique_refs.len() == 1 {
-                    // Unqualified with single ref: assume it comes from that ref
                     let ref_name = alias_to_ref.values().next().unwrap();
                     let final_type =
-                        inferred_type.or_else(|| ctx.lookup_column(None, &col_name).cloned());
-                    record(ref_name, &col_name, final_type, expr.text_range());
+                        inferred_type.or_else(|| ctx.lookup_column(None, col_name).cloned());
+                    record_constraint(ref_name, col_name, final_type, range);
                 }
             }
-            return;
-        }
+        };
 
-        // Recurse into function arguments with type hints for aggregates
-        if let Some(func) = expr.as_function_call() {
-            let func_name = func.name().map(|n| n.to_uppercase()).unwrap_or_default();
-            let arg_hint = match smelt_types::SqlFunction::from_name(&func_name) {
-                // SUM/AVG require numeric arguments
-                Some(smelt_types::SqlFunction::Sum | smelt_types::SqlFunction::Avg) => {
-                    Some(TypedColumn {
-                        data_type: DataType::Double,
-                        nullable: true,
-                    })
-                }
-                // COUNT doesn't constrain argument type
-                _ => None,
-            };
-            for arg in func.arguments() {
-                collect_column_refs(&arg, alias_to_ref, ctx, arg_hint.as_ref(), record);
-            }
-            return;
-        }
-
-        // Recurse into binary expressions with cross-side type inference
-        if let Some(bin) = expr.as_binary() {
-            let lhs = bin.left();
-            let rhs = bin.right();
-
-            // Try to infer type from each side to hint the other
-            let lhs_type = lhs.as_ref().and_then(|e| infer_expression_type(e, ctx));
-            let rhs_type = rhs.as_ref().and_then(|e| infer_expression_type(e, ctx));
-
-            // If one side is a non-column typed expression, use it as hint for the other
-            let lhs_is_col = lhs.as_ref().and_then(|e| e.as_column_ref()).is_some();
-            let rhs_is_col = rhs.as_ref().and_then(|e| e.as_column_ref()).is_some();
-
-            if let Some(l) = &lhs {
-                let hint = if lhs_is_col && !rhs_is_col {
-                    rhs_type.as_ref()
-                } else {
-                    None
-                };
-                collect_column_refs(l, alias_to_ref, ctx, hint, record);
-            }
-            if let Some(r) = &rhs {
-                let hint = if rhs_is_col && !lhs_is_col {
-                    lhs_type.as_ref()
-                } else {
-                    None
-                };
-                collect_column_refs(r, alias_to_ref, ctx, hint, record);
-            }
-            return;
-        }
-
-        // Recurse into CASE expressions
-        if let Some(case_expr) = expr.as_case() {
-            for when_clause in case_expr.when_clauses() {
-                if let Some(cond) = when_clause.condition() {
-                    collect_column_refs(&cond, alias_to_ref, ctx, None, record);
-                }
-                if let Some(result) = when_clause.result() {
-                    collect_column_refs(&result, alias_to_ref, ctx, None, record);
-                }
-            }
-            if let Some(else_expr) = case_expr.else_expr() {
-                collect_column_refs(&else_expr, alias_to_ref, ctx, None, record);
-            }
-        }
-    }
-
-    // Collect from SELECT list
-    if let Some(select_list) = select_stmt.select_list() {
-        for item in select_list.items() {
-            if let Some(expr) = item.expression() {
-                collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
-            }
-        }
-    }
-
-    // Collect from WHERE clause
-    if let Some(where_clause) = select_stmt.where_clause() {
-        if let Some(expr) = where_clause.expression() {
-            collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
-        }
-    }
-
-    // Collect from JOIN ON conditions
-    if let Some(from_clause) = select_stmt.from_clause() {
-        for join in from_clause.joins() {
-            if let Some(condition) = join.condition() {
-                if let Some(on_expr) = condition.on_expression() {
-                    collect_column_refs(
-                        &on_expr,
-                        &alias_to_ref,
-                        &ctx,
-                        None,
-                        &mut record_constraint,
-                    );
-                }
-            }
-        }
-    }
-
-    // Collect from GROUP BY clause
-    if let Some(group_by) = select_stmt.group_by_clause() {
-        for expr in group_by.expressions() {
-            collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
-        }
-    }
-
-    // Collect from HAVING clause
-    if let Some(having) = select_stmt.having_clause() {
-        if let Some(expr) = having.expression() {
-            collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
-        }
-    }
-
-    // Collect from ORDER BY clause
-    if let Some(order_by) = select_stmt.order_by_clause() {
-        for item in order_by.items() {
-            if let Some(expr) = item.expression() {
-                collect_column_refs(&expr, &alias_to_ref, &ctx, None, &mut record_constraint);
-            }
-        }
+        type_inference::walk_select_columns_with_visitor(&select_stmt, &ctx, None, &mut visitor);
     }
 
     // Build InputConstraint list

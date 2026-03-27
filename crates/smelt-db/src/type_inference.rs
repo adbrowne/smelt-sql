@@ -2,6 +2,7 @@
 ///
 /// This module provides type inference capabilities for SQL expressions,
 /// including literals, column references, CAST expressions, and aggregates.
+use rowan::TextRange;
 use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, SelectStmt, Subquery,
 };
@@ -1029,14 +1030,28 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
     }
 }
 
-/// Infer the column names and types from a CTE definition
-/// Recursively walk all sub-expressions, calling `lookup_column` on every
-/// column reference encountered. Unlike `infer_expression_type` which
+/// Recursively walk all sub-expressions, calling `visitor` for each column
+/// reference encountered. Also triggers `ctx.lookup_column()` for
+/// missed-lookup tracking. Unlike `infer_expression_type` which
 /// short-circuits (e.g., `||` returns Text without inspecting operands),
-/// this function visits ALL operands to ensure every column reference
-/// triggers a lookup — used by property-based tests to detect missing columns.
-pub fn walk_expression_columns(expr: &Expr, ctx: &TypeContext) {
-    // Leaf: column reference — trigger lookup
+/// this function visits ALL operands.
+///
+/// `type_hint` propagates type context from the parent expression (e.g.,
+/// SUM/AVG arguments get a Double hint, binary expression operands get
+/// cross-side type inference).
+/// Callback type for column reference visitors.
+/// Parameters: (qualifier, column_name, type_hint, text_range)
+#[allow(clippy::type_complexity)]
+pub type ColumnRefVisitor<'a> =
+    &'a mut dyn FnMut(Option<&str>, &str, Option<&TypedColumn>, TextRange);
+
+pub fn walk_expression_columns_with_visitor(
+    expr: &Expr,
+    ctx: &TypeContext,
+    type_hint: Option<&TypedColumn>,
+    visitor: ColumnRefVisitor<'_>,
+) {
+    // Leaf: column reference — trigger lookup and visitor
     // Only treat as a leaf if there are no child expression nodes
     // (avoids false-positive from as_column_ref on complex expressions
     // where a bare IDENT token coexists with BINARY_EXPR children)
@@ -1044,6 +1059,12 @@ pub fn walk_expression_columns(expr: &Expr, ctx: &TypeContext) {
     if !has_expr_children {
         if let Some(col_ref) = expr.as_column_ref() {
             let _ = ctx.lookup_column(col_ref.qualifier(), col_ref.name());
+            visitor(
+                col_ref.qualifier(),
+                col_ref.name(),
+                type_hint,
+                expr.text_range(),
+            );
             return;
         }
     }
@@ -1053,21 +1074,21 @@ pub fn walk_expression_columns(expr: &Expr, ctx: &TypeContext) {
         return;
     }
 
-    // CASE — special handling for when_clauses/else
+    // CASE — special handling for when_clauses/else (no hint propagation)
     if let Some(case_expr) = expr.as_case() {
         if let Some(case_value) = case_expr.case_value() {
-            walk_expression_columns(&case_value, ctx);
+            walk_expression_columns_with_visitor(&case_value, ctx, None, visitor);
         }
         for when_clause in case_expr.when_clauses() {
             if let Some(condition) = when_clause.condition() {
-                walk_expression_columns(&condition, ctx);
+                walk_expression_columns_with_visitor(&condition, ctx, None, visitor);
             }
             if let Some(result) = when_clause.result() {
-                walk_expression_columns(&result, ctx);
+                walk_expression_columns_with_visitor(&result, ctx, None, visitor);
             }
         }
         if let Some(else_expr) = case_expr.else_expr() {
-            walk_expression_columns(&else_expr, ctx);
+            walk_expression_columns_with_visitor(&else_expr, ctx, None, visitor);
         }
         // Also check for bare IDENT tokens as CASE value (parser artifact:
         // `CASE status WHEN ...` may have `status` as a bare token, not wrapped
@@ -1081,73 +1102,150 @@ pub fn walk_expression_columns(expr: &Expr, ctx: &TypeContext) {
             if let Some(token) = child.as_token() {
                 if token.kind() == smelt_parser::SyntaxKind::IDENT {
                     let _ = ctx.lookup_column(None, token.text());
+                    visitor(None, token.text(), None, token.text_range());
                 }
             }
         }
         return;
     }
 
-    // Function call — walk all arguments
+    // Function call — walk all arguments with type hints for aggregates
     if let Some(func) = expr.as_function_call() {
+        let func_name = func.name().map(|n| n.to_uppercase()).unwrap_or_default();
+        let arg_hint = match SqlFunction::from_name(&func_name) {
+            Some(SqlFunction::Sum | SqlFunction::Avg) => Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            }),
+            _ => None,
+        };
         for arg in func.arguments() {
-            walk_expression_columns(&arg, ctx);
+            walk_expression_columns_with_visitor(&arg, ctx, arg_hint.as_ref(), visitor);
         }
         if let Some(filter) = func.filter_clause() {
             if let Some(filter_expr) = filter.expression() {
-                walk_expression_columns(&filter_expr, ctx);
+                walk_expression_columns_with_visitor(&filter_expr, ctx, None, visitor);
             }
         }
         return;
     }
 
-    // For all other expression types (binary, CAST, BETWEEN, IN, etc.):
+    // Binary expression — apply cross-side type inference when there are
+    // exactly 2 child Expr operands (simple binary like `a = 1`). For
+    // chained operators (3+ operands) we fall through to the generic handler.
+    if expr.as_binary().is_some() {
+        let child_exprs: Vec<Expr> = expr.syntax().children().filter_map(Expr::cast).collect();
+        if child_exprs.len() == 2 {
+            let lhs = &child_exprs[0];
+            let rhs = &child_exprs[1];
+
+            let lhs_type = infer_expression_type(lhs, ctx);
+            let rhs_type = infer_expression_type(rhs, ctx);
+
+            let lhs_is_col = lhs.as_column_ref().is_some();
+            let rhs_is_col = rhs.as_column_ref().is_some();
+
+            let lhs_hint = if lhs_is_col && !rhs_is_col {
+                rhs_type.as_ref()
+            } else {
+                type_hint
+            };
+            walk_expression_columns_with_visitor(lhs, ctx, lhs_hint, visitor);
+
+            let rhs_hint = if rhs_is_col && !lhs_is_col {
+                lhs_type.as_ref()
+            } else {
+                type_hint
+            };
+            walk_expression_columns_with_visitor(rhs, ctx, rhs_hint, visitor);
+            return;
+        }
+        // For chained binary operators, fall through to the generic handler
+    }
+
+    // For all other expression types (CAST, BETWEEN, IN, chained binary, etc.):
     // Walk all child nodes that can be cast to Expr, plus bare IDENT tokens.
     // This handles the parser's flat structure for chained binary operators
     // (e.g., `a || b || c` creates sibling BINARY_EXPR nodes).
     for child in expr.syntax().children() {
         if let Some(child_expr) = Expr::cast(child) {
-            walk_expression_columns(&child_expr, ctx);
+            walk_expression_columns_with_visitor(&child_expr, ctx, type_hint, visitor);
         }
     }
     for child in expr.syntax().children_with_tokens() {
         if let Some(token) = child.as_token() {
             if token.kind() == smelt_parser::SyntaxKind::IDENT {
                 let _ = ctx.lookup_column(None, token.text());
+                visitor(None, token.text(), type_hint, token.text_range());
             }
         }
     }
 }
 
-/// Walk all expressions in a SELECT statement to trigger column lookups.
-/// Covers SELECT list, WHERE, GROUP BY, HAVING, and QUALIFY clauses.
-pub fn walk_select_columns(select_stmt: &SelectStmt, ctx: &TypeContext) {
+/// Walk all sub-expressions, calling `lookup_column` on every column reference.
+/// Thin wrapper around `walk_expression_columns_with_visitor` with no visitor
+/// or type hints — used by property-based tests to detect missing columns.
+pub fn walk_expression_columns(expr: &Expr, ctx: &TypeContext) {
+    walk_expression_columns_with_visitor(expr, ctx, None, &mut |_, _, _, _| {});
+}
+
+/// Walk all expressions in a SELECT statement with a visitor callback.
+/// Covers SELECT list, WHERE, GROUP BY, HAVING, QUALIFY, JOIN ON, and ORDER BY.
+pub fn walk_select_columns_with_visitor(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+    type_hint: Option<&TypedColumn>,
+    visitor: ColumnRefVisitor<'_>,
+) {
     if let Some(select_list) = select_stmt.select_list() {
         for item in select_list.items() {
             if let Some(expr) = item.expression() {
-                walk_expression_columns(&expr, ctx);
+                walk_expression_columns_with_visitor(&expr, ctx, type_hint, visitor);
             }
         }
     }
     if let Some(where_clause) = select_stmt.where_clause() {
         if let Some(expr) = where_clause.expression() {
-            walk_expression_columns(&expr, ctx);
+            walk_expression_columns_with_visitor(&expr, ctx, type_hint, visitor);
+        }
+    }
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for join in from_clause.joins() {
+            if let Some(condition) = join.condition() {
+                if let Some(on_expr) = condition.on_expression() {
+                    walk_expression_columns_with_visitor(&on_expr, ctx, type_hint, visitor);
+                }
+            }
         }
     }
     if let Some(group_by) = select_stmt.group_by_clause() {
         for expr in group_by.expressions() {
-            walk_expression_columns(&expr, ctx);
+            walk_expression_columns_with_visitor(&expr, ctx, type_hint, visitor);
         }
     }
     if let Some(having) = select_stmt.having_clause() {
         if let Some(expr) = having.expression() {
-            walk_expression_columns(&expr, ctx);
+            walk_expression_columns_with_visitor(&expr, ctx, type_hint, visitor);
+        }
+    }
+    if let Some(order_by) = select_stmt.order_by_clause() {
+        for item in order_by.items() {
+            if let Some(expr) = item.expression() {
+                walk_expression_columns_with_visitor(&expr, ctx, type_hint, visitor);
+            }
         }
     }
     if let Some(qualify) = select_stmt.qualify_clause() {
         if let Some(expr) = qualify.expression() {
-            walk_expression_columns(&expr, ctx);
+            walk_expression_columns_with_visitor(&expr, ctx, type_hint, visitor);
         }
     }
+}
+
+/// Walk all expressions in a SELECT statement to trigger column lookups.
+/// Covers SELECT list, WHERE, GROUP BY, HAVING, QUALIFY, JOIN ON, and ORDER BY.
+pub fn walk_select_columns(select_stmt: &SelectStmt, ctx: &TypeContext) {
+    walk_select_columns_with_visitor(select_stmt, ctx, None, &mut |_, _, _, _| {});
 }
 
 ///
