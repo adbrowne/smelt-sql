@@ -3,6 +3,7 @@ version: 1
 
 model_paths:
   - models
+  - tests
 
 seed_paths:
   - seeds

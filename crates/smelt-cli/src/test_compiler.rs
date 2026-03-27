@@ -1,0 +1,490 @@
+//! Test compiler: extracts CTEs and compiles test SQL.
+
+use std::collections::BTreeMap;
+
+use smelt_parser::ast::File as AstFile;
+
+/// Information about a CTE extracted from a SQL model.
+#[derive(Debug, Clone)]
+pub struct CteInfo {
+    /// CTE name
+    pub name: String,
+    /// The SQL body of the CTE (without the surrounding parens)
+    pub body: String,
+    /// Names of other CTEs that this CTE depends on
+    pub dependencies: Vec<String>,
+}
+
+/// Extract CTEs from a SQL string, including their dependencies.
+///
+/// Dependencies are detected by finding table references in each CTE body
+/// that match other CTE names in the same WITH clause.
+pub fn extract_ctes(sql: &str) -> Vec<CteInfo> {
+    let clean = smelt_parser::strip_frontmatter(sql);
+    let parse = smelt_parser::parse(&clean);
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return vec![],
+    };
+
+    let select = match file.select_stmt() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let with_clause = match select.with_clause() {
+        Some(w) => w,
+        None => return vec![],
+    };
+
+    // First pass: collect all CTE names and bodies
+    let mut cte_names: Vec<String> = Vec::new();
+    let mut cte_bodies: Vec<String> = Vec::new();
+
+    for cte in with_clause.ctes() {
+        let name = match cte.name() {
+            Some(n) => n,
+            None => continue,
+        };
+        // Get the CTE body text from the subquery's select statement
+        let body = match cte.query() {
+            Some(subquery) => match subquery.select_stmt() {
+                Some(select) => select.to_string(),
+                None => continue,
+            },
+            None => continue,
+        };
+        cte_names.push(name);
+        cte_bodies.push(body);
+    }
+
+    // Second pass: detect dependencies between CTEs
+    let mut result = Vec::new();
+    for (i, name) in cte_names.iter().enumerate() {
+        let body = &cte_bodies[i];
+        let body_upper = body.to_uppercase();
+
+        let mut deps = Vec::new();
+        for (j, other_name) in cte_names.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            // Check if this CTE references the other CTE name
+            // Use word-boundary check to avoid false positives
+            let other_upper = other_name.to_uppercase();
+            if contains_word(&body_upper, &other_upper) {
+                deps.push(other_name.clone());
+            }
+        }
+
+        result.push(CteInfo {
+            name: name.clone(),
+            body: body.clone(),
+            dependencies: deps,
+        });
+    }
+
+    result
+}
+
+/// Check if `haystack` contains `word` as a whole word (not as a substring of a larger identifier).
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let word_bytes = word.as_bytes();
+    let word_len = word_bytes.len();
+
+    for i in 0..=bytes.len().saturating_sub(word_len) {
+        if &bytes[i..i + word_len] == word_bytes {
+            // Check word boundary before
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            // Check word boundary after
+            let after_ok = i + word_len >= bytes.len() || !is_ident_char(bytes[i + word_len]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Check if a string matches the YYYY-MM-DD date pattern.
+fn is_date_string(s: &str) -> bool {
+    if s.len() != 10 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        && bytes[5..7].iter().all(|b| b.is_ascii_digit())
+        && bytes[8..10].iter().all(|b| b.is_ascii_digit())
+}
+
+/// Convert a serde_yaml::Value to a SQL literal.
+fn yaml_value_to_sql(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::Number(n) => {
+            if n.is_i64() {
+                format!("{}", n.as_i64().unwrap())
+            } else {
+                format!("{}", n.as_f64().unwrap())
+            }
+        }
+        serde_yaml::Value::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        serde_yaml::Value::Null => "NULL".to_string(),
+        serde_yaml::Value::String(s) => {
+            if is_date_string(s) {
+                format!("'{}'::DATE", s)
+            } else {
+                format!("'{}'", s.replace('\'', "''"))
+            }
+        }
+        _ => "NULL".to_string(),
+    }
+}
+
+/// Convert YAML rows to a SQL CTE definition using VALUES.
+///
+/// Example output:
+/// ```sql
+/// mock_data AS (SELECT * FROM (VALUES (1, 100.0, '2024-01-01'::DATE)) AS t(user_id, amount, created_at))
+/// ```
+pub fn yaml_rows_to_sql(name: &str, rows: &[BTreeMap<String, serde_yaml::Value>]) -> String {
+    if rows.is_empty() {
+        return format!(
+            "{} AS (SELECT * FROM (VALUES (NULL)) AS t(__empty) WHERE 1=0)",
+            name
+        );
+    }
+
+    // Derive columns from first row (BTreeMap gives alphabetical order)
+    let columns: Vec<&String> = rows[0].keys().collect();
+
+    let value_rows: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let vals: Vec<String> = columns
+                .iter()
+                .map(|col| {
+                    row.get(*col)
+                        .map(yaml_value_to_sql)
+                        .unwrap_or_else(|| "NULL".to_string())
+                })
+                .collect();
+            format!("({})", vals.join(", "))
+        })
+        .collect();
+
+    let col_names: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
+    format!(
+        "{} AS (SELECT * FROM (VALUES {}) AS t({}))",
+        name,
+        value_rows.join(", "),
+        col_names.join(", ")
+    )
+}
+
+/// Compile a test that targets a specific CTE within a model.
+///
+/// Extracts the target CTE's body, mocks its dependencies using `inputs`,
+/// and returns a standalone SQL query.
+pub fn compile_cte_test(
+    model_sql: &str,
+    target_cte: &str,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    sql_body: Option<&str>,
+) -> Result<String, String> {
+    let ctes = extract_ctes(model_sql);
+
+    // Find target CTE
+    let target = ctes
+        .iter()
+        .find(|c| c.name == target_cte)
+        .ok_or_else(|| format!("CTE '{}' not found in model", target_cte))?;
+
+    // Build mock CTEs for dependencies
+    let mut mock_cte_parts: Vec<String> = Vec::new();
+
+    for dep in &target.dependencies {
+        if let Some(rows) = inputs.get(dep) {
+            mock_cte_parts.push(yaml_rows_to_sql(dep, rows));
+        } else if let Some(body) = sql_body {
+            // Check if sql_body defines this CTE
+            let body_ctes = extract_ctes(&format!("WITH {} SELECT 1", body));
+            if let Some(found) = body_ctes.iter().find(|c| c.name == *dep) {
+                mock_cte_parts.push(format!("{} AS ({})", dep, found.body));
+            } else {
+                return Err(format!(
+                    "Dependency '{}' of CTE '{}' is not mocked in inputs",
+                    dep, target_cte
+                ));
+            }
+        } else {
+            return Err(format!(
+                "Dependency '{}' of CTE '{}' is not mocked in inputs",
+                dep, target_cte
+            ));
+        }
+    }
+
+    // Assemble: WITH <mock CTEs> <target body as main SELECT>
+    if mock_cte_parts.is_empty() {
+        Ok(target.body.clone())
+    } else {
+        Ok(format!(
+            "WITH {}\n{}",
+            mock_cte_parts.join(",\n"),
+            target.body
+        ))
+    }
+}
+
+/// Compile a test for a whole model by mocking smelt.ref() calls.
+///
+/// Replaces each `smelt.ref('name')` with the bare CTE name and prepends
+/// mock CTE definitions as a WITH clause.
+pub fn compile_whole_model_test(
+    model_sql: &str,
+    inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    sql_body: Option<&str>,
+) -> Result<String, String> {
+    let clean = smelt_parser::strip_frontmatter(model_sql);
+    let parse = smelt_parser::parse(&clean);
+    let file = AstFile::cast(parse.syntax()).ok_or("Failed to parse model SQL")?;
+
+    // Collect all ref names and their text ranges (in reverse order for replacement)
+    let mut ref_replacements: Vec<(usize, usize, String)> = Vec::new();
+    for ref_call in file.refs() {
+        if let Some(name) = ref_call.model_name() {
+            let range = ref_call.range();
+            let start: usize = range.start().into();
+            let end: usize = range.end().into();
+            ref_replacements.push((start, end, name));
+        }
+    }
+
+    // Sort by start position descending so replacements don't shift offsets
+    ref_replacements.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Replace smelt.ref('name') with bare name in the SQL
+    let mut result_sql = clean.clone();
+    let mut ref_names: Vec<String> = Vec::new();
+    for (start, end, name) in &ref_replacements {
+        result_sql.replace_range(*start..*end, name);
+        if !ref_names.contains(name) {
+            ref_names.push(name.clone());
+        }
+    }
+    ref_names.sort();
+
+    // Build mock CTEs
+    let mut mock_cte_parts: Vec<String> = Vec::new();
+    for ref_name in &ref_names {
+        if let Some(rows) = inputs.get(ref_name) {
+            mock_cte_parts.push(yaml_rows_to_sql(ref_name, rows));
+        }
+    }
+
+    // Add sql_body CTEs if provided
+    if let Some(body) = sql_body {
+        let body_ctes = extract_ctes(&format!("WITH {} SELECT 1", body));
+        for cte in body_ctes {
+            if !mock_cte_parts.iter().any(|p| p.starts_with(&cte.name)) {
+                mock_cte_parts.push(format!("{} AS ({})", cte.name, cte.body));
+            }
+        }
+    }
+
+    // Prepend WITH clause
+    let trimmed = result_sql.trim();
+    if mock_cte_parts.is_empty() {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("WITH {}\n{}", mock_cte_parts.join(",\n"), trimmed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_ctes_basic() {
+        let sql = r#"
+WITH cleaned AS (
+    SELECT user_id, amount FROM raw_orders WHERE status = 'completed'
+),
+daily AS (
+    SELECT DATE(created_at) as day, SUM(amount) as revenue FROM cleaned GROUP BY 1
+)
+SELECT * FROM daily
+"#;
+        let ctes = extract_ctes(sql);
+        assert_eq!(ctes.len(), 2);
+        assert_eq!(ctes[0].name, "cleaned");
+        assert!(ctes[0].dependencies.is_empty());
+        assert_eq!(ctes[1].name, "daily");
+        assert_eq!(ctes[1].dependencies, vec!["cleaned"]);
+    }
+
+    #[test]
+    fn test_extract_ctes_no_with() {
+        let sql = "SELECT * FROM users";
+        let ctes = extract_ctes(sql);
+        assert!(ctes.is_empty());
+    }
+
+    #[test]
+    fn test_extract_ctes_chain() {
+        let sql = r#"
+WITH a AS (SELECT 1 as x),
+b AS (SELECT x FROM a),
+c AS (SELECT x FROM b)
+SELECT * FROM c
+"#;
+        let ctes = extract_ctes(sql);
+        assert_eq!(ctes.len(), 3);
+        assert!(ctes[0].dependencies.is_empty());
+        assert_eq!(ctes[1].dependencies, vec!["a"]);
+        assert_eq!(ctes[2].dependencies, vec!["b"]);
+    }
+
+    #[test]
+    fn test_contains_word() {
+        assert!(contains_word("FROM CLEANED GROUP BY", "CLEANED"));
+        assert!(!contains_word("FROM CLEANED_V2 GROUP BY", "CLEANED"));
+        assert!(contains_word("CLEANED", "CLEANED"));
+    }
+
+    #[test]
+    fn test_extract_ctes_with_frontmatter() {
+        let sql = r#"---
+name: my_model
+materialization: table
+---
+WITH step1 AS (
+    SELECT 1 as x
+)
+SELECT * FROM step1
+"#;
+        let ctes = extract_ctes(sql);
+        assert_eq!(ctes.len(), 1);
+        assert_eq!(ctes[0].name, "step1");
+    }
+
+    #[test]
+    fn test_yaml_rows_to_sql_basic() {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+        row.insert(
+            "user_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        let result = yaml_rows_to_sql("mock_data", &[row]);
+        assert!(result.contains("mock_data AS"));
+        assert!(result.contains("VALUES"));
+        assert!(result.contains("t(amount, user_id)"));
+    }
+
+    #[test]
+    fn test_yaml_rows_to_sql_empty() {
+        let result = yaml_rows_to_sql("empty", &[]);
+        assert!(result.contains("WHERE 1=0"));
+    }
+
+    #[test]
+    fn test_yaml_rows_to_sql_date_detection() {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "day".to_string(),
+            serde_yaml::Value::String("2024-01-01".to_string()),
+        );
+        let result = yaml_rows_to_sql("dates", &[row]);
+        assert!(result.contains("::DATE"));
+    }
+
+    #[test]
+    fn test_compile_cte_test_basic() {
+        let model_sql = r#"
+WITH cleaned AS (
+    SELECT user_id, amount FROM raw_orders WHERE status = 'completed'
+),
+daily AS (
+    SELECT DATE(created_at) as day, SUM(amount) as revenue FROM cleaned GROUP BY 1
+)
+SELECT * FROM daily
+"#;
+        let mut inputs = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert(
+            "user_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        row.insert(
+            "amount".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(100)),
+        );
+        row.insert(
+            "created_at".to_string(),
+            serde_yaml::Value::String("2024-01-01".to_string()),
+        );
+        inputs.insert("cleaned".to_string(), vec![row]);
+
+        let result = compile_cte_test(model_sql, "daily", &inputs, None).unwrap();
+        assert!(result.contains("cleaned AS"));
+        assert!(result.contains("SUM(amount)"));
+        // The target CTE body should be the main SELECT, not wrapped in a CTE
+        assert!(!result.contains("daily AS"));
+    }
+
+    #[test]
+    fn test_compile_cte_test_missing_dependency() {
+        let model_sql = r#"
+WITH a AS (SELECT 1 as x),
+b AS (SELECT x FROM a)
+SELECT * FROM b
+"#;
+        let inputs = BTreeMap::new(); // No mock for 'a'
+        let result = compile_cte_test(model_sql, "b", &inputs, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_whole_model_test() {
+        let model_sql = r#"
+SELECT order_date, COUNT(*) AS order_count
+FROM smelt.ref('raw_orders')
+GROUP BY order_date
+"#;
+        let mut inputs = BTreeMap::new();
+        let mut row = BTreeMap::new();
+        row.insert(
+            "order_date".to_string(),
+            serde_yaml::Value::String("2024-01-01".to_string()),
+        );
+        row.insert(
+            "order_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        inputs.insert("raw_orders".to_string(), vec![row]);
+
+        let result = compile_whole_model_test(model_sql, &inputs, None).unwrap();
+        assert!(result.contains("raw_orders AS"));
+        assert!(result.contains("order_count"));
+        // smelt.ref should be replaced
+        assert!(!result.contains("smelt.ref"));
+    }
+}
