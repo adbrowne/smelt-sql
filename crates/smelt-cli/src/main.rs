@@ -2492,9 +2492,16 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         .map(|t| t.schema.clone())
         .unwrap_or_else(|| "main".to_string());
 
+    // Check if the database file exists (needed for singular and column tests)
+    let db_exists = database_path
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
     // 5. Run each test
     let mut passed = 0;
     let mut failed = 0;
+    let mut skipped = 0;
     let mut results = Vec::new();
 
     for test_model in &selected_tests {
@@ -2506,6 +2513,16 @@ async fn run_tests(args: TestArgs) -> Result<()> {
             let trimmed = clean.trim();
             if trimmed.is_empty() {
                 eprintln!("  SKIP {} (empty test body)", test_model.name);
+                continue;
+            }
+
+            // Singular tests run against the real database; skip if not built
+            if database_path.is_some() && !db_exists {
+                println!(
+                    "  SKIP {:<40} (database not built, run `smelt build` first)",
+                    test_model.name
+                );
+                skipped += 1;
                 continue;
             }
 
@@ -2729,7 +2746,38 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         results.push(result);
     }
 
-    // 6. Run column-level data quality tests
+    // 6. Run column-level data quality tests (require built database)
+    if database_path.is_some() && !db_exists {
+        // Count how many column tests would run so we can report them as skipped
+        for model in &regular_models {
+            if let Some(metadata) = model.metadata.as_ref() {
+                for (_col_name, col_meta) in &metadata.columns {
+                    for test in &col_meta.tests {
+                        let test_display_name =
+                            match smelt_cli::test_compiler::compile_column_test(
+                                &schema,
+                                &model.name,
+                                _col_name,
+                                test,
+                            ) {
+                                Ok((name, _)) => name,
+                                Err(_) => continue,
+                            };
+                        if !args.select.is_empty()
+                            && !args.select.iter().any(|s| test_display_name.contains(s))
+                        {
+                            continue;
+                        }
+                        println!(
+                            "  SKIP {:<40} (database not built, run `smelt build` first)",
+                            test_display_name
+                        );
+                        skipped += 1;
+                    }
+                }
+            }
+        }
+    } else {
     for model in &regular_models {
         let metadata = match model.metadata.as_ref() {
             Some(m) => m,
@@ -2798,16 +2846,22 @@ async fn run_tests(args: TestArgs) -> Result<()> {
         }
     }
 
+    } // end else (db_exists) for column tests
+
     // 7. Summary
-    let total = passed + failed;
+    let total = passed + failed + skipped;
     let overall_duration = overall_start.elapsed();
-    println!(
-        "\n  {} passed, {} failed, {} total ({:.2}s)\n",
-        passed,
-        failed,
-        total,
-        overall_duration.as_secs_f64()
-    );
+    if skipped > 0 {
+        println!(
+            "\n  {} passed, {} failed, {} skipped, {} total ({:.2}s)\n",
+            passed, failed, skipped, total, overall_duration.as_secs_f64()
+        );
+    } else {
+        println!(
+            "\n  {} passed, {} failed, {} total ({:.2}s)\n",
+            passed, failed, total, overall_duration.as_secs_f64()
+        );
+    }
 
     if failed > 0 {
         std::process::exit(1);
