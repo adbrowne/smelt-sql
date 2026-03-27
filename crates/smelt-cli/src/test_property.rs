@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use smelt_parser::ast::Expr;
-use smelt_parser::SyntaxKind;
+use smelt_parser::ast::{Expr, File as AstFile, SelectStmt};
 use smelt_types::DataType;
 
 use crate::test_compiler::{compile_cte_test, compile_whole_model_test, extract_ctes};
@@ -71,237 +70,199 @@ fn is_date_string(s: &str) -> bool {
         && bytes[8..10].iter().all(|b| b.is_ascii_digit())
 }
 
+/// Recursively collect all column references from an expression.
+///
+/// Uses typed AST methods (as_column_ref, as_case, as_function_call, etc.) for
+/// expression types that need special handling, then falls back to walking all
+/// child Expr nodes. This handles the parser's structure where chained binary
+/// operators (like `a || b || c`) create sibling BINARY_EXPR nodes rather than
+/// nested ones, so we can't rely solely on `as_binary().left()/right()`.
+fn collect_column_refs(expr: &Expr, refs: &mut Vec<(Option<String>, String)>) {
+    use smelt_parser::SyntaxKind;
+
+    // Leaf: column reference — only if there are no child expression nodes
+    // (as_column_ref can false-positive on complex expressions when a bare IDENT
+    // token like `first_name` is a direct child alongside BINARY_EXPR children)
+    let has_expr_children = expr.syntax().children().any(|c| Expr::cast(c).is_some());
+    if !has_expr_children {
+        if let Some(col_ref) = expr.as_column_ref() {
+            refs.push((
+                col_ref.qualifier().map(|s| s.to_string()),
+                col_ref.name().to_string(),
+            ));
+            return;
+        }
+    }
+
+    // EXISTS/subquery: skip (different scope)
+    if expr.as_exists().is_some() || expr.as_subquery().is_some() {
+        return;
+    }
+
+    // CASE expression: needs special handling for when_clauses/else
+    if let Some(case_expr) = expr.as_case() {
+        if let Some(case_value) = case_expr.case_value() {
+            collect_column_refs(&case_value, refs);
+        }
+        // The case value may be a bare IDENT token not wrapped in an EXPRESSION node
+        // (e.g., `CASE status WHEN ...`). Scan the CASE_EXPR node's direct tokens.
+        for child in case_expr.syntax().children_with_tokens() {
+            if let Some(node) = child.as_node() {
+                // Stop at WHEN_CLAUSE — tokens after this are condition/result values
+                if node.kind() == SyntaxKind::WHEN_CLAUSE {
+                    break;
+                }
+            }
+            if let Some(token) = child.as_token() {
+                if token.kind() == SyntaxKind::IDENT {
+                    refs.push((None, token.text().to_string()));
+                }
+            }
+        }
+        for when_clause in case_expr.when_clauses() {
+            if let Some(condition) = when_clause.condition() {
+                collect_column_refs(&condition, refs);
+            }
+            if let Some(result) = when_clause.result() {
+                collect_column_refs(&result, refs);
+            }
+        }
+        if let Some(else_expr) = case_expr.else_expr() {
+            collect_column_refs(&else_expr, refs);
+        }
+        return;
+    }
+
+    // Function call: recurse into arguments and filter clause
+    if let Some(func) = expr.as_function_call() {
+        for arg in func.arguments() {
+            collect_column_refs(&arg, refs);
+        }
+        if let Some(filter) = func.filter_clause() {
+            if let Some(filter_expr) = filter.expression() {
+                collect_column_refs(&filter_expr, refs);
+            }
+        }
+        return;
+    }
+
+    // For all other expression types (binary exprs, CAST, BETWEEN, IN, etc.),
+    // walk all child nodes that can be cast to Expr. This handles the parser's
+    // flat sibling structure for chained operators (e.g., `a || b || c` creates
+    // BINARY_EXPR siblings rather than nested children).
+    for child in expr.syntax().children() {
+        if let Some(child_expr) = Expr::cast(child) {
+            collect_column_refs(&child_expr, refs);
+        }
+    }
+
+    // Also check for bare IDENT tokens that are direct children (not wrapped
+    // in EXPRESSION nodes). This happens for the first operand of chained
+    // binary expressions: in `a || b || c`, `a` may be a bare IDENT token
+    // at the EXPRESSION level, while `b` and `c` are in EXPRESSION child nodes.
+    for child in expr.syntax().children_with_tokens() {
+        if let Some(token) = child.as_token() {
+            if token.kind() == SyntaxKind::IDENT {
+                let name = token.text().to_string();
+                refs.push((None, name));
+            }
+        }
+    }
+}
+
+/// Collect all column references from a SELECT statement (all clauses).
+fn collect_column_refs_from_select(
+    select_stmt: &SelectStmt,
+    refs: &mut Vec<(Option<String>, String)>,
+) {
+    // SELECT list
+    if let Some(select_list) = select_stmt.select_list() {
+        for item in select_list.items() {
+            if let Some(expr) = item.expression() {
+                collect_column_refs(&expr, refs);
+            }
+        }
+    }
+
+    // WHERE clause
+    if let Some(where_clause) = select_stmt.where_clause() {
+        if let Some(expr) = where_clause.expression() {
+            collect_column_refs(&expr, refs);
+        }
+    }
+
+    // GROUP BY clause
+    if let Some(group_by) = select_stmt.group_by_clause() {
+        for expr in group_by.expressions() {
+            collect_column_refs(&expr, refs);
+        }
+    }
+
+    // HAVING clause
+    if let Some(having) = select_stmt.having_clause() {
+        if let Some(expr) = having.expression() {
+            collect_column_refs(&expr, refs);
+        }
+    }
+
+    // QUALIFY clause
+    if let Some(qualify) = select_stmt.qualify_clause() {
+        if let Some(expr) = qualify.expression() {
+            collect_column_refs(&expr, refs);
+        }
+    }
+}
+
 /// Find columns referenced from a specific dependency in a CTE body SQL.
 ///
-/// Parses the SQL and walks all expression nodes looking for column references
-/// that are qualified with `dependency_name` or unqualified when the dependency
-/// is the only source.
+/// Uses recursive AST expression walking (mirroring the type inference dispatch
+/// pattern) to correctly find column references inside binary expressions,
+/// CASE WHEN, function arguments, etc.
 pub fn find_dependency_columns(
     cte_body_sql: &str,
     dependency_name: &str,
     all_cte_names: &[String],
 ) -> Vec<String> {
     let parse = smelt_parser::parse(cte_body_sql);
-    let mut columns = Vec::new();
-    let mut seen = HashSet::new();
+    let file = match AstFile::cast(parse.syntax()) {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return vec![],
+    };
 
     // Determine if this dependency is the only source (for unqualified column resolution)
     let is_only_source = {
         let body_upper = cte_body_sql.to_uppercase();
         let dep_upper = dependency_name.to_uppercase();
-        let mut source_count = 0;
-        for name in all_cte_names {
-            let name_upper = name.to_uppercase();
-            if body_upper.contains(&name_upper) {
-                source_count += 1;
-            }
-        }
-        // If only one CTE name appears in the body and it matches our dependency
-        source_count <= 1 && body_upper.contains(&dep_upper)
+        let other_sources = all_cte_names
+            .iter()
+            .filter(|name| {
+                let name_upper = name.to_uppercase();
+                name_upper != dep_upper && body_upper.contains(&name_upper)
+            })
+            .count();
+        other_sources == 0 && body_upper.contains(&dep_upper)
     };
 
-    // SQL keywords and functions that should not be treated as column references
-    let sql_keywords: HashSet<&str> = [
-        "SELECT",
-        "FROM",
-        "WHERE",
-        "GROUP",
-        "BY",
-        "ORDER",
-        "HAVING",
-        "LIMIT",
-        "OFFSET",
-        "AND",
-        "OR",
-        "NOT",
-        "IN",
-        "IS",
-        "NULL",
-        "AS",
-        "ON",
-        "JOIN",
-        "LEFT",
-        "RIGHT",
-        "INNER",
-        "OUTER",
-        "FULL",
-        "CROSS",
-        "UNION",
-        "ALL",
-        "DISTINCT",
-        "CASE",
-        "WHEN",
-        "THEN",
-        "ELSE",
-        "END",
-        "BETWEEN",
-        "LIKE",
-        "EXISTS",
-        "TRUE",
-        "FALSE",
-        "ASC",
-        "DESC",
-        "WITH",
-        "RECURSIVE",
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "CREATE",
-        "DROP",
-        "ALTER",
-        "TABLE",
-        "VIEW",
-        "INDEX",
-        // Common SQL aggregate/scalar functions
-        "COUNT",
-        "SUM",
-        "AVG",
-        "MIN",
-        "MAX",
-        "ABS",
-        "ROUND",
-        "FLOOR",
-        "CEIL",
-        "CEILING",
-        "COALESCE",
-        "NULLIF",
-        "CAST",
-        "DATE",
-        "TIMESTAMP",
-        "INTERVAL",
-        "EXTRACT",
-        "DATE_TRUNC",
-        "DATE_PART",
-        "DATE_DIFF",
-        "DATEDIFF",
-        "ROW_NUMBER",
-        "RANK",
-        "DENSE_RANK",
-        "NTILE",
-        "LAG",
-        "LEAD",
-        "FIRST_VALUE",
-        "LAST_VALUE",
-        "NTH_VALUE",
-        "CONCAT",
-        "UPPER",
-        "LOWER",
-        "TRIM",
-        "LTRIM",
-        "RTRIM",
-        "SUBSTRING",
-        "SUBSTR",
-        "LENGTH",
-        "CHAR_LENGTH",
-        "REPLACE",
-        "POSITION",
-        "STRFTIME",
-        "TO_CHAR",
-        "SIGN",
-        "POWER",
-        "POW",
-        "SQRT",
-        "EXP",
-        "LN",
-        "LOG",
-        "LOG10",
-        "LOG2",
-        "MOD",
-        "GREATEST",
-        "LEAST",
-        "IF",
-        "IIF",
-        "GENERATE_SERIES",
-        "UNNEST",
-        "ARRAY_AGG",
-        "STRING_AGG",
-        "LISTAGG",
-        "BOOL_AND",
-        "BOOL_OR",
-        "EVERY",
-        "OVER",
-        "PARTITION",
-        "ROWS",
-        "RANGE",
-        "UNBOUNDED",
-        "PRECEDING",
-        "FOLLOWING",
-        "CURRENT",
-        "ROW",
-    ]
-    .iter()
-    .copied()
-    .collect();
+    // Collect all column references from all clauses
+    let mut all_refs = Vec::new();
+    collect_column_refs_from_select(&select_stmt, &mut all_refs);
 
-    // Strategy: walk all nodes looking for column references.
-    // Also scan for bare IDENT tokens inside expressions that might be columns
-    // (handles cases like `a || b` where operands may not be wrapped in EXPRESSION nodes).
-    for node in parse.syntax().descendants() {
-        let kind = node.kind();
-        if kind == SyntaxKind::EXPRESSION
-            || kind == SyntaxKind::BINARY_EXPR
-            || kind == SyntaxKind::FUNCTION_CALL
-        {
-            if let Some(expr) = Expr::cast(node.clone()) {
-                if let Some(col_ref) = expr.as_column_ref() {
-                    let col_name = col_ref.name().to_string();
-                    if sql_keywords.contains(col_name.to_uppercase().as_str()) {
-                        continue;
-                    }
-                    if let Some(qualifier) = col_ref.qualifier() {
-                        if qualifier.eq_ignore_ascii_case(dependency_name)
-                            && seen.insert(col_name.clone())
-                        {
-                            columns.push(col_name);
-                        }
-                    } else if is_only_source && seen.insert(col_name.clone()) {
-                        columns.push(col_name);
-                    }
-                }
+    // Filter to columns belonging to the dependency
+    let mut columns = Vec::new();
+    let mut seen = HashSet::new();
+    for (qualifier, col_name) in all_refs {
+        if let Some(ref q) = qualifier {
+            // Qualified: dep.col
+            if q.eq_ignore_ascii_case(dependency_name) && seen.insert(col_name.clone()) {
+                columns.push(col_name);
             }
-        }
-    }
-
-    // Second pass: look for any IDENT tokens inside SELECT_ITEM or EXPRESSION contexts
-    // that we might have missed (e.g., operands in binary expressions like `a || b`)
-    for node in parse.syntax().descendants() {
-        if node.kind() == SyntaxKind::BINARY_EXPR
-            || node.kind() == SyntaxKind::EXPRESSION
-            || node.kind() == SyntaxKind::SELECT_ITEM
-        {
-            for child in node.children_with_tokens() {
-                if let Some(token) = child.as_token() {
-                    if token.kind() == SyntaxKind::IDENT {
-                        let col_name = token.text().to_string();
-                        if sql_keywords.contains(col_name.to_uppercase().as_str()) {
-                            continue;
-                        }
-                        // Skip the dependency name itself (FROM table name)
-                        if col_name.eq_ignore_ascii_case(dependency_name) {
-                            continue;
-                        }
-                        // Skip alias names (after AS)
-                        let mut prev = token.prev_token();
-                        let is_alias = loop {
-                            match prev {
-                                Some(ref t) if t.text().trim().is_empty() => {
-                                    prev = t.prev_token();
-                                }
-                                Some(ref t) if t.text().eq_ignore_ascii_case("AS") => {
-                                    break true;
-                                }
-                                _ => break false,
-                            }
-                        };
-                        if is_alias {
-                            continue;
-                        }
-                        if is_only_source && seen.insert(col_name.clone()) {
-                            columns.push(col_name);
-                        }
-                    }
-                }
-            }
+        } else if is_only_source && seen.insert(col_name.clone()) {
+            // Unqualified and this is the only source
+            columns.push(col_name);
         }
     }
 
@@ -827,6 +788,33 @@ SELECT * FROM daily
             result.inner_result
         );
         assert_eq!(result.iterations, 5);
+    }
+
+    #[test]
+    fn test_find_dependency_columns_concat() {
+        let cte_body = "SELECT user_id, first_name || ' ' || last_name AS full_name FROM users";
+        let all_ctes = vec!["users".to_string()];
+        let cols = find_dependency_columns(cte_body, "users", &all_ctes);
+        assert!(
+            cols.contains(&"last_name".to_string()),
+            "should find last_name in concat expr, got: {:?}",
+            cols
+        );
+        assert!(cols.contains(&"first_name".to_string()));
+        assert!(cols.contains(&"user_id".to_string()));
+    }
+
+    #[test]
+    fn test_find_dependency_columns_case() {
+        let cte_body = "SELECT ticket_id, CASE status WHEN 'open' THEN 'active' WHEN 'closed' THEN 'resolved' END AS status_label FROM tickets";
+        let all_ctes = vec!["tickets".to_string()];
+        let cols = find_dependency_columns(cte_body, "tickets", &all_ctes);
+        assert!(
+            cols.contains(&"status".to_string()),
+            "should find status in CASE expr, got: {:?}",
+            cols
+        );
+        assert!(cols.contains(&"ticket_id".to_string()));
     }
 
     #[test]

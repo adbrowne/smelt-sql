@@ -602,6 +602,11 @@ impl Expr {
         None
     }
 
+    /// Get the underlying syntax node
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
     /// Get the full text of this expression
     pub fn text(&self) -> String {
         self.0.text().to_string()
@@ -1287,6 +1292,11 @@ impl CaseExpr {
             .children()
             .take_while(|n| n.kind() != WHEN_CLAUSE)
             .find_map(Expr::cast)
+    }
+
+    /// Get the underlying syntax node
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 
     /// Get all WHEN clauses
