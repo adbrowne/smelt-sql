@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774655638971,
+  "lastUpdate": 1774655640251,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8459,6 +8459,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.588211945145805,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c63df60b9b0cffcc8bfff74c5839de33c3adcc1b",
+          "message": "Add smelt model tests to CI\n\nRuns `smelt test` against the retail_analytics, timeseries, and\nephemeral_demo example projects as part of the test suite.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T10:52:35+11:00",
+          "tree_id": "e91f541b1296882398c51112c3a4afdf4bbc08d8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c63df60b9b0cffcc8bfff74c5839de33c3adcc1b"
+        },
+        "date": 1774655639803,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.426776678706613,
             "unit": "MB/s"
           }
         ]
