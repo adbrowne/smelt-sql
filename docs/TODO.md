@@ -46,6 +46,10 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - [ ] **GROUP BY / HAVING** — Generate multi-column GROUP BY with HAVING predicates
 - [ ] **DISTINCT / DISTINCT ON** — Generate DISTINCT expressions
 
+## smelt test
+
+- [ ] **Graph-aware selectors for `smelt test --select`** — Currently `--select` uses substring matching on test names. Should support the same graph-aware selector syntax as `smelt run` (e.g., `tag:X`, `+model_name`, `model_name+`).
+
 ### Known DuckDB Incompatibilities (discovered during generator expansion)
 
 - **INITCAP**: Not available in DuckDB (no simple equivalent)

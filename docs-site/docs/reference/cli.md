@@ -196,6 +196,60 @@ smelt seed --show-results
 
 ---
 
+## smelt test
+
+Run model tests and report results. Tests are `.sql` files with `materialization: test` in YAML frontmatter, placed in a directory listed in `model_paths` (typically `tests/`).
+
+Each test defines mock input data and expected output for a model or CTE. smelt compiles the test into a standalone SQL query, executes it against an in-memory DuckDB instance, and compares the result.
+
+**Usage:**
+
+```
+smelt test [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--select` | `-s` | string[] | | Filter tests by name (repeatable, substring match) |
+| `--verbose` | `-v` | bool | `false` | Show compiled SQL for each test |
+| `--show-all` | | bool | `false` | Show passing tests in output (default: only failures shown) |
+
+**Output:**
+
+Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails.
+
+```
+smelt test
+
+  PASS test_cohort_sizes (mart_cohort_retention::cohort_sizes)     0.02s
+  FAIL test_user_activity (user_activity)                          0.03s
+
+  1 passed, 1 failed, 2 total (0.05s)
+```
+
+**Examples:**
+
+```bash
+# Run all tests
+smelt test
+
+# Run tests matching "cohort"
+smelt test --select cohort
+
+# Run with compiled SQL output
+smelt test --verbose
+
+# Show all results including passes
+smelt test --show-all
+```
+
+See the [Testing guide](../guide/testing.md) for how to write tests.
+
+---
+
 ## smelt table
 
 Show column names and types for a model. The schema is inferred by the smelt type checker without executing the model.

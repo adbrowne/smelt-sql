@@ -57,6 +57,7 @@ nav:
     - Seeds: guide/seeds.md
     - Model Selection: guide/model-selection.md
     - Python Models: guide/python-models.md
+    - Testing: guide/testing.md
     - Targets & Backends: guide/targets.md
     - Web UI: guide/web-ui.md
     - Editor Setup: guide/editor-setup.md

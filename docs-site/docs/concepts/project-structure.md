@@ -12,6 +12,9 @@ my-project/
 │   ├── staging/         # Raw data cleanup
 │   ├── intermediate/    # Business logic
 │   └── marts/           # Final analytical tables
+├── tests/               # Model test files
+│   ├── test_user_activity.sql
+│   └── test_cohort_sizes.sql
 ├── seeds/               # CSV files loaded as tables
 │   └── raw/             # Subdirectories map to schemas
 └── target/              # Generated artifacts (gitignored)
@@ -123,6 +126,27 @@ Subdirectory names become schema names in the database:
 Models reference seeds the same way they reference other models: `smelt.ref('raw.country_codes')`.
 
 See the [seeds guide](../guide/seeds.md) for more details.
+
+## tests/ Directory
+
+Test files are `.sql` files with `materialization: test` in YAML frontmatter. By convention, they live in a `tests/` directory, which must be listed in `model_paths` in your `smelt.yml`:
+
+```yaml
+model_paths:
+  - models
+  - tests
+```
+
+```
+tests/
+├── test_user_activity.sql
+├── test_cohort_sizes.sql
+└── test_customer_quantiles.sql
+```
+
+Each test defines mock inputs and expected outputs for a model (or a specific CTE within a model). Run tests with `smelt test`.
+
+Tests can also be co-located as additional sections in model files -- see the [Testing guide](../guide/testing.md) for details.
 
 ## target/ Directory
 
