@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 pub use smelt_core::extract_refs;
 pub use smelt_core::RefInfo;
-use smelt_core::{extract_file_metadata, FileMetadata, ModelId, ModelMetadata};
+use smelt_core::{
+    extract_file_metadata, FileMetadata, Materialization, ModelId, ModelMetadata, TestConfig,
+};
 use smelt_parser::File as AstFile;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -32,6 +34,22 @@ pub struct ModelFile {
     pub kind: ModelKind,
     /// Canonical model identifier.
     pub model_id: ModelId,
+}
+
+impl ModelFile {
+    /// Whether this model is a test.
+    pub fn is_test(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.materialization.as_ref())
+            .map(|m| *m == Materialization::Test)
+            .unwrap_or(false)
+    }
+
+    /// Get test configuration if this is a test model.
+    pub fn test_config(&self) -> Option<&TestConfig> {
+        self.metadata.as_ref().and_then(|m| m.test.as_ref())
+    }
 }
 
 pub struct ModelDiscovery {

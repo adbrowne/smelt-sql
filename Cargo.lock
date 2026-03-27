@@ -3766,6 +3766,7 @@ dependencies = [
  "arrow",
  "chrono",
  "clap",
+ "duckdb",
  "pyo3",
  "rowan",
  "serde",
