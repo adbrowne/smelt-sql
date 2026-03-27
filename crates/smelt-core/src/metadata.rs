@@ -25,9 +25,31 @@
 
 use crate::config::{DataLatency, IncrementalConfig, Materialization};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use thiserror::Error;
+
+/// Configuration for a test model
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct TestConfig {
+    /// Name of the model being tested
+    pub model: String,
+    /// Optional CTE name to test in isolation (if absent, tests the whole model)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_cte: Option<String>,
+    /// Mock input data: maps dependency name → list of row objects
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
+    /// Expected output rows
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expect: Vec<BTreeMap<String, serde_yaml::Value>>,
+    /// Number of property-based test cases (default 10)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cases: Option<u32>,
+    /// Whether to check row order (default false = set comparison)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_order: Option<bool>,
+}
 
 /// Per-column metadata declared in model frontmatter.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -80,6 +102,10 @@ pub struct ModelMetadata {
     /// Backend-specific hints (forward compatibility)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub backend_hints: HashMap<String, serde_yaml::Value>,
+
+    /// Test configuration (only for materialization: test)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestConfig>,
 }
 
 /// Complete file metadata (single or multi-model)

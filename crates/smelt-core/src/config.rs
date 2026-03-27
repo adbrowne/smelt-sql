@@ -23,6 +23,8 @@ pub enum Materialization {
     Ephemeral,
     /// Backend-managed persistent view (e.g., PostgreSQL, Databricks).
     MaterializedView,
+    /// Test model — not materialized, used for unit testing.
+    Test,
 }
 
 impl<'de> Deserialize<'de> for Materialization {
@@ -36,8 +38,9 @@ impl<'de> Deserialize<'de> for Materialization {
             "view" => Ok(Materialization::View),
             "ephemeral" => Ok(Materialization::Ephemeral),
             "materialized_view" => Ok(Materialization::MaterializedView),
+            "test" => Ok(Materialization::Test),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', or 'materialized_view'",
+                "Invalid materialization type: {}. Must be 'table', 'view', 'ephemeral', 'materialized_view', or 'test'",
                 s
             ))),
         }
@@ -54,6 +57,7 @@ impl Serialize for Materialization {
             Materialization::View => serializer.serialize_str("view"),
             Materialization::Ephemeral => serializer.serialize_str("ephemeral"),
             Materialization::MaterializedView => serializer.serialize_str("materialized_view"),
+            Materialization::Test => serializer.serialize_str("test"),
         }
     }
 }
@@ -498,6 +502,20 @@ impl Config {
                                 name
                             );
                         }
+                    }
+                }
+                Materialization::Test => {
+                    if incremental.is_some() {
+                        errors.push((
+                            name.to_string(),
+                            "Test models cannot have incremental configuration".to_string(),
+                        ));
+                    }
+                    if target.is_some() {
+                        errors.push((
+                            name.to_string(),
+                            "Test models cannot have a target override".to_string(),
+                        ));
                     }
                 }
                 Materialization::Table => {} // All config is valid for tables

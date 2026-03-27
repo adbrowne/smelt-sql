@@ -1,4 +1,5 @@
-use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata};
+use crate::config::Materialization;
+use crate::metadata::{extract_file_metadata, FileMetadata, ModelMetadata, TestConfig};
 use crate::model_id::ModelId;
 use crate::refs::extract_refs;
 pub use crate::refs::RefInfo;
@@ -19,6 +20,22 @@ pub struct ModelFile {
     pub metadata: Option<Box<ModelMetadata>>,
     /// Canonical model identifier.
     pub model_id: ModelId,
+}
+
+impl ModelFile {
+    /// Whether this model is a test.
+    pub fn is_test(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.materialization.as_ref())
+            .map(|m| *m == Materialization::Test)
+            .unwrap_or(false)
+    }
+
+    /// Get test configuration if this is a test model.
+    pub fn test_config(&self) -> Option<&TestConfig> {
+        self.metadata.as_ref().and_then(|m| m.test.as_ref())
+    }
 }
 
 pub struct ModelDiscovery {
