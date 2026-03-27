@@ -6,18 +6,17 @@ The **What's Next** section below is the prioritized work queue. Component secti
 
 ## What's Next
 
-### 1. Code Quality & Hardening
+### ~~1. Code Quality & Hardening~~ ✅ (March 28, 2026)
 
-The codebase review surfaced concrete technical debt that affects reliability and developer experience. Fixing these first makes all subsequent work safer and more pleasant.
+All four sub-items completed:
+- ✅ Snapshot tests: 30 `insta` tests for `smelt-dialect` covering all dialect rewrite paths
+- ✅ CLI decomposition: `main.rs` split from 2,656 → 339 lines + 12 per-subcommand modules
+- ✅ Structured logging: `tracing` crate replaces ~90 `println!`/`eprintln!` calls across 14 files
+- ✅ unwrap() audit: ~35 production `unwrap()` → `expect("reason")` across 13 files
 
-- Replace `println!` calls with `tracing` crate + structured spans for the compilation pipeline
-- Audit `unwrap()` calls — replace with `anyhow::Context` in CLI, `thiserror` variants in libraries
-- Decompose CLI `main.rs` (2,387 lines) into per-subcommand modules
-- Add snapshot tests (insta crate) for compiled SQL output across dialects
+See [Code Quality & Hardening](#code-quality--hardening) below for details.
 
-See [Code Quality & Hardening](#code-quality--hardening) below for expanded detail.
-
-### 2. Data Testing Framework — `smelt test`
+### 1. Data Testing Framework — `smelt test`
 
 Every production-oriented perspective in the codebase review identified the absence of a data testing framework as the single biggest gap. Beyond filling that gap, smelt's architecture enables testing approaches that aren't possible in dbt or SQLMesh.
 
@@ -28,7 +27,7 @@ Every production-oriented perspective in the codebase review identified the abse
   - Statically-checkable assertions — verify invariants at compile time (e.g., input/output row count matching for filter-free models)
   - Type-system-leveraged testing — auto-generate constraint checks from inferred schemas
 
-### 3. Spark / Databricks Backend
+### 2. Spark / Databricks Backend
 
 The current Spark backend is a 267-line stub where every method returns an error. Making this real proves out the multi-backend architecture — a key differentiator — and enables running actual workloads on Databricks.
 
@@ -40,31 +39,32 @@ The current Spark backend is a 267-line stub where every method returns an error
 
 ---
 
-## Code Quality & Hardening
+## Code Quality & Hardening ✅ (March 28, 2026)
 
-### Structured Logging
+### Structured Logging ✅
 
-- **Current**: ~320 `println!` calls, ~8 `tracing::` calls
-- **Target**: `tracing` crate with structured spans for each pipeline stage (parse, type-check, plan, execute)
-- **Affected crates**: smelt-cli (primary), smelt-core, smelt-planner, smelt-backend, smelt-ui
+- `tracing` crate with `EnvFilter` (controlled via `RUST_LOG` env var)
+- ~90 `println!`/`eprintln!` calls converted to `tracing::info!`/`debug!`/`warn!` across 14 files
+- Program output (tables, JSON, test results) kept as `println!` for piping
 
-### Error Handling
+### Error Handling ✅
 
-- **Current**: ~935 `unwrap()` calls across 16 crates
-- **Target**: Zero `unwrap()` in user-facing code paths
-- **Approach**: `anyhow::Context` in smelt-cli, `thiserror` variants in library crates
-- **Priority modules**: `python.rs` (~125 unwraps — most fragile), `main.rs`, `logical_graph.rs`
+- ~35 production `unwrap()` calls replaced with `expect("reason")` across 13 files
+- Focused on smelt-cli, smelt-db, smelt-core, smelt-backend-duckdb
+- Test code left as-is (idiomatic Rust)
+- Remaining `unwrap()` calls are in test code or already have proper error handling
 
-### CLI Decomposition
+### CLI Decomposition ✅
 
-- **Current**: `crates/smelt-cli/src/main.rs` at ~2,387 lines mixing argument parsing, execution orchestration, and output formatting
-- **Target**: Per-subcommand modules (`run.rs`, `backbuild.rs`, `explain.rs`, `seed.rs`, `build.rs`, `status.rs`, `history.rs`, `type_cmd.rs`, `table.rs`, `ui.rs`) with shared orchestration extracted to internal modules
+- `main.rs` split from 2,656 → 339 lines (arg structs + dispatch only)
+- 11 per-subcommand modules under `src/commands/` (run, backbuild, seed, build, status, history, explain, table, type, ui, test)
+- Shared utilities extracted to `src/helpers.rs` (352 lines)
 
-### Snapshot Testing
+### Snapshot Testing ✅
 
-- Add insta snapshot tests for compiled SQL output
-- Cover all supported dialects (DuckDB, SparkSQL)
-- Capture dialect printer output for representative queries: QUALIFY rewrite, function remapping, array literals, incremental WHERE injection
+- 30 `insta` snapshot tests for `smelt-dialect` printer
+- Covers all dialect rewrite paths: QUALIFY, ARRAY, DATE, `::` cast, trailing comma, function remapping, ref/source resolution, ephemeral refs, combined rewrites
+- All three dialects tested: DuckDB, SparkSQL, PostgreSQL
 
 ---
 
@@ -93,7 +93,7 @@ The current Spark backend is a 267-line stub where every method returns an error
 **Next steps**:
 - LSP quick-fixes for type errors (CAST suggestions, COALESCE for NULLs)
 - Stricter boundary type checking (explicit input/output schemas)
-- *See also*: snapshot tests for type inference output ([What's Next #1](#1-code-quality--hardening)), type-system-leveraged data testing ([What's Next #2](#2-data-testing-framework--smelt-test))
+- *See also*: snapshot tests for type inference output ([Code Quality & Hardening](#code-quality--hardening-)), type-system-leveraged data testing ([What's Next #1](#1-data-testing-framework--smelt-test))
 
 ## Planner
 
@@ -114,12 +114,12 @@ The current Spark backend is a 267-line stub where every method returns an error
 
 **Current state**:
 - **DuckDB**: Full implementation — table/view materialization, incremental DELETE+INSERT, bundled (no system install needed)
-- **Spark**: Architectural scaffolding only — backend trait, type oracle for property tests, dialect-aware SQL generation in `smelt-dialect`. **The execution backend is not yet implemented** (every method returns an error). See [What's Next #3](#3-spark--databricks-backend) for implementation plan.
+- **Spark**: Architectural scaffolding only — backend trait, type oracle for property tests, dialect-aware SQL generation in `smelt-dialect`. **The execution backend is not yet implemented** (every method returns an error). See [What's Next #2](#2-spark--databricks-backend) for implementation plan.
 - **PostgreSQL**: Not started. Deprioritized in favor of Spark/Databricks.
 - **Dialect printer**: `smelt-dialect` crate — single-pass CST walk emitting target SQL, handles QUALIFY, array literals, DATE literals, JSON function remapping
 
 **Next steps**:
-- Spark/Databricks backend implementation ([What's Next #3](#3-spark--databricks-backend))
+- Spark/Databricks backend implementation ([What's Next #2](#2-spark--databricks-backend))
 - Multi-backend execution in a single run (route models to different engines)
 - *Deferred*: PostgreSQL backend
 
@@ -158,9 +158,9 @@ The current Spark backend is a 267-line stub where every method returns an error
   - `smelt explain` shows physical execution plan with strategies, ephemerals, planner optimizations (March 26, 2026)
 
 **Next steps**:
-- `smelt test` — data testing framework ([What's Next #2](#2-data-testing-framework--smelt-test))
-- `smelt docs generate` — data catalog output ([What's Next #2](#2-data-testing-framework--smelt-test))
-- CLI decomposition into per-subcommand modules ([What's Next #1](#1-code-quality--hardening))
+- `smelt test` — data testing framework ([What's Next #1](#1-data-testing-framework--smelt-test))
+- `smelt docs generate` — data catalog output ([What's Next #1](#1-data-testing-framework--smelt-test))
+- ~~CLI decomposition into per-subcommand modules~~ ✅ (March 28, 2026)
 - `smelt diff` — show pending schema changes
 - `smelt validate` — pre-run validation
 - Schema evolution with efficient migrations (ALTER+backfill instead of full refresh)
