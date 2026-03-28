@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774658216087,
+  "lastUpdate": 1774658217384,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8951,6 +8951,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.596967970889196,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6a34f683a2846523311c69df020bde19c342d9a5",
+          "message": "Update roadmap: mark testing framework, UI phases 1-4, and backend routing as complete\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T11:35:08+11:00",
+          "tree_id": "75aebb5721dff97762225fce4e110b9a7411b49b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6a34f683a2846523311c69df020bde19c342d9a5"
+        },
+        "date": 1774658216926,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.67309766993163,
             "unit": "MB/s"
           }
         ]
