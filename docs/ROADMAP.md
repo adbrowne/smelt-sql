@@ -16,18 +16,11 @@ All four sub-items completed:
 
 See [Code Quality & Hardening](#code-quality--hardening) below for details.
 
-### 1. Data Testing Framework — `smelt test`
+### ~~1. Data Testing Framework — `smelt test`~~ ✅ (March 27, 2026)
 
-Every production-oriented perspective in the codebase review identified the absence of a data testing framework as the single biggest gap. Beyond filling that gap, smelt's architecture enables testing approaches that aren't possible in dbt or SQLMesh.
+Fully implemented. See [Data Testing Framework](#data-testing-framework) below for details.
 
-- Schema-level assertions: not_null, unique, relationships, custom SQL predicates
-- `smelt docs generate` for data catalog / data dictionary output
-- Ideas to explore (details in a future plan doc):
-  - Property-based data tests — leverage proptest infrastructure for user data validation
-  - Statically-checkable assertions — verify invariants at compile time (e.g., input/output row count matching for filter-free models)
-  - Type-system-leveraged testing — auto-generate constraint checks from inferred schemas
-
-### 2. Spark / Databricks Backend
+### 1. Spark / Databricks Backend
 
 The current Spark backend is a 267-line stub where every method returns an error. Making this real proves out the multi-backend architecture — a key differentiator — and enables running actual workloads on Databricks.
 
@@ -68,6 +61,30 @@ The current Spark backend is a 267-line stub where every method returns an error
 
 ---
 
+## Data Testing Framework ✅ (March 27, 2026)
+
+### Test Types
+- **CTE isolation tests**: Test a single CTE by mocking all its direct dependencies
+- **Whole-model tests**: Test entire model by mocking `smelt.ref()` inputs
+- **Singular tests**: Custom SQL assertion tests (`materialization: test`, pass when 0 rows returned)
+- **Property-based tests**: Omit columns from inputs → framework generates random values using type inference, runs N times (configurable via `test.cases`)
+- **Column-level data quality tests**: `not_null`, `unique`, `accepted_values`, `min`, `max` defined in model frontmatter
+
+### CLI
+- `smelt test` with `--select`, `--verbose`, `--show-all`, `--seed` flags
+- Tests excluded from `smelt run`/`build`/`explain`
+- Example tests across ephemeral_demo, retail_analytics, timeseries projects
+
+### Remaining work
+- `smelt docs generate` for data catalog / data dictionary output
+- Recursive CTE support in test isolation
+- Snapshot/golden file mode (auto-capture expected output)
+- LSP validation of test references (`test.model`, `test.target_cte`)
+- Seed data integration with tests
+- Statically-checkable assertions and type-system-leveraged testing (exploratory)
+
+---
+
 ## Language & Parser
 
 **Current state**: Full SQL parser with error recovery (Rowan CST), covering SELECT, FROM, JOIN (all types), WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, CTEs, window functions, set operations, subqueries, QUALIFY, PIVOT/UNPIVOT, lambda expressions, array/struct/JSON literals, and all standard operators.
@@ -93,7 +110,7 @@ The current Spark backend is a 267-line stub where every method returns an error
 **Next steps**:
 - LSP quick-fixes for type errors (CAST suggestions, COALESCE for NULLs)
 - Stricter boundary type checking (explicit input/output schemas)
-- *See also*: snapshot tests for type inference output ([Code Quality & Hardening](#code-quality--hardening-)), type-system-leveraged data testing ([What's Next #1](#1-data-testing-framework--smelt-test))
+- *See also*: snapshot tests for type inference output ([Code Quality & Hardening](#code-quality--hardening)), type-system-leveraged data testing ([Data Testing Framework](#data-testing-framework))
 
 ## Planner
 
@@ -114,13 +131,13 @@ The current Spark backend is a 267-line stub where every method returns an error
 
 **Current state**:
 - **DuckDB**: Full implementation — table/view materialization, incremental DELETE+INSERT, bundled (no system install needed)
-- **Spark**: Architectural scaffolding only — backend trait, type oracle for property tests, dialect-aware SQL generation in `smelt-dialect`. **The execution backend is not yet implemented** (every method returns an error). See [What's Next #2](#2-spark--databricks-backend) for implementation plan.
+- **Spark**: Architectural scaffolding only — backend trait, type oracle for property tests, dialect-aware SQL generation in `smelt-dialect`. **The execution backend is not yet implemented** (every method returns an error). See [What's Next #1](#1-spark--databricks-backend) for implementation plan.
 - **PostgreSQL**: Not started. Deprioritized in favor of Spark/Databricks.
 - **Dialect printer**: `smelt-dialect` crate — single-pass CST walk emitting target SQL, handles QUALIFY, array literals, DATE literals, JSON function remapping
 
 **Next steps**:
-- Spark/Databricks backend implementation ([What's Next #2](#2-spark--databricks-backend))
-- Multi-backend execution in a single run (route models to different engines)
+- Spark/Databricks backend implementation ([What's Next #1](#1-spark--databricks-backend))
+- ~~Multi-backend execution in a single run~~ ✅ (March 25, 2026) — `BackendRegistry` with per-model `target:` frontmatter override, cross-backend validation
 - *Deferred*: PostgreSQL backend
 
 ## LSP & Editor Support
@@ -148,6 +165,7 @@ The current Spark backend is a 267-line stub where every method returns an error
 - `smelt explain` — dependency graph + JSON export
 - `smelt status` — interval coverage and gaps for incremental models
 - `smelt history` — run history with model filtering
+- `smelt test` — data testing framework (CTE isolation, whole-model, singular, property-based, column-level tests)
 - `smelt type` — function type signatures
 - Smart batching based on batch safety analysis
 - `smelt-state` crate for run manifests + interval tracking (`.smelt/` directory)
@@ -158,20 +176,21 @@ The current Spark backend is a 267-line stub where every method returns an error
   - `smelt explain` shows physical execution plan with strategies, ephemerals, planner optimizations (March 26, 2026)
 
 **Next steps**:
-- `smelt test` — data testing framework ([What's Next #1](#1-data-testing-framework--smelt-test))
-- `smelt docs generate` — data catalog output ([What's Next #1](#1-data-testing-framework--smelt-test))
-- ~~CLI decomposition into per-subcommand modules~~ ✅ (March 28, 2026)
+- ~~`smelt test`~~ ✅ (March 27, 2026) — see [Data Testing Framework](#data-testing-framework)
+- `smelt docs generate` — data catalog output
 - `smelt diff` — show pending schema changes
 - `smelt validate` — pre-run validation
 - Schema evolution with efficient migrations (ALTER+backfill instead of full refresh)
 
-## UI Dashboard
+## UI Dashboard ✅ Phases 1-4 (March 24-25, 2026)
 
-**Current state**: Web dashboard (`smelt-ui`) with React frontend:
+**Current state**: Web dashboard (`smelt-ui`) with React frontend and Axum backend:
 
+- Phase 1: Live backend with file watching and WebSocket updates
+- Phase 2: Full REST API, batch safety diagnostics, type information in UI
+- Phase 3: Run planner with interactive preview, select/exclude with CLI command preview
+- Phase 4: Run execution and monitoring with real-time WebSocket progress streaming
 - Model graph visualization with dependency explorer
-- Run planner: preview execution plan before running
-- Run execution from UI with real-time WebSocket progress streaming
 - Run history with expandable model details
 - Model sidebar with type signatures and metadata
 
@@ -180,6 +199,13 @@ The current Spark backend is a 267-line stub where every method returns an error
 
 ## Ecosystem
 
+**Recent** (March 25-28, 2026):
+- ✅ Documentation site for smeltsql.com (MkDocs Material, 15+ pages covering all features)
+- ✅ Frontmatter validation with `deny_unknown_fields` (catches typos like `materialized:` vs `materialization:`)
+- ✅ Multi-model file discovery with `ModelId` (`--- name: model_name ---` delimiters)
+- ✅ Testing documentation: guide, CLI reference, and project structure docs
+
+**Next steps**:
 - Pre-built binaries via GitHub Releases (dev-release.yml workflow exists)
 - dbt-to-smelt cheat sheet showing common pattern equivalents
 - Publish Python SDK to PyPI (currently TestPyPI only)
