@@ -5,14 +5,17 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 publish = false
-description = "Spark backend implementation for smelt"
+description = "Spark backend implementation for smelt via PySpark/PyO3 bridge"
 
 [dependencies]
 # Backend trait
 smelt-backend = { path = "../smelt-backend" }
 
-# Arrow (for RecordBatch type)
-arrow.workspace = true
+# Arrow (with pyarrow feature for zero-copy conversion)
+arrow = { workspace = true, features = ["pyarrow"] }
+
+# Python bridge
+pyo3 = { workspace = true }
 
 # Async runtime
 tokio.workspace = true
@@ -22,8 +25,8 @@ async-trait = "0.1"
 anyhow.workspace = true
 thiserror.workspace = true
 
-# TODO: Add spark-connect when implementing real Spark Connect integration
-# spark-connect = "0.1"  # Requires protoc installed
+# Logging
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3.8"

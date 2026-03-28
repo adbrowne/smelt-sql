@@ -353,4 +353,3 @@ async fn main() -> Result<()> {
         Commands::Test(args) => commands::test::run_tests(args).await,
     }
 }
-

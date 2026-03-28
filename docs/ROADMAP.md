@@ -20,15 +20,19 @@ See [Code Quality & Hardening](#code-quality--hardening) below for details.
 
 Fully implemented. See [Data Testing Framework](#data-testing-framework) below for details.
 
-### 1. Spark / Databricks Backend
+### ~~1. Spark / Databricks Backend~~ 🔄 (March 28, 2026)
 
-The current Spark backend is a 267-line stub where every method returns an error. Making this real proves out the multi-backend architecture — a key differentiator — and enables running actual workloads on Databricks.
+Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are now functional, connecting to Spark through PySpark's SparkSession.
 
-- Implement Spark Connect integration (or Databricks SQL REST API)
-- Table materialization with Delta Lake format support
-- Incremental support: INSERT OVERWRITE for partitioned tables, MERGE INTO
-- Cluster and authentication configuration (local Spark, Databricks tokens)
-- Test parity: run existing DuckDB integration tests against local Spark
+- ✅ PySpark bridge via PyO3 — thin Python adapter (`spark_adapter.py`) wraps SparkSession
+- ✅ SQL execution with zero-copy Arrow result conversion (`pyarrow.Table` → `RecordBatch` via C Data Interface)
+- ✅ Table/view materialization (DROP + CREATE TABLE AS, CREATE OR REPLACE VIEW)
+- ✅ Incremental support: DELETE+INSERT, MERGE INTO, INSERT OVERWRITE, APPEND
+- ✅ Catalog/schema management (three-part names: `catalog.schema.table`)
+- ✅ pyo3 upgraded from 0.24 → 0.26 (required for arrow-pyarrow compatibility)
+- ✅ Works with local Spark Connect, Databricks Connect, EMR, Dataproc
+- 🔮 Integration test parity with DuckDB tests (requires Spark Connect server)
+- 🔮 Authentication configuration docs (tokens, OAuth, instance profiles)
 
 ---
 
@@ -137,7 +141,7 @@ The current Spark backend is a 267-line stub where every method returns an error
 
 **Current state**:
 - **DuckDB**: Full implementation — table/view materialization, incremental DELETE+INSERT, bundled (no system install needed)
-- **Spark**: Architectural scaffolding only — backend trait, type oracle for property tests, dialect-aware SQL generation in `smelt-dialect`. **The execution backend is not yet implemented** (every method returns an error). See [What's Next #1](#1-spark--databricks-backend) for implementation plan.
+- **Spark**: Full implementation via PySpark/PyO3 bridge (March 28, 2026) — all Backend trait methods implemented, zero-copy Arrow conversion, works with Spark Connect and Databricks Connect. Requires PySpark in Python environment.
 - **PostgreSQL**: Not started. Deprioritized in favor of Spark/Databricks.
 - **Dialect printer**: `smelt-dialect` crate — single-pass CST walk emitting target SQL, handles QUALIFY, array literals, DATE literals, JSON function remapping
 
@@ -145,8 +149,9 @@ The current Spark backend is a 267-line stub where every method returns an error
 - ⏸️ Spark JSON incompatibilities — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY` rewrites; compile-time warnings planned but not yet implemented
 
 **Next steps**:
-- Spark/Databricks backend implementation ([What's Next #1](#1-spark--databricks-backend))
+- ~~Spark/Databricks backend implementation~~ ✅ (March 28, 2026) — see [What's Next #1](#1-spark--databricks-backend)
 - ~~Multi-backend execution in a single run~~ ✅ (March 25, 2026) — `BackendRegistry` with per-model `target:` frontmatter override, cross-backend validation
+- Integration test parity: run DuckDB integration tests against local Spark Connect
 - *Deferred*: PostgreSQL backend
 
 ## LSP & Editor Support

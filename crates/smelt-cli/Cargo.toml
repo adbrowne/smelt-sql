@@ -66,5 +66,5 @@ tempfile = "3.8"
 [features]
 default = ["duckdb"]
 duckdb = ["smelt-backend-duckdb", "dep:duckdb"]
-spark = ["smelt-backend-spark"]
+spark = ["smelt-backend-spark", "python"]
 python = ["smelt-planner/python", "smelt-core/python", "pyo3"]
