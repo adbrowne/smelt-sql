@@ -202,9 +202,13 @@ impl RunManager {
             target_assignments.insert(model_name.clone(), target);
         }
 
-        graph_lock
-            .validate_cross_backend_refs(&target_assignments)
-            .with_context(|| "Cross-backend reference validation failed")?;
+        let cross_edges = graph_lock.find_cross_backend_edges(&target_assignments);
+        if !cross_edges.is_empty() {
+            tracing::info!(
+                "Cross-engine references detected ({} transfer(s) via Parquet)",
+                cross_edges.len()
+            );
+        }
 
         // Create backends for all needed targets
         let needed_targets: HashSet<String> = target_assignments.values().cloned().collect();
@@ -611,6 +615,7 @@ fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) ->
         capabilities: &capabilities,
         schema,
         ephemeral_models: std::collections::HashSet::new(),
+        cross_engine_refs: std::collections::HashMap::new(),
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }

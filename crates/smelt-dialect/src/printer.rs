@@ -15,7 +15,7 @@
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall, RefCall, SourceCall};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{BackendCapabilities, SqlDialect};
 
@@ -26,6 +26,9 @@ pub struct PrintContext<'a> {
     pub schema: &'a str,
     /// Model names that are ephemeral — refs to these emit `__smelt_{name}` instead of `schema.name`.
     pub ephemeral_models: HashSet<&'a str>,
+    /// Cross-engine refs: model_name -> `read_parquet('{path}/**/*.parquet', hive_partitioning=true)`.
+    /// When a ref is in this map, the parquet expression is emitted instead of `schema.model`.
+    pub cross_engine_refs: HashMap<String, String>,
 }
 
 /// Print a CST node as dialect-specific SQL.
@@ -44,6 +47,10 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                         if ctx.ephemeral_models.contains(model_name.as_str()) {
                             out.push_str("__smelt_");
                             out.push_str(&model_name);
+                        } else if let Some(parquet_expr) =
+                            ctx.cross_engine_refs.get(model_name.as_str())
+                        {
+                            out.push_str(parquet_expr);
                         } else {
                             out.push_str(ctx.schema);
                             out.push('.');
@@ -424,6 +431,7 @@ mod tests {
             capabilities: caps,
             schema,
             ephemeral_models: HashSet::new(),
+            cross_engine_refs: HashMap::new(),
         };
         print(&parsed.syntax(), &ctx)
     }
@@ -492,6 +500,73 @@ mod tests {
         assert!(result.contains("main.model_a"));
         assert!(result.contains("main.model_b"));
         assert!(!result.contains("smelt.ref"));
+    }
+
+    // ===== Cross-engine ref resolution tests =====
+
+    #[test]
+    fn test_cross_engine_ref_resolution() {
+        let sql = "SELECT * FROM smelt.ref('spark_model')";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+        let mut cross_refs = HashMap::new();
+        cross_refs.insert(
+            "spark_model".to_string(),
+            "read_parquet('/data/warehouse/default/spark_model/**/*.parquet', hive_partitioning=true)".to_string(),
+        );
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: cross_refs,
+        };
+        let result = print(&parsed.syntax(), &ctx);
+        assert!(
+            result.contains("read_parquet("),
+            "Expected read_parquet, got: {}",
+            result
+        );
+        assert!(
+            result.contains("spark_model/**/*.parquet"),
+            "Expected parquet glob path, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("main.spark_model"),
+            "Should not contain schema-qualified ref, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cross_engine_ref_mixed_with_normal_refs() {
+        let sql = "SELECT a.id, b.id FROM smelt.ref('local_model') a JOIN smelt.ref('spark_model') b ON a.id = b.id";
+        let parsed = parse(sql);
+        let (d, c) = duckdb_ctx();
+        let mut cross_refs = HashMap::new();
+        cross_refs.insert(
+            "spark_model".to_string(),
+            "read_parquet('/data/spark_model/**/*.parquet', hive_partitioning=true)".to_string(),
+        );
+        let ctx = PrintContext {
+            dialect: &d,
+            capabilities: &c,
+            schema: "main",
+            ephemeral_models: HashSet::new(),
+            cross_engine_refs: cross_refs,
+        };
+        let result = print(&parsed.syntax(), &ctx);
+        assert!(
+            result.contains("main.local_model"),
+            "Normal ref should resolve to schema.model, got: {}",
+            result
+        );
+        assert!(
+            result.contains("read_parquet("),
+            "Cross-engine ref should resolve to read_parquet, got: {}",
+            result
+        );
     }
 
     // ===== Source resolution tests =====

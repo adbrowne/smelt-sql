@@ -160,9 +160,19 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     }
 
     // 9. Compute needed targets and create backends
-    graph
-        .validate_cross_backend_refs()
-        .with_context(|| "Cross-backend reference validation failed")?;
+    let cross_edges = graph.find_cross_backend_edges();
+    if !cross_edges.is_empty() {
+        info!(
+            "Cross-engine references detected ({} transfer(s) via Parquet):",
+            cross_edges.len()
+        );
+        for edge in &cross_edges {
+            info!(
+                "  {} ({}) -> {} ({})",
+                edge.upstream, edge.upstream_target, edge.downstream, edge.downstream_target
+            );
+        }
+    }
 
     let needed_targets: HashSet<String> = execution_order
         .iter()
@@ -186,7 +196,44 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
         .iter()
         .map(|name| (name.clone(), config.targets[name].clone()))
         .collect();
-    let compilers = CompilerRegistry::new(&config, &needed_target_configs);
+    let mut compilers = CompilerRegistry::new(&config, &needed_target_configs);
+
+    // Set up cross-engine ref resolution (Parquet exchange)
+    // Paths are computed from target config (warehouse field) so we don't need
+    // the upstream backend to be instantiated.
+    if !cross_edges.is_empty() {
+        let mut refs_by_target: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for edge in &cross_edges {
+            let upstream_target_config = &config.targets[&edge.upstream_target];
+            let upstream_schema = &upstream_target_config.schema;
+            let rel_path = if let Some(ref warehouse) = upstream_target_config.warehouse {
+                Some(std::path::PathBuf::from(format!(
+                    "{}/{}/{}",
+                    warehouse, upstream_schema, edge.upstream
+                )))
+            } else if needed_targets.contains(&edge.upstream_target) {
+                registry
+                    .get(&edge.upstream_target)
+                    .materialized_path(upstream_schema, &edge.upstream)
+            } else {
+                None
+            };
+            if let Some(rel_path) = rel_path {
+                let abs_path = project_dir.join(&rel_path);
+                let parquet_expr = format!(
+                    "read_parquet('{}/**/*.parquet', hive_partitioning=true)",
+                    abs_path.display()
+                );
+                refs_by_target
+                    .entry(edge.downstream_target.clone())
+                    .or_default()
+                    .insert(edge.upstream.clone(), parquet_expr);
+            }
+        }
+        for (target, refs) in refs_by_target {
+            compilers.set_cross_engine_refs(&target, refs);
+        }
+    }
 
     if let Some(ref source_config) = sources {
         executor::validate_sources(registry.get(&args.target), source_config)

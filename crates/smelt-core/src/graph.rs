@@ -88,12 +88,12 @@ impl DependencyGraph {
         Ok(())
     }
 
-    /// Validate that no model references a model on a different target.
-    pub fn validate_cross_backend_refs(
+    /// Find cross-backend reference edges (no longer errors; cross-engine refs are supported via Parquet).
+    pub fn find_cross_backend_edges(
         &self,
         target_assignments: &HashMap<String, String>,
-    ) -> Result<()> {
-        let mut errors = Vec::new();
+    ) -> Vec<(String, String, String, String)> {
+        let mut edges = Vec::new();
 
         for (model_name, deps) in &self.dependencies {
             let Some(model_target) = target_assignments.get(model_name) else {
@@ -102,24 +102,18 @@ impl DependencyGraph {
             for dep in deps {
                 if let Some(dep_target) = target_assignments.get(dep) {
                     if model_target != dep_target {
-                        errors.push(format!(
-                            "Model '{}' (target: {}) references '{}' (target: {}). \
-                             Cross-backend references are not yet supported.",
-                            model_name, model_target, dep, dep_target
+                        edges.push((
+                            model_name.clone(),
+                            dep.clone(),
+                            model_target.clone(),
+                            dep_target.clone(),
                         ));
                     }
                 }
             }
         }
 
-        if !errors.is_empty() {
-            return Err(GraphError::DependencyError {
-                message: errors.join("\n  "),
-            }
-            .into());
-        }
-
-        Ok(())
+        edges
     }
 
     fn is_source(&self, name: &str) -> bool {
@@ -583,6 +577,7 @@ mod tests {
                 schema: "main".to_string(),
                 connect_url: None,
                 catalog: None,
+                warehouse: None,
             },
         );
 
@@ -761,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cross_backend_refs_same_target_ok() {
+    fn test_cross_backend_edges_same_target_empty() {
         let models = vec![
             make_model("upstream", vec![]),
             make_model("downstream", vec!["upstream"]),
@@ -772,11 +767,11 @@ mod tests {
         assignments.insert("upstream".to_string(), "dev".to_string());
         assignments.insert("downstream".to_string(), "dev".to_string());
 
-        assert!(graph.validate_cross_backend_refs(&assignments).is_ok());
+        assert!(graph.find_cross_backend_edges(&assignments).is_empty());
     }
 
     #[test]
-    fn test_cross_backend_refs_different_target_rejected() {
+    fn test_cross_backend_edges_different_target_detected() {
         let models = vec![
             make_model("upstream", vec![]),
             make_model("downstream", vec!["upstream"]),
@@ -787,16 +782,14 @@ mod tests {
         assignments.insert("upstream".to_string(), "spark_prod".to_string());
         assignments.insert("downstream".to_string(), "dev".to_string());
 
-        let result = graph.validate_cross_backend_refs(&assignments);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("downstream"));
-        assert!(err_msg.contains("upstream"));
-        assert!(err_msg.contains("Cross-backend"));
+        let edges = graph.find_cross_backend_edges(&assignments);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].0, "downstream");
+        assert_eq!(edges[0].1, "upstream");
     }
 
     #[test]
-    fn test_cross_backend_refs_independent_models_ok() {
+    fn test_cross_backend_edges_independent_models_empty() {
         let models = vec![make_model("model_a", vec![]), make_model("model_b", vec![])];
         let graph = DependencyGraph::build(models, None).unwrap();
 
@@ -804,7 +797,7 @@ mod tests {
         assignments.insert("model_a".to_string(), "dev".to_string());
         assignments.insert("model_b".to_string(), "spark_prod".to_string());
 
-        // Independent models on different targets is fine
-        assert!(graph.validate_cross_backend_refs(&assignments).is_ok());
+        // Independent models on different targets have no cross-backend edges
+        assert!(graph.find_cross_backend_edges(&assignments).is_empty());
     }
 }

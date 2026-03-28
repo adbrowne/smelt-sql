@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::parse;
@@ -10,6 +10,7 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         capabilities: caps,
         schema,
         ephemeral_models: HashSet::new(),
+        cross_engine_refs: HashMap::new(),
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -27,6 +28,7 @@ fn print_with_ephemerals(
         capabilities: caps,
         schema,
         ephemeral_models: ephemerals.iter().copied().collect(),
+        cross_engine_refs: HashMap::new(),
     };
     print(&parsed.syntax(), &ctx)
 }

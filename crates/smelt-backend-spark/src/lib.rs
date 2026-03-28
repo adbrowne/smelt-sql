@@ -29,6 +29,8 @@ pub struct SparkBackend {
     catalog: String,
     #[allow(dead_code)]
     schema: String,
+    /// Base directory for Parquet output (from target config `warehouse` field).
+    warehouse: Option<String>,
 }
 
 // Safety: Py<PyAny> is Send, and we only access it inside `Python::attach`
@@ -43,7 +45,13 @@ impl SparkBackend {
     /// * `connect_url` - Spark Connect URL (e.g., "sc://localhost:15002")
     /// * `catalog` - Catalog name (e.g., "spark_catalog")
     /// * `schema` - Schema name (e.g., "default")
-    pub async fn new(connect_url: &str, catalog: &str, schema: &str) -> Result<Self, BackendError> {
+    /// * `warehouse` - Optional base directory for Parquet output
+    pub async fn new(
+        connect_url: &str,
+        catalog: &str,
+        schema: &str,
+        warehouse: Option<&str>,
+    ) -> Result<Self, BackendError> {
         let connect_url = connect_url.to_string();
         let catalog = catalog.to_string();
         let schema = schema.to_string();
@@ -92,6 +100,7 @@ impl SparkBackend {
             adapter,
             catalog,
             schema,
+            warehouse: warehouse.map(|s| s.to_string()),
         })
     }
 
@@ -295,6 +304,12 @@ impl Backend for SparkBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::spark()
+    }
+
+    fn materialized_path(&self, schema: &str, name: &str) -> Option<std::path::PathBuf> {
+        self.warehouse
+            .as_ref()
+            .map(|wh| std::path::PathBuf::from(format!("{}/{}/{}", wh, schema, name)))
     }
 
     async fn delete_partitions(

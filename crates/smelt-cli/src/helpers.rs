@@ -220,11 +220,14 @@ pub async fn create_backend(
                 info!("Catalog: {}", catalog);
 
                 Ok(Box::new(
-                    SparkBackend::new(connect_url, catalog, &target_config.schema)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to connect to Spark at {}", connect_url)
-                        })?,
+                    SparkBackend::new(
+                        connect_url,
+                        catalog,
+                        &target_config.schema,
+                        target_config.warehouse.as_deref(),
+                    )
+                    .await
+                    .with_context(|| format!("Failed to connect to Spark at {}", connect_url))?,
                 ))
             }
             #[cfg(not(feature = "spark"))]

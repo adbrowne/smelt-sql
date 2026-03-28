@@ -635,6 +635,7 @@ mod tests {
                 schema: "main".to_string(),
                 connect_url: None,
                 catalog: None,
+                warehouse: None,
             },
         );
 

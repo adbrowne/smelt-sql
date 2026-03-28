@@ -17,6 +17,14 @@ pub struct LogicalNode {
     pub tags: Vec<String>,
 }
 
+/// Describes a dependency edge that crosses backend boundaries.
+pub struct CrossBackendEdge {
+    pub downstream: String,
+    pub upstream: String,
+    pub upstream_target: String,
+    pub downstream_target: String,
+}
+
 /// A dependency graph where each node carries its fully-resolved configuration.
 ///
 /// Unlike `DependencyGraph`, the config cascade (SQL metadata > smelt.yml > default) is
@@ -114,32 +122,26 @@ impl LogicalGraph {
         Ok(())
     }
 
-    /// Validate that no model references a model on a different target.
-    pub fn validate_cross_backend_refs(&self) -> Result<()> {
-        let mut errors = Vec::new();
+    /// Find all dependency edges that cross backend boundaries.
+    pub fn find_cross_backend_edges(&self) -> Vec<CrossBackendEdge> {
+        let mut edges = Vec::new();
 
         for node in self.nodes.values() {
             for dep in &node.dependencies {
                 if let Some(dep_node) = self.nodes.get(dep) {
                     if node.target != dep_node.target {
-                        errors.push(format!(
-                            "Model '{}' (target: {}) references '{}' (target: {}). \
-                             Cross-backend references are not yet supported.",
-                            node.name, node.target, dep, dep_node.target
-                        ));
+                        edges.push(CrossBackendEdge {
+                            downstream: node.name.clone(),
+                            upstream: dep.clone(),
+                            upstream_target: dep_node.target.clone(),
+                            downstream_target: node.target.clone(),
+                        });
                     }
                 }
             }
         }
 
-        if !errors.is_empty() {
-            return Err(GraphError::DependencyError {
-                message: errors.join("\n  "),
-            }
-            .into());
-        }
-
-        Ok(())
+        edges
     }
 
     fn is_source(&self, name: &str) -> bool {
@@ -485,6 +487,7 @@ mod tests {
                 schema: "main".to_string(),
                 connect_url: None,
                 catalog: None,
+                warehouse: None,
             },
         );
 
@@ -557,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cross_backend_refs_from_nodes() {
+    fn test_cross_backend_edges_detected() {
         let models = vec![
             make_model("upstream", vec![]),
             make_model("downstream", vec!["upstream"]),
@@ -571,6 +574,7 @@ mod tests {
                 schema: "default".to_string(),
                 connect_url: None,
                 catalog: None,
+                warehouse: None,
             },
         );
         config.models.insert(
@@ -584,10 +588,12 @@ mod tests {
         );
 
         let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
-        let result = graph.validate_cross_backend_refs();
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Cross-backend"));
+        let edges = graph.find_cross_backend_edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].upstream, "upstream");
+        assert_eq!(edges[0].downstream, "downstream");
+        assert_eq!(edges[0].upstream_target, "spark_prod");
+        assert_eq!(edges[0].downstream_target, "dev");
     }
 
     #[test]

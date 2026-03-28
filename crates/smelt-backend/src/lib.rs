@@ -69,6 +69,13 @@ pub trait Backend: Send + Sync {
     /// Get the capabilities of this backend.
     fn capabilities(&self) -> BackendCapabilities;
 
+    /// Get the filesystem path where a model's output is materialized.
+    /// Returns None for database backends (DuckDB), Some(path) for file-based backends (Spark).
+    fn materialized_path(&self, schema: &str, name: &str) -> Option<std::path::PathBuf> {
+        let _ = (schema, name);
+        None
+    }
+
     /// Execute a model (drop + create as table or view).
     ///
     /// This is a convenience method that combines drop + create operations.
