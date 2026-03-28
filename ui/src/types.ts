@@ -11,7 +11,7 @@ export interface GraphNode {
   tags: string[];
   description: string | null;
   has_errors: boolean;
-  node_type: 'model' | 'source';
+  node_type: 'model' | 'source' | 'test';
 }
 
 export interface GraphEdge {

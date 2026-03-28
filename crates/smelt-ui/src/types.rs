@@ -24,6 +24,7 @@ pub struct GraphNode {
 pub enum NodeType {
     Model,
     Source,
+    Test,
 }
 
 #[derive(Clone, Serialize)]

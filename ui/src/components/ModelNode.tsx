@@ -6,6 +6,7 @@ type ModelNodeType = Node<ModelNodeData, 'model'>
 
 export function ModelNode({ data, selected }: NodeProps<ModelNodeType>) {
   const isSource = data.node_type === 'source'
+  const isTest = data.node_type === 'test'
   const hasErrors = data.has_errors
 
   let bgColor = 'bg-white'
@@ -18,6 +19,10 @@ export function ModelNode({ data, selected }: NodeProps<ModelNodeType>) {
   } else if (hasErrors) {
     borderColor = 'border-red-400'
     bgColor = 'bg-red-50'
+  } else if (isTest) {
+    borderColor = 'border-violet-400'
+    bgColor = 'bg-violet-50'
+    textColor = 'text-violet-900'
   } else if (isSource) {
     borderColor = 'border-emerald-400'
     bgColor = 'bg-emerald-50'
@@ -27,9 +32,11 @@ export function ModelNode({ data, selected }: NodeProps<ModelNodeType>) {
   const matLabel = data.materialization
   const matBadgeColor = isSource
     ? 'bg-emerald-100 text-emerald-700'
-    : matLabel === 'table'
-      ? 'bg-amber-100 text-amber-700'
-      : 'bg-sky-100 text-sky-700'
+    : isTest
+      ? 'bg-violet-100 text-violet-700'
+      : matLabel === 'table'
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-sky-100 text-sky-700'
 
   return (
     <div
