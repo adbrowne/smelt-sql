@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774658217384,
+  "lastUpdate": 1774658506038,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -6861,6 +6861,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.090804,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "efcf9b5d97ae8e85853e0b8038a53918387738d5",
+          "message": "Update roadmap: add deferred items from incremental, graph, and dialect plans\n\nSurfaces deferred work that was documented in plan files but missing\nfrom the roadmap: per-ref upstream filtering, custom granularities,\nrule conflict resolution, orchestrator integration, Spark JSON\nincompatibilities.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T11:39:57+11:00",
+          "tree_id": "3044712e0893691bc4eaf14b95d6b696a602b424",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/efcf9b5d97ae8e85853e0b8038a53918387738d5"
+        },
+        "date": 1774658505114,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 32.749029,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 31.572158,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.548007,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.344345,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003791,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 33.126845,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.030487,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.016591,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010952,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.446002,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.031347,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.84438,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.67734,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.731228000000002,
             "unit": "ms"
           }
         ]
