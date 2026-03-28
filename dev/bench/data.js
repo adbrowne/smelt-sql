@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774658506038,
+  "lastUpdate": 1774658507567,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9074,6 +9074,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.67309766993163,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "efcf9b5d97ae8e85853e0b8038a53918387738d5",
+          "message": "Update roadmap: add deferred items from incremental, graph, and dialect plans\n\nSurfaces deferred work that was documented in plan files but missing\nfrom the roadmap: per-ref upstream filtering, custom granularities,\nrule conflict resolution, orchestrator integration, Spark JSON\nincompatibilities.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T11:39:57+11:00",
+          "tree_id": "3044712e0893691bc4eaf14b95d6b696a602b424",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/efcf9b5d97ae8e85853e0b8038a53918387738d5"
+        },
+        "date": 1774658506947,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.281046887228786,
             "unit": "MB/s"
           }
         ]
