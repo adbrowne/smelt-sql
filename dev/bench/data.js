@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774657360131,
+  "lastUpdate": 1774657362681,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8828,6 +8828,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.747499167384287,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "24280436de05b40cd6df4c9b5ace644297ada813",
+          "message": "Link test nodes to their target models in the UI graph\n\nTest models now appear as distinct violet-colored nodes with an edge\nconnecting them to the model they test (via test_config.model). Added\nTest variant to NodeType enum in both backend and frontend.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-28T11:20:50+11:00",
+          "tree_id": "394650effbc3ff00292da52489f3b45562b0af4b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/24280436de05b40cd6df4c9b5ace644297ada813"
+        },
+        "date": 1774657361932,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.596967970889196,
             "unit": "MB/s"
           }
         ]
