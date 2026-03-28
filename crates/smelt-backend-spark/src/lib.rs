@@ -15,6 +15,11 @@ use async_trait::async_trait;
 use pyo3::prelude::*;
 use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionSpec, SqlDialect};
 
+mod sql;
+
+#[cfg(test)]
+mod tests;
+
 /// Spark backend for smelt, powered by PySpark via PyO3.
 ///
 /// Holds a Python `SparkAdapter` object that wraps a PySpark SparkSession.
@@ -92,7 +97,7 @@ impl SparkBackend {
 
     /// Build a fully qualified table name: catalog.schema.table
     fn qualified_name(&self, schema: &str, name: &str) -> String {
-        format!("{}.{}.{}", self.catalog, schema, name)
+        sql::qualified_name(&self.catalog, schema, name)
     }
 
     /// Execute SQL via the Python adapter, returning Arrow RecordBatches.
@@ -168,7 +173,7 @@ impl SparkBackend {
 #[async_trait]
 impl Backend for SparkBackend {
     async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
-        tracing::debug!("Spark execute_sql: {}", truncate_sql(sql));
+        tracing::debug!("Spark execute_sql: {}", sql::truncate_sql(sql));
         self.py_execute_sql(sql).await
     }
 
@@ -183,11 +188,10 @@ impl Backend for SparkBackend {
 
         // Spark doesn't reliably support CREATE OR REPLACE TABLE,
         // so we DROP IF EXISTS first, then CREATE TABLE ... AS SELECT
-        let drop_sql = format!("DROP TABLE IF EXISTS {}", table_name);
-        self.py_execute_no_result(&drop_sql).await?;
-
-        let create_sql = format!("CREATE TABLE {} AS {}", table_name, sql);
-        self.py_execute_no_result(&create_sql).await
+        self.py_execute_no_result(&sql::drop_table(&table_name))
+            .await?;
+        self.py_execute_no_result(&sql::create_table_as(&table_name, sql))
+            .await
     }
 
     async fn create_view_as(
@@ -198,21 +202,19 @@ impl Backend for SparkBackend {
     ) -> Result<(), BackendError> {
         let view_name = self.qualified_name(schema, name);
         tracing::debug!("Spark CREATE OR REPLACE VIEW {} AS ...", view_name);
-
-        let create_sql = format!("CREATE OR REPLACE VIEW {} AS {}", view_name, sql);
-        self.py_execute_no_result(&create_sql).await
+        self.py_execute_no_result(&sql::create_view_as(&view_name, sql))
+            .await
     }
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        let sql = format!("DROP TABLE IF EXISTS {}", table_name);
-        self.py_execute_no_result(&sql).await
+        self.py_execute_no_result(&sql::drop_table(&table_name))
+            .await
     }
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let view_name = self.qualified_name(schema, name);
-        let sql = format!("DROP VIEW IF EXISTS {}", view_name);
-        self.py_execute_no_result(&sql).await
+        self.py_execute_no_result(&sql::drop_view(&view_name)).await
     }
 
     async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
@@ -250,7 +252,7 @@ impl Backend for SparkBackend {
         limit: usize,
     ) -> Result<Vec<RecordBatch>, BackendError> {
         let table_name = self.qualified_name(schema, name);
-        let sql = format!("SELECT * FROM {} LIMIT {}", table_name, limit);
+        let sql = sql::select_preview(&table_name, limit);
         self.py_execute_sql(&sql).await
     }
 
@@ -283,8 +285,8 @@ impl Backend for SparkBackend {
     }
 
     async fn ensure_schema(&self, schema: &str) -> Result<(), BackendError> {
-        let sql = format!("CREATE DATABASE IF NOT EXISTS {}.{}", self.catalog, schema);
-        self.py_execute_no_result(&sql).await
+        self.py_execute_no_result(&sql::create_database(&self.catalog, schema))
+            .await
     }
 
     fn dialect(&self) -> SqlDialect {
@@ -302,20 +304,8 @@ impl Backend for SparkBackend {
         partition: &PartitionSpec,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-
-        let values_list = partition
-            .values
-            .iter()
-            .map(|v| format!("'{}'", v.replace("'", "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "DELETE FROM {} WHERE {} IN ({})",
-            table_name, partition.column, values_list
-        );
-
-        self.py_execute_no_result(&sql).await
+        self.py_execute_no_result(&sql::delete_partitions(&table_name, partition))
+            .await
     }
 
     async fn insert_into_from_query(
@@ -325,8 +315,8 @@ impl Backend for SparkBackend {
         sql: &str,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        let insert_sql = format!("INSERT INTO {} {}", table_name, sql);
-        self.py_execute_no_result(&insert_sql).await
+        self.py_execute_no_result(&sql::insert_into(&table_name, sql))
+            .await
     }
 
     async fn merge_into(
@@ -337,21 +327,8 @@ impl Backend for SparkBackend {
         unique_key: &[String],
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, table);
-
-        let on_clause = unique_key
-            .iter()
-            .map(|k| format!("target.{} = source.{}", k, k))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-
-        let merge_sql = format!(
-            "MERGE INTO {} AS target USING ({}) AS source ON {} \
-             WHEN MATCHED THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *",
-            table_name, source_sql, on_clause
-        );
-
-        self.py_execute_no_result(&merge_sql).await
+        self.py_execute_no_result(&sql::merge_into(&table_name, source_sql, unique_key))
+            .await
     }
 
     async fn insert_overwrite(
@@ -362,78 +339,7 @@ impl Backend for SparkBackend {
         partition: &PartitionSpec,
     ) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, table);
-
-        // Spark has native INSERT OVERWRITE support
-        let insert_sql = format!(
-            "INSERT OVERWRITE TABLE {} PARTITION ({}) {}",
-            table_name, partition.column, sql
-        );
-
-        self.py_execute_no_result(&insert_sql).await
-    }
-}
-
-/// Truncate SQL for logging (first 200 chars).
-fn truncate_sql(sql: &str) -> String {
-    if sql.len() > 200 {
-        format!("{}...", &sql[..200])
-    } else {
-        sql.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_qualified_name() {
-        let catalog = "spark_catalog";
-        let schema = "default";
-        let name = "my_table";
-        let qualified = format!("{}.{}.{}", catalog, schema, name);
-        assert_eq!(qualified, "spark_catalog.default.my_table");
-    }
-
-    #[test]
-    fn test_truncate_sql() {
-        assert_eq!(truncate_sql("SELECT 1"), "SELECT 1");
-
-        let long_sql = "x".repeat(300);
-        let truncated = truncate_sql(&long_sql);
-        assert!(truncated.len() < 210);
-        assert!(truncated.ends_with("..."));
-    }
-
-    #[test]
-    fn test_partition_values_escaping() {
-        let partition = PartitionSpec {
-            column: "dt".to_string(),
-            values: vec!["2024-01-01".to_string(), "it's".to_string()],
-        };
-
-        let values_list = partition
-            .values
-            .iter()
-            .map(|v| format!("'{}'", v.replace("'", "''")))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        assert_eq!(values_list, "'2024-01-01', 'it''s'");
-    }
-
-    #[test]
-    fn test_merge_on_clause() {
-        let unique_key = ["id".to_string(), "date".to_string()];
-        let on_clause = unique_key
-            .iter()
-            .map(|k| format!("target.{} = source.{}", k, k))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-
-        assert_eq!(
-            on_clause,
-            "target.id = source.id AND target.date = source.date"
-        );
+        self.py_execute_no_result(&sql::insert_overwrite(&table_name, sql, partition))
+            .await
     }
 }
