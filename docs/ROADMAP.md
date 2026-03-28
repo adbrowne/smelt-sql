@@ -122,10 +122,16 @@ The current Spark backend is a 267-line stub where every method returns an error
 - Batch safety analysis: classifies models as FullyBatchSafe/BoundedSafe/PerPartitionOnly
 - DAG-aware range computation for backfill planning
 
+**Deferred**:
+- ⏸️ Per-ref upstream filtering — wrapping `smelt.ref()` in filtered subqueries requires column lineage tracing through query AST; currently applies single wider filter range
+- ⏸️ Custom time granularities — plugin API for fiscal quarters, 4-4-5 retail calendars; placeholder `Custom` variant exists
+- ⏸️ Rule conflict resolution — how planner rules compose when they conflict (e.g., shared sub-expression vs incremental on same model); currently last-transformation-wins
+
 **Next steps**:
 - Shared materialization detection (multiple models computing same intermediate)
 - Model fusion (trivial passthrough models)
 - Cost-based optimization (requires backend statistics)
+- Orchestrator integration — Dagster/Airflow plugin API (deferred to separate plan)
 
 ## Backends
 
@@ -134,6 +140,9 @@ The current Spark backend is a 267-line stub where every method returns an error
 - **Spark**: Architectural scaffolding only — backend trait, type oracle for property tests, dialect-aware SQL generation in `smelt-dialect`. **The execution backend is not yet implemented** (every method returns an error). See [What's Next #1](#1-spark--databricks-backend) for implementation plan.
 - **PostgreSQL**: Not started. Deprioritized in favor of Spark/Databricks.
 - **Dialect printer**: `smelt-dialect` crate — single-pass CST walk emitting target SQL, handles QUALIFY, array literals, DATE literals, JSON function remapping
+
+**Deferred**:
+- ⏸️ Spark JSON incompatibilities — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY` rewrites; compile-time warnings planned but not yet implemented
 
 **Next steps**:
 - Spark/Databricks backend implementation ([What's Next #1](#1-spark--databricks-backend))
