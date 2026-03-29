@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774775713231,
+  "lastUpdate": 1774775715291,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10427,6 +10427,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.700791901473767,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "59293d0d0c2b72980e72a04361083d233871c3a6",
+          "message": "Expand property test generators for comprehensive SQL coverage\n\nAdd 12 new expression kinds (IsNull, Comparison, UnaryNot, UnaryMinus,\nExists, Like, Regex, ScalarSubquery, Extract, MakeTemporal, plus\nmixed-type BinaryOp and :: cast syntax), 2 new query shapes\n(GroupByWindow, Distinct), 2 new base types (Time, Interval), window\nframe specs, and LIKE/ILIKE parser support with type inference.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T20:13:20+11:00",
+          "tree_id": "170c9b1a428b7e19c0ad1ca6cd566702fdbd1707",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/59293d0d0c2b72980e72a04361083d233871c3a6"
+        },
+        "date": 1774775714704,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.37335924190012,
             "unit": "MB/s"
           }
         ]
