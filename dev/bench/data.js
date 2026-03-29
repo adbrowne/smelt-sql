@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774744933001,
+  "lastUpdate": 1774748179851,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7237,6 +7237,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.049399,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "510e5238274150ebcdf2db8677d354181b5a040d",
+          "message": "Add cross-model type system improvements: cycle recovery, mismatch diagnostics, property tests\n\n- Salsa cycle recovery: circular model refs (A→B→A) now degrade gracefully\n  instead of panicking, returning empty schemas and emitting diagnostics\n- Type mismatch diagnostics: warns when upstream column types conflict with\n  downstream usage (e.g. SUM on a VARCHAR column)\n- Multi-model property tests: 128-case proptest exercising cross-model type\n  propagation through Salsa, verified against DuckDB\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T12:34:18+11:00",
+          "tree_id": "51bc5a97477b4bf52ad212531ecd78c5a7555ec3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/510e5238274150ebcdf2db8677d354181b5a040d"
+        },
+        "date": 1774748179357,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 38.843387,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.407122,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.744076,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.352637,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002915,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.43128,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.031398,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013265,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009047,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.246291,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.2566219999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.73372,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.97273,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.157771,
             "unit": "ms"
           }
         ]
