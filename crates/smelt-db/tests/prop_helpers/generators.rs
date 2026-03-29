@@ -1142,7 +1142,11 @@ pub fn generate_expr(
 
         ExprKind::Like => {
             let str_col = columns.iter().find(|c| c.data_type.is_string())?;
-            let op = if func_idx.is_multiple_of(2) { "LIKE" } else { "ILIKE" };
+            let op = if func_idx.is_multiple_of(2) {
+                "LIKE"
+            } else {
+                "ILIKE"
+            };
             Some(TypedExpr {
                 sql: format!("{} {op} '%ell%'", str_col.name),
                 alias,
