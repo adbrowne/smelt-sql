@@ -1,0 +1,44 @@
+name: multi_engine
+version: 1
+
+model_paths:
+  - models
+
+targets:
+  duckdb_local:
+    type: duckdb
+    database: target/warehouse.duckdb
+    schema: analytics
+
+  spark_docker:
+    type: spark
+    connect_url: sc://localhost:15002
+    catalog: spark_catalog
+    schema: analytics
+    warehouse: target/spark
+
+default_materialization: table
+
+models:
+  stg_sessions:
+    materialization: table
+    target: spark_docker
+  int_visitor_daily:
+    materialization: table
+    target: spark_docker
+    incremental:
+      enabled: true
+      event_time_column: session_start
+      partition_column: session_date
+      granularity: day
+  mart_daily_metrics:
+    materialization: table
+    target: duckdb_local
+    incremental:
+      enabled: true
+      event_time_column: session_date
+      partition_column: metric_date
+      granularity: day
+  mart_country_metrics:
+    materialization: table
+    target: duckdb_local

@@ -219,10 +219,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 6. Create backends for needed targets
-    // Validate no cross-backend references
-    graph
-        .validate_cross_backend_refs()
-        .with_context(|| "Cross-backend reference validation failed")?;
+    // Log cross-backend references (supported via Parquet exchange)
+    let cross_edges = graph.find_cross_backend_edges();
+    if !cross_edges.is_empty() {
+        info!(
+            "Cross-engine references detected ({} transfer(s) via Parquet):",
+            cross_edges.len()
+        );
+        for edge in &cross_edges {
+            info!(
+                "  {} ({}) -> {} ({})",
+                edge.upstream, edge.upstream_target, edge.downstream, edge.downstream_target
+            );
+        }
+    }
 
     let needed_targets: HashSet<String> = execution_order
         .iter()
@@ -241,14 +251,64 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .iter()
         .map(|name| (name.clone(), config.targets[name].clone()))
         .collect();
-    let compilers = CompilerRegistry::new(&config, &needed_target_configs);
+    let mut compilers = CompilerRegistry::new(&config, &needed_target_configs);
+
+    // Set up cross-engine ref resolution (Parquet exchange)
+    // Only resolve edges where the downstream model is in the execution order.
+    // Paths are computed from target config (warehouse field) so we don't need
+    // the upstream backend to be instantiated (e.g., Spark may not be running).
+    if !cross_edges.is_empty() {
+        let execution_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
+        let mut refs_by_target: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for edge in &cross_edges {
+            if !execution_set.contains(edge.downstream.as_str()) {
+                continue;
+            }
+            let upstream_target_config = &config.targets[&edge.upstream_target];
+            let upstream_schema = &upstream_target_config.schema;
+            // Compute materialized path from config: warehouse/schema/model_name
+            let rel_path = if let Some(ref warehouse) = upstream_target_config.warehouse {
+                Some(std::path::PathBuf::from(format!(
+                    "{}/{}/{}",
+                    warehouse, upstream_schema, edge.upstream
+                )))
+            } else if needed_targets.contains(&edge.upstream_target) {
+                // Fallback: if backend is available, ask it
+                registry
+                    .get(&edge.upstream_target)
+                    .materialized_path(upstream_schema, &edge.upstream)
+            } else {
+                None
+            };
+            if let Some(rel_path) = rel_path {
+                let abs_path = project_dir.join(&rel_path);
+                let parquet_expr = format!(
+                    "read_parquet('{}/**/*.parquet', hive_partitioning=true)",
+                    abs_path.display()
+                );
+                refs_by_target
+                    .entry(edge.downstream_target.clone())
+                    .or_default()
+                    .insert(edge.upstream.clone(), parquet_expr);
+            }
+        }
+        for (target, refs) in refs_by_target {
+            compilers.set_cross_engine_refs(&target, refs);
+        }
+    }
 
     // 7. Validate sources exist (if sources.yml present)
+    // Skip source validation when --select/--exclude is used: the selected models
+    // may not reference all sources, and some sources may live on backends that
+    // aren't running (e.g., Spark sources when only DuckDB models are selected).
     if let Some(ref source_config) = sources {
-        // Validate against the default target's backend
-        executor::validate_sources(registry.get(&args.target), source_config)
-            .await
-            .with_context(|| "Source validation failed")?;
+        if args.select.is_empty() && args.exclude.is_empty() {
+            executor::validate_sources(registry.get(&args.target), source_config)
+                .await
+                .with_context(|| "Source validation failed")?;
+        } else {
+            debug!("Skipping source validation (--select/--exclude active)");
+        }
     }
 
     // 8. Parse time range if provided (for incremental processing)
@@ -406,7 +466,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     let mut results: Vec<(smelt_backend::ExecutionResult, PhysicalStrategy)> = Vec::new();
 
-    for phys_node in physical_graph.iter_in_order() {
+    // When --select is used, filter physical nodes to only those whose target
+    // has a backend available. Upstream models on other engines (e.g., Spark)
+    // may be in the physical graph but shouldn't be executed.
+    let selected_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
+    for phys_node in physical_graph.iter_in_order().filter(|n| {
+        selected_set.contains(n.name.as_str())
+            || n.logical_origins
+                .iter()
+                .any(|o| selected_set.contains(o.as_str()))
+    }) {
         let model_name = &phys_node.name;
         let model = &phys_node.model_file;
         let backend = registry.get(&phys_node.target);

@@ -219,7 +219,7 @@ mod integration {
     /// Helper to create a SparkBackend for integration tests.
     async fn create_test_backend() -> Option<crate::SparkBackend> {
         let url = spark_connect_url()?;
-        match crate::SparkBackend::new(&url, "spark_catalog", "default").await {
+        match crate::SparkBackend::new(&url, "spark_catalog", "default", None).await {
             Ok(backend) => Some(backend),
             Err(e) => {
                 eprintln!(

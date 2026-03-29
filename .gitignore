@@ -12,6 +12,7 @@ __pycache__/
 # Example build artifacts
 examples/*/target/
 examples/*/.smelt/
+examples/*/data/
 
 # UI
 ui/node_modules/

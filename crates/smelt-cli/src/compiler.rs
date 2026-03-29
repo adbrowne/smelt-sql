@@ -31,6 +31,7 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
         capabilities: &BackendCapabilities::duckdb(),
         schema,
         ephemeral_models: std::collections::HashSet::new(),
+        cross_engine_refs: std::collections::HashMap::new(),
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -39,6 +40,9 @@ pub struct SqlCompiler {
     config: Config,
     dialect: SqlDialect,
     capabilities: BackendCapabilities,
+    /// Cross-engine refs: model_name -> parquet read expression.
+    /// Set externally before compilation when cross-engine references exist.
+    cross_engine_refs: HashMap<String, String>,
 }
 
 impl SqlCompiler {
@@ -48,7 +52,13 @@ impl SqlCompiler {
             config,
             dialect,
             capabilities,
+            cross_engine_refs: HashMap::new(),
         }
+    }
+
+    /// Set cross-engine ref mappings (model_name -> parquet read expression).
+    pub fn set_cross_engine_refs(&mut self, refs: HashMap<String, String>) {
+        self.cross_engine_refs = refs;
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -78,6 +88,7 @@ impl SqlCompiler {
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: std::collections::HashSet::new(),
+            cross_engine_refs: self.cross_engine_refs.clone(),
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -163,6 +174,7 @@ impl SqlCompiler {
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: std::collections::HashSet::new(),
+            cross_engine_refs: self.cross_engine_refs.clone(),
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -208,6 +220,7 @@ impl SqlCompiler {
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: ephemeral_refs,
+            cross_engine_refs: self.cross_engine_refs.clone(),
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
@@ -326,6 +339,7 @@ impl EphemeralResolver {
             capabilities,
             schema,
             ephemeral_models: ephemeral_refs,
+            cross_engine_refs: std::collections::HashMap::new(),
         };
         let compiled = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -677,6 +691,7 @@ impl SqlCompiler {
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: ephemeral_refs,
+            cross_engine_refs: self.cross_engine_refs.clone(),
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
@@ -732,6 +747,13 @@ impl CompilerRegistry {
     pub fn get(&self, target_name: &str) -> &SqlCompiler {
         &self.compilers[target_name]
     }
+
+    /// Set cross-engine ref mappings for a specific target's compiler.
+    pub fn set_cross_engine_refs(&mut self, target_name: &str, refs: HashMap<String, String>) {
+        if let Some(compiler) = self.compilers.get_mut(target_name) {
+            compiler.set_cross_engine_refs(refs);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -748,6 +770,7 @@ mod tests {
             schema: "main".to_string(),
             connect_url: None,
             catalog: None,
+            warehouse: None,
         }
     }
 
@@ -779,6 +802,7 @@ mod tests {
                 schema: "main".to_string(),
                 connect_url: None,
                 catalog: None,
+                warehouse: None,
             },
         );
 

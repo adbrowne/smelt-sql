@@ -105,6 +105,9 @@ pub struct Target {
     pub connect_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
+    /// Base directory for file-based output (e.g., Spark warehouse for Parquet files).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
 }
 
 impl Target {

@@ -1,0 +1,64 @@
+seed: 42
+scale_factor: 1.0
+
+datasets:
+  - name: sessions
+    output: data/sessions
+    num_rows: 100000
+    partition:
+      column: session_date
+      start: "2024-07-01"
+      days: 14
+    entity:
+      pool_ratio: 0.15
+      columns:
+        - name: visitor_id
+          generator: { type: uuid }
+    columns:
+      - name: session_id
+        generator: { type: uuid }
+      - name: page_views
+        generator: { type: log_normal, median: 4, sigma: 0.8, max: 50 }
+      - name: revenue_cents
+        generator:
+          type: optional
+          prob: 0.3
+          inner:
+            type: log_normal
+            median: 500
+            sigma: 1.5
+            max: 100000
+      - name: country
+        generator:
+          type: weighted_choice
+          values:
+            US: 0.35
+            UK: 0.12
+            DE: 0.10
+            FR: 0.08
+            CA: 0.07
+            AU: 0.05
+            JP: 0.05
+            BR: 0.04
+            IN: 0.04
+            Other: 0.10
+      - name: traffic_source
+        generator:
+          type: weighted_choice
+          values:
+            organic_search: 0.30
+            direct: 0.25
+            paid_search: 0.15
+            social: 0.12
+            email: 0.08
+            referral: 0.05
+            affiliate: 0.05
+      - name: device_type
+        generator:
+          type: weighted_choice
+          values:
+            mobile: 0.55
+            desktop: 0.35
+            tablet: 0.10
+      - name: is_converted
+        generator: { type: bool, prob: 0.08 }
