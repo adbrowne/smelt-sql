@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774748179851,
+  "lastUpdate": 1774748180911,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9566,6 +9566,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.768189932128564,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "510e5238274150ebcdf2db8677d354181b5a040d",
+          "message": "Add cross-model type system improvements: cycle recovery, mismatch diagnostics, property tests\n\n- Salsa cycle recovery: circular model refs (A→B→A) now degrade gracefully\n  instead of panicking, returning empty schemas and emitting diagnostics\n- Type mismatch diagnostics: warns when upstream column types conflict with\n  downstream usage (e.g. SUM on a VARCHAR column)\n- Multi-model property tests: 128-case proptest exercising cross-model type\n  propagation through Salsa, verified against DuckDB\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T12:34:18+11:00",
+          "tree_id": "51bc5a97477b4bf52ad212531ecd78c5a7555ec3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/510e5238274150ebcdf2db8677d354181b5a040d"
+        },
+        "date": 1774748180603,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.520669701707657,
             "unit": "MB/s"
           }
         ]
