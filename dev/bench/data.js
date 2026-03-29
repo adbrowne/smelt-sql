@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774757154192,
+  "lastUpdate": 1774766280434,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7613,6 +7613,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.110203,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ca17ce9c631d4cea95108ed2e3b2389ed5c0e449",
+          "message": "Document `smelt diff` in roadmap and CLI reference\n\n- ROADMAP.md: mark smelt diff as complete (March 29, 2026), update CLI section\n- CLI reference: add full smelt diff documentation with flags, output format,\n  JSON schema, exit codes, and usage examples\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T16:32:21+11:00",
+          "tree_id": "cd8249f270ab3df33907f24ddaa38013f0a059f6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ca17ce9c631d4cea95108ed2e3b2389ed5c0e449"
+        },
+        "date": 1774766279369,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 32.820719999999994,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 31.610845,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.54905,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.359299,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004783,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 32.192688999999994,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.032183,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.016674,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010746,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.334603,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1.923701,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.11152,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.94396,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.587617,
             "unit": "ms"
           }
         ]
