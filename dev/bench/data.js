@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774766658585,
+  "lastUpdate": 1774766660184,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10181,6 +10181,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.580885007861298,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e651aa955a50aa15af2a59b8ea2bdf7b5fd7c25a",
+          "message": "Document pure function rule for smelt-db analysis logic\n\nAdd architectural guidance to CLAUDE.md and smelt-db module docs\nensuring analysis logic stays as pure functions with Salsa queries\nas thin wrappers. This preserves future extractability to a\nstandalone smelt-check crate for batch compilation.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T17:42:26+11:00",
+          "tree_id": "806994fdafb2c5aba8ccd64d80b72013778bcdec",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e651aa955a50aa15af2a59b8ea2bdf7b5fd7c25a"
+        },
+        "date": 1774766659572,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.326684349231417,
             "unit": "MB/s"
           }
         ]
