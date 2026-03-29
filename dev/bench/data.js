@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774766962714,
+  "lastUpdate": 1774775713231,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7895,6 +7895,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.018665,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "59293d0d0c2b72980e72a04361083d233871c3a6",
+          "message": "Expand property test generators for comprehensive SQL coverage\n\nAdd 12 new expression kinds (IsNull, Comparison, UnaryNot, UnaryMinus,\nExists, Like, Regex, ScalarSubquery, Extract, MakeTemporal, plus\nmixed-type BinaryOp and :: cast syntax), 2 new query shapes\n(GroupByWindow, Distinct), 2 new base types (Time, Interval), window\nframe specs, and LIKE/ILIKE parser support with type inference.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T20:13:20+11:00",
+          "tree_id": "170c9b1a428b7e19c0ad1ca6cd566702fdbd1707",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/59293d0d0c2b72980e72a04361083d233871c3a6"
+        },
+        "date": 1774775712282,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 32.564088,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 31.398973,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.52912,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.358481,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003909,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 31.916112,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.035627000000000006,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015407,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.00996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.227129,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1.982927,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.0599,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.98756,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.686666,
             "unit": "ms"
           }
         ]
