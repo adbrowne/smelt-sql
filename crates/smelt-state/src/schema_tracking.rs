@@ -389,6 +389,11 @@ pub fn plan_migration(
                         "ALTER TABLE {} ADD COLUMN {} {} NOT NULL DEFAULT {}",
                         qualified_table, name, data_type, default_val
                     ));
+                } else {
+                    unreachable!(
+                        "NOT NULL column '{}' without default should have triggered FullRefresh",
+                        name
+                    );
                 }
                 // Backfill expression for the newly added column
                 if let Some(backfill) = backfill_exprs.get(name.as_str()) {
@@ -425,7 +430,11 @@ pub fn plan_migration(
                 to_nullable: false,
                 ..
             } => {
-                // nullable → NOT NULL: fill NULLs with default, then set NOT NULL
+                // nullable → NOT NULL: fill NULLs with the column's default value, then
+                // set NOT NULL. We use column_defaults (not backfill_exprs) here because
+                // the goal is to fill NULL gaps with a safe constant — backfill expressions
+                // are for recomputing column values from other columns, which is a different
+                // semantic (used for new column additions, not nullability changes).
                 if let Some(default_val) = column_defaults.get(name.as_str()) {
                     statements.push(format!(
                         "UPDATE {} SET {} = {} WHERE {} IS NULL",

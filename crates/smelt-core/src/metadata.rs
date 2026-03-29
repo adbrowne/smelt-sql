@@ -87,23 +87,31 @@ pub enum SchemaEvolutionStrategy {
 ///
 /// Used to generate DEFAULT clauses for ALTER TABLE statements from
 /// frontmatter `default:` values.
-pub fn yaml_value_to_sql_literal(val: &serde_yaml::Value) -> String {
+///
+/// Returns an error for YAML sequences and mappings, which are not valid
+/// SQL literals.
+pub fn yaml_value_to_sql_literal(val: &serde_yaml::Value) -> Result<String, String> {
     match val {
-        serde_yaml::Value::Null => "NULL".to_string(),
+        serde_yaml::Value::Null => Ok("NULL".to_string()),
         serde_yaml::Value::Bool(b) => {
             if *b {
-                "TRUE".to_string()
+                Ok("TRUE".to_string())
             } else {
-                "FALSE".to_string()
+                Ok("FALSE".to_string())
             }
         }
-        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::Number(n) => Ok(n.to_string()),
         serde_yaml::Value::String(s) => {
             // Escape single quotes by doubling them
-            format!("'{}'", s.replace('\'', "''"))
+            Ok(format!("'{}'", s.replace('\'', "''")))
         }
-        // Sequences and mappings are not valid SQL defaults
-        _ => "NULL".to_string(),
+        serde_yaml::Value::Sequence(_) => Err(
+            "unsupported YAML type for SQL default: sequences are not valid SQL literals".into(),
+        ),
+        serde_yaml::Value::Mapping(_) => {
+            Err("unsupported YAML type for SQL default: mappings are not valid SQL literals".into())
+        }
+        serde_yaml::Value::Tagged(t) => yaml_value_to_sql_literal(&t.value),
     }
 }
 
@@ -698,26 +706,35 @@ SELECT * FROM users"#;
     #[test]
     fn test_yaml_value_to_sql_literal() {
         assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::String("hello".into())),
+            yaml_value_to_sql_literal(&serde_yaml::Value::String("hello".into())).unwrap(),
             "'hello'"
         );
         assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::String("it's".into())),
+            yaml_value_to_sql_literal(&serde_yaml::Value::String("it's".into())).unwrap(),
             "'it''s'"
         );
         assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Number(42.into())),
+            yaml_value_to_sql_literal(&serde_yaml::Value::Number(42.into())).unwrap(),
             "42"
         );
         assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(true)),
+            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(true)).unwrap(),
             "TRUE"
         );
         assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(false)),
+            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(false)).unwrap(),
             "FALSE"
         );
-        assert_eq!(yaml_value_to_sql_literal(&serde_yaml::Value::Null), "NULL");
+        assert_eq!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::Null).unwrap(),
+            "NULL"
+        );
+        // Sequences and mappings should return errors
+        assert!(yaml_value_to_sql_literal(&serde_yaml::Value::Sequence(vec![])).is_err());
+        assert!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -737,12 +754,12 @@ SELECT * FROM users"#;
             FileMetadata::Single { metadata, .. } => {
                 let status = metadata.columns.get("status").unwrap();
                 assert_eq!(
-                    yaml_value_to_sql_literal(status.default.as_ref().unwrap()),
+                    yaml_value_to_sql_literal(status.default.as_ref().unwrap()).unwrap(),
                     "'unknown'"
                 );
                 let priority = metadata.columns.get("priority").unwrap();
                 assert_eq!(
-                    yaml_value_to_sql_literal(priority.default.as_ref().unwrap()),
+                    yaml_value_to_sql_literal(priority.default.as_ref().unwrap()).unwrap(),
                     "0"
                 );
             }

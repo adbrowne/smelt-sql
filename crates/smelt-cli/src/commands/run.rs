@@ -8,7 +8,7 @@ use smelt_cli::{
     BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery,
     PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig, TimeRange,
 };
-use smelt_core::metadata::{yaml_value_to_sql_literal, SchemaEvolutionStrategy};
+use smelt_core::metadata::SchemaEvolutionStrategy;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
@@ -502,33 +502,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 if let Ok(true) = backend.table_exists(schema, model_name).await {
                     let inferred_columns = infer_deployed_columns(&type_db, model);
                     if !inferred_columns.is_empty() {
-                        // Extract column defaults and backfill expressions from frontmatter
-                        let (column_defaults, backfill_exprs) = model
-                            .metadata
-                            .as_ref()
-                            .map(|m| {
-                                let defaults: HashMap<String, String> =
-                                    m.columns
-                                        .iter()
-                                        .filter_map(|(name, col_meta)| {
-                                            col_meta.default.as_ref().map(|v| {
-                                                (name.clone(), yaml_value_to_sql_literal(v))
-                                            })
-                                        })
-                                        .collect();
-                                let backfills: HashMap<String, String> = m
-                                    .columns
-                                    .iter()
-                                    .filter_map(|(name, col_meta)| {
-                                        col_meta
-                                            .backfill
-                                            .as_ref()
-                                            .map(|expr| (name.clone(), expr.clone()))
-                                    })
-                                    .collect();
-                                (defaults, backfills)
-                            })
-                            .unwrap_or_default();
+                        let (column_defaults, backfill_exprs) =
+                            migration::extract_evolution_maps(model.metadata.as_deref());
 
                         match migration::check_and_migrate(
                             backend,
