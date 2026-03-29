@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774781914457,
+  "lastUpdate": 1774781915768,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10796,6 +10796,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.310218914352888,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "90cd833c641807c07aec7837df3f17a3afff659f",
+          "message": "Fix rustfmt formatting for is_multiple_of ternary\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T21:57:08+11:00",
+          "tree_id": "d555e46233868b947b49059a707dd4af18be4d31",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/90cd833c641807c07aec7837df3f17a3afff659f"
+        },
+        "date": 1774781915323,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.26354260805498,
             "unit": "MB/s"
           }
         ]
