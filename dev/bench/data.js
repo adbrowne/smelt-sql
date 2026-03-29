@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774749480281,
+  "lastUpdate": 1774749482393,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9689,6 +9689,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.520669701707657,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0ed6342a184f3e1db7fefff8be4c1ec81f796789",
+          "message": "Extend multi-model property tests: upstream expressions, GROUP BY, three-hop chains, JOINs\n\nExtends the property test generators to cover more of the cross-model\ntype inference surface area:\n\n- Upstream expressions: upstream models now generate computed columns\n  (CAST, arithmetic, functions), not just passthrough\n- GROUP BY/aggregates: 30% of scenarios use GROUP BY in downstream\n- Three-model chains (A → B → C): verifies type propagation across\n  two ref boundaries\n- JOIN scenarios: downstream JOINs two upstream models via smelt.ref()\n\nUncovered a real bug: cross-model type propagation loses types for\ncomputed upstream columns (Decimal, Double), causing aggregates like\nSUM to fall back to BigInt. Registered as known divergences for\nfollow-up fix.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T12:56:06+11:00",
+          "tree_id": "e023b31f580b6e45db6961b3ff241c33c6cdf4bd",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0ed6342a184f3e1db7fefff8be4c1ec81f796789"
+        },
+        "date": 1774749481769,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.337564787150537,
             "unit": "MB/s"
           }
         ]
