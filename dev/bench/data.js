@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774766280434,
+  "lastUpdate": 1774766282561,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10058,6 +10058,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.62876889842392,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ca17ce9c631d4cea95108ed2e3b2389ed5c0e449",
+          "message": "Document `smelt diff` in roadmap and CLI reference\n\n- ROADMAP.md: mark smelt diff as complete (March 29, 2026), update CLI section\n- CLI reference: add full smelt diff documentation with flags, output format,\n  JSON schema, exit codes, and usage examples\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T16:32:21+11:00",
+          "tree_id": "cd8249f270ab3df33907f24ddaa38013f0a059f6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ca17ce9c631d4cea95108ed2e3b2389ed5c0e449"
+        },
+        "date": 1774766281909,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.580885007861298,
             "unit": "MB/s"
           }
         ]
