@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774748180911,
+  "lastUpdate": 1774749480281,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7331,6 +7331,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.157771,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0ed6342a184f3e1db7fefff8be4c1ec81f796789",
+          "message": "Extend multi-model property tests: upstream expressions, GROUP BY, three-hop chains, JOINs\n\nExtends the property test generators to cover more of the cross-model\ntype inference surface area:\n\n- Upstream expressions: upstream models now generate computed columns\n  (CAST, arithmetic, functions), not just passthrough\n- GROUP BY/aggregates: 30% of scenarios use GROUP BY in downstream\n- Three-model chains (A → B → C): verifies type propagation across\n  two ref boundaries\n- JOIN scenarios: downstream JOINs two upstream models via smelt.ref()\n\nUncovered a real bug: cross-model type propagation loses types for\ncomputed upstream columns (Decimal, Double), causing aggregates like\nSUM to fall back to BigInt. Registered as known divergences for\nfollow-up fix.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T12:56:06+11:00",
+          "tree_id": "e023b31f580b6e45db6961b3ff241c33c6cdf4bd",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0ed6342a184f3e1db7fefff8be4c1ec81f796789"
+        },
+        "date": 1774749479297,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 33.366244,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 32.167411,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.5850430000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.31944599999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004484,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 31.756016999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028714999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.016753999999999998,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010838,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.295497,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1.902463,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.788399999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.30305,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.703908,
             "unit": "ms"
           }
         ]
