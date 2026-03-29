@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774779379522,
+  "lastUpdate": 1774779380677,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10673,6 +10673,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.1042159899564,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "af010a82437db76e96f6a90ddb3821aa63f39ef7",
+          "message": "Fix clippy errors on Rust 1.94: is_multiple_of and &Path\n\nCI clippy with -D warnings fails on newer Rust due to:\n- manual_is_multiple_of: `% N == 0` → `.is_multiple_of(N)`\n- ptr_arg: `&PathBuf` → `&Path` in function parameter\n- unused variable: prefix with underscore\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T21:14:35+11:00",
+          "tree_id": "918ee4a69f872694392570defb88218ac59811a3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/af010a82437db76e96f6a90ddb3821aa63f39ef7"
+        },
+        "date": 1774779380380,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.310218914352888,
             "unit": "MB/s"
           }
         ]
