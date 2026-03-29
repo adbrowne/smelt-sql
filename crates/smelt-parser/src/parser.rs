@@ -933,10 +933,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_or_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_and_expr();
 
         while self.at(OR_KW) {
-            self.start_node(BINARY_EXPR);
+            self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_and_expr();
@@ -945,10 +946,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_and_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_comparison_expr();
 
         while self.at(AND_KW) {
-            self.start_node(BINARY_EXPR);
+            self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_comparison_expr();
@@ -957,6 +959,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_concat_expr();
 
         loop {
@@ -973,7 +976,7 @@ impl<'a> Parser<'a> {
                 NOT_TILDE,
                 NOT_TILDE_STAR,
             ]) {
-                self.start_node(BINARY_EXPR);
+                self.start_node_at(checkpoint, BINARY_EXPR);
                 self.advance();
                 self.skip_trivia();
                 // Check for ANY/ALL/SOME(expr)
@@ -997,7 +1000,7 @@ impl<'a> Parser<'a> {
                 self.finish_node();
             } else if self.at(IS_KW) {
                 // IS [NOT] NULL
-                self.start_node(BINARY_EXPR);
+                self.start_node_at(checkpoint, BINARY_EXPR);
                 self.advance(); // consume IS
                 self.skip_trivia();
                 if self.at(NOT_KW) {
@@ -1081,10 +1084,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_concat_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_json_expr();
 
         while self.at(CONCAT) {
-            self.start_node(BINARY_EXPR);
+            self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_json_expr();
@@ -1114,11 +1118,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_additive_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_multiplicative_expr();
 
         self.skip_trivia();
         while self.at_any(&[PLUS, MINUS]) {
-            self.start_node(BINARY_EXPR);
+            self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_multiplicative_expr();
@@ -1128,11 +1133,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_multiplicative_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_unary_expr();
 
         self.skip_trivia();
         while self.at_any(&[STAR, DIVIDE]) {
-            self.start_node(BINARY_EXPR);
+            self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
             self.parse_unary_expr();

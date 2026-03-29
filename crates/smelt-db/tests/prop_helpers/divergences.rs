@@ -124,36 +124,6 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             }),
             status: DivergenceStatus::BackendSpecific,
         },
-        TypeDivergence {
-            id: "sum_decimal_cross_model",
-            description: "SUM through cross-model ref with computed upstream columns — types lost during propagation, SUM falls back to BigInt",
-            smelt_type: DataType::BigInt,
-            duckdb_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "sum_double_cross_model",
-            description: "SUM(DOUBLE) through cross-model ref with computed upstream columns — types lost during propagation, SUM falls back to BigInt",
-            smelt_type: DataType::BigInt,
-            duckdb_type: Some(DataType::Double),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
-        TypeDivergence {
-            id: "ceil_decimal_cross_model",
-            description: "CEIL/FLOOR(DECIMAL) through cross-model ref — Decimal type lost, CEIL falls back to Double instead of Decimal(p,0)",
-            smelt_type: DataType::Double,
-            duckdb_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
-            spark_type: None,
-            status: DivergenceStatus::KnownBug,
-        },
     ]
 }
 

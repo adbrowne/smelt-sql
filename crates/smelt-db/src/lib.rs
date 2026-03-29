@@ -4651,4 +4651,34 @@ sources:
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_binary_expr_type_propagation_through_ref() {
+        // Verifies that computed columns (binary expressions) in upstream models
+        // have their types correctly propagated through smelt.ref()
+        let (db, paths) = setup_multi_model(&[
+            (
+                "upstream",
+                "WITH data AS (SELECT CAST(3.14 AS DOUBLE) AS dbl_col) SELECT dbl_col + dbl_col AS up_0 FROM data",
+            ),
+            (
+                "downstream",
+                "SELECT SUM(up_0) AS agg_0 FROM smelt.ref('upstream')",
+            ),
+        ]);
+
+        let up_schema = db.typed_model_schema(paths[0].clone());
+        assert_eq!(
+            up_schema.columns[0].data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "dbl_col + dbl_col should be Double"
+        );
+
+        let down_schema = db.typed_model_schema(paths[1].clone());
+        assert_eq!(
+            down_schema.columns[0].data_type.as_ref().unwrap().data_type,
+            DataType::Double,
+            "SUM(Double) should be Double"
+        );
+    }
 }

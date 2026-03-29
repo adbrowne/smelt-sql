@@ -758,6 +758,11 @@ impl BinaryExpr {
         }
     }
 
+    /// Get the underlying syntax node
+    pub fn node(&self) -> &SyntaxNode {
+        &self.0
+    }
+
     /// Get the left operand expression
     pub fn left(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)

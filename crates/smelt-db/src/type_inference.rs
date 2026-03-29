@@ -863,6 +863,56 @@ fn infer_numeric_literal_type(text: &str) -> Option<DataType> {
     None
 }
 
+/// Infer the type of a binary operand. First tries the Expr child node (for expressions
+/// wrapped in EXPRESSION nodes). Falls back to resolving bare IDENT/NUMBER tokens directly,
+/// which handles the case where the parser produces BINARY_EXPR with token-level operands.
+fn infer_binary_operand(binary: &BinaryExpr, nth: usize, ctx: &TypeContext) -> Option<TypedColumn> {
+    // Try child Expr nodes first (works when operands are wrapped in EXPRESSION nodes)
+    let expr = binary.node().children().filter_map(Expr::cast).nth(nth);
+    if let Some(e) = expr {
+        return infer_expression_type(&e, ctx);
+    }
+
+    // Fall back to bare tokens: find the nth IDENT or NUMBER token
+    // (skipping operator tokens like PLUS, MINUS, STAR, etc.)
+    use smelt_parser::SyntaxKind;
+    let mut value_token_idx = 0;
+    for child in binary.node().children_with_tokens() {
+        if let Some(token) = child.into_token() {
+            let kind = token.kind();
+            if matches!(
+                kind,
+                SyntaxKind::IDENT | SyntaxKind::NUMBER | SyntaxKind::STRING
+            ) {
+                if value_token_idx == nth {
+                    return match kind {
+                        SyntaxKind::IDENT => ctx.lookup_column(None, token.text()).cloned(),
+                        SyntaxKind::NUMBER => {
+                            let text = token.text();
+                            Some(TypedColumn {
+                                data_type: if text.contains('.') {
+                                    DataType::Double
+                                } else {
+                                    DataType::BigInt
+                                },
+                                nullable: false,
+                            })
+                        }
+                        SyntaxKind::STRING => Some(TypedColumn {
+                            data_type: DataType::Varchar { max_length: None },
+                            nullable: false,
+                        }),
+                        _ => None,
+                    };
+                }
+                value_token_idx += 1;
+            }
+        }
+    }
+
+    None
+}
+
 /// Infer the result type of a binary expression
 fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let op = binary.operator()?;
@@ -894,8 +944,8 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
 
         // Arithmetic operators - promote to widest numeric type
         "+" | "*" | "/" => {
-            let left = binary.left().and_then(|e| infer_expression_type(&e, ctx));
-            let right = binary.right().and_then(|e| infer_expression_type(&e, ctx));
+            let left = infer_binary_operand(binary, 0, ctx);
+            let right = infer_binary_operand(binary, 1, ctx);
 
             // Promote to widest numeric type
             match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
@@ -962,8 +1012,8 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
                 None
             } else {
                 // Binary minus: a - b
-                let left = binary.left().and_then(|e| infer_expression_type(&e, ctx));
-                let right = binary.right().and_then(|e| infer_expression_type(&e, ctx));
+                let left = infer_binary_operand(binary, 0, ctx);
+                let right = infer_binary_operand(binary, 1, ctx);
 
                 // Promote to widest numeric type
                 match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
