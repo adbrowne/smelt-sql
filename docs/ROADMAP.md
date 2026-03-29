@@ -33,6 +33,18 @@ Static data catalog / data dictionary generation. Outputs Markdown (default) or 
 
 See [plan](plans/20260329-docs-generate.md) for details.
 
+### ~~1. Schema Diff — `smelt diff`~~ ✅ (March 29, 2026)
+
+Offline schema change detection. Compares inferred model schemas (from SQL parsing/type inference) against deployed schemas (`.smelt/schemas/`) without requiring a database connection.
+
+- ✅ Per-model diff: column additions, removals, type changes, nullability changes
+- ✅ Risk assessment: safe ALTER TABLE vs full refresh vs column removal flag
+- ✅ `--select`/`--exclude` filtering reuses existing selector infrastructure
+- ✅ `--json` output for CI integration (machine-readable)
+- ✅ Exit code 1 when changes detected (CI-friendly)
+- ✅ Removed model detection (deployed schema exists but model deleted from code)
+- ✅ Per-model target resolution (works with multi-backend projects)
+
 ### ~~1. Spark / Databricks Backend~~ 🔄 (March 28, 2026)
 
 Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are now functional, connecting to Spark through PySpark's SparkSession.
@@ -196,6 +208,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - `smelt test` — data testing framework (CTE isolation, whole-model, singular, property-based, column-level tests)
 - `smelt type` — function type signatures
 - `smelt docs generate` — static data catalog (Markdown/JSON) with column types, lineage, descriptions, tests (March 29, 2026)
+- `smelt diff` — offline schema change detection, compares inferred vs deployed schemas without database connection (March 29, 2026)
 - Smart batching based on batch safety analysis
 - `smelt-state` crate for run manifests + interval tracking (`.smelt/` directory)
 - Two-stage graph architecture: `LogicalGraph` (user intent) → `PhysicalGraph` (execution plan)
@@ -207,7 +220,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 **Next steps**:
 - ~~`smelt test`~~ ✅ (March 27, 2026) — see [Data Testing Framework](#data-testing-framework)
 - ~~`smelt docs generate`~~ ✅ (March 29, 2026) — see [What's Next](#1-data-catalog--smelt-docs-generate)
-- `smelt diff` — show pending schema changes
+- ~~`smelt diff`~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-diff--smelt-diff)
 - `smelt validate` — pre-run validation
 - Schema evolution with efficient migrations (ALTER+backfill instead of full refresh)
 

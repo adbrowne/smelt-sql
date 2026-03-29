@@ -250,6 +250,113 @@ See the [Testing guide](../guide/testing.md) for how to write tests.
 
 ---
 
+## smelt diff
+
+Show pending schema changes between model definitions and deployed state. Compares the inferred schema (from SQL parsing and type inference) against the last deployed schema (stored in `.smelt/schemas/`).
+
+This command does **not** require a database connection — it works entirely offline, making it fast and suitable for CI pipelines.
+
+**Usage:**
+
+```
+smelt diff [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--select` | `-s` | string[] | | Select models to diff (repeatable). Same selector syntax as `smelt run`. |
+| `--exclude` | `-e` | string[] | | Exclude models from diff (repeatable). Same syntax as `--select`. |
+| `--json` | | bool | `false` | Output as JSON for machine consumption |
+
+**Exit codes:**
+
+- `0` — no schema changes detected
+- `1` — schema changes detected (or new/removed models found)
+
+**Output:**
+
+For each model with changes, smelt shows the specific column-level changes and a risk assessment:
+
+```
+smelt diff
+
+Model: daily_revenue
+  ADD COLUMN email VARCHAR NULL
+  ALTER COLUMN amount TYPE INTEGER -> BIGINT
+  -> Safe: ALTER TABLE (no data loss)
+
+Model: user_sessions
+  DROP COLUMN legacy_id
+  ADD COLUMN session_type VARCHAR NOT NULL
+  -> Requires: --full-refresh (NOT NULL column added)
+
+Model: new_model
+  + New model (not yet deployed)
+
+Summary: 2 changed, 1 new, 0 removed, 5 unchanged
+```
+
+Change types detected:
+
+- **ADD COLUMN** — column exists in model SQL but not in deployed schema
+- **DROP COLUMN** — column exists in deployed schema but not in model SQL
+- **ALTER COLUMN TYPE** — column type changed (e.g., INTEGER → BIGINT)
+- **ALTER COLUMN nullability** — column changed between NULL and NOT NULL
+
+Risk assessment:
+
+- **Safe: ALTER TABLE** — changes can be applied with ALTER TABLE statements (no data loss)
+- **Requires: --full-refresh** — destructive changes that need a full table rebuild (e.g., adding NOT NULL column, unsafe type narrowing)
+- **Requires: --allow-column-removal** — column removals detected (blocked by default for safety)
+
+**Examples:**
+
+```bash
+# Show all schema changes
+smelt diff
+
+# Show changes for a specific model
+smelt diff --select daily_revenue
+
+# Show changes for all models with a tag
+smelt diff --select tag:staging
+
+# JSON output for CI
+smelt diff --json
+
+# Use in CI: fail if any schema changes pending
+smelt diff --json || echo "Schema changes detected!"
+```
+
+**JSON output format:**
+
+```json
+{
+  "models": [
+    {
+      "name": "daily_revenue",
+      "status": "changed",
+      "changes": [
+        { "type": "add_column", "column": "email", "data_type": "VARCHAR", "nullable": true }
+      ],
+      "risk": {
+        "requires_full_refresh": false,
+        "has_column_removals": false,
+        "migration_action": "alter_table",
+        "statements": ["ALTER TABLE main.daily_revenue ADD COLUMN email VARCHAR"]
+      }
+    },
+    { "name": "new_model", "status": "new" }
+  ],
+  "summary": { "changed": 1, "new": 1, "removed": 0, "unchanged": 5 }
+}
+```
+
+---
+
 ## smelt table
 
 Show column names and types for a model. The schema is inferred by the smelt type checker without executing the model.
