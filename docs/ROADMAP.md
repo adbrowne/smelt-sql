@@ -20,6 +20,19 @@ See [Code Quality & Hardening](#code-quality--hardening) below for details.
 
 Fully implemented. See [Data Testing Framework](#data-testing-framework) below for details.
 
+### ~~1. Data Catalog — `smelt docs generate`~~ ✅ (March 29, 2026)
+
+Static data catalog / data dictionary generation. Outputs Markdown (default) or JSON.
+
+- ✅ Per-model pages: description, owner, tags, materialization, columns with inferred types and lineage, upstream/downstream deps, incremental config
+- ✅ Column enrichment: merges Salsa type inference with frontmatter descriptions and column-level tests
+- ✅ Project index: model table, tag index, execution order
+- ✅ JSON format: structured `catalog.json` for machine consumption
+- ✅ `--select` filtering reuses existing selector infrastructure
+- ✅ Nested subcommand (`smelt docs generate`) for future `smelt docs serve`
+
+See [plan](plans/20260329-docs-generate.md) for details.
+
 ### ~~1. Spark / Databricks Backend~~ 🔄 (March 28, 2026)
 
 Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are now functional, connecting to Spark through PySpark's SparkSession.
@@ -182,6 +195,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - `smelt history` — run history with model filtering
 - `smelt test` — data testing framework (CTE isolation, whole-model, singular, property-based, column-level tests)
 - `smelt type` — function type signatures
+- `smelt docs generate` — static data catalog (Markdown/JSON) with column types, lineage, descriptions, tests (March 29, 2026)
 - Smart batching based on batch safety analysis
 - `smelt-state` crate for run manifests + interval tracking (`.smelt/` directory)
 - Two-stage graph architecture: `LogicalGraph` (user intent) → `PhysicalGraph` (execution plan)
@@ -192,7 +206,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 **Next steps**:
 - ~~`smelt test`~~ ✅ (March 27, 2026) — see [Data Testing Framework](#data-testing-framework)
-- `smelt docs generate` — data catalog output
+- ~~`smelt docs generate`~~ ✅ (March 29, 2026) — see [What's Next](#1-data-catalog--smelt-docs-generate)
 - `smelt diff` — show pending schema changes
 - `smelt validate` — pre-run validation
 - Schema evolution with efficient migrations (ALTER+backfill instead of full refresh)

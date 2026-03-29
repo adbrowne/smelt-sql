@@ -37,6 +37,17 @@ enum Commands {
     Explain(ExplainArgs),
     /// Run unit tests for models
     Test(TestArgs),
+    /// Generate documentation
+    Docs {
+        #[command(subcommand)]
+        command: DocsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocsCommands {
+    /// Generate a data catalog / data dictionary
+    Generate(DocsGenerateArgs),
 }
 
 #[derive(Parser)]
@@ -301,6 +312,25 @@ struct ExplainArgs {
 }
 
 #[derive(Parser)]
+pub struct DocsGenerateArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Output format: markdown, json
+    #[arg(long, default_value = "markdown")]
+    format: String,
+
+    /// Output directory (default: <project>/target/docs)
+    #[arg(long, short)]
+    output: Option<PathBuf>,
+
+    /// Select models to include (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+}
+
+#[derive(Parser)]
 struct TestArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
@@ -351,5 +381,8 @@ async fn main() -> Result<()> {
         Commands::History(args) => commands::history::history(args).await,
         Commands::Explain(args) => commands::explain::explain(args).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
+        Commands::Docs { command } => match command {
+            DocsCommands::Generate(args) => commands::docs::generate(args).await,
+        },
     }
 }

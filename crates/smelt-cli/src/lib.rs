@@ -3,6 +3,8 @@ pub mod backfill;
 pub mod compiler;
 pub mod config;
 pub mod discovery;
+pub mod docs;
+pub mod docs_render;
 pub mod errors;
 pub mod executor;
 pub mod explain;
