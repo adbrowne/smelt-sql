@@ -127,6 +127,29 @@ smelt-parser (pure parser)  →  smelt-db (Salsa queries)  →  smelt-lsp (LSP s
 
 This separation allows the LSP to get incremental parsing via Salsa, while the planner and CLI can use fast one-shot parsing directly from smelt-parser.
 
+### Pure Function Rule (smelt-db)
+
+**All analysis logic in smelt-db must be implemented as pure functions. Salsa queries must be thin wrappers that call these functions.**
+
+This is an architectural invariant. The core type inference, schema extraction, and diagnostic checks are deliberately written as pure functions that take AST nodes and plain data structures — not Salsa database references. Salsa queries exist only to provide incrementality (caching, dependency tracking, change detection).
+
+**Why this matters:** We plan to extract a `smelt-check` crate for batch compilation (planner, CLI) that doesn't need Salsa. Keeping logic pure makes that extraction a mechanical refactoring rather than a rewrite.
+
+**The rule in practice:**
+- **DO**: Write analysis as `fn check_something(ast: &Expr, ctx: &TypeContext) -> Result`
+- **DO**: Have Salsa queries build the inputs, call the pure function, and return the result
+- **DON'T**: Use `db.some_query()` calls inside analysis logic — pass the data in as parameters instead
+- **DON'T**: Make `TypeContext`, `ModelSchema`, or diagnostic functions depend on Salsa traits
+
+**Current examples of this pattern:**
+- `type_inference.rs` — 1800 lines of pure functions, zero Salsa imports
+- `schema.rs` — pure data structures
+- `check_expression_types()` in `lib.rs` — pure diagnostic check
+
+**Current exceptions (acceptable for now):**
+- `file_diagnostics()` orchestrates multiple Salsa queries to gather inputs before running checks
+- `type_context()` calls Salsa to resolve upstream model schemas
+
 ### Key Dependencies
 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)

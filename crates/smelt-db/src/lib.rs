@@ -2,6 +2,19 @@
 ///
 /// This module defines the Salsa queries that power the LSP and optimizer.
 /// Salsa automatically handles incremental recomputation when inputs change.
+///
+/// # Architecture: Pure Function Rule
+///
+/// All analysis logic must be implemented as **pure functions** that take AST nodes
+/// and plain data structures (e.g., `TypeContext`, `ModelSchema`). Salsa queries
+/// should be thin wrappers: gather inputs via queries, call the pure function, return
+/// the result.
+///
+/// **DO**: `fn infer_type(expr: &Expr, ctx: &TypeContext) -> DataType`
+/// **DON'T**: Put `db.some_query()` calls inside analysis logic.
+///
+/// This keeps the core compiler logic reusable outside Salsa (batch CLI, planner)
+/// and independently testable. See `type_inference.rs` and `schema.rs` for examples.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
