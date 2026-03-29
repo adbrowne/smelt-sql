@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774778128135,
+  "lastUpdate": 1774778129185,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10550,6 +10550,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.37335924190012,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e47c63ebcf53989e6dd0ae03746af86f2c3bfe5b",
+          "message": "Document discoveries from property test expansion\n\nAdd DuckDB incompatibilities discovered during generator expansion:\n~* / !~ / !~* regex operators, TO_CHAR, and EXTRACT parser issue.\nUpdate roadmap with comprehensive generator coverage summary.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T20:54:02+11:00",
+          "tree_id": "cb483523e8032589dd79cca3de3cacceb1cfda74",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e47c63ebcf53989e6dd0ae03746af86f2c3bfe5b"
+        },
+        "date": 1774778128900,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.1042159899564,
             "unit": "MB/s"
           }
         ]
