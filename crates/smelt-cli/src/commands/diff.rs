@@ -3,9 +3,10 @@ use smelt_cli::{
     discover_python_models, find_project_root, init_db, parse_selector, Config, LogicalGraph,
     ModelDiscovery, SourcesConfig,
 };
+use smelt_core::metadata::yaml_value_to_sql_literal;
 use smelt_state::file_store::FileStore;
 use smelt_state::schema_tracking::{diff_schemas, plan_migration, MigrationAction, SchemaDiff};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::helpers::infer_deployed_columns;
 use crate::DiffArgs;
@@ -146,11 +147,41 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
                         .and_then(|node| config.targets.get(&node.target))
                         .map(|t| t.schema.as_str())
                         .unwrap_or("main");
+                    // Extract column defaults and backfill expressions from frontmatter
+                    let (column_defaults, backfill_exprs) = model
+                        .metadata
+                        .as_ref()
+                        .map(|m| {
+                            let defaults: HashMap<String, String> =
+                                m.columns
+                                    .iter()
+                                    .filter_map(|(col_name, col_meta)| {
+                                        col_meta.default.as_ref().map(|v| {
+                                            (col_name.clone(), yaml_value_to_sql_literal(v))
+                                        })
+                                    })
+                                    .collect();
+                            let backfills: HashMap<String, String> = m
+                                .columns
+                                .iter()
+                                .filter_map(|(col_name, col_meta)| {
+                                    col_meta
+                                        .backfill
+                                        .as_ref()
+                                        .map(|expr| (col_name.clone(), expr.clone()))
+                                })
+                                .collect();
+                            (defaults, backfills)
+                        })
+                        .unwrap_or_default();
+
                     let action = plan_migration(
                         schema_name,
                         name,
                         &schema_diff,
                         true, // show full plan, don't block on column removal
+                        &column_defaults,
+                        &backfill_exprs,
                     );
                     ModelDiffStatus::Changed {
                         diff: schema_diff,

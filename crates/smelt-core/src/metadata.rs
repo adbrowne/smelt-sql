@@ -61,6 +61,52 @@ pub struct TestConfig {
     pub check_order: Option<bool>,
 }
 
+/// Schema evolution configuration for a model.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct SchemaEvolutionConfig {
+    /// Strategy for handling schema changes.
+    /// `alter_and_backfill` (default): use ALTER TABLE + UPDATE when possible.
+    /// `full_refresh`: always DROP + CREATE on schema changes.
+    #[serde(default)]
+    pub strategy: SchemaEvolutionStrategy,
+}
+
+/// How to handle schema changes during incremental runs.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub enum SchemaEvolutionStrategy {
+    /// Use ALTER TABLE with DEFAULT values and UPDATE backfill when possible.
+    #[default]
+    #[serde(rename = "alter_and_backfill")]
+    AlterAndBackfill,
+    /// Always fall back to full refresh on any schema change.
+    #[serde(rename = "full_refresh")]
+    FullRefresh,
+}
+
+/// Convert a YAML value to a SQL literal string.
+///
+/// Used to generate DEFAULT clauses for ALTER TABLE statements from
+/// frontmatter `default:` values.
+pub fn yaml_value_to_sql_literal(val: &serde_yaml::Value) -> String {
+    match val {
+        serde_yaml::Value::Null => "NULL".to_string(),
+        serde_yaml::Value::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::String(s) => {
+            // Escape single quotes by doubling them
+            format!("'{}'", s.replace('\'', "''"))
+        }
+        // Sequences and mappings are not valid SQL defaults
+        _ => "NULL".to_string(),
+    }
+}
+
 /// Per-column metadata declared in model frontmatter.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ColumnMetadata {
@@ -75,6 +121,16 @@ pub struct ColumnMetadata {
     /// Column-level test constraints (not_null, unique, accepted_values, min, max)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<ColumnTest>,
+
+    /// Default value for schema evolution (used when adding NOT NULL columns
+    /// via ALTER TABLE instead of full refresh).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_yaml::Value>,
+
+    /// SQL expression for backfilling existing rows during schema evolution.
+    /// Used in UPDATE statements after ALTER TABLE ADD COLUMN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<String>,
 }
 
 /// Metadata for a single model extracted from frontmatter
@@ -120,6 +176,10 @@ pub struct ModelMetadata {
     /// Test configuration (only for materialization: test)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestConfig>,
+
+    /// Schema evolution configuration (opt out with strategy: full_refresh)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_evolution: Option<SchemaEvolutionConfig>,
 }
 
 /// Complete file metadata (single or multi-model)
@@ -629,6 +689,105 @@ SELECT * FROM users"#;
                 assert_eq!(
                     metadata.materialization,
                     Some(Materialization::MaterializedView)
+                );
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_yaml_value_to_sql_literal() {
+        assert_eq!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::String("hello".into())),
+            "'hello'"
+        );
+        assert_eq!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::String("it's".into())),
+            "'it''s'"
+        );
+        assert_eq!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::Number(42.into())),
+            "42"
+        );
+        assert_eq!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(true)),
+            "TRUE"
+        );
+        assert_eq!(
+            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(false)),
+            "FALSE"
+        );
+        assert_eq!(yaml_value_to_sql_literal(&serde_yaml::Value::Null), "NULL");
+    }
+
+    #[test]
+    fn test_frontmatter_with_column_default() {
+        let source = r#"---
+name: test_model
+materialization: table
+columns:
+  status:
+    default: unknown
+  priority:
+    default: 0
+---
+SELECT * FROM users"#;
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                let status = metadata.columns.get("status").unwrap();
+                assert_eq!(
+                    yaml_value_to_sql_literal(status.default.as_ref().unwrap()),
+                    "'unknown'"
+                );
+                let priority = metadata.columns.get("priority").unwrap();
+                assert_eq!(
+                    yaml_value_to_sql_literal(priority.default.as_ref().unwrap()),
+                    "0"
+                );
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_schema_evolution() {
+        let source = r#"---
+name: test_model
+materialization: table
+schema_evolution:
+  strategy: full_refresh
+---
+SELECT * FROM users"#;
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(
+                    metadata.schema_evolution.unwrap().strategy,
+                    SchemaEvolutionStrategy::FullRefresh
+                );
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_backfill() {
+        let source = r#"---
+name: test_model
+materialization: table
+columns:
+  full_name:
+    backfill: "COALESCE(first_name || ' ' || last_name, '')"
+---
+SELECT * FROM users"#;
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                let col = metadata.columns.get("full_name").unwrap();
+                assert_eq!(
+                    col.backfill.as_ref().unwrap(),
+                    "COALESCE(first_name || ' ' || last_name, '')"
                 );
             }
             _ => panic!("Expected Single variant"),

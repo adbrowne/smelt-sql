@@ -6,6 +6,7 @@ use smelt_state::intervals::compute_model_hash;
 use smelt_state::schema_tracking::{
     diff_schemas, plan_migration, DeployedColumn, DeployedSchema, MigrationAction,
 };
+use std::collections::HashMap;
 
 /// Result of checking schema evolution for a model.
 #[derive(Debug)]
@@ -49,6 +50,8 @@ pub async fn check_and_migrate(
     inferred_columns: &[DeployedColumn],
     allow_column_removal: bool,
     dry_run: bool,
+    column_defaults: &HashMap<String, String>,
+    backfill_exprs: &HashMap<String, String>,
 ) -> Result<SchemaEvolutionResult> {
     let model_hash = compute_model_hash(model_sql);
 
@@ -73,7 +76,14 @@ pub async fn check_and_migrate(
     }
 
     // Plan the migration
-    let action = plan_migration(schema, model_name, &diff, allow_column_removal);
+    let action = plan_migration(
+        schema,
+        model_name,
+        &diff,
+        allow_column_removal,
+        column_defaults,
+        backfill_exprs,
+    );
 
     match action {
         MigrationAction::NoChange => Ok(SchemaEvolutionResult::NoChange),

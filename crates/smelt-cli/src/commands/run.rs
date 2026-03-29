@@ -8,6 +8,7 @@ use smelt_cli::{
     BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery,
     PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig, TimeRange,
 };
+use smelt_core::metadata::{yaml_value_to_sql_literal, SchemaEvolutionStrategy};
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
@@ -486,46 +487,93 @@ pub async fn run(args: RunArgs) -> Result<()> {
         // Schema evolution check for incremental table models
         let mut force_full_refresh = false;
         if let PhysicalStrategy::Incremental { .. } = &phys_node.strategy {
-            if let Ok(true) = backend.table_exists(schema, model_name).await {
-                let inferred_columns = infer_deployed_columns(&type_db, model);
-                if !inferred_columns.is_empty() {
-                    match migration::check_and_migrate(
-                        backend,
-                        &file_store,
-                        model_name,
-                        &model.content,
-                        schema,
-                        &inferred_columns,
-                        args.allow_column_removal,
-                        args.dry_run,
-                    )
-                    .await
-                    {
-                        Ok(migration::SchemaEvolutionResult::FirstDeployment) => {}
-                        Ok(migration::SchemaEvolutionResult::NoChange) => {}
-                        Ok(migration::SchemaEvolutionResult::Migrated { statements }) => {
-                            info!("Schema evolved ({} ALTER statement(s)):", statements.len());
-                            for stmt in &statements {
-                                info!("    {}", stmt);
+            // Check if schema evolution is opted out via frontmatter
+            let evolution_strategy = model
+                .metadata
+                .as_ref()
+                .and_then(|m| m.schema_evolution.as_ref())
+                .map(|se| &se.strategy);
+            let use_alter = !matches!(
+                evolution_strategy,
+                Some(SchemaEvolutionStrategy::FullRefresh)
+            );
+
+            if use_alter {
+                if let Ok(true) = backend.table_exists(schema, model_name).await {
+                    let inferred_columns = infer_deployed_columns(&type_db, model);
+                    if !inferred_columns.is_empty() {
+                        // Extract column defaults and backfill expressions from frontmatter
+                        let (column_defaults, backfill_exprs) = model
+                            .metadata
+                            .as_ref()
+                            .map(|m| {
+                                let defaults: HashMap<String, String> =
+                                    m.columns
+                                        .iter()
+                                        .filter_map(|(name, col_meta)| {
+                                            col_meta.default.as_ref().map(|v| {
+                                                (name.clone(), yaml_value_to_sql_literal(v))
+                                            })
+                                        })
+                                        .collect();
+                                let backfills: HashMap<String, String> = m
+                                    .columns
+                                    .iter()
+                                    .filter_map(|(name, col_meta)| {
+                                        col_meta
+                                            .backfill
+                                            .as_ref()
+                                            .map(|expr| (name.clone(), expr.clone()))
+                                    })
+                                    .collect();
+                                (defaults, backfills)
+                            })
+                            .unwrap_or_default();
+
+                        match migration::check_and_migrate(
+                            backend,
+                            &file_store,
+                            model_name,
+                            &model.content,
+                            schema,
+                            &inferred_columns,
+                            args.allow_column_removal,
+                            args.dry_run,
+                            &column_defaults,
+                            &backfill_exprs,
+                        )
+                        .await
+                        {
+                            Ok(migration::SchemaEvolutionResult::FirstDeployment) => {}
+                            Ok(migration::SchemaEvolutionResult::NoChange) => {}
+                            Ok(migration::SchemaEvolutionResult::Migrated { statements }) => {
+                                info!("Schema evolved ({} ALTER statement(s)):", statements.len());
+                                for stmt in &statements {
+                                    info!("    {}", stmt);
+                                }
                             }
-                        }
-                        Ok(migration::SchemaEvolutionResult::FullRefreshRequired { reason }) => {
-                            info!("Schema change requires full refresh: {}", reason);
-                            force_full_refresh = true;
-                        }
-                        Ok(migration::SchemaEvolutionResult::ColumnRemovalBlocked { columns }) => {
-                            return Err(anyhow::anyhow!(
-                                "Schema evolution for '{}' would remove columns: {}. \
+                            Ok(migration::SchemaEvolutionResult::FullRefreshRequired {
+                                reason,
+                            }) => {
+                                info!("Schema change requires full refresh: {}", reason);
+                                force_full_refresh = true;
+                            }
+                            Ok(migration::SchemaEvolutionResult::ColumnRemovalBlocked {
+                                columns,
+                            }) => {
+                                return Err(anyhow::anyhow!(
+                                    "Schema evolution for '{}' would remove columns: {}. \
                                  Use --allow-column-removal to permit this.",
-                                model_name,
-                                columns.join(", ")
-                            ));
-                        }
-                        Err(e) => {
-                            warn!(
+                                    model_name,
+                                    columns.join(", ")
+                                ));
+                            }
+                            Err(e) => {
+                                warn!(
                                 "Schema evolution check failed: {}. Continuing with incremental.",
                                 e
                             );
+                            }
                         }
                     }
                 }
