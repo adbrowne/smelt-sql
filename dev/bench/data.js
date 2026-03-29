@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774751523232,
+  "lastUpdate": 1774751524995,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9812,6 +9812,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.337564787150537,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "60640176b745312bf503465720b08b9dfbb976f1",
+          "message": "Add proptest regression seeds for cross-model type propagation failures\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T13:30:11+11:00",
+          "tree_id": "a179533db85bc9db9dec0bc862479bf522e654ca",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/60640176b745312bf503465720b08b9dfbb976f1"
+        },
+        "date": 1774751524309,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.93210042733384,
             "unit": "MB/s"
           }
         ]
