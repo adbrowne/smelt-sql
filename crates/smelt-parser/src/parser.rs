@@ -1017,6 +1017,13 @@ impl<'a> Parser<'a> {
             } else if self.at(IN_KW) {
                 // IN (values...)
                 self.parse_in_expr();
+            } else if self.at(LIKE_KW) || self.at(ILIKE_KW) {
+                // LIKE / ILIKE pattern
+                self.start_node_at(checkpoint, BINARY_EXPR);
+                self.advance(); // consume LIKE/ILIKE
+                self.skip_trivia();
+                self.parse_concat_expr();
+                self.finish_node();
             } else {
                 break;
             }

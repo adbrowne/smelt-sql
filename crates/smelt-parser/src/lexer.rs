@@ -410,6 +410,8 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "QUALIFY" => QUALIFY_KW,
         "PIVOT" => PIVOT_KW,
         "UNPIVOT" => UNPIVOT_KW,
+        "LIKE" => LIKE_KW,
+        "ILIKE" => ILIKE_KW,
         _ => IDENT,
     }
 }

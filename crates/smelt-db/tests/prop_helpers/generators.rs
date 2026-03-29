@@ -43,6 +43,8 @@ pub enum BaseType {
     Date,
     Timestamp,
     Decimal,
+    Time,
+    Interval,
 }
 
 impl BaseType {
@@ -56,6 +58,8 @@ impl BaseType {
             BaseType::Date,
             BaseType::Timestamp,
             BaseType::Decimal,
+            BaseType::Time,
+            BaseType::Interval,
         ]
     }
 
@@ -74,6 +78,8 @@ impl BaseType {
                 precision: 10,
                 scale: 2,
             },
+            BaseType::Time => DataType::Time,
+            BaseType::Interval => DataType::Interval,
         }
     }
 
@@ -87,6 +93,8 @@ impl BaseType {
             BaseType::Date => "CAST('2024-01-01' AS DATE)",
             BaseType::Timestamp => "CAST('2024-01-01 12:00:00' AS TIMESTAMP)",
             BaseType::Decimal => "CAST(99.99 AS DECIMAL(10,2))",
+            BaseType::Time => "CAST('12:00:00' AS TIME)",
+            BaseType::Interval => "CAST('1 day' AS INTERVAL)",
         }
     }
 
@@ -100,6 +108,8 @@ impl BaseType {
             BaseType::Date => "date_col",
             BaseType::Timestamp => "ts_col",
             BaseType::Decimal => "dec_col",
+            BaseType::Time => "time_col",
+            BaseType::Interval => "interval_col",
         }
     }
 }
@@ -118,6 +128,10 @@ pub enum QueryShape {
     },
     /// `SELECT window_exprs FROM data`
     Window,
+    /// `SELECT group_cols, agg_exprs, window_over_agg FROM data GROUP BY group_cols`
+    GroupByWindow { group_columns: Vec<String> },
+    /// `SELECT DISTINCT exprs FROM data`
+    Distinct,
 }
 
 /// An expression kind the generator can produce.
@@ -141,6 +155,26 @@ pub enum ExprKind {
     WindowFunc,
     /// JSON operator (-> or ->>).
     JsonOp,
+    /// col IS NULL / col IS NOT NULL → Boolean.
+    IsNull,
+    /// Comparison operators (=, <>, <, >, <=, >=) → Boolean.
+    Comparison,
+    /// NOT bool_col → Boolean.
+    UnaryNot,
+    /// -num_col → same numeric type.
+    UnaryMinus,
+    /// EXISTS (SELECT 1 FROM data WHERE bool_col) → Boolean.
+    Exists,
+    /// EXTRACT(part FROM temporal_col) → BigInt.
+    Extract,
+    /// MAKE_DATE(y, m, d) or MAKE_TIMESTAMP(y, m, d, h, min, s).
+    MakeTemporal,
+    /// (SELECT agg(col) FROM data) → aggregate return type.
+    ScalarSubquery,
+    /// LIKE / ILIKE pattern matching → Boolean.
+    Like,
+    /// Regex operators (~, ~*) → Boolean.
+    Regex,
 }
 
 // ---- Function descriptors ----
@@ -692,6 +726,30 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: Some("key"),
             output_type: DataType::Text,
         },
+        // String aggregate
+        FuncDesc {
+            name: "STRING_AGG",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral(",")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
+        // Any-type aggregates
+        FuncDesc {
+            name: "ANY_VALUE",
+            input: FuncInput::AnyAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Unknown, // uses input type
+        },
+        FuncDesc {
+            name: "APPROX_COUNT_DISTINCT",
+            input: FuncInput::AnyAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::BigInt,
+        },
+        // TO_CHAR omitted — not available in DuckDB
     ]
 }
 
@@ -731,8 +789,10 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             },
             _ => DataType::Double,
         },
-        "MIN" | "MAX" | "COALESCE" | "NULLIF" | "GREATEST" | "LEAST" => arg_type.clone(),
-        "COUNT" => DataType::BigInt,
+        "MIN" | "MAX" | "COALESCE" | "NULLIF" | "GREATEST" | "LEAST" | "ANY_VALUE" => {
+            arg_type.clone()
+        }
+        "COUNT" | "APPROX_COUNT_DISTINCT" => DataType::BigInt,
         "SUM" => DataType::Decimal {
             precision: 38,
             scale: 10,
@@ -756,7 +816,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
         | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
-        | "SPLIT_PART" => DataType::Text,
+        | "SPLIT_PART" | "STRING_AGG" => DataType::Text,
         // JSON functions
         "TO_JSON"
         | "JSON_OBJECT"
@@ -803,6 +863,14 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::InList),
         2 => Just(ExprKind::WindowFunc),
         1 => Just(ExprKind::JsonOp),
+        1 => Just(ExprKind::IsNull),
+        1 => Just(ExprKind::Comparison),
+        1 => Just(ExprKind::UnaryNot),
+        1 => Just(ExprKind::UnaryMinus),
+        1 => Just(ExprKind::Exists),
+        1 => Just(ExprKind::ScalarSubquery),
+        1 => Just(ExprKind::Like),
+        1 => Just(ExprKind::Regex),
     ]
 }
 
@@ -857,8 +925,14 @@ pub fn generate_expr(
                 &[("VARCHAR", DataType::Varchar { max_length: None })]
             };
             let (cast_type, smelt_type) = &cast_options[func_idx % cast_options.len()];
+            // Alternate between CAST() and :: syntax
+            let sql = if expr_idx % 2 == 0 {
+                format!("CAST({} AS {cast_type})", col.name)
+            } else {
+                format!("{}::{cast_type}", col.name)
+            };
             Some(TypedExpr {
-                sql: format!("CAST({} AS {cast_type})", col.name),
+                sql,
                 alias,
                 expected_smelt_type: smelt_type.clone(),
             })
@@ -907,9 +981,23 @@ pub fn generate_expr(
         }
 
         ExprKind::BinaryOp => {
-            // Find a numeric column for arithmetic, or string for ||
-            if let Some(num_col) = columns.iter().find(|c| c.data_type.is_numeric()) {
-                // integer + integer => same type promotion
+            let num_cols: Vec<&TypedSource> = columns
+                .iter()
+                .filter(|c| c.data_type.is_numeric())
+                .collect();
+
+            if num_cols.len() >= 2 && func_idx % 3 == 0 {
+                // Mixed-type binary op: pick two different numeric columns
+                let col_a = num_cols[expr_idx % num_cols.len()];
+                let col_b = num_cols[(expr_idx + 1) % num_cols.len()];
+                let expected = promote_numeric_type(&col_a.data_type, &col_b.data_type);
+                Some(TypedExpr {
+                    sql: format!("{} + {}", col_a.name, col_b.name),
+                    alias,
+                    expected_smelt_type: expected,
+                })
+            } else if let Some(num_col) = num_cols.first() {
+                // Same-type arithmetic
                 let expected = num_col.data_type.clone();
                 Some(TypedExpr {
                     sql: format!("{} + {}", num_col.name, num_col.name),
@@ -976,6 +1064,142 @@ pub fn generate_expr(
         }
 
         ExprKind::WindowFunc => generate_window_expr(columns, expr_idx, func_idx, alias),
+
+        ExprKind::IsNull => {
+            let col = &columns[expr_idx % columns.len()];
+            let is_not = func_idx % 2 == 0;
+            let op = if is_not { "IS NOT NULL" } else { "IS NULL" };
+            Some(TypedExpr {
+                sql: format!("{} {op}", col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::Comparison => {
+            // Find two columns of the same type for comparison
+            let col = &columns[expr_idx % columns.len()];
+            let ops = ["=", "<>", "<", ">", "<=", ">="];
+            let op = ops[func_idx % ops.len()];
+            Some(TypedExpr {
+                sql: format!("{} {op} {}", col.name, col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::UnaryNot => {
+            // Find a boolean column, or wrap a comparison
+            if let Some(bool_col) = columns.iter().find(|c| c.data_type == DataType::Boolean) {
+                Some(TypedExpr {
+                    sql: format!("NOT {}", bool_col.name),
+                    alias,
+                    expected_smelt_type: DataType::Boolean,
+                })
+            } else {
+                // Generate NOT (col = col) as fallback
+                let col = &columns[expr_idx % columns.len()];
+                Some(TypedExpr {
+                    sql: format!("NOT ({} = {})", col.name, col.name),
+                    alias,
+                    expected_smelt_type: DataType::Boolean,
+                })
+            }
+        }
+
+        ExprKind::UnaryMinus => {
+            let num_col = columns.iter().find(|c| c.data_type.is_numeric())?;
+            Some(TypedExpr {
+                sql: format!("-{}", num_col.name),
+                alias,
+                expected_smelt_type: num_col.data_type.clone(),
+            })
+        }
+
+        ExprKind::Exists => {
+            // EXISTS (SELECT 1 FROM data WHERE col IS NOT NULL)
+            let col = &columns[expr_idx % columns.len()];
+            Some(TypedExpr {
+                sql: format!("EXISTS (SELECT 1 FROM data WHERE {} IS NOT NULL)", col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::Extract => {
+            // EXTRACT(part FROM temporal_col) → BigInt
+            let temporal_col = columns
+                .iter()
+                .find(|c| matches!(c.data_type, DataType::Date | DataType::Timestamp { .. }))?;
+            let parts = ["YEAR", "MONTH", "DAY"];
+            let part = parts[func_idx % parts.len()];
+            Some(TypedExpr {
+                sql: format!("EXTRACT({part} FROM {})", temporal_col.name),
+                alias,
+                expected_smelt_type: DataType::BigInt,
+            })
+        }
+
+        ExprKind::Like => {
+            let str_col = columns.iter().find(|c| c.data_type.is_string())?;
+            let op = if func_idx % 2 == 0 { "LIKE" } else { "ILIKE" };
+            Some(TypedExpr {
+                sql: format!("{} {op} '%ell%'", str_col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::Regex => {
+            // Use ~ only (DuckDB doesn't support ~*, !~, !~*)
+            let str_col = columns.iter().find(|c| c.data_type.is_string())?;
+            Some(TypedExpr {
+                sql: format!("{} ~ 'ell'", str_col.name),
+                alias,
+                expected_smelt_type: DataType::Boolean,
+            })
+        }
+
+        ExprKind::ScalarSubquery => {
+            // (SELECT COUNT(*) FROM data) or (SELECT MIN(col) FROM data)
+            let col = &columns[expr_idx % columns.len()];
+            if func_idx % 2 == 0 {
+                Some(TypedExpr {
+                    sql: "(SELECT COUNT(*) FROM data)".to_string(),
+                    alias,
+                    expected_smelt_type: DataType::BigInt,
+                })
+            } else {
+                Some(TypedExpr {
+                    sql: format!("(SELECT MIN({}) FROM data)", col.name),
+                    alias,
+                    expected_smelt_type: col.data_type.clone(),
+                })
+            }
+        }
+
+        ExprKind::MakeTemporal => {
+            // MAKE_DATE or MAKE_TIMESTAMP from integer columns
+            // Use column as year (any integer is a valid year), safe literals for month/day
+            let int_col = columns
+                .iter()
+                .find(|c| matches!(c.data_type, DataType::Integer | DataType::BigInt))?;
+            if func_idx % 2 == 0 {
+                Some(TypedExpr {
+                    sql: format!("MAKE_DATE({}, 1, 1)", int_col.name),
+                    alias,
+                    expected_smelt_type: DataType::Date,
+                })
+            } else {
+                Some(TypedExpr {
+                    sql: format!("MAKE_TIMESTAMP({}, 1, 1, 0, 0, 0)", int_col.name),
+                    alias,
+                    expected_smelt_type: DataType::Timestamp {
+                        with_timezone: false,
+                    },
+                })
+            }
+        }
     }
 }
 
@@ -1101,6 +1325,18 @@ fn generate_window_expr(
     }
     if wf.requires_order_by || func_idx.is_multiple_of(2) {
         over_parts.push(format!("ORDER BY {}", order_col.name));
+
+        // Add window frame spec sometimes (only valid with ORDER BY)
+        // Skip for ranking functions (ROW_NUMBER, RANK, DENSE_RANK) which don't support frames
+        if !matches!(wf.kind, WindowFuncKind::RankingBigInt) && expr_idx % 3 == 0 {
+            let frame_specs = [
+                "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+                "ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING",
+                "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING",
+                "ROWS UNBOUNDED PRECEDING",
+            ];
+            over_parts.push(frame_specs[func_idx % frame_specs.len()].to_string());
+        }
     }
 
     let over_clause = if over_parts.is_empty() {
@@ -1123,6 +1359,25 @@ fn generate_window_expr(
     })
 }
 
+/// Promote two numeric types to the widest type, matching type_inference.rs rules.
+/// Double > Decimal > BigInt > Integer > SmallInt
+fn promote_numeric_type(a: &DataType, b: &DataType) -> DataType {
+    if matches!(a, DataType::Double) || matches!(b, DataType::Double) {
+        DataType::Double
+    } else if matches!(a, DataType::Decimal { .. }) || matches!(b, DataType::Decimal { .. }) {
+        DataType::Decimal {
+            precision: 38,
+            scale: 10,
+        }
+    } else if matches!(a, DataType::BigInt) || matches!(b, DataType::BigInt) {
+        DataType::BigInt
+    } else if matches!(a, DataType::Integer) || matches!(b, DataType::Integer) {
+        DataType::Integer
+    } else {
+        DataType::SmallInt
+    }
+}
+
 fn smelt_type_to_base(dt: &DataType) -> Option<BaseType> {
     match dt {
         DataType::Boolean => Some(BaseType::Boolean),
@@ -1136,6 +1391,8 @@ fn smelt_type_to_base(dt: &DataType) -> Option<BaseType> {
         DataType::Timestamp { .. } => Some(BaseType::Timestamp),
         DataType::Decimal { .. } => Some(BaseType::Decimal),
         DataType::SmallInt => Some(BaseType::Integer),
+        DataType::Time => Some(BaseType::Time),
+        DataType::Interval => Some(BaseType::Interval),
         _ => None,
     }
 }
@@ -1177,7 +1434,9 @@ pub fn assemble_cte_query(
         .collect();
 
     match shape {
-        QueryShape::GroupBy { group_columns } | QueryShape::GroupByHaving { group_columns, .. } => {
+        QueryShape::GroupBy { group_columns }
+        | QueryShape::GroupByHaving { group_columns, .. }
+        | QueryShape::GroupByWindow { group_columns } => {
             // For GROUP BY queries: include group columns + aggregate expressions only
             let mut select_items: Vec<String> = Vec::new();
 
@@ -1199,6 +1458,17 @@ pub fn assemble_cte_query(
                 }
             }
 
+            // For GroupByWindow, add a window function over an aggregate
+            if matches!(shape, QueryShape::GroupByWindow { .. }) {
+                // Pick an aggregate column to order by — use first agg or COUNT(*)
+                let order_expr = if !agg_exprs.is_empty() {
+                    agg_exprs[0].sql.clone()
+                } else {
+                    "COUNT(*)".to_string()
+                };
+                select_items.push(format!("RANK() OVER (ORDER BY {order_expr}) AS win_rank"));
+            }
+
             let group_by_clause = format!("GROUP BY {}", group_columns.join(", "));
 
             let having_clause = if let QueryShape::GroupByHaving {
@@ -1214,6 +1484,27 @@ pub fn assemble_cte_query(
                 "WITH data AS (SELECT {}) SELECT {} FROM data {group_by_clause}{having_clause}",
                 cte_cols.join(", "),
                 select_items.join(", ")
+            )
+        }
+        QueryShape::Distinct => {
+            // SELECT DISTINCT doesn't change types — just deduplicates
+            let scalar_exprs: Vec<&TypedExpr> = exprs
+                .iter()
+                .filter(|e| !is_aggregate_expr(&e.sql) && !is_window_expr(&e.sql))
+                .collect();
+            let selected = if scalar_exprs.is_empty() {
+                // fallback: use column refs
+                vec![format!("{} AS expr_0", columns[0].name)]
+            } else {
+                scalar_exprs
+                    .iter()
+                    .map(|e| format!("{} AS {}", e.sql, e.alias))
+                    .collect()
+            };
+            format!(
+                "WITH data AS (SELECT {}) SELECT DISTINCT {} FROM data",
+                cte_cols.join(", "),
+                selected.join(", ")
             )
         }
         QueryShape::Scalar | QueryShape::Window => {
@@ -1276,19 +1567,25 @@ pub fn query_shape_strategy(
 
     let cols_for_gb = columns.clone();
     let cols_for_gbh = columns.clone();
+    let cols_for_gbw = columns.clone();
 
-    // Weighted choice: Scalar 60%, GroupBy 20%, GroupByHaving 15%, Window 5%
+    // Weighted choice: Scalar 50%, GroupBy 15%, GroupByHaving 10%, GroupByWindow 10%, Window 5%, Distinct 10%
     prop_oneof![
-        60 => Just((columns.clone(), QueryShape::Scalar)),
+        50 => Just((columns.clone(), QueryShape::Scalar)),
         5 => Just((columns.clone(), QueryShape::Window)),
-        20 => (1..=max_group).prop_map(move |n_group| {
+        10 => Just((columns.clone(), QueryShape::Distinct)),
+        15 => (1..=max_group).prop_map(move |n_group| {
             let group_cols: Vec<String> = cols_for_gb.iter().take(n_group).map(|c| c.name.clone()).collect();
             (cols_for_gb.clone(), QueryShape::GroupBy { group_columns: group_cols })
         }),
-        15 => (1..=max_group).prop_map(move |n_group| {
+        10 => (1..=max_group).prop_map(move |n_group| {
             let group_cols: Vec<String> = cols_for_gbh.iter().take(n_group).map(|c| c.name.clone()).collect();
             let having = generate_having_predicate(&cols_for_gbh, &group_cols);
             (cols_for_gbh.clone(), QueryShape::GroupByHaving { group_columns: group_cols, having_predicate: having })
+        }),
+        10 => (1..=max_group).prop_map(move |n_group| {
+            let group_cols: Vec<String> = cols_for_gbw.iter().take(n_group).map(|c| c.name.clone()).collect();
+            (cols_for_gbw.clone(), QueryShape::GroupByWindow { group_columns: group_cols })
         }),
     ]
 }
@@ -1765,6 +2062,10 @@ fn scalar_expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         2 => Just(ExprKind::BinaryOp),
         1 => Just(ExprKind::CaseExpr),
         1 => Just(ExprKind::Cast),
+        1 => Just(ExprKind::IsNull),
+        1 => Just(ExprKind::Comparison),
+        1 => Just(ExprKind::UnaryNot),
+        1 => Just(ExprKind::UnaryMinus),
     ]
 }
 

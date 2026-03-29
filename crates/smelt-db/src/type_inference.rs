@@ -936,6 +936,12 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             nullable: false, // Comparisons always return true/false
         }),
 
+        // Pattern matching operators - always return Boolean
+        "LIKE" | "ILIKE" | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
+            data_type: DataType::Boolean,
+            nullable: true,
+        }),
+
         // String concatenation - always returns Text
         "||" => Some(TypedColumn {
             data_type: DataType::Text,

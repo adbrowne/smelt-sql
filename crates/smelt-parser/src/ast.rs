@@ -793,6 +793,12 @@ impl BinaryExpr {
                     OR_KW => return Some("OR".to_string()),
                     IS_KW => return Some("IS".to_string()),
                     NOT_KW => return Some("NOT".to_string()),
+                    LIKE_KW => return Some("LIKE".to_string()),
+                    ILIKE_KW => return Some("ILIKE".to_string()),
+                    TILDE => return Some("~".to_string()),
+                    TILDE_STAR => return Some("~*".to_string()),
+                    NOT_TILDE => return Some("!~".to_string()),
+                    NOT_TILDE_STAR => return Some("!~*".to_string()),
                     _ => {}
                 }
             }

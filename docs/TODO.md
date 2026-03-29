@@ -26,25 +26,40 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 - [x] **Window functions** — Added ROW_NUMBER, RANK, DENSE_RANK, NTILE, CUME_DIST, PERCENT_RANK, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE with random OVER clauses (PARTITION BY, ORDER BY). Frame specs not yet covered.
 - [x] **BETWEEN / IN expressions** — Added BETWEEN and IN for numeric columns (both return Boolean). EXISTS not yet covered.
-- [ ] **GROUP BY + window functions combined** — Generate queries that use window functions over aggregated results (e.g., `RANK() OVER (ORDER BY SUM(x))`), or window functions alongside GROUP BY columns. Currently window and aggregate expressions are separated into different queries.
-- [ ] **Scalar subqueries** — Generate `(SELECT ...)` in expression position (none covered)
-- [ ] **Regex operators** — Add `~`, `~*`, `!~`, `!~*` PostgreSQL regex operators (none covered, type inference also missing)
+- [x] **GROUP BY + window functions combined** — `QueryShape::GroupByWindow` generates `RANK() OVER (ORDER BY SUM(x))` alongside GROUP BY. Window frame specs (ROWS/RANGE/GROUPS BETWEEN) also added to window function generators.
+- [x] **Scalar subqueries** — `ExprKind::ScalarSubquery` generates `(SELECT COUNT(*) FROM data)` and `(SELECT MIN(col) FROM data)`.
+- [x] **Regex operators** — Parser already lexed `~`, `~*`, `!~`, `!~*`; added to `BinaryExpr::operator()`, type inference (`→ Boolean`), and generators.
 - [x] **JSON operators** — Added type inference for `->`, `->>` (Text), `#>`, `#>>` (Text), `@>`, `<@` (Boolean). Added `->` and `->>` to property test generators against DuckDB.
-- [ ] **Mixed-type binary operations** — Generate cross-type arithmetic (INTEGER + BIGINT, DECIMAL + DOUBLE) to test type promotion rules
+- [x] **Mixed-type binary operations** — `BinaryOp` generator now picks two columns of different numeric types (e.g., `int_col + bigint_col`) with correct type promotion (Double > Decimal > BigInt > Integer).
+- [x] **Boolean/unary expressions** — Added `ExprKind::IsNull` (`col IS NULL`/`IS NOT NULL`), `Comparison` (`col = col`, `<`, `>`, etc.), `UnaryNot` (`NOT bool_col`), `UnaryMinus` (`-num_col`), `Exists` (`EXISTS (SELECT ...)`).
+- [x] **LIKE / ILIKE operators** — Added `LIKE_KW`/`ILIKE_KW` to parser lexer, parsed as binary expressions, type inference returns Boolean, generators produce `str_col LIKE '%pattern%'`.
+- [x] **Additional functions** — Added STRING_AGG, ANY_VALUE, APPROX_COUNT_DISTINCT to generators. EXTRACT and MAKE_DATE/MAKE_TIMESTAMP have generator code but are excluded from `expr_kind_strategy()` due to EXTRACT's `FROM` keyword confusing the parser's alias extraction. TO_CHAR omitted (not available in DuckDB).
 
 ### Types
 
-- [ ] **Interval type** — Add as a base type for temporal arithmetic testing
-- [ ] **Time type** — Add as a base type for MAKE_TIME and time functions
+- [x] **Interval type** — Added `BaseType::Interval` with `CAST('1 day' AS INTERVAL)`, Arrow mapping already handles `Duration`/`Interval`.
+- [x] **Time type** — Added `BaseType::Time` with `CAST('12:00:00' AS TIME)`, Arrow mapping already handles `Time32`/`Time64`.
 - [ ] **Array types** — Add ARRAY literals, ARRAY_AGG, array subscript, array slice
 - [ ] **Row/Struct types** — Add ROW(...) and STRUCT(...) constructors
 
 ### Syntax Variants
 
-- [ ] **PostgreSQL `::` cast syntax** — Generate `expr::type` in addition to `CAST(expr AS type)`
+- [x] **PostgreSQL `::` cast syntax** — `ExprKind::Cast` now randomly chooses between `CAST(col AS TYPE)` and `col::TYPE`.
 - [x] **CAST to more types** — Added INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN, DATE, TIMESTAMP targets
 - [x] **GROUP BY / HAVING** — `QueryShape::GroupByHaving` generates multi-column GROUP BY with HAVING predicates via `generate_having_predicate()`
-- [ ] **DISTINCT / DISTINCT ON** — Generate DISTINCT expressions
+- [x] **DISTINCT / DISTINCT ON** — `QueryShape::Distinct` generates `SELECT DISTINCT` queries.
+
+### Deferred
+
+- [ ] **SET operations (UNION/INTERSECT/EXCEPT)** — Type coercion rules across union branches, requires different query shape
+- [ ] **QUALIFY clause** — Parsed and rewritten by dialect printer, needs query-shape-level testing
+- [ ] **PIVOT/UNPIVOT** — Complex syntax, rare usage, needs dedicated generator shape
+- [ ] **Lambda expressions** — No type inference support yet, needs inference work first
+- [ ] **Ordered-set aggregates (MEDIAN/MODE/PERCENTILE_CONT/PERCENTILE_DISC)** — DuckDB syntax differences for ordered-set aggregates
+- [ ] **Two-column aggregates (CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE)** — Needs multi-column aggregate generator support
+- [ ] **Aggregate FILTER clause** — `COUNT(*) FILTER (WHERE cond)`, parsed but not generated
+- [ ] **WITHIN GROUP (ORDER BY)** — For STRING_AGG/LISTAGG, parsed but not generated
+- [ ] **EXTRACT parser support** — `EXTRACT(YEAR FROM col)` uses `FROM` keyword inside function args, which confuses the parser's alias extraction and SELECT item parsing. Needs dedicated parser handling (like CAST). Affects cross-model type propagation and conformance test wrapping. Generator code exists (`ExprKind::Extract`, `ExprKind::MakeTemporal`) but is excluded from `expr_kind_strategy()` until parser is fixed.
 
 ## smelt test
 

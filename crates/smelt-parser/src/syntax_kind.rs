@@ -82,6 +82,8 @@ pub enum SyntaxKind {
     QUALIFY_KW,
     PIVOT_KW,
     UNPIVOT_KW,
+    LIKE_KW,
+    ILIKE_KW,
 
     // Contextual keywords (lexed as IDENT, recognized by parser contextually)
     // These variants exist for the enum but are never produced by the lexer.
@@ -282,6 +284,8 @@ impl SyntaxKind {
                 | QUALIFY_KW
                 | PIVOT_KW
                 | UNPIVOT_KW
+                | LIKE_KW
+                | ILIKE_KW
         )
     }
 
