@@ -926,7 +926,7 @@ pub fn generate_expr(
             };
             let (cast_type, smelt_type) = &cast_options[func_idx % cast_options.len()];
             // Alternate between CAST() and :: syntax
-            let sql = if expr_idx % 2 == 0 {
+            let sql = if expr_idx.is_multiple_of(2) {
                 format!("CAST({} AS {cast_type})", col.name)
             } else {
                 format!("{}::{cast_type}", col.name)
@@ -986,7 +986,7 @@ pub fn generate_expr(
                 .filter(|c| c.data_type.is_numeric())
                 .collect();
 
-            if num_cols.len() >= 2 && func_idx % 3 == 0 {
+            if num_cols.len() >= 2 && func_idx.is_multiple_of(3) {
                 // Mixed-type binary op: pick two different numeric columns
                 let col_a = num_cols[expr_idx % num_cols.len()];
                 let col_b = num_cols[(expr_idx + 1) % num_cols.len()];
@@ -1067,7 +1067,7 @@ pub fn generate_expr(
 
         ExprKind::IsNull => {
             let col = &columns[expr_idx % columns.len()];
-            let is_not = func_idx % 2 == 0;
+            let is_not = func_idx.is_multiple_of(2);
             let op = if is_not { "IS NOT NULL" } else { "IS NULL" };
             Some(TypedExpr {
                 sql: format!("{} {op}", col.name),
@@ -1142,7 +1142,7 @@ pub fn generate_expr(
 
         ExprKind::Like => {
             let str_col = columns.iter().find(|c| c.data_type.is_string())?;
-            let op = if func_idx % 2 == 0 { "LIKE" } else { "ILIKE" };
+            let op = if func_idx.is_multiple_of(2) { "LIKE" } else { "ILIKE" };
             Some(TypedExpr {
                 sql: format!("{} {op} '%ell%'", str_col.name),
                 alias,
@@ -1163,7 +1163,7 @@ pub fn generate_expr(
         ExprKind::ScalarSubquery => {
             // (SELECT COUNT(*) FROM data) or (SELECT MIN(col) FROM data)
             let col = &columns[expr_idx % columns.len()];
-            if func_idx % 2 == 0 {
+            if func_idx.is_multiple_of(2) {
                 Some(TypedExpr {
                     sql: "(SELECT COUNT(*) FROM data)".to_string(),
                     alias,
@@ -1184,7 +1184,7 @@ pub fn generate_expr(
             let int_col = columns
                 .iter()
                 .find(|c| matches!(c.data_type, DataType::Integer | DataType::BigInt))?;
-            if func_idx % 2 == 0 {
+            if func_idx.is_multiple_of(2) {
                 Some(TypedExpr {
                     sql: format!("MAKE_DATE({}, 1, 1)", int_col.name),
                     alias,
@@ -1328,7 +1328,7 @@ fn generate_window_expr(
 
         // Add window frame spec sometimes (only valid with ORDER BY)
         // Skip for ranking functions (ROW_NUMBER, RANK, DENSE_RANK) which don't support frames
-        if !matches!(wf.kind, WindowFuncKind::RankingBigInt) && expr_idx % 3 == 0 {
+        if !matches!(wf.kind, WindowFuncKind::RankingBigInt) && expr_idx.is_multiple_of(3) {
             let frame_specs = [
                 "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
                 "ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING",
@@ -2039,7 +2039,7 @@ pub fn join_scenario_strategy() -> impl Strategy<Value = JoinScenario> {
 
                 let duckdb_sql = format!(
                     "WITH left_model AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) , right_model AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {} FROM left_model l INNER JOIN right_model r ON l.join_key = r.join_key",
-                    left_cte.iter().zip(left_cols.iter()).map(|(cte, c)| format!("{} AS {}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
+                    left_cte.iter().zip(left_cols.iter()).map(|(_cte, c)| format!("{} AS {}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
                     right_cols.iter().map(|c| format!("{} AS r_{}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
                     expr_items.join(", ")
                 );

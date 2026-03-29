@@ -27,7 +27,7 @@ use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
 use std::sync::LazyLock;
@@ -398,10 +398,10 @@ fn setup_two_model_db(
 /// Run smelt type inference on the downstream model via the Salsa DB.
 fn run_smelt_multi_model_inference(
     db: &smelt_db::Database,
-    downstream_path: &PathBuf,
+    downstream_path: &Path,
 ) -> Vec<(String, DataType)> {
     use smelt_db::TypeChecking;
-    let schema = db.typed_model_schema(downstream_path.clone());
+    let schema = db.typed_model_schema(downstream_path.to_path_buf());
     schema
         .columns
         .iter()
