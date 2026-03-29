@@ -17,8 +17,8 @@ mod prop_helpers;
 use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
-    self, assemble_cte_query, generate_expr, multi_model_scenario_strategy, test_scenario_strategy,
-    TypedExpr,
+    self, assemble_cte_query, generate_expr, join_scenario_strategy, multi_model_scenario_strategy,
+    test_scenario_strategy, three_model_scenario_strategy, TypedExpr,
 };
 use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
@@ -504,4 +504,167 @@ fn smoke_multi_model_function_on_ref() {
     let (db, _, downstream_path) = setup_two_model_db(upstream_sql, downstream_sql);
     let inferred = run_smelt_multi_model_inference(&db, &downstream_path);
     assert_eq!(inferred[0].1, DataType::BigInt);
+}
+
+// ---- Three-model chain property tests ----
+
+/// Set up a Salsa DB with three models: A → B → C.
+fn setup_three_model_db(a_sql: &str, b_sql: &str, c_sql: &str) -> (smelt_db::Database, PathBuf) {
+    use smelt_db::Inputs;
+    let mut db = smelt_db::Database::default();
+    let a_path = PathBuf::from("models/model_a.sql");
+    let b_path = PathBuf::from("models/model_b.sql");
+    let c_path = PathBuf::from("models/model_c.sql");
+
+    db.set_file_text(a_path.clone(), std::sync::Arc::new(a_sql.to_string()));
+    db.set_file_text(b_path.clone(), std::sync::Arc::new(b_sql.to_string()));
+    db.set_file_text(c_path.clone(), std::sync::Arc::new(c_sql.to_string()));
+    db.set_file_project_root(a_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(b_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(c_path.clone(), PathBuf::from("."));
+    db.set_all_files(std::sync::Arc::new(vec![a_path, b_path, c_path.clone()]));
+    db.set_project_sources_yaml(PathBuf::from("."), std::sync::Arc::new(String::new()));
+    db.set_all_project_roots(std::sync::Arc::new(vec![PathBuf::from(".")]));
+
+    (db, c_path)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Three-model chain property test: A → B → C type inference should match DuckDB.
+    #[test]
+    fn prop_three_model_type_inference(scenario in three_model_scenario_strategy()) {
+        let duckdb = DuckDbOracle::new();
+        let divergences = known_divergences();
+
+        let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
+            Ok(types) => types,
+            Err(_) => return Ok(()),
+        };
+
+        let (db, c_path) = setup_three_model_db(
+            &scenario.model_a_sql,
+            &scenario.model_b_sql,
+            &scenario.model_c_sql,
+        );
+        let inferred_types = run_smelt_multi_model_inference(&db, &c_path);
+
+        for (i, actual) in actual_types.iter().enumerate() {
+            let inferred = if i < inferred_types.len() {
+                &inferred_types[i]
+            } else {
+                continue;
+            };
+
+            let smelt_type = &inferred.1;
+            let actual_type = &actual.1;
+
+            if *smelt_type == DataType::Unknown {
+                continue;
+            }
+
+            match compare_types(smelt_type, actual_type) {
+                TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
+                TypeMatch::Mismatch => {
+                    if find_divergence(smelt_type, actual_type, "duckdb", &divergences).is_none() {
+                        prop_assert!(
+                            false,
+                            "Three-model type mismatch for column {} ({}):\n  \
+                             smelt: {:?}, duckdb: {:?}\n  \
+                             A: {}\n  B: {}\n  C: {}\n  duckdb: {}",
+                            i, actual.0, smelt_type, actual_type,
+                            scenario.model_a_sql, scenario.model_b_sql,
+                            scenario.model_c_sql, scenario.duckdb_sql
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- JOIN property tests ----
+
+/// Set up a Salsa DB with two upstream models and a downstream JOIN model.
+fn setup_join_db(left_sql: &str, right_sql: &str, join_sql: &str) -> (smelt_db::Database, PathBuf) {
+    use smelt_db::Inputs;
+    let mut db = smelt_db::Database::default();
+    let left_path = PathBuf::from("models/left_model.sql");
+    let right_path = PathBuf::from("models/right_model.sql");
+    let join_path = PathBuf::from("models/join_model.sql");
+
+    db.set_file_text(left_path.clone(), std::sync::Arc::new(left_sql.to_string()));
+    db.set_file_text(
+        right_path.clone(),
+        std::sync::Arc::new(right_sql.to_string()),
+    );
+    db.set_file_text(join_path.clone(), std::sync::Arc::new(join_sql.to_string()));
+    db.set_file_project_root(left_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(right_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(join_path.clone(), PathBuf::from("."));
+    db.set_all_files(std::sync::Arc::new(vec![
+        left_path,
+        right_path,
+        join_path.clone(),
+    ]));
+    db.set_project_sources_yaml(PathBuf::from("."), std::sync::Arc::new(String::new()));
+    db.set_all_project_roots(std::sync::Arc::new(vec![PathBuf::from(".")]));
+
+    (db, join_path)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// JOIN property test: types through INNER JOIN of two upstream models.
+    #[test]
+    fn prop_join_type_inference(scenario in join_scenario_strategy()) {
+        let duckdb = DuckDbOracle::new();
+        let divergences = known_divergences();
+
+        let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
+            Ok(types) => types,
+            Err(_) => return Ok(()),
+        };
+
+        let (db, join_path) = setup_join_db(
+            &scenario.left_sql,
+            &scenario.right_sql,
+            &scenario.join_sql,
+        );
+        let inferred_types = run_smelt_multi_model_inference(&db, &join_path);
+
+        for (i, actual) in actual_types.iter().enumerate() {
+            let inferred = if i < inferred_types.len() {
+                &inferred_types[i]
+            } else {
+                continue;
+            };
+
+            let smelt_type = &inferred.1;
+            let actual_type = &actual.1;
+
+            if *smelt_type == DataType::Unknown {
+                continue;
+            }
+
+            match compare_types(smelt_type, actual_type) {
+                TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
+                TypeMatch::Mismatch => {
+                    if find_divergence(smelt_type, actual_type, "duckdb", &divergences).is_none() {
+                        prop_assert!(
+                            false,
+                            "JOIN type mismatch for column {} ({}):\n  \
+                             smelt: {:?}, duckdb: {:?}\n  \
+                             left: {}\n  right: {}\n  join: {}\n  duckdb: {}",
+                            i, actual.0, smelt_type, actual_type,
+                            scenario.left_sql, scenario.right_sql,
+                            scenario.join_sql, scenario.duckdb_sql
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

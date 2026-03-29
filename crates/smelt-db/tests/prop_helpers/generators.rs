@@ -1331,72 +1331,427 @@ pub struct MultiModelScenario {
 
 /// Generate a multi-model scenario: upstream model → downstream model with smelt.ref().
 ///
-/// - Upstream: `WITH data AS (SELECT casts...) SELECT cols FROM data`
-/// - Downstream: `SELECT exprs FROM smelt.ref('upstream')`
-/// - DuckDB equiv: `WITH upstream AS (SELECT casts...) SELECT exprs FROM upstream`
+/// The upstream model can have either passthrough columns or computed expressions.
+/// The downstream model applies scalar expressions (or optionally GROUP BY + aggregates)
+/// over the upstream's output columns.
 pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenario> {
-    // Generate upstream columns
     column_pool_strategy()
         .prop_flat_map(|columns| {
-            // Generate 1-3 scalar expressions for the downstream
-            let num_exprs = 1..=3usize;
             (
-                Just(columns),
-                prop::collection::vec(scalar_expr_kind_strategy(), num_exprs),
+                Just(columns.clone()),
+                // Upstream expression kinds (for non-passthrough upstream)
+                prop::collection::vec(scalar_expr_kind_strategy(), 1..=3),
                 prop::collection::vec(0..100usize, 1..=3),
+                // Downstream expression kinds
+                prop::collection::vec(scalar_expr_kind_strategy(), 1..=3),
+                prop::collection::vec(0..100usize, 1..=3),
+                // Whether to use expressions in upstream (50%) or passthrough
+                proptest::bool::ANY,
+                // Whether downstream uses GROUP BY (30%)
+                prop::sample::select(vec![
+                    false, false, false, false, false, false, true, true, true, false,
+                ]),
             )
         })
         .prop_filter_map(
-            "need valid downstream exprs",
-            |(columns, expr_kinds, func_indices)| {
-                // Build upstream SQL
+            "need valid scenario",
+            |(
+                columns,
+                up_expr_kinds,
+                up_func_indices,
+                down_expr_kinds,
+                down_func_indices,
+                use_upstream_exprs,
+                use_group_by,
+            )| {
                 let cte_cols: Vec<String> = columns
                     .iter()
                     .map(|c| format!("{} AS {}", c.cast_sql, c.name))
                     .collect();
-                let select_cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+
+                // Determine upstream output columns
+                let (upstream_select_items, upstream_output_cols) = if use_upstream_exprs {
+                    // Generate expressions for the upstream model
+                    let mut up_exprs: Vec<TypedExpr> = Vec::new();
+                    for (i, kind) in up_expr_kinds.iter().enumerate() {
+                        let func_idx = up_func_indices.get(i).copied().unwrap_or(0);
+                        if let Some(expr) = generate_expr(&columns, *kind, i, func_idx) {
+                            up_exprs.push(expr);
+                        }
+                    }
+                    if up_exprs.is_empty() {
+                        return None;
+                    }
+                    // Rename upstream expr aliases to up_N to avoid collision
+                    let items: Vec<String> = up_exprs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| format!("{} AS up_{i}", e.sql))
+                        .collect();
+                    let out_cols: Vec<TypedSource> = up_exprs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| TypedSource {
+                            name: format!("up_{i}"),
+                            data_type: e.expected_smelt_type.clone(),
+                            cast_sql: String::new(), // not used for downstream
+                        })
+                        .collect();
+                    (items, out_cols)
+                } else {
+                    // Passthrough
+                    let items: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+                    (items, columns.clone())
+                };
+
                 let upstream_sql = format!(
                     "WITH data AS (SELECT {}) SELECT {} FROM data",
                     cte_cols.join(", "),
-                    select_cols.join(", ")
+                    upstream_select_items.join(", ")
                 );
 
-                // Generate downstream expressions over upstream columns
+                // Build downstream expressions
+                if use_group_by && upstream_output_cols.len() >= 2 {
+                    // GROUP BY: first column is group key, rest get aggregated
+                    let group_col = &upstream_output_cols[0];
+                    let agg_cols: Vec<&TypedSource> = upstream_output_cols.iter().skip(1).collect();
+
+                    let mut select_items = vec![format!("{} AS grp_0", group_col.name)];
+                    let mut down_exprs = vec![TypedExpr {
+                        sql: group_col.name.clone(),
+                        alias: "grp_0".to_string(),
+                        expected_smelt_type: group_col.data_type.clone(),
+                    }];
+
+                    // Add COUNT(*) as a reliable aggregate
+                    select_items.push("COUNT(*) AS agg_0".to_string());
+                    down_exprs.push(TypedExpr {
+                        sql: "COUNT(*)".to_string(),
+                        alias: "agg_0".to_string(),
+                        expected_smelt_type: DataType::BigInt,
+                    });
+
+                    // Add SUM/MIN/MAX on numeric columns
+                    for (i, col) in agg_cols.iter().enumerate() {
+                        if col.data_type.is_numeric() {
+                            let agg_name = format!("agg_{}", i + 1);
+                            select_items.push(format!("SUM({}) AS {agg_name}", col.name));
+                            down_exprs.push(TypedExpr {
+                                sql: format!("SUM({})", col.name),
+                                alias: agg_name,
+                                // SUM on integer types -> depends on input:
+                                // DuckDB: SUM(INT) -> HUGEINT (mapped to Decimal), SUM(BIGINT) -> HUGEINT
+                                // smelt: SUM(numeric) -> varies
+                                // Use expected_smelt_type from the SUM inference
+                                expected_smelt_type: DataType::Unknown, // will be checked via DuckDB
+                            });
+                        }
+                    }
+
+                    let downstream_sql = format!(
+                        "SELECT {} FROM smelt.ref('upstream') GROUP BY {}",
+                        select_items.join(", "),
+                        group_col.name
+                    );
+
+                    // DuckDB equivalent
+                    let duckdb_cte = if use_upstream_exprs {
+                        format!(
+                            "WITH data AS (SELECT {}) , upstream AS (SELECT {} FROM data)",
+                            cte_cols.join(", "),
+                            upstream_select_items.join(", ")
+                        )
+                    } else {
+                        format!("WITH upstream AS (SELECT {})", cte_cols.join(", "))
+                    };
+                    let duckdb_sql = format!(
+                        "{} SELECT {} FROM upstream GROUP BY {}",
+                        duckdb_cte,
+                        select_items.join(", "),
+                        group_col.name
+                    );
+
+                    Some(MultiModelScenario {
+                        upstream_sql,
+                        upstream_columns: upstream_output_cols,
+                        downstream_sql,
+                        duckdb_sql,
+                        downstream_exprs: down_exprs,
+                    })
+                } else {
+                    // Scalar downstream
+                    let mut exprs: Vec<TypedExpr> = Vec::new();
+                    for (i, kind) in down_expr_kinds.iter().enumerate() {
+                        let func_idx = down_func_indices.get(i).copied().unwrap_or(0);
+                        if let Some(expr) = generate_expr(&upstream_output_cols, *kind, i, func_idx)
+                        {
+                            exprs.push(expr);
+                        }
+                    }
+
+                    if exprs.is_empty() {
+                        return None;
+                    }
+
+                    let expr_items: Vec<String> = exprs
+                        .iter()
+                        .map(|e| format!("{} AS {}", e.sql, e.alias))
+                        .collect();
+                    let downstream_sql = format!(
+                        "SELECT {} FROM smelt.ref('upstream')",
+                        expr_items.join(", ")
+                    );
+
+                    let duckdb_cte = if use_upstream_exprs {
+                        format!(
+                            "WITH data AS (SELECT {}) , upstream AS (SELECT {} FROM data)",
+                            cte_cols.join(", "),
+                            upstream_select_items.join(", ")
+                        )
+                    } else {
+                        format!("WITH upstream AS (SELECT {})", cte_cols.join(", "))
+                    };
+                    let duckdb_sql = format!(
+                        "{} SELECT {} FROM upstream",
+                        duckdb_cte,
+                        expr_items.join(", ")
+                    );
+
+                    Some(MultiModelScenario {
+                        upstream_sql,
+                        upstream_columns: upstream_output_cols,
+                        downstream_sql,
+                        duckdb_sql,
+                        downstream_exprs: exprs,
+                    })
+                }
+            },
+        )
+}
+
+// ---- Three-model chain scenario ----
+
+/// A generated three-model chain for testing multi-hop type propagation.
+#[derive(Debug, Clone)]
+pub struct ThreeModelScenario {
+    /// Model A: base model with CTE (no refs)
+    pub model_a_sql: String,
+    /// Model B: refs model A, applies expressions
+    pub model_b_sql: String,
+    /// Model C: refs model B, applies expressions
+    pub model_c_sql: String,
+    /// DuckDB-equivalent SQL (all three as CTEs)
+    pub duckdb_sql: String,
+}
+
+/// Generate a three-model chain: A (base) → B (refs A) → C (refs B).
+pub fn three_model_scenario_strategy() -> impl Strategy<Value = ThreeModelScenario> {
+    column_pool_strategy()
+        .prop_flat_map(|columns| {
+            (
+                Just(columns),
+                // B's expression kinds over A's columns
+                prop::collection::vec(scalar_expr_kind_strategy(), 1..=3),
+                prop::collection::vec(0..100usize, 1..=3),
+                // C's expression kinds over B's output
+                prop::collection::vec(scalar_expr_kind_strategy(), 1..=3),
+                prop::collection::vec(0..100usize, 1..=3),
+            )
+        })
+        .prop_filter_map(
+            "need valid three-model scenario",
+            |(columns, b_expr_kinds, b_func_indices, c_expr_kinds, c_func_indices)| {
+                // Model A: base CTE
+                let cte_cols: Vec<String> = columns
+                    .iter()
+                    .map(|c| format!("{} AS {}", c.cast_sql, c.name))
+                    .collect();
+                let a_select: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+                let model_a_sql = format!(
+                    "WITH data AS (SELECT {}) SELECT {} FROM data",
+                    cte_cols.join(", "),
+                    a_select.join(", ")
+                );
+
+                // Model B: refs A, applies expressions
+                let mut b_exprs: Vec<TypedExpr> = Vec::new();
+                for (i, kind) in b_expr_kinds.iter().enumerate() {
+                    let func_idx = b_func_indices.get(i).copied().unwrap_or(0);
+                    if let Some(mut expr) = generate_expr(&columns, *kind, i, func_idx) {
+                        expr.alias = format!("b_{i}");
+                        b_exprs.push(expr);
+                    }
+                }
+                if b_exprs.is_empty() {
+                    return None;
+                }
+
+                let b_items: Vec<String> = b_exprs
+                    .iter()
+                    .map(|e| format!("{} AS {}", e.sql, e.alias))
+                    .collect();
+                let model_b_sql = format!(
+                    "SELECT {} FROM smelt.ref('model_a')",
+                    b_items.join(", ")
+                );
+
+                // B's output columns
+                let b_output: Vec<TypedSource> = b_exprs
+                    .iter()
+                    .map(|e| TypedSource {
+                        name: e.alias.clone(),
+                        data_type: e.expected_smelt_type.clone(),
+                        cast_sql: String::new(),
+                    })
+                    .collect();
+
+                // Model C: refs B, applies expressions
+                let mut c_exprs: Vec<TypedExpr> = Vec::new();
+                for (i, kind) in c_expr_kinds.iter().enumerate() {
+                    let func_idx = c_func_indices.get(i).copied().unwrap_or(0);
+                    if let Some(expr) = generate_expr(&b_output, *kind, i, func_idx) {
+                        c_exprs.push(expr);
+                    }
+                }
+                if c_exprs.is_empty() {
+                    return None;
+                }
+
+                let c_items: Vec<String> = c_exprs
+                    .iter()
+                    .map(|e| format!("{} AS {}", e.sql, e.alias))
+                    .collect();
+                let model_c_sql = format!(
+                    "SELECT {} FROM smelt.ref('model_b')",
+                    c_items.join(", ")
+                );
+
+                // DuckDB equivalent: chain as CTEs
+                let duckdb_sql = format!(
+                    "WITH model_a AS (SELECT {}) , model_b AS (SELECT {} FROM model_a) SELECT {} FROM model_b",
+                    cte_cols.join(", "),
+                    b_items.join(", "),
+                    c_items.join(", ")
+                );
+
+                Some(ThreeModelScenario {
+                    model_a_sql,
+                    model_b_sql,
+                    model_c_sql,
+                    duckdb_sql,
+                })
+            },
+        )
+}
+
+// ---- JOIN scenario ----
+
+/// A generated JOIN scenario: two upstream models joined in a downstream model.
+#[derive(Debug, Clone)]
+pub struct JoinScenario {
+    /// Left upstream model SQL
+    pub left_sql: String,
+    /// Right upstream model SQL
+    pub right_sql: String,
+    /// Downstream model SQL (JOINs both upstreams via smelt.ref)
+    pub join_sql: String,
+    /// DuckDB-equivalent SQL
+    pub duckdb_sql: String,
+}
+
+/// Generate a JOIN scenario: left_model INNER JOIN right_model ON shared key.
+pub fn join_scenario_strategy() -> impl Strategy<Value = JoinScenario> {
+    (column_pool_strategy(), column_pool_strategy())
+        .prop_flat_map(|(left_cols, right_cols)| {
+            (
+                Just(left_cols),
+                Just(right_cols),
+                prop::collection::vec(scalar_expr_kind_strategy(), 1..=2),
+                prop::collection::vec(0..100usize, 1..=2),
+            )
+        })
+        .prop_filter_map(
+            "need valid join scenario",
+            |(left_cols, right_cols, expr_kinds, func_indices)| {
+                if left_cols.is_empty() || right_cols.is_empty() {
+                    return None;
+                }
+
+                // Build left model CTE
+                let left_cte: Vec<String> = left_cols
+                    .iter()
+                    .map(|c| format!("{} AS {}", c.cast_sql, c.name))
+                    .collect();
+                // Add a join key: CAST(1 AS INTEGER) AS join_key
+                let left_sql = format!(
+                    "WITH data AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {}, join_key FROM data",
+                    left_cte.join(", "),
+                    left_cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                );
+
+                // Build right model CTE — prefix column names with r_ to avoid collision
+                let right_cte: Vec<String> = right_cols
+                    .iter()
+                    .map(|c| format!("{} AS r_{}", c.cast_sql, c.name))
+                    .collect();
+                let right_sql = format!(
+                    "WITH data AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {}, join_key FROM data",
+                    right_cte.join(", "),
+                    right_cols.iter().map(|c| format!("r_{}", c.name)).collect::<Vec<_>>().join(", ")
+                );
+
+                // Combined columns available after JOIN (qualified by alias)
+                let mut combined_cols: Vec<TypedSource> = Vec::new();
+                for c in &left_cols {
+                    combined_cols.push(TypedSource {
+                        name: format!("l.{}", c.name),
+                        data_type: c.data_type.clone(),
+                        cast_sql: String::new(),
+                    });
+                }
+                for c in &right_cols {
+                    combined_cols.push(TypedSource {
+                        name: format!("r.r_{}", c.name),
+                        data_type: c.data_type.clone(),
+                        cast_sql: String::new(),
+                    });
+                }
+
+                // Generate expressions over combined columns
                 let mut exprs: Vec<TypedExpr> = Vec::new();
-                for (i, kind) in expr_kinds.iter().enumerate() {
+                for (i, _kind) in expr_kinds.iter().enumerate() {
                     let func_idx = func_indices.get(i).copied().unwrap_or(0);
-                    if let Some(expr) = generate_expr(&columns, *kind, i, func_idx) {
+                    // Only use ColumnRef for join tests to keep things simple
+                    if let Some(expr) = generate_expr(&combined_cols, ExprKind::ColumnRef, i, func_idx) {
                         exprs.push(expr);
                     }
                 }
-
                 if exprs.is_empty() {
                     return None;
                 }
 
-                // Build downstream SQL using smelt.ref
                 let expr_items: Vec<String> = exprs
                     .iter()
                     .map(|e| format!("{} AS {}", e.sql, e.alias))
                     .collect();
-                let downstream_sql = format!(
-                    "SELECT {} FROM smelt.ref('upstream')",
+
+                let join_sql = format!(
+                    "SELECT {} FROM smelt.ref('left_model') l INNER JOIN smelt.ref('right_model') r ON l.join_key = r.join_key",
                     expr_items.join(", ")
                 );
 
-                // Build DuckDB equivalent (CTE instead of smelt.ref)
                 let duckdb_sql = format!(
-                    "WITH upstream AS (SELECT {}) SELECT {} FROM upstream",
-                    cte_cols.join(", "),
+                    "WITH left_model AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) , right_model AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {} FROM left_model l INNER JOIN right_model r ON l.join_key = r.join_key",
+                    left_cte.iter().zip(left_cols.iter()).map(|(cte, c)| format!("{} AS {}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
+                    right_cols.iter().map(|c| format!("{} AS r_{}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
                     expr_items.join(", ")
                 );
 
-                Some(MultiModelScenario {
-                    upstream_sql,
-                    upstream_columns: columns,
-                    downstream_sql,
+                Some(JoinScenario {
+                    left_sql,
+                    right_sql,
+                    join_sql,
                     duckdb_sql,
-                    downstream_exprs: exprs,
                 })
             },
         )
