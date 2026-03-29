@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774781915768,
+  "lastUpdate": 1774820777443,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8271,6 +8271,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.272433,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a48460f7540a9a970a96af854a1abf7d8f419269",
+          "message": "Add critical analysis report on smelt's SQL dialect\n\nCovers dialect design, parser implementation, type system, and testing\ninfrastructure. Identifies correctness issues (comparison nullability,\ndecimal arithmetic) and prioritized improvement suggestions.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T08:44:28+11:00",
+          "tree_id": "24f4de659c36ee93b98523daf3ce4d84d06de486",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a48460f7540a9a970a96af854a1abf7d8f419269"
+        },
+        "date": 1774820776947,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.046451,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.786402,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.5929960000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.34297,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002755,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 33.481214,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.024605,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.01107,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008525999999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.949179,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.40861,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.65017,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.83172,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.169907,
             "unit": "ms"
           }
         ]
