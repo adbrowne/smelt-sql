@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774820777443,
+  "lastUpdate": 1774820778560,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10919,6 +10919,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.26354260805498,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a48460f7540a9a970a96af854a1abf7d8f419269",
+          "message": "Add critical analysis report on smelt's SQL dialect\n\nCovers dialect design, parser implementation, type system, and testing\ninfrastructure. Identifies correctness issues (comparison nullability,\ndecimal arithmetic) and prioritized improvement suggestions.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T08:44:28+11:00",
+          "tree_id": "24f4de659c36ee93b98523daf3ce4d84d06de486",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a48460f7540a9a970a96af854a1abf7d8f419269"
+        },
+        "date": 1774820778244,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.493225708298343,
             "unit": "MB/s"
           }
         ]
