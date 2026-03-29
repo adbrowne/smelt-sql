@@ -133,6 +133,8 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 **Current state**: Full type inference for expressions, functions, aggregates, window functions, and cross-model schemas. NULL tracking, row polymorphism (`SELECT *` propagation), and `resolved_model_schema()` Salsa query.
 
 - Property-based testing against DuckDB and Spark (via `smelt-parser-compat`)
+- Comprehensive generator coverage (March 29, 2026): 12 expression kinds (IS NULL, comparisons, unary NOT/minus, EXISTS, LIKE/ILIKE, regex, scalar subqueries, mixed-type binary ops, `::` cast), 5 query shapes (Scalar, GroupBy, GroupByHaving, GroupByWindow, Distinct), 10 base types (incl. Time, Interval), window frame specs
+- LIKE/ILIKE parser support with type inference
 - Known divergence registry for backend-specific type differences
 - JSON operator type inference
 

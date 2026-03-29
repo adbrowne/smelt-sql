@@ -72,3 +72,6 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - **LEFT/RIGHT**: Parser keyword conflict fixed; now tested
 - **ASIN/ACOS**: Domain-restricted to [-1,1]; sample values (42, 100, etc.) cause errors
 - **SIGN**: DuckDB and Spark both return TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
+- **`~*`, `!~`, `!~*`**: DuckDB only supports `~` (case-sensitive regex); `~*` (case-insensitive), `!~`, `!~*` are not available. Generator uses `~` only.
+- **TO_CHAR**: Not available in DuckDB (PostgreSQL-only). Omitted from generators.
+- **EXTRACT(part FROM col)**: The `FROM` keyword inside EXTRACT confuses the parser — it's consumed as the query-level FROM clause, breaking alias extraction and SELECT item parsing. Generator code exists but is excluded from strategies.
