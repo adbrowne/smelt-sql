@@ -112,12 +112,15 @@ pub trait Schema: Semantic {
 #[salsa::query_group(TypeCheckingStorage)]
 pub trait TypeChecking: Schema {
     /// Get the schema with inferred types for a model
+    #[salsa::cycle(recover_typed_model_schema)]
     fn typed_model_schema(&self, path: PathBuf) -> Arc<ModelSchema>;
 
     /// Build type context for a model (source and upstream model types)
+    #[salsa::cycle(recover_type_context)]
     fn type_context(&self, path: PathBuf) -> Arc<TypeContext>;
 
     /// Get the fully resolved schema (row extensions expanded)
+    #[salsa::cycle(recover_resolved_model_schema)]
     fn resolved_model_schema(&self, path: PathBuf) -> Arc<ResolvedSchema>;
 
     /// Extract input constraints from a model's SQL
@@ -839,6 +842,35 @@ fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
 
 // TypeChecking query implementations
 
+// Cycle recovery functions — return safe defaults when circular model refs are detected
+fn recover_typed_model_schema(
+    _db: &dyn TypeChecking,
+    _cycle: &[String],
+    _path: &PathBuf,
+) -> Arc<ModelSchema> {
+    Arc::new(ModelSchema::empty())
+}
+
+fn recover_type_context(
+    _db: &dyn TypeChecking,
+    _cycle: &[String],
+    _path: &PathBuf,
+) -> Arc<TypeContext> {
+    Arc::new(TypeContext::new())
+}
+
+fn recover_resolved_model_schema(
+    _db: &dyn TypeChecking,
+    _cycle: &[String],
+    _path: &PathBuf,
+) -> Arc<ResolvedSchema> {
+    Arc::new(ResolvedSchema {
+        columns: vec![],
+        is_fully_resolved: true,
+        unresolved_extensions: vec![],
+    })
+}
+
 fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
     let mut ctx = TypeContext::new();
     let project_root = db.file_project_root(path.clone());
@@ -1348,6 +1380,41 @@ fn model_function_type(db: &dyn TypeChecking, path: PathBuf) -> Arc<schema::Mode
     })
 }
 
+/// Check if an actual upstream type is compatible with the expected downstream usage.
+/// Conservative: only flags clear mismatches (e.g., text used where numeric expected).
+fn types_compatible(expected: &DataType, actual: &DataType) -> bool {
+    // Unknown on either side means we can't determine a mismatch
+    if matches!(expected, DataType::Unknown) || matches!(actual, DataType::Unknown) {
+        return true;
+    }
+    // Same type is always compatible
+    if expected == actual {
+        return true;
+    }
+    // Both numeric — SQL engines handle promotion
+    if expected.is_numeric() && actual.is_numeric() {
+        return true;
+    }
+    // Both string types — compatible
+    if expected.is_string() && actual.is_string() {
+        return true;
+    }
+    // Both temporal — compatible
+    if expected.is_temporal() && actual.is_temporal() {
+        return true;
+    }
+    // Boolean is compatible with boolean
+    if matches!(expected, DataType::Boolean) && matches!(actual, DataType::Boolean) {
+        return true;
+    }
+    // Numeric expected but string/temporal/boolean provided — incompatible
+    // String expected but anything non-string is often implicitly cast — compatible
+    if expected.is_string() {
+        return true;
+    }
+    false
+}
+
 fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
 
@@ -1398,6 +1465,65 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
                 });
             }
             _ => {} // Type successfully inferred
+        }
+    }
+
+    // Cross-model type mismatch checks: compare upstream types against input constraints
+    let input_constraints = db.model_input_constraints(path.clone());
+    for constraint in input_constraints.iter() {
+        let upstream_path = match db.resolve_ref(constraint.ref_name.clone()) {
+            Some(p) => p,
+            None => continue, // undefined ref — already reported by file_diagnostics
+        };
+        let upstream_schema = db.typed_model_schema(upstream_path);
+
+        for (col_name, col_constraint) in &constraint.required_columns {
+            let expected = match &col_constraint.expected_type {
+                Some(t) => t,
+                None => continue,
+            };
+            let upstream_col = upstream_schema.columns.iter().find(|c| c.name == *col_name);
+            if let Some(col) = upstream_col {
+                if let Some(actual) = &col.data_type {
+                    if !types_compatible(&expected.data_type, &actual.data_type) {
+                        for site in &col_constraint.usage_sites {
+                            let range = smelt_parser::ast::text_range_to_range(&text, *site);
+                            diagnostics.push(Diagnostic {
+                                severity: DiagnosticSeverity::Warning,
+                                message: format!(
+                                    "Column '{}' from '{}' has type {} but is used where {} is expected",
+                                    col_name, constraint.ref_name, actual.data_type, expected.data_type
+                                ),
+                                range,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Detect circular dependencies: if an upstream ref has a SELECT list (non-empty model_schema)
+    // but resolved_model_schema returned empty columns, cycle recovery likely fired.
+    let refs = db.model_refs(path.clone());
+    for ref_loc in refs.iter() {
+        if let Some(upstream_path) = db.resolve_ref(ref_loc.name.clone()) {
+            let upstream_base = db.model_schema(upstream_path.clone());
+            let upstream_resolved = db.resolved_model_schema(upstream_path);
+            // If the base schema has columns or row extensions but resolved is empty,
+            // cycle recovery produced the empty result
+            if (!upstream_base.columns.is_empty() || !upstream_base.row_extensions.is_empty())
+                && upstream_resolved.columns.is_empty()
+            {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: format!(
+                        "Circular dependency involving model '{}' — type information unavailable",
+                        ref_loc.name
+                    ),
+                    range: ref_loc.range,
+                });
+            }
         }
     }
 
@@ -4243,6 +4369,286 @@ sources:
             func_diag.severity,
             DiagnosticSeverity::Warning,
             "Unknown function diagnostic should be Warning"
+        );
+    }
+
+    // ============================================================
+    // Circular reference / cycle recovery tests
+    // ============================================================
+
+    #[test]
+    fn test_circular_ref_does_not_panic() {
+        // A refs B, B refs A — should not panic, should return empty schemas
+        let (db, paths) = setup_multi_model(&[
+            ("model_a", "SELECT x FROM smelt.ref('model_b')"),
+            ("model_b", "SELECT y FROM smelt.ref('model_a')"),
+        ]);
+
+        // These should not panic thanks to cycle recovery
+        let schema_a = db.typed_model_schema(paths[0].clone());
+        let schema_b = db.typed_model_schema(paths[1].clone());
+
+        // At least one should have empty columns due to cycle recovery
+        // (the one that triggers recovery gets empty upstream)
+        assert!(
+            schema_a.columns.is_empty()
+                || schema_b.columns.is_empty()
+                || schema_a.columns.iter().all(|c| c.data_type.is_none())
+                || schema_b.columns.iter().all(|c| c.data_type.is_none()),
+            "Cycle should result in degraded type info"
+        );
+    }
+
+    #[test]
+    fn test_circular_ref_self() {
+        // Model references itself
+        let (db, paths) = setup_multi_model(&[("self_ref", "SELECT x FROM smelt.ref('self_ref')")]);
+
+        // Should not panic
+        let schema = db.typed_model_schema(paths[0].clone());
+        // Schema may be empty or have Unknown types — either is fine
+        let _ = schema;
+    }
+
+    #[test]
+    fn test_circular_ref_three_models() {
+        // A -> B -> C -> A cycle
+        let (db, paths) = setup_multi_model(&[
+            ("cycle_a", "SELECT x FROM smelt.ref('cycle_b')"),
+            ("cycle_b", "SELECT y FROM smelt.ref('cycle_c')"),
+            ("cycle_c", "SELECT z FROM smelt.ref('cycle_a')"),
+        ]);
+
+        // None of these should panic
+        let _sa = db.typed_model_schema(paths[0].clone());
+        let _sb = db.typed_model_schema(paths[1].clone());
+        let _sc = db.typed_model_schema(paths[2].clone());
+
+        let _ra = db.resolved_model_schema(paths[0].clone());
+        let _rb = db.resolved_model_schema(paths[1].clone());
+        let _rc = db.resolved_model_schema(paths[2].clone());
+    }
+
+    #[test]
+    fn test_circular_ref_diagnostic() {
+        let (db, paths) = setup_multi_model(&[
+            ("diag_a", "SELECT x FROM smelt.ref('diag_b')"),
+            ("diag_b", "SELECT y FROM smelt.ref('diag_a')"),
+        ]);
+
+        let diags_a = db.type_diagnostics(paths[0].clone());
+        let diags_b = db.type_diagnostics(paths[1].clone());
+
+        // At least one model should get a circular dependency diagnostic
+        let all_msgs: Vec<&str> = diags_a
+            .iter()
+            .chain(diags_b.iter())
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            all_msgs.iter().any(|m| m.contains("Circular dependency")),
+            "Expected a circular dependency diagnostic, got: {:?}",
+            all_msgs
+        );
+    }
+
+    #[test]
+    fn test_circular_ref_does_not_affect_others() {
+        // A <-> B form a cycle, but C -> D should work fine
+        let (db, paths) = setup_multi_model(&[
+            ("cyc_a", "SELECT x FROM smelt.ref('cyc_b')"),
+            ("cyc_b", "SELECT y FROM smelt.ref('cyc_a')"),
+            ("good_c", "SELECT CAST(1 AS INTEGER) AS val"),
+            ("good_d", "SELECT val FROM smelt.ref('good_c')"),
+        ]);
+
+        // Trigger cycle resolution first
+        let _sa = db.typed_model_schema(paths[0].clone());
+        let _sb = db.typed_model_schema(paths[1].clone());
+
+        // C -> D should still propagate types correctly
+        let schema_d = db.typed_model_schema(paths[3].clone());
+        assert_eq!(schema_d.columns.len(), 1);
+        assert_eq!(schema_d.columns[0].name, "val");
+        assert_eq!(
+            schema_d.columns[0].data_type.as_ref().unwrap().data_type,
+            DataType::Integer,
+            "C -> D type propagation should work despite A <-> B cycle"
+        );
+    }
+
+    // ============================================================
+    // Cross-model type mismatch diagnostic tests
+    // ============================================================
+
+    #[test]
+    fn test_type_mismatch_varchar_in_sum() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: price
+            type: VARCHAR
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                ("raw_data", "SELECT price FROM smelt.source('raw.data')"),
+                (
+                    "totals",
+                    "SELECT SUM(price) AS total_price FROM smelt.ref('raw_data')",
+                ),
+            ],
+        );
+
+        let diags = db.type_diagnostics(paths[1].clone());
+        let mismatch_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("has type") && d.message.contains("expected"))
+            .collect();
+        assert!(
+            !mismatch_diags.is_empty(),
+            "Should warn about VARCHAR used in SUM, got diagnostics: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(
+            mismatch_diags[0].message.contains("price"),
+            "Diagnostic should mention column name"
+        );
+    }
+
+    #[test]
+    fn test_type_mismatch_compatible_numeric_no_warning() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: amount
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                ("raw_data", "SELECT amount FROM smelt.source('raw.data')"),
+                (
+                    "totals",
+                    "SELECT SUM(amount) AS total FROM smelt.ref('raw_data')",
+                ),
+            ],
+        );
+
+        let diags = db.type_diagnostics(paths[1].clone());
+        let mismatch_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("has type") && d.message.contains("expected"))
+            .collect();
+        assert!(
+            mismatch_diags.is_empty(),
+            "Should not warn about INTEGER in SUM, got: {:?}",
+            mismatch_diags
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_type_mismatch_multiple_columns() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: name
+            type: VARCHAR
+          - name: status
+            type: VARCHAR
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                (
+                    "raw_data",
+                    "SELECT name, status FROM smelt.source('raw.data')",
+                ),
+                (
+                    "agg",
+                    "SELECT SUM(name) AS s1, AVG(status) AS s2 FROM smelt.ref('raw_data')",
+                ),
+            ],
+        );
+
+        let diags = db.type_diagnostics(paths[1].clone());
+        let mismatch_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("has type") && d.message.contains("expected"))
+            .collect();
+        assert!(
+            mismatch_diags.len() >= 2,
+            "Should produce at least 2 mismatch diagnostics, got {}: {:?}",
+            mismatch_diags.len(),
+            mismatch_diags
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_mismatch_for_undefined_ref() {
+        let (db, paths) = setup_multi_model(&[(
+            "bad_ref",
+            "SELECT SUM(x) AS total FROM smelt.ref('nonexistent')",
+        )]);
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        let mismatch_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("has type") && d.message.contains("expected"))
+            .collect();
+        assert!(
+            mismatch_diags.is_empty(),
+            "Should not produce mismatch diagnostics for undefined ref"
+        );
+    }
+
+    #[test]
+    fn test_type_mismatch_through_chain() {
+        // source (VARCHAR) -> passthrough model -> SUM in downstream
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      data:
+        columns:
+          - name: value
+            type: VARCHAR
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[
+                ("passthrough", "SELECT value FROM smelt.source('raw.data')"),
+                (
+                    "aggregator",
+                    "SELECT SUM(value) AS total FROM smelt.ref('passthrough')",
+                ),
+            ],
+        );
+
+        let diags = db.type_diagnostics(paths[1].clone());
+        let mismatch_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("has type") && d.message.contains("expected"))
+            .collect();
+        assert!(
+            !mismatch_diags.is_empty(),
+            "Should detect VARCHAR->SUM mismatch through model chain, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 }

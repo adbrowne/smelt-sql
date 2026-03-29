@@ -17,7 +17,8 @@ mod prop_helpers;
 use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
-    self, assemble_cte_query, generate_expr, test_scenario_strategy, TypedExpr,
+    self, assemble_cte_query, generate_expr, multi_model_scenario_strategy, test_scenario_strategy,
+    TypedExpr,
 };
 use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
@@ -25,6 +26,8 @@ use prop_helpers::type_comparison::{compare_types, TypeMatch};
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
+
+use std::path::PathBuf;
 
 use proptest::prelude::*;
 use std::sync::LazyLock;
@@ -358,4 +361,147 @@ fn smoke_group_by_having() {
     // expr_0 (COUNT) should be BigInt
     assert_eq!(inferred[1].1, DataType::BigInt);
     assert_eq!(actual[1].1, DataType::BigInt);
+}
+
+// ---- Multi-model property tests ----
+
+/// Set up a Salsa DB with two models: upstream and downstream.
+fn setup_two_model_db(
+    upstream_sql: &str,
+    downstream_sql: &str,
+) -> (smelt_db::Database, PathBuf, PathBuf) {
+    use smelt_db::Inputs;
+    let mut db = smelt_db::Database::default();
+    let upstream_path = PathBuf::from("models/upstream.sql");
+    let downstream_path = PathBuf::from("models/downstream.sql");
+
+    db.set_file_text(
+        upstream_path.clone(),
+        std::sync::Arc::new(upstream_sql.to_string()),
+    );
+    db.set_file_text(
+        downstream_path.clone(),
+        std::sync::Arc::new(downstream_sql.to_string()),
+    );
+    db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+    db.set_all_files(std::sync::Arc::new(vec![
+        upstream_path.clone(),
+        downstream_path.clone(),
+    ]));
+    db.set_project_sources_yaml(PathBuf::from("."), std::sync::Arc::new(String::new()));
+    db.set_all_project_roots(std::sync::Arc::new(vec![PathBuf::from(".")]));
+
+    (db, upstream_path, downstream_path)
+}
+
+/// Run smelt type inference on the downstream model via the Salsa DB.
+fn run_smelt_multi_model_inference(
+    db: &smelt_db::Database,
+    downstream_path: &PathBuf,
+) -> Vec<(String, DataType)> {
+    use smelt_db::TypeChecking;
+    let schema = db.typed_model_schema(downstream_path.clone());
+    schema
+        .columns
+        .iter()
+        .map(|col| {
+            let dt = col
+                .data_type
+                .as_ref()
+                .map(|tc| tc.data_type.clone())
+                .unwrap_or(DataType::Unknown);
+            (col.name.clone(), dt)
+        })
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Multi-model property test: type inference through smelt.ref() should match
+    /// DuckDB's actual types for the same expressions.
+    #[test]
+    fn prop_multi_model_type_inference(scenario in multi_model_scenario_strategy()) {
+        let duckdb = DuckDbOracle::new();
+        let divergences = known_divergences();
+
+        // Get DuckDB actual types
+        let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
+            Ok(types) => types,
+            Err(_) => return Ok(()), // Skip if DuckDB can't run it
+        };
+
+        // Get smelt inference via Salsa cross-model path
+        let (db, _upstream_path, downstream_path) =
+            setup_two_model_db(&scenario.upstream_sql, &scenario.downstream_sql);
+        let inferred_types = run_smelt_multi_model_inference(&db, &downstream_path);
+
+        for (i, actual) in actual_types.iter().enumerate() {
+            let inferred = if i < inferred_types.len() {
+                &inferred_types[i]
+            } else {
+                continue;
+            };
+
+            let smelt_type = &inferred.1;
+            let actual_type = &actual.1;
+
+            if *smelt_type == DataType::Unknown {
+                continue;
+            }
+
+            match compare_types(smelt_type, actual_type) {
+                TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
+                TypeMatch::Mismatch => {
+                    if find_divergence(smelt_type, actual_type, "duckdb", &divergences).is_none() {
+                        prop_assert!(
+                            false,
+                            "Multi-model type mismatch for column {} ({}):\n  \
+                             smelt inferred: {:?}\n  \
+                             duckdb actual:  {:?}\n  \
+                             upstream SQL: {}\n  \
+                             downstream SQL: {}\n  \
+                             duckdb SQL: {}",
+                            i, actual.0, smelt_type, actual_type,
+                            scenario.upstream_sql, scenario.downstream_sql, scenario.duckdb_sql
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Smoke test: simple cross-model INTEGER passthrough.
+#[test]
+fn smoke_multi_model_integer_passthrough() {
+    let upstream_sql = "WITH data AS (SELECT CAST(42 AS INTEGER) AS x) SELECT x FROM data";
+    let downstream_sql = "SELECT x AS expr_0 FROM smelt.ref('upstream')";
+    let duckdb_sql =
+        "WITH upstream AS (SELECT CAST(42 AS INTEGER) AS x) SELECT x AS expr_0 FROM upstream";
+
+    let oracle = DuckDbOracle::new();
+    let actual = oracle.query_types(duckdb_sql).unwrap();
+    assert_eq!(actual[0].1, DataType::Integer);
+
+    let (db, _, downstream_path) = setup_two_model_db(upstream_sql, downstream_sql);
+    let inferred = run_smelt_multi_model_inference(&db, &downstream_path);
+    assert_eq!(inferred[0].1, DataType::Integer);
+}
+
+/// Smoke test: cross-model with expression (LENGTH on VARCHAR).
+#[test]
+fn smoke_multi_model_function_on_ref() {
+    let upstream_sql = "WITH data AS (SELECT CAST('hello' AS STRING) AS s) SELECT s FROM data";
+    let downstream_sql = "SELECT LENGTH(s) AS expr_0 FROM smelt.ref('upstream')";
+    let duckdb_sql = "WITH upstream AS (SELECT CAST('hello' AS STRING) AS s) SELECT LENGTH(s) AS expr_0 FROM upstream";
+
+    let oracle = DuckDbOracle::new();
+    let actual = oracle.query_types(duckdb_sql).unwrap();
+    assert_eq!(actual[0].1, DataType::BigInt);
+
+    let (db, _, downstream_path) = setup_two_model_db(upstream_sql, downstream_sql);
+    let inferred = run_smelt_multi_model_inference(&db, &downstream_path);
+    assert_eq!(inferred[0].1, DataType::BigInt);
 }

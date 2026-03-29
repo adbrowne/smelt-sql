@@ -1312,6 +1312,107 @@ pub fn test_scenario_strategy(
         })
 }
 
+// ---- Multi-model scenario for cross-model property tests ----
+
+/// A generated two-model scenario for testing cross-model type propagation.
+#[derive(Debug, Clone)]
+pub struct MultiModelScenario {
+    /// The upstream model SQL (valid SQL with CTE)
+    pub upstream_sql: String,
+    /// The upstream output columns with their types
+    pub upstream_columns: Vec<TypedSource>,
+    /// The downstream model SQL (uses smelt.ref('upstream'))
+    pub downstream_sql: String,
+    /// DuckDB-equivalent SQL (flattened CTEs, no smelt.ref)
+    pub duckdb_sql: String,
+    /// The downstream expressions with expected types
+    pub downstream_exprs: Vec<TypedExpr>,
+}
+
+/// Generate a multi-model scenario: upstream model → downstream model with smelt.ref().
+///
+/// - Upstream: `WITH data AS (SELECT casts...) SELECT cols FROM data`
+/// - Downstream: `SELECT exprs FROM smelt.ref('upstream')`
+/// - DuckDB equiv: `WITH upstream AS (SELECT casts...) SELECT exprs FROM upstream`
+pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenario> {
+    // Generate upstream columns
+    column_pool_strategy()
+        .prop_flat_map(|columns| {
+            // Generate 1-3 scalar expressions for the downstream
+            let num_exprs = 1..=3usize;
+            (
+                Just(columns),
+                prop::collection::vec(scalar_expr_kind_strategy(), num_exprs),
+                prop::collection::vec(0..100usize, 1..=3),
+            )
+        })
+        .prop_filter_map(
+            "need valid downstream exprs",
+            |(columns, expr_kinds, func_indices)| {
+                // Build upstream SQL
+                let cte_cols: Vec<String> = columns
+                    .iter()
+                    .map(|c| format!("{} AS {}", c.cast_sql, c.name))
+                    .collect();
+                let select_cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+                let upstream_sql = format!(
+                    "WITH data AS (SELECT {}) SELECT {} FROM data",
+                    cte_cols.join(", "),
+                    select_cols.join(", ")
+                );
+
+                // Generate downstream expressions over upstream columns
+                let mut exprs: Vec<TypedExpr> = Vec::new();
+                for (i, kind) in expr_kinds.iter().enumerate() {
+                    let func_idx = func_indices.get(i).copied().unwrap_or(0);
+                    if let Some(expr) = generate_expr(&columns, *kind, i, func_idx) {
+                        exprs.push(expr);
+                    }
+                }
+
+                if exprs.is_empty() {
+                    return None;
+                }
+
+                // Build downstream SQL using smelt.ref
+                let expr_items: Vec<String> = exprs
+                    .iter()
+                    .map(|e| format!("{} AS {}", e.sql, e.alias))
+                    .collect();
+                let downstream_sql = format!(
+                    "SELECT {} FROM smelt.ref('upstream')",
+                    expr_items.join(", ")
+                );
+
+                // Build DuckDB equivalent (CTE instead of smelt.ref)
+                let duckdb_sql = format!(
+                    "WITH upstream AS (SELECT {}) SELECT {} FROM upstream",
+                    cte_cols.join(", "),
+                    expr_items.join(", ")
+                );
+
+                Some(MultiModelScenario {
+                    upstream_sql,
+                    upstream_columns: columns,
+                    downstream_sql,
+                    duckdb_sql,
+                    downstream_exprs: exprs,
+                })
+            },
+        )
+}
+
+/// Expression kinds that work in scalar (non-GROUP BY) context.
+fn scalar_expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
+    prop_oneof![
+        3 => Just(ExprKind::ColumnRef),
+        3 => Just(ExprKind::Function),
+        2 => Just(ExprKind::BinaryOp),
+        1 => Just(ExprKind::CaseExpr),
+        1 => Just(ExprKind::Cast),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
