@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774775715291,
+  "lastUpdate": 1774778128135,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -7989,6 +7989,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.686666,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e47c63ebcf53989e6dd0ae03746af86f2c3bfe5b",
+          "message": "Document discoveries from property test expansion\n\nAdd DuckDB incompatibilities discovered during generator expansion:\n~* / !~ / !~* regex operators, TO_CHAR, and EXTRACT parser issue.\nUpdate roadmap with comprehensive generator coverage summary.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T20:54:02+11:00",
+          "tree_id": "cb483523e8032589dd79cca3de3cacceb1cfda74",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e47c63ebcf53989e6dd0ae03746af86f2c3bfe5b"
+        },
+        "date": 1774778127653,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 40.656166,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 39.310867,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.64333,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.366413,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003576,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 36.441806,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.018795,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012272,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008416,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.101545,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.423741,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.39938,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.873320000000003,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.344574,
             "unit": "ms"
           }
         ]
