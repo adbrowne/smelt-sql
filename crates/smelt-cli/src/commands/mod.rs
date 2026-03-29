@@ -1,5 +1,6 @@
 pub mod backbuild;
 pub mod build;
+pub mod diff;
 pub mod docs;
 pub mod explain;
 pub mod history;

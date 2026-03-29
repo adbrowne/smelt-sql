@@ -35,6 +35,8 @@ enum Commands {
     History(HistoryArgs),
     /// Output model graph and configuration as JSON for orchestrator integration
     Explain(ExplainArgs),
+    /// Show pending schema changes between model definitions and deployed state
+    Diff(DiffArgs),
     /// Run unit tests for models
     Test(TestArgs),
     /// Generate documentation
@@ -331,6 +333,25 @@ pub struct DocsGenerateArgs {
 }
 
 #[derive(Parser)]
+struct DiffArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Select models to diff (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+
+    /// Exclude models from diff (repeatable). Same syntax as --select.
+    #[arg(long = "exclude", short = 'e')]
+    exclude: Vec<String>,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
 struct TestArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
@@ -380,6 +401,7 @@ async fn main() -> Result<()> {
         Commands::Status(args) => commands::status::status(args).await,
         Commands::History(args) => commands::history::history(args).await,
         Commands::Explain(args) => commands::explain::explain(args).await,
+        Commands::Diff(args) => commands::diff::diff(args).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,

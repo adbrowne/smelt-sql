@@ -165,6 +165,33 @@ impl FileStore {
         Ok(Some(schema))
     }
 
+    /// List all model names that have deployed schemas.
+    ///
+    /// Returns the file stems from `.smelt/schemas/*.json`.
+    /// Returns an empty vec if the schemas directory doesn't exist.
+    pub fn list_deployed_model_names(&self) -> Vec<String> {
+        let dir = self.schemas_dir();
+        if !dir.exists() {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "json") {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Check if state directory exists (indicates state tracking has been initialized).
     pub fn exists(&self) -> bool {
         self.state_dir.exists()
