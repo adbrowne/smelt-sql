@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774766961610,
+  "lastUpdate": 1774766962714,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10304,6 +10304,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.326684349231417,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "655b951e30c562ade9d2e183e94d61987189c86d",
+          "message": "Update TODO.md: mark 4 completed items\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T17:47:33+11:00",
+          "tree_id": "5d17fc4489a2e970287f809a514367e2cd193a10",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/655b951e30c562ade9d2e183e94d61987189c86d"
+        },
+        "date": 1774766962443,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.700791901473767,
             "unit": "MB/s"
           }
         ]
