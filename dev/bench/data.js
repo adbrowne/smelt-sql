@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774757152644,
+  "lastUpdate": 1774757154192,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9935,6 +9935,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.93210042733384,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "73a3d965cb0eb55fcfa3b704500dbeb6c71b225a",
+          "message": "Fix binary expression type inference for cross-model propagation\n\nRoot cause: the parser's binary expression handlers (parse_additive_expr,\nparse_multiplicative_expr, etc.) called start_node(BINARY_EXPR) after\nthe left operand was parsed, so the BINARY_EXPR node only wrapped the\noperator and right operand. BinaryExpr::left() returned None since it\nonly looked for child EXPRESSION nodes.\n\nTwo-part fix:\n1. Parser: use Rowan checkpoints + start_node_at() to retroactively\n   wrap both operands in BINARY_EXPR (6 functions fixed)\n2. Type inference: add infer_binary_operand() fallback that resolves\n   bare IDENT/NUMBER tokens when child Expr nodes aren't available\n\nThis fixes SUM(computed_col), CEIL(computed_col), etc. through\nsmelt.ref() when the upstream model has binary expressions like\n`col + col AS result`. Types now propagate correctly across model\nboundaries.\n\nRemoves 3 KnownBug divergences that are no longer needed.\nVerified with 512 proptest cases — zero failures.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T15:03:58+11:00",
+          "tree_id": "756787be4b24efbe0e65d5c50f0c79006e215edb",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/73a3d965cb0eb55fcfa3b704500dbeb6c71b225a"
+        },
+        "date": 1774757153744,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.62876889842392,
             "unit": "MB/s"
           }
         ]
