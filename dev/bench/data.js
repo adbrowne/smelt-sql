@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774744932011,
+  "lastUpdate": 1774744933001,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9443,6 +9443,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.60182850667747,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9cd6c51171ee5ab43542878157584bddf8595f72",
+          "message": "Implement `smelt docs generate` for static data catalog output\n\nAdds a new CLI command that generates a data catalog / data dictionary\nin Markdown (default) or JSON format, combining Salsa type inference\nwith frontmatter metadata (descriptions, column tests, ownership).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-29T11:40:12+11:00",
+          "tree_id": "a42f9cbd2bff26314959172bebf11184806133c0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9cd6c51171ee5ab43542878157584bddf8595f72"
+        },
+        "date": 1774744932721,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.768189932128564,
             "unit": "MB/s"
           }
         ]
