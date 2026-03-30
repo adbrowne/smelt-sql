@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774906804383,
+  "lastUpdate": 1774906805561,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11165,6 +11165,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.19228281729572,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a883f7d65e306575ed24b917d256ebf8ffbd4cbc",
+          "message": "Revise dialect report: superset approach is sound, not risky\n\nThe multi-dialect superset is syntactic sugar that compiles down to\neach backend via the dialect printer. Reframe critique to focus on\nincomplete transpilation coverage (DISTINCT ON, LATERAL, PIVOT) rather\nthan the approach itself.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-31T08:38:51+11:00",
+          "tree_id": "ee149f0393636c9d97a3158d9a01b8d36f049c0e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a883f7d65e306575ed24b917d256ebf8ffbd4cbc"
+        },
+        "date": 1774906805291,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.559604780490577,
             "unit": "MB/s"
           }
         ]
