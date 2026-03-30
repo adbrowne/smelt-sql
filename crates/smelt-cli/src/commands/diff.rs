@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
-    discover_python_models, find_project_root, init_db, parse_selector, Config, LogicalGraph,
-    ModelDiscovery, SourcesConfig,
+    discover_python_models, find_project_root, init_db, migration, parse_selector, Config,
+    LogicalGraph, ModelDiscovery, SourcesConfig,
 };
 use smelt_state::file_store::FileStore;
 use smelt_state::schema_tracking::{diff_schemas, plan_migration, MigrationAction, SchemaDiff};
@@ -146,11 +146,16 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
                         .and_then(|node| config.targets.get(&node.target))
                         .map(|t| t.schema.as_str())
                         .unwrap_or("main");
+                    let (column_defaults, backfill_exprs) =
+                        migration::extract_evolution_maps(model.metadata.as_deref());
+
                     let action = plan_migration(
                         schema_name,
                         name,
                         &schema_diff,
                         true, // show full plan, don't block on column removal
+                        &column_defaults,
+                        &backfill_exprs,
                     );
                     ModelDiffStatus::Changed {
                         diff: schema_diff,

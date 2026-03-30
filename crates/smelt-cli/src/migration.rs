@@ -1,11 +1,55 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use smelt_backend::Backend;
+use smelt_core::metadata::{yaml_value_to_sql_literal, ModelMetadata};
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::schema_tracking::{
     diff_schemas, plan_migration, DeployedColumn, DeployedSchema, MigrationAction,
 };
+use std::collections::HashMap;
+use tracing::warn;
+
+/// Extract column default values and backfill expressions from model metadata.
+///
+/// Returns `(column_defaults, backfill_exprs)` where:
+/// - `column_defaults` maps column name → SQL literal (from `default:` in frontmatter)
+/// - `backfill_exprs` maps column name → SQL expression (from `backfill:` in frontmatter)
+pub fn extract_evolution_maps(
+    metadata: Option<&ModelMetadata>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    metadata
+        .map(|m| {
+            let defaults: HashMap<String, String> = m
+                .columns
+                .iter()
+                .filter_map(|(name, col_meta)| {
+                    col_meta
+                        .default
+                        .as_ref()
+                        .and_then(|v| match yaml_value_to_sql_literal(v) {
+                            Ok(sql) => Some((name.clone(), sql)),
+                            Err(e) => {
+                                warn!("Column '{}': {} — ignoring default", name, e);
+                                None
+                            }
+                        })
+                })
+                .collect();
+            let backfills: HashMap<String, String> = m
+                .columns
+                .iter()
+                .filter_map(|(name, col_meta)| {
+                    col_meta
+                        .backfill
+                        .as_ref()
+                        .map(|expr| (name.clone(), expr.clone()))
+                })
+                .collect();
+            (defaults, backfills)
+        })
+        .unwrap_or_default()
+}
 
 /// Result of checking schema evolution for a model.
 #[derive(Debug)]
@@ -49,6 +93,8 @@ pub async fn check_and_migrate(
     inferred_columns: &[DeployedColumn],
     allow_column_removal: bool,
     dry_run: bool,
+    column_defaults: &HashMap<String, String>,
+    backfill_exprs: &HashMap<String, String>,
 ) -> Result<SchemaEvolutionResult> {
     let model_hash = compute_model_hash(model_sql);
 
@@ -73,7 +119,14 @@ pub async fn check_and_migrate(
     }
 
     // Plan the migration
-    let action = plan_migration(schema, model_name, &diff, allow_column_removal);
+    let action = plan_migration(
+        schema,
+        model_name,
+        &diff,
+        allow_column_removal,
+        column_defaults,
+        backfill_exprs,
+    );
 
     match action {
         MigrationAction::NoChange => Ok(SchemaEvolutionResult::NoChange),

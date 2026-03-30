@@ -45,6 +45,16 @@ Offline schema change detection. Compares inferred model schemas (from SQL parsi
 - ✅ Removed model detection (deployed schema exists but model deleted from code)
 - ✅ Per-model target resolution (works with multi-backend projects)
 
+### ~~1. Schema Evolution~~ ✅ (March 29, 2026)
+
+Efficient schema migrations using ALTER TABLE + DEFAULT values instead of full table refresh.
+
+- ✅ Column `default:` in frontmatter — NOT NULL column additions use `ALTER TABLE ADD COLUMN ... DEFAULT val` instead of full refresh
+- ✅ Column `backfill:` in frontmatter — SQL expression for UPDATE backfill after ALTER TABLE ADD COLUMN
+- ✅ `schema_evolution: { strategy: full_refresh }` — opt out of ALTER-based migration per model
+- ✅ Nullable-to-NOT-NULL with default — `UPDATE ... WHERE IS NULL` + `ALTER SET NOT NULL`
+- ✅ `smelt diff` shows migration plan with defaults (ALTER with DEFAULT instead of full refresh)
+
 ### ~~1. Spark / Databricks Backend~~ 🔄 (March 28, 2026)
 
 Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are now functional, connecting to Spark through PySpark's SparkSession.
@@ -224,7 +234,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ~~`smelt docs generate`~~ ✅ (March 29, 2026) — see [What's Next](#1-data-catalog--smelt-docs-generate)
 - ~~`smelt diff`~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-diff--smelt-diff)
 - `smelt validate` — pre-run validation
-- Schema evolution with efficient migrations (ALTER+backfill instead of full refresh)
+- ~~Schema evolution with efficient migrations~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-evolution)
 
 ## UI Dashboard ✅ Phases 1-4 (March 24-25, 2026)
 

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Persisted schema for a deployed model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,11 +281,19 @@ pub enum MigrationAction {
 }
 
 /// Plan the migration action for a model based on the schema diff.
+///
+/// `column_defaults` maps column names to SQL literal default values (from frontmatter).
+/// When a NOT NULL column is added and has a default, ALTER TABLE with DEFAULT is used
+/// instead of triggering a full refresh.
+///
+/// `backfill_exprs` maps column names to SQL expressions for UPDATE backfill.
 pub fn plan_migration(
     schema: &str,
     table: &str,
     diff: &SchemaDiff,
     allow_column_removal: bool,
+    column_defaults: &HashMap<String, String>,
+    backfill_exprs: &HashMap<String, String>,
 ) -> MigrationAction {
     if diff.is_empty() {
         return MigrationAction::NoChange;
@@ -303,38 +312,58 @@ pub fn plan_migration(
         return MigrationAction::RequiresColumnRemovalFlag { columns: removed };
     }
 
-    // Check if full refresh is needed
-    if diff.requires_full_refresh() {
-        let reasons: Vec<String> = diff
-            .changes
-            .iter()
-            .filter_map(|c| match c {
-                SchemaChange::AddColumn {
-                    name,
-                    nullable: false,
-                    ..
-                } => Some(format!("NOT NULL column '{}' added", name)),
-                SchemaChange::ChangeType { name, from, to, .. } => {
-                    if !is_safe_type_widening(from, to) {
-                        Some(format!(
-                            "unsafe type change on '{}': {} -> {}",
-                            name, from, to
-                        ))
-                    } else {
-                        None
-                    }
+    // Check if full refresh is needed (considering available defaults)
+    let unresolvable_reasons: Vec<String> = diff
+        .changes
+        .iter()
+        .filter_map(|c| match c {
+            SchemaChange::AddColumn {
+                name,
+                nullable: false,
+                ..
+            } => {
+                // NOT NULL column addition is safe if we have a default value
+                if column_defaults.contains_key(name.as_str()) {
+                    None
+                } else {
+                    Some(format!(
+                        "NOT NULL column '{}' added (no default specified)",
+                        name
+                    ))
                 }
-                SchemaChange::ChangeNullability {
-                    name,
-                    to_nullable: false,
-                    ..
-                } => Some(format!("column '{}' changed to NOT NULL", name)),
-                _ => None,
-            })
-            .collect();
+            }
+            SchemaChange::ChangeType { name, from, to, .. } => {
+                if !is_safe_type_widening(from, to) {
+                    Some(format!(
+                        "unsafe type change on '{}': {} -> {}",
+                        name, from, to
+                    ))
+                } else {
+                    None
+                }
+            }
+            SchemaChange::ChangeNullability {
+                name,
+                to_nullable: false,
+                ..
+            } => {
+                // nullable → NOT NULL is safe if we have a default to fill NULLs
+                if column_defaults.contains_key(name.as_str()) {
+                    None
+                } else {
+                    Some(format!(
+                        "column '{}' changed to NOT NULL (no default specified)",
+                        name
+                    ))
+                }
+            }
+            _ => None,
+        })
+        .collect();
 
+    if !unresolvable_reasons.is_empty() {
         return MigrationAction::FullRefresh {
-            reason: reasons.join("; "),
+            reason: unresolvable_reasons.join("; "),
         };
     }
 
@@ -345,12 +374,34 @@ pub fn plan_migration(
     for change in &diff.changes {
         match change {
             SchemaChange::AddColumn {
-                name, data_type, ..
+                name,
+                data_type,
+                nullable,
             } => {
-                statements.push(format!(
-                    "ALTER TABLE {} ADD COLUMN {} {}",
-                    qualified_table, name, data_type
-                ));
+                if *nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {} ADD COLUMN {} {}",
+                        qualified_table, name, data_type
+                    ));
+                } else if let Some(default_val) = column_defaults.get(name.as_str()) {
+                    // NOT NULL with default: use DEFAULT clause
+                    statements.push(format!(
+                        "ALTER TABLE {} ADD COLUMN {} {} NOT NULL DEFAULT {}",
+                        qualified_table, name, data_type, default_val
+                    ));
+                } else {
+                    unreachable!(
+                        "NOT NULL column '{}' without default should have triggered FullRefresh",
+                        name
+                    );
+                }
+                // Backfill expression for the newly added column
+                if let Some(backfill) = backfill_exprs.get(name.as_str()) {
+                    statements.push(format!(
+                        "UPDATE {} SET {} = {}",
+                        qualified_table, name, backfill
+                    ));
+                }
             }
             SchemaChange::RemoveColumn { name } => {
                 statements.push(format!(
@@ -375,9 +426,25 @@ pub fn plan_migration(
                 ));
             }
             SchemaChange::ChangeNullability {
-                to_nullable: false, ..
+                name,
+                to_nullable: false,
+                ..
             } => {
-                // Handled by full refresh above
+                // nullable → NOT NULL: fill NULLs with the column's default value, then
+                // set NOT NULL. We use column_defaults (not backfill_exprs) here because
+                // the goal is to fill NULL gaps with a safe constant — backfill expressions
+                // are for recomputing column values from other columns, which is a different
+                // semantic (used for new column additions, not nullability changes).
+                if let Some(default_val) = column_defaults.get(name.as_str()) {
+                    statements.push(format!(
+                        "UPDATE {} SET {} = {} WHERE {} IS NULL",
+                        qualified_table, name, default_val, name
+                    ));
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+                        qualified_table, name
+                    ));
+                }
             }
         }
     }
@@ -395,6 +462,10 @@ mod tests {
             data_type: data_type.to_string(),
             nullable,
         }
+    }
+
+    fn no_defaults() -> HashMap<String, String> {
+        HashMap::new()
     }
 
     #[test]
@@ -528,7 +599,14 @@ mod tests {
     #[test]
     fn test_plan_migration_no_change() {
         let diff = SchemaDiff { changes: vec![] };
-        let action = plan_migration("main", "my_table", &diff, false);
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
         assert_eq!(action, MigrationAction::NoChange);
     }
 
@@ -541,7 +619,14 @@ mod tests {
                 nullable: true,
             }],
         };
-        let action = plan_migration("main", "my_table", &diff, false);
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
         match action {
             MigrationAction::AlterTable { statements } => {
                 assert_eq!(statements.len(), 1);
@@ -561,7 +646,14 @@ mod tests {
                 name: "old_col".to_string(),
             }],
         };
-        let action = plan_migration("main", "my_table", &diff, false);
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
         assert!(matches!(
             action,
             MigrationAction::RequiresColumnRemovalFlag { .. }
@@ -575,7 +667,14 @@ mod tests {
                 name: "old_col".to_string(),
             }],
         };
-        let action = plan_migration("main", "my_table", &diff, true);
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            true,
+            &no_defaults(),
+            &no_defaults(),
+        );
         match action {
             MigrationAction::AlterTable { statements } => {
                 assert_eq!(statements.len(), 1);
@@ -597,7 +696,14 @@ mod tests {
                 nullable: false,
             }],
         };
-        let action = plan_migration("main", "my_table", &diff, false);
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
         assert!(matches!(action, MigrationAction::FullRefresh { .. }));
     }
 
@@ -617,7 +723,14 @@ mod tests {
                 },
             ],
         };
-        let action = plan_migration("main", "my_table", &diff, false);
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
         match action {
             MigrationAction::AlterTable { statements } => {
                 assert_eq!(statements.len(), 2);
@@ -671,5 +784,193 @@ mod tests {
         assert!(summary[0].contains("ADD COLUMN email"));
         assert!(summary[1].contains("DROP COLUMN old_col"));
         assert!(summary[2].contains("ALTER COLUMN amount"));
+    }
+
+    // --- Schema evolution with defaults ---
+
+    #[test]
+    fn test_plan_migration_not_null_column_with_default() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "status".to_string(),
+                data_type: "VARCHAR".to_string(),
+                nullable: false,
+            }],
+        };
+        let mut defaults = HashMap::new();
+        defaults.insert("status".to_string(), "'unknown'".to_string());
+
+        let action = plan_migration("main", "my_table", &diff, false, &defaults, &no_defaults());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.my_table ADD COLUMN status VARCHAR NOT NULL DEFAULT 'unknown'"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_migration_not_null_column_without_default_requires_refresh() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "status".to_string(),
+                data_type: "VARCHAR".to_string(),
+                nullable: false,
+            }],
+        };
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
+        assert!(matches!(action, MigrationAction::FullRefresh { .. }));
+    }
+
+    #[test]
+    fn test_plan_migration_nullable_to_not_null_with_default() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "priority".to_string(),
+                from_nullable: true,
+                to_nullable: false,
+            }],
+        };
+        let mut defaults = HashMap::new();
+        defaults.insert("priority".to_string(), "0".to_string());
+
+        let action = plan_migration("main", "my_table", &diff, false, &defaults, &no_defaults());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 2);
+                assert_eq!(
+                    statements[0],
+                    "UPDATE main.my_table SET priority = 0 WHERE priority IS NULL"
+                );
+                assert_eq!(
+                    statements[1],
+                    "ALTER TABLE main.my_table ALTER COLUMN priority SET NOT NULL"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_migration_nullable_to_not_null_without_default_requires_refresh() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "priority".to_string(),
+                from_nullable: true,
+                to_nullable: false,
+            }],
+        };
+        let action = plan_migration(
+            "main",
+            "my_table",
+            &diff,
+            false,
+            &no_defaults(),
+            &no_defaults(),
+        );
+        assert!(matches!(action, MigrationAction::FullRefresh { .. }));
+    }
+
+    #[test]
+    fn test_plan_migration_add_column_with_backfill() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "full_name".to_string(),
+                data_type: "VARCHAR".to_string(),
+                nullable: true,
+            }],
+        };
+        let mut backfills = HashMap::new();
+        backfills.insert(
+            "full_name".to_string(),
+            "COALESCE(first_name || ' ' || last_name, '')".to_string(),
+        );
+
+        let action = plan_migration("main", "my_table", &diff, false, &no_defaults(), &backfills);
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 2);
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.my_table ADD COLUMN full_name VARCHAR"
+                );
+                assert_eq!(
+                    statements[1],
+                    "UPDATE main.my_table SET full_name = COALESCE(first_name || ' ' || last_name, '')"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_migration_not_null_with_default_and_backfill() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::AddColumn {
+                name: "status".to_string(),
+                data_type: "VARCHAR".to_string(),
+                nullable: false,
+            }],
+        };
+        let mut defaults = HashMap::new();
+        defaults.insert("status".to_string(), "'pending'".to_string());
+        let mut backfills = HashMap::new();
+        backfills.insert(
+            "status".to_string(),
+            "CASE WHEN completed THEN 'done' ELSE 'pending' END".to_string(),
+        );
+
+        let action = plan_migration("main", "my_table", &diff, false, &defaults, &backfills);
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 2);
+                assert!(statements[0].contains("DEFAULT 'pending'"));
+                assert!(statements[1].contains("UPDATE"));
+                assert!(statements[1].contains("CASE WHEN"));
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_migration_mixed_with_some_defaults() {
+        // One NOT NULL column with default + one safe type widening
+        let diff = SchemaDiff {
+            changes: vec![
+                SchemaChange::AddColumn {
+                    name: "priority".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                },
+                SchemaChange::ChangeType {
+                    name: "amount".to_string(),
+                    from: "INTEGER".to_string(),
+                    to: "BIGINT".to_string(),
+                },
+            ],
+        };
+        let mut defaults = HashMap::new();
+        defaults.insert("priority".to_string(), "0".to_string());
+
+        let action = plan_migration("main", "my_table", &diff, false, &defaults, &no_defaults());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 2);
+                assert!(statements[0].contains("NOT NULL DEFAULT 0"));
+                assert!(statements[1].contains("ALTER COLUMN amount TYPE BIGINT"));
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
     }
 }
