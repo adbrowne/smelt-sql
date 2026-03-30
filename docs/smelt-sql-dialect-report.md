@@ -33,13 +33,27 @@ Smelt is a SELECT-only parser. It does not handle:
 - Type constructors beyond ARRAY/STRUCT/ROW (e.g., MAP in Spark)
 - Set-returning functions in SELECT (UNNEST as a select item)
 
-### 1.3 Critique: The superset approach is risky
+### 1.3 The superset approach: sound design, incomplete transpilation
 
-**Problem**: Accepting the union of multiple dialects means smelt will happily parse SQL that no single backend can execute. A query using both PostgreSQL's `DISTINCT ON` and DuckDB's `QUALIFY` is syntactically valid to smelt but cannot run anywhere.
+Smelt's multi-dialect superset is best understood as **syntactic sugar that compiles down to any backend**. The dialect compiler (`smelt-dialect`) already transpiles many cross-dialect constructs:
 
-**The `star_in_expression` gap illustrates this well**: smelt accepts `SELECT * + 1 FROM t` or `CASE WHEN * THEN ...` because `*` is parsed as a primary expression without restriction. No backend accepts this.
+- QUALIFY → subquery wrapper (for PostgreSQL/Spark)
+- `x::type` → `CAST(x AS type)` (for Spark)
+- `ARRAY[...]` → `ARRAY(...)` (for Spark)
+- `DATE 'literal'` → `DATE('literal')` (for Spark)
+- Trailing commas → stripped (for Spark)
+- Function name remapping (UNNEST ↔ EXPLODE, BOOL_AND ↔ EVERY)
 
-**Suggestion**: Introduce a dialect mode (even if just for diagnostics) that flags constructs unsupported by the target backend. This doesn't need to be enforced at parse time — a post-parse lint pass would suffice. The `smelt-parser-compat` crate already has the infrastructure for this via gap tracking; it could be promoted from test infrastructure to a user-facing feature.
+This is the right model for a multi-backend tool. The superset isn't a problem — it's a feature — as long as every construct has a transpilation path to every backend.
+
+**Where gaps remain**: A few parsed constructs have no rewrite and are passthrough-only:
+- **DISTINCT ON** — PostgreSQL-only, could be rewritten to ROW_NUMBER window
+- **LATERAL** — PostgreSQL-only, could be rewritten to correlated subquery
+- **PIVOT/UNPIVOT** — capability flag exists but no rewrite for PostgreSQL
+
+These are incremental transpilation gaps, not architectural flaws. They should be tracked and filled over time.
+
+**One genuine concern**: The `star_in_expression` gap — smelt accepts `SELECT * + 1 FROM t` or `CASE WHEN * THEN ...` because `*` is parsed as a primary expression without restriction. No backend accepts this, and no transpilation can fix it. This is a parser permissiveness issue worth addressing.
 
 ### 1.4 Critique: No formal grammar specification
 
@@ -308,7 +322,7 @@ If the parser changes how it nests nodes (e.g., wrapping an operand in an extra 
 
 8. **Extract a formal grammar** from the parser, even if just as documentation.
 9. **Split parser.rs** into statement/expression/clause modules.
-10. **Add a dialect-aware lint pass** that warns about cross-dialect constructs.
+10. **Fill transpilation gaps** for DISTINCT ON, LATERAL, and PIVOT/UNPIVOT so all parsed constructs compile to all backends.
 11. **Track Compatible vs Exact type matches** in property test reporting.
 12. **Add JSON and STRUCT types** to the type system.
 
