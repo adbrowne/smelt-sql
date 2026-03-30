@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774872787825,
+  "lastUpdate": 1774906804383,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8459,6 +8459,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.304594,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a883f7d65e306575ed24b917d256ebf8ffbd4cbc",
+          "message": "Revise dialect report: superset approach is sound, not risky\n\nThe multi-dialect superset is syntactic sugar that compiles down to\neach backend via the dialect printer. Reframe critique to focus on\nincomplete transpilation coverage (DISTINCT ON, LATERAL, PIVOT) rather\nthan the approach itself.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-31T08:38:51+11:00",
+          "tree_id": "ee149f0393636c9d97a3158d9a01b8d36f049c0e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a883f7d65e306575ed24b917d256ebf8ffbd4cbc"
+        },
+        "date": 1774906803891,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.597407,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.269561,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.665061,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.344974,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0026850000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.179247,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.027772,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014026,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010049,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.284806,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.469486,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.99321,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 26.14627,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.140595,
             "unit": "ms"
           }
         ]
