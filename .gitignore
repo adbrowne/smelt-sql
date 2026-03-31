@@ -1,7 +1,8 @@
 target/
 .cargo-cache/
-.claude/
+.claude/*
 !.claude/settings.json
+!.claude/commands/
 datagen.duckdb
 output/
 __pycache__/

@@ -294,6 +294,26 @@ Plans are committed to the repo under `docs/plans/` as markdown files.
 - Use markdown format
 - **Always commit the plan file to `docs/plans/`** as part of the implementation work — do not leave it only in `.claude/plans/`
 
+## ACE-FCA Workflow
+
+This project uses the [ACE-FCA workflow](docs/ace-fca-guide.md) (Advanced Context Engineering with Frequent Intentional Compaction) for non-trivial development tasks.
+
+**Slash commands** (in `.claude/commands/`):
+- `/research` — Explore codebase to understand a topic (outputs to `docs/research/`)
+- `/plan` — Create an implementation plan from research (outputs to `docs/plans/`)
+- `/iterate-plan` — Refine an existing plan based on feedback
+- `/implement` — Execute a plan phase by phase with verification gates
+- `/validate` — Verify implementation matches the plan specification
+- `/handoff` — Compact session context for continuity (outputs to `docs/handoffs/`)
+
+**Compaction guidance** — When compacting (manually or automatically), preserve:
+- The active plan path and which phases are complete
+- List of files modified in this session
+- Current build/test status
+- Decisions made and their rationale
+
+See `docs/ace-fca-guide.md` for the full tutorial.
+
 ## License
 
 MIT License - Copyright (c) 2025 Andrew Browne
