@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774937267943,
+  "lastUpdate": 1774937268972,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11288,6 +11288,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.559604780490577,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "aa32e417917dea14b15732c87c9425410c593c83",
+          "message": "Reject PIVOT/UNPIVOT with diagnostic error\n\nPIVOT/UNPIVOT produce columns derived from data values, making output\nschema unknowable at compile time. Keep parsing them (for good LSP\nerror positions) but emit an error diagnostic. A future enhancement\ncan allow the static PIVOT ... IN (literal_list) form.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-31T17:06:28+11:00",
+          "tree_id": "ad551d97a47b20a2f75cb8160f84a898ffc8a234",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/aa32e417917dea14b15732c87c9425410c593c83"
+        },
+        "date": 1774937268702,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.460178473514784,
             "unit": "MB/s"
           }
         ]
