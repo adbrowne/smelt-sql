@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774955463139,
+  "lastUpdate": 1774955464611,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11411,6 +11411,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.460178473514784,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "83afae299ee9379bc5f69c6cec0ec52badc2a552",
+          "message": "Add ACE-FCA workflow: slash commands, tutorial, and artifact directories\n\nImplements the Advanced Context Engineering with Frequent Intentional\nCompaction (ACE-FCA) workflow adapted from HumanLayer's framework. Adds\n6 slash commands (/research, /plan, /iterate-plan, /implement, /validate,\n/handoff) that structure development into phases with human review gates\nand context compaction between each stage.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-31T22:09:41+11:00",
+          "tree_id": "ab21dca069b08534e4dcf9281cc67629711ee166",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/83afae299ee9379bc5f69c6cec0ec52badc2a552"
+        },
+        "date": 1774955464116,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.770100518152777,
             "unit": "MB/s"
           }
         ]
