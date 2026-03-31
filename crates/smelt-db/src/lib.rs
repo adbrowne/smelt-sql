@@ -486,6 +486,10 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
     // Check for malformed source calls (missing dot separator like 'foo' instead of 'raw.users')
     // These are filtered out by model_sources() so we need to check them separately
     let text = db.file_text(path.clone());
+
+    // Check for unsupported constructs (PIVOT/UNPIVOT)
+    check_unsupported_constructs(&parse.syntax(), &text, &mut diagnostics);
+
     let syntax = parse.syntax();
     if let Some(file) = AstFile::cast(syntax) {
         for source_call in file.sources() {
@@ -618,6 +622,32 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<
                 });
             }
         }
+    }
+}
+
+/// Check for unsupported SQL constructs (PIVOT/UNPIVOT)
+fn check_unsupported_constructs(
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    use smelt_parser::SyntaxKind::{PIVOT_CLAUSE, UNPIVOT_CLAUSE};
+
+    for node in syntax.descendants() {
+        let (kind_name, node_range) = match node.kind() {
+            PIVOT_CLAUSE => ("PIVOT", node.text_range()),
+            UNPIVOT_CLAUSE => ("UNPIVOT", node.text_range()),
+            _ => continue,
+        };
+        let range = smelt_parser::ast::text_range_to_range(text, node_range);
+        diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "{} is not supported \u{2014} output columns depend on data values and cannot be determined at compile time",
+                kind_name
+            ),
+            range,
+        });
     }
 }
 
@@ -4692,6 +4722,64 @@ sources:
             down_schema.columns[0].data_type.as_ref().unwrap().data_type,
             DataType::Double,
             "SUM(Double) should be Double"
+        );
+    }
+
+    // ============================================================
+    // Unsupported construct diagnostics
+    // ============================================================
+
+    #[test]
+    fn test_pivot_rejected_with_diagnostic() {
+        let (db, paths) = setup_multi_model(&[(
+            "pivot_model",
+            "SELECT * FROM (SELECT dept, quarter, rev FROM t) PIVOT (SUM(rev) FOR quarter IN ('Q1', 'Q2'))",
+        )]);
+
+        let diags = db.file_diagnostics(paths[0].clone());
+        let pivot_diag = diags
+            .iter()
+            .find(|d| d.message.contains("PIVOT is not supported"));
+        assert!(
+            pivot_diag.is_some(),
+            "Should emit error for PIVOT, got: {:?}",
+            diags
+        );
+        assert_eq!(pivot_diag.unwrap().severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn test_unpivot_rejected_with_diagnostic() {
+        let (db, paths) = setup_multi_model(&[(
+            "unpivot_model",
+            "SELECT * FROM t UNPIVOT (val FOR name IN (a, b, c))",
+        )]);
+
+        let diags = db.file_diagnostics(paths[0].clone());
+        let unpivot_diag = diags
+            .iter()
+            .find(|d| d.message.contains("UNPIVOT is not supported"));
+        assert!(
+            unpivot_diag.is_some(),
+            "Should emit error for UNPIVOT, got: {:?}",
+            diags
+        );
+        assert_eq!(unpivot_diag.unwrap().severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn test_no_pivot_diagnostic_for_normal_query() {
+        let (db, paths) = setup_multi_model(&[(
+            "normal_model",
+            "SELECT dept, SUM(rev) as total FROM t GROUP BY dept",
+        )]);
+
+        let diags = db.file_diagnostics(paths[0].clone());
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.message.contains("PIVOT") || d.message.contains("UNPIVOT")),
+            "Normal query should not trigger PIVOT/UNPIVOT diagnostic"
         );
     }
 }
