@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775222026579,
+  "lastUpdate": 1775222028302,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12764,6 +12764,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.823866160839398,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "d5f0304dbfaa0ac726f3b5b6e24a4127712918fd",
+          "message": "Fix sources.yml changes not updating LSP until reload\n\nThe VSCode extension's documentSelector only matched **/models/**/*.sql,\nso didOpen/didChange notifications were never sent for sources.yml files.\nThe LSP server already had correct handling code that was simply unreachable.\n\n- Add **/sources.yml and **/sources.yaml to documentSelector\n- Add sources.{yml,yaml} file watcher to fileEvents\n- Handle sources.yml in did_change_watched_files for external edits\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T00:12:28+11:00",
+          "tree_id": "c56e405a0886ba5c072f9ccaf412bb73348a19d3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d5f0304dbfaa0ac726f3b5b6e24a4127712918fd"
+        },
+        "date": 1775222027648,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.067196854474727,
             "unit": "MB/s"
           }
         ]
