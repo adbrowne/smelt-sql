@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774955464611,
+  "lastUpdate": 1775190409892,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -8741,6 +8741,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.04857,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f343c0ce1836ed17521b25d2d70ee390c4b200e6",
+          "message": "Use system DuckDB in CI and document for local dev\n\nThread a `bundled-duckdb` feature through smelt-cli, smelt-ui, and\nsmelt-db so builds can link against a pre-installed system DuckDB\nlibrary instead of compiling it from C++ source each time.\n\n- Add .github/actions/setup-duckdb composite action (downloads + caches\n  libduckdb v1.5.0)\n- Update test.yml: lint and test jobs use system DuckDB, clippy now\n  runs on all workspace crates\n- Update compat.yml: type-property-spark job uses system DuckDB\n- Update CLAUDE.md with system DuckDB setup and commands (recommended)\n- Fix pre-existing clippy::type_complexity warning in smelt-bench\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-03T15:25:25+11:00",
+          "tree_id": "3827b506e275f6a547642ab0c86a1f400dfe699b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f343c0ce1836ed17521b25d2d70ee390c4b200e6"
+        },
+        "date": 1775190409224,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.76594,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.456956,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.602946,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.382233,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002655,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.300257,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.029195,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014567,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010801,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.576263,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.448862,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.47028,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.79413,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.336844,
             "unit": "ms"
           }
         ]
