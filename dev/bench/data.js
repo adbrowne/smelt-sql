@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775192326603,
+  "lastUpdate": 1775192328375,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11657,6 +11657,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.12119890630051,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1fbce865cff28f8320078c93d80ebfab53b7c9b4",
+          "message": "Merge pull request #93 from adbrowne/fix-example-diagnostics\n\nFix 35 LSP diagnostics in examples and add CI verification",
+          "timestamp": "2026-04-03T15:56:45+11:00",
+          "tree_id": "820fa2dc759b17e76bd4d050e698be73abe8197c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/1fbce865cff28f8320078c93d80ebfab53b7c9b4"
+        },
+        "date": 1775192327700,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.04870124358221,
             "unit": "MB/s"
           }
         ]
