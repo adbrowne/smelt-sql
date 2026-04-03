@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775211440539,
+  "lastUpdate": 1775211441621,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12026,6 +12026,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.637894597321118,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6cd569045825a9602a9b6560f439945b531d111c",
+          "message": "Merge pull request #96 from adbrowne/worktree-next\n\nPass real ProjectContext to Python models in LSP",
+          "timestamp": "2026-04-03T21:15:40+11:00",
+          "tree_id": "4c3598db4ede73f6e881790789f0176bb8e955d5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6cd569045825a9602a9b6560f439945b531d111c"
+        },
+        "date": 1775211441315,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.771636590858947,
             "unit": "MB/s"
           }
         ]
