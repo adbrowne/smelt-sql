@@ -6,6 +6,7 @@ pub mod model_id;
 pub mod project;
 #[cfg(feature = "python")]
 pub mod python_models;
+pub mod python_utils;
 pub mod refs;
 pub mod selector;
 pub mod sources;
