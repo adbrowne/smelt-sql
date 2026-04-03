@@ -113,7 +113,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist --features bundled-duckdb
           manylinux: auto
           docker-options: -e CXXFLAGS=-DDUCKDB_CUSTOM_PLATFORM=${{ contains(matrix.target, 'aarch64') && 'linux_arm64_gcc4' || 'linux_amd64_gcc4' }}
           before-script-linux: |
@@ -186,7 +186,7 @@ jobs:
         run: cd ui && npm ci && npm run build
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p smelt-cli -p smelt-lsp
+        run: cargo build --release --target ${{ matrix.target }} -p smelt-cli -p smelt-lsp --features smelt-cli/bundled-duckdb
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
