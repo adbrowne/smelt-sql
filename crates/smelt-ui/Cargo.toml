@@ -12,7 +12,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
 smelt-planner = { path = "../smelt-planner" }
 smelt-backend = { path = "../smelt-backend" }
-smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true }
+smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, default-features = false }
 smelt-state = { path = "../smelt-state" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-dialect = { path = "../smelt-dialect" }
@@ -49,8 +49,9 @@ rowan.workspace = true
 tracing = "0.1"
 
 [features]
-default = ["duckdb"]
+default = ["duckdb", "bundled-duckdb"]
 duckdb = ["smelt-backend-duckdb"]
+bundled-duckdb = ["smelt-backend-duckdb/bundled"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

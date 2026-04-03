@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  DUCKDB_LIB_DIR: /usr/local/lib
+
 jobs:
   lint:
     name: Lint
@@ -19,6 +22,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -31,16 +37,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run clippy (core crates)
+      - name: Run clippy
         run: >
           cargo clippy
-          --workspace
-          --exclude smelt-backend-duckdb
-          --exclude smelt-datagen
-          --exclude smelt-cli
-          --exclude smelt-bench
-          --exclude smelt-ui
-          --lib --bins --tests
+          --all-targets
+          --no-default-features
+          --features smelt-cli/duckdb,smelt-ui/duckdb
           -- -D warnings
 
   test:
@@ -50,13 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -76,7 +76,7 @@ jobs:
         run: cd ui && npm ci && npm run build
 
       - name: Run unit tests
-        run: cargo test --lib
+        run: cargo test --lib --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
 
       - name: Run property-based tests (quick)
         run: cargo test --test proptest_round_trip -- --test-threads=1
@@ -88,11 +88,14 @@ jobs:
         env:
           PROPTEST_CASES: 100
 
+      - name: Verify example workspaces have no diagnostics
+        run: cargo test -p smelt-cli --no-default-features --features duckdb --test example_diagnostics
+
       - name: Run smelt model tests (example projects)
         run: |
-          cargo run -p smelt-cli --quiet -- test --project-dir examples/retail_analytics
-          cargo run -p smelt-cli --quiet -- test --project-dir examples/timeseries
-          cargo run -p smelt-cli --quiet -- test --project-dir examples/ephemeral_demo
+          cargo run -p smelt-cli --no-default-features --features duckdb --quiet -- test --project-dir examples/retail_analytics
+          cargo run -p smelt-cli --no-default-features --features duckdb --quiet -- test --project-dir examples/timeseries
+          cargo run -p smelt-cli --no-default-features --features duckdb --quiet -- test --project-dir examples/ephemeral_demo
 
   fuzz-build:
     name: Fuzz Targets Build Check

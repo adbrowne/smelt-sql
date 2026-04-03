@@ -49,10 +49,28 @@ A next-generation data pipeline tool designed to improve upon dbt by:
 
 ## Commands
 
-### Build and Test
+### Build and Test (System DuckDB - Recommended)
+
+Using system DuckDB avoids recompiling DuckDB from C++ source, making builds much faster.
+
+**Setup:** Install the DuckDB shared library (v1.5.0) and set `DUCKDB_LIB_DIR`:
 ```bash
-# Build the entire workspace
-cargo build
+# Download and install (one-time setup)
+curl -sL https://github.com/duckdb/duckdb/releases/download/v1.5.0/libduckdb-linux-amd64.zip -o /tmp/libduckdb.zip
+cd /tmp && unzip -o libduckdb.zip libduckdb.so
+sudo cp libduckdb.so /usr/local/lib/ && sudo ldconfig
+# Or for user-local install:
+mkdir -p ~/.local/lib/duckdb && cp libduckdb.so ~/.local/lib/duckdb/
+
+# Set env var (add to ~/.bashrc or ~/.zshrc)
+export DUCKDB_LIB_DIR=/usr/local/lib          # system install
+# or: export DUCKDB_LIB_DIR=~/.local/lib/duckdb  # user-local install
+```
+
+**Commands with system DuckDB:**
+```bash
+# Build the entire workspace (system DuckDB)
+cargo build --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
 
 # Format code (required before committing)
 cargo fmt --all
@@ -61,19 +79,28 @@ cargo fmt --all
 cargo fmt --all -- --check
 
 # Run clippy (linter) - must pass with no warnings
-cargo clippy --all-targets
+cargo clippy --all-targets --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
 
 # Run tests
-cargo test
+cargo test --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
 
-# Build with bundled DuckDB (no system dependency required)
-cargo build  # bundled is default
+# Verify example workspaces have no LSP diagnostics
+cargo test -p smelt-cli --no-default-features --features duckdb --test example_diagnostics
 
 # Run the LSP server
 cargo run -p smelt-lsp
 
 # Test with sample workspace
 # (Configure your editor to use the LSP server, then open examples/test_workspace/)
+```
+
+### Build and Test (Bundled DuckDB - No System Dependencies)
+
+If you don't have the system DuckDB library, bundled mode compiles DuckDB from source (slower first build):
+```bash
+cargo build            # bundled is the default
+cargo test             # bundled is the default
+cargo clippy --all-targets
 ```
 
 ### VSCode Extension

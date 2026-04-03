@@ -19,7 +19,7 @@ smelt-types = { path = "../smelt-types" }
 smelt-planner = { path = "../smelt-planner" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-dialect = { path = "../smelt-dialect" }
-smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true }
+smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, default-features = false }
 duckdb = { workspace = true, optional = true }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
 smelt-state = { path = "../smelt-state" }
@@ -64,7 +64,8 @@ pyo3 = { workspace = true, optional = true }
 tempfile = "3.8"
 
 [features]
-default = ["duckdb"]
+default = ["duckdb", "bundled-duckdb"]
 duckdb = ["smelt-backend-duckdb", "dep:duckdb"]
+bundled-duckdb = ["smelt-backend-duckdb/bundled", "duckdb/bundled"]
 spark = ["smelt-backend-spark", "python"]
 python = ["smelt-planner/python", "smelt-core/python", "pyo3"]

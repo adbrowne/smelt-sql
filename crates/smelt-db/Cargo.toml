@@ -17,7 +17,11 @@ smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
 
 [dev-dependencies]
-duckdb = { workspace = true, features = ["bundled"] }
+duckdb = { workspace = true }
 arrow = { workspace = true }
 proptest = { workspace = true }
 smelt-dialect = { path = "../smelt-dialect" }
+
+[features]
+default = ["bundled-duckdb"]
+bundled-duckdb = ["duckdb/bundled"]
