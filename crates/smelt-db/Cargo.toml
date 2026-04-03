@@ -23,5 +23,5 @@ proptest = { workspace = true }
 smelt-dialect = { path = "../smelt-dialect" }
 
 [features]
-default = ["bundled-duckdb"]
+default = []
 bundled-duckdb = ["duckdb/bundled"]

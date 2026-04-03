@@ -64,7 +64,7 @@ pyo3 = { workspace = true, optional = true }
 tempfile = "3.8"
 
 [features]
-default = ["duckdb", "bundled-duckdb"]
+default = ["duckdb"]
 duckdb = ["smelt-backend-duckdb", "dep:duckdb"]
 bundled-duckdb = ["smelt-backend-duckdb/bundled", "duckdb/bundled"]
 spark = ["smelt-backend-spark", "python"]

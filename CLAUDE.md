@@ -67,10 +67,10 @@ export DUCKDB_LIB_DIR=/usr/local/lib          # system install
 # or: export DUCKDB_LIB_DIR=~/.local/lib/duckdb  # user-local install
 ```
 
-**Commands with system DuckDB:**
+**Commands (system DuckDB is now the default):**
 ```bash
-# Build the entire workspace (system DuckDB)
-cargo build --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
+# Build the entire workspace
+cargo build
 
 # Format code (required before committing)
 cargo fmt --all
@@ -79,13 +79,13 @@ cargo fmt --all
 cargo fmt --all -- --check
 
 # Run clippy (linter) - must pass with no warnings
-cargo clippy --all-targets --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
+cargo clippy --all-targets
 
 # Run tests
-cargo test --no-default-features --features smelt-cli/duckdb,smelt-ui/duckdb
+cargo test
 
 # Verify example workspaces have no LSP diagnostics
-cargo test -p smelt-cli --no-default-features --features duckdb --test example_diagnostics
+cargo test -p smelt-cli --test example_diagnostics
 
 # Run the LSP server
 cargo run -p smelt-lsp
@@ -96,11 +96,12 @@ cargo run -p smelt-lsp
 
 ### Build and Test (Bundled DuckDB - No System Dependencies)
 
-If you don't have the system DuckDB library, bundled mode compiles DuckDB from source (slower first build):
+If you don't have the system DuckDB library, bundled mode compiles DuckDB from source (slower first build).
+You must explicitly opt in with feature flags:
 ```bash
-cargo build            # bundled is the default
-cargo test             # bundled is the default
-cargo clippy --all-targets
+cargo build --features smelt-cli/bundled-duckdb,smelt-ui/bundled-duckdb
+cargo test --features smelt-cli/bundled-duckdb,smelt-ui/bundled-duckdb,smelt-db/bundled-duckdb
+cargo clippy --all-targets --features smelt-cli/bundled-duckdb,smelt-ui/bundled-duckdb
 ```
 
 ### VSCode Extension

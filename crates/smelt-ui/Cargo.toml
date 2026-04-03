@@ -49,7 +49,7 @@ rowan.workspace = true
 tracing = "0.1"
 
 [features]
-default = ["duckdb", "bundled-duckdb"]
+default = ["duckdb"]
 duckdb = ["smelt-backend-duckdb"]
 bundled-duckdb = ["smelt-backend-duckdb/bundled"]
 
