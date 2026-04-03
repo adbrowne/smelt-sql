@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-03
 **Research**: docs/research/2026-04-03-lsp-python-model-integration.md
-**Status**: Draft
+**Status**: Validated
 
 ## Context
 
