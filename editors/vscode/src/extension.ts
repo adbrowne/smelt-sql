@@ -110,12 +110,15 @@ export function activate(context: vscode.ExtensionContext) {
 
     const clientOptions: LanguageClientOptions = {
         documentSelector: [
-            { scheme: 'file', pattern: '**/models/**/*.sql' }
+            { scheme: 'file', pattern: '**/models/**/*.sql' },
+            { scheme: 'file', pattern: '**/sources.yml' },
+            { scheme: 'file', pattern: '**/sources.yaml' },
         ],
         synchronize: {
             fileEvents: [
                 vscode.workspace.createFileSystemWatcher('**/models/**/*.sql'),
                 vscode.workspace.createFileSystemWatcher('**/models/**/*.py'),
+                vscode.workspace.createFileSystemWatcher('**/sources.{yml,yaml}'),
             ]
         },
         workspaceFolder: workspaceFolder,

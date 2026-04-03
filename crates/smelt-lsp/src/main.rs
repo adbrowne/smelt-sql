@@ -1530,6 +1530,16 @@ impl LanguageServer for Backend {
 
             if path.extension().and_then(|s| s.to_str()) == Some("py") {
                 self.handle_python_file_change(&path).await;
+            } else if is_sources_file(&path) {
+                // Re-read sources.yml from disk when changed outside the editor
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Some(project_root) = path.parent().map(|p| p.to_path_buf()) {
+                        let mut db = self.db.lock().await;
+                        db.set_project_sources_yaml(project_root, Arc::new(content));
+                        drop(db);
+                        self.publish_all_diagnostics().await;
+                    }
+                }
             }
         }
     }
