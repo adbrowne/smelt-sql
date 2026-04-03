@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775221920261,
+  "lastUpdate": 1775222026579,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9681,6 +9681,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 14.04432,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "d5f0304dbfaa0ac726f3b5b6e24a4127712918fd",
+          "message": "Fix sources.yml changes not updating LSP until reload\n\nThe VSCode extension's documentSelector only matched **/models/**/*.sql,\nso didOpen/didChange notifications were never sent for sources.yml files.\nThe LSP server already had correct handling code that was simply unreachable.\n\n- Add **/sources.yml and **/sources.yaml to documentSelector\n- Add sources.{yml,yaml} file watcher to fileEvents\n- Handle sources.yml in did_change_watched_files for external edits\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T00:12:28+11:00",
+          "tree_id": "c56e405a0886ba5c072f9ccaf412bb73348a19d3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d5f0304dbfaa0ac726f3b5b6e24a4127712918fd"
+        },
+        "date": 1775222025452,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.582495,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.281235,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.647274,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.347296,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002725,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 38.9184,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.019556,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014687,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008877,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.071412,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.242009,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.105449999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.59741,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.347723,
             "unit": "ms"
           }
         ]
