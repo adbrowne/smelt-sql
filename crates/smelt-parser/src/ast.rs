@@ -763,12 +763,71 @@ impl BinaryExpr {
         &self.0
     }
 
-    /// Get the left operand expression
+    /// Check if a left operand exists (may be a bare token or expression node)
+    pub fn has_left(&self) -> bool {
+        for child in self.0.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) => {
+                    if matches!(t.kind(), IDENT | NUMBER | STRING) {
+                        return true;
+                    }
+                }
+                rowan::NodeOrToken::Node(n) => {
+                    if Expr::cast(n.clone()).is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a right operand exists (may be a bare token or expression node)
+    pub fn has_right(&self) -> bool {
+        let mut found_op = false;
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if matches!(
+                    token.kind(),
+                    PLUS | MINUS
+                        | STAR
+                        | MULTIPLY
+                        | DIVIDE
+                        | EQ
+                        | NE
+                        | LT
+                        | GT
+                        | LE
+                        | GE
+                        | CONCAT
+                        | AND_KW
+                        | OR_KW
+                        | LIKE_KW
+                        | ILIKE_KW
+                        | TILDE
+                        | TILDE_STAR
+                        | NOT_TILDE
+                        | NOT_TILDE_STAR
+                ) {
+                    found_op = true;
+                } else if found_op && matches!(token.kind(), IDENT | NUMBER | STRING) {
+                    return true;
+                }
+            } else if found_op {
+                return true; // Any node after operator is the right operand
+            }
+        }
+        false
+    }
+
+    /// Get the left operand expression — only works when it's a node, not a bare token.
+    /// Use `has_left()` to check for bare tokens.
     pub fn left(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
     }
 
-    /// Get the right operand expression
+    /// Get the right operand expression — only works when it's a node, not a bare token.
+    /// Use `has_right()` to check for bare tokens.
     pub fn right(&self) -> Option<Expr> {
         self.0.children().filter_map(Expr::cast).nth(1)
     }
@@ -813,7 +872,7 @@ impl BinaryExpr {
     /// Check if this is a unary expression (e.g., -x, NOT y)
     /// Unary expressions have no right operand
     pub fn is_unary(&self) -> bool {
-        self.right().is_none()
+        !self.has_right()
     }
 
     /// Get the unary operand as a column reference
@@ -1304,10 +1363,34 @@ impl CaseExpr {
         &self.0
     }
 
+    /// Check if this is a simple CASE (CASE value WHEN ...) vs searched (CASE WHEN ...)
+    pub fn has_case_value(&self) -> bool {
+        // A simple CASE has a value expression (node or bare token) between CASE and WHEN.
+        // A searched CASE goes directly from CASE keyword to WHEN clause.
+        for child in self.0.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Node(n) => {
+                    if n.kind() == WHEN_CLAUSE {
+                        return false; // Reached WHEN without finding a value
+                    }
+                    if Expr::cast(n.clone()).is_some() {
+                        return true;
+                    }
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    if matches!(t.kind(), IDENT | NUMBER | STRING) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Get the case value expression (for simple CASE)
-    /// Returns None for searched CASE (CASE WHEN ...)
+    /// Returns None for searched CASE (CASE WHEN ...) or when the value is a bare token
     pub fn case_value(&self) -> Option<Expr> {
-        // The case value is the first EXPRESSION child, before any WHEN_CLAUSE
+        // The case value is the first EXPRESSION-like child, before any WHEN_CLAUSE
         self.0
             .children()
             .take_while(|n| n.kind() != WHEN_CLAUSE)
@@ -1359,7 +1442,26 @@ impl WhenClause {
         self.0.children().find_map(Expr::cast)
     }
 
-    /// Get the result expression (after THEN)
+    /// Check whether a result expression exists (after THEN).
+    /// The result may be a bare token (IDENT, NUMBER, STRING) or an expression node.
+    pub fn has_result(&self) -> bool {
+        let mut found_then = false;
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if token.kind() == THEN_KW {
+                    found_then = true;
+                } else if found_then && matches!(token.kind(), IDENT | NUMBER | STRING) {
+                    return true;
+                }
+            } else if found_then {
+                return true; // Any node after THEN is a result
+            }
+        }
+        false
+    }
+
+    /// Get the result expression (after THEN) — only works when result is a node,
+    /// not a bare token. Use `has_result()` to check for bare tokens.
     pub fn result(&self) -> Option<Expr> {
         // Second EXPRESSION child
         self.0.children().filter_map(Expr::cast).nth(1)
@@ -1379,7 +1481,27 @@ impl CastExpr {
         }
     }
 
-    /// Get the expression being cast
+    /// Check if a source expression exists (may be a bare token for `::` casts)
+    pub fn has_expression(&self) -> bool {
+        for child in self.0.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) => {
+                    if matches!(t.kind(), IDENT | NUMBER | STRING) {
+                        return true;
+                    }
+                }
+                rowan::NodeOrToken::Node(n) => {
+                    if Expr::cast(n.clone()).is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the expression being cast — only works when it's a node, not a bare token.
+    /// Use `has_expression()` to check for bare tokens (common with `::` casts).
     pub fn expression(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
     }
@@ -1686,6 +1808,7 @@ impl LimitClause {
             .0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
+            .filter(|t| !matches!(t.kind(), WHITESPACE | COMMENT))
             .collect();
 
         for i in 0..tokens.len() {
@@ -1705,6 +1828,7 @@ impl LimitClause {
             .0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
+            .filter(|t| !matches!(t.kind(), WHITESPACE | COMMENT))
             .collect();
 
         for i in 0..tokens.len() {
