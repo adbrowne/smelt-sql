@@ -88,6 +88,11 @@ pub enum SqlFunction {
     DateTrunc,
     Extract,
     DatePart,
+    Year,
+    Month,
+    Day,
+    DayOfWeek,
+    Quarter,
     MakeDate,
     MakeTime,
     MakeTimestamp,
@@ -237,6 +242,11 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::DateTrunc,
     SqlFunction::Extract,
     SqlFunction::DatePart,
+    SqlFunction::Year,
+    SqlFunction::Month,
+    SqlFunction::Day,
+    SqlFunction::DayOfWeek,
+    SqlFunction::Quarter,
     SqlFunction::MakeDate,
     SqlFunction::MakeTime,
     SqlFunction::MakeTimestamp,
@@ -403,6 +413,11 @@ impl SqlFunction {
             Self::DateTrunc => "DATE_TRUNC",
             Self::Extract => "EXTRACT",
             Self::DatePart => "DATE_PART",
+            Self::Year => "YEAR",
+            Self::Month => "MONTH",
+            Self::Day => "DAY",
+            Self::DayOfWeek => "DAYOFWEEK",
+            Self::Quarter => "QUARTER",
             Self::MakeDate => "MAKE_DATE",
             Self::MakeTime => "MAKE_TIME",
             Self::MakeTimestamp => "MAKE_TIMESTAMP",
@@ -532,6 +547,11 @@ impl SqlFunction {
             | Self::DateTrunc
             | Self::Extract
             | Self::DatePart
+            | Self::Year
+            | Self::Month
+            | Self::Day
+            | Self::DayOfWeek
+            | Self::Quarter
             | Self::MakeDate
             | Self::MakeTime
             | Self::MakeTimestamp

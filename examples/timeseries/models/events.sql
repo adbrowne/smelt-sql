@@ -3,5 +3,6 @@ SELECT
     event_id,
     user_id,
     event_type,
-    event_timestamp
+    event_timestamp,
+    properties
 FROM smelt.source('raw.events')

@@ -401,11 +401,11 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
     // Check if model is valid
     if db.parse_model(path.clone()).is_none() {
         // Only report error if file is supposed to be a model (in models/ directory)
-        if path
-            .to_str()
-            .map(|s| s.contains("models/"))
-            .unwrap_or(false)
-        {
+        // Skip virtual sub-model paths (e.g. "file.sql::test_name") — test blocks
+        // are YAML-only and don't contain standalone SQL.
+        let path_str = path.to_str().unwrap_or("");
+        let is_virtual_submodel = path_str.contains("::");
+        if !is_virtual_submodel && path_str.contains("models/") {
             diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: "File does not contain a valid SQL query".to_string(),
@@ -964,6 +964,13 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
                             }
                         }
 
+                        // Pre-process the CTE's FROM clause to resolve smelt.ref() and
+                        // smelt.source() calls, making upstream columns available for
+                        // type inference within the CTE.
+                        if let Some(cte_select) = cte.query().and_then(|q| q.select_stmt()) {
+                            process_from_clause(db, &cte_select, &mut ctx);
+                        }
+
                         // Infer columns from CTE query
                         let columns = infer_cte_columns(&cte, &ctx);
                         for (col_name, typed_col) in columns {
@@ -976,23 +983,29 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
                 }
             }
 
-            if let Some(from_clause) = select_stmt.from_clause() {
-                // Process main table refs in FROM clause
-                for table_ref in from_clause.table_refs() {
-                    process_table_ref(db, &table_ref, &mut ctx);
-                }
-
-                // Process table refs from JOIN clauses
-                for join in from_clause.joins() {
-                    if let Some(table_ref) = join.table_ref() {
-                        process_table_ref(db, &table_ref, &mut ctx);
-                    }
-                }
-            }
+            process_from_clause(db, &select_stmt, &mut ctx);
         }
     }
 
     Arc::new(ctx)
+}
+
+/// Process a SELECT statement's FROM clause, adding all table ref columns to the context.
+fn process_from_clause(
+    db: &dyn TypeChecking,
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &mut TypeContext,
+) {
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            process_table_ref(db, &table_ref, ctx);
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                process_table_ref(db, &table_ref, ctx);
+            }
+        }
+    }
 }
 
 /// Process a single table reference and add its columns/aliases to the context.
@@ -1472,6 +1485,14 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
 
     // Skip if file doesn't parse as a model
     if db.parse_model(path.clone()).is_none() {
+        return Arc::new(diagnostics);
+    }
+
+    // Skip models that reference only physical tables (no smelt.ref() or smelt.source()).
+    // Without upstream metadata, type inference can't determine column types.
+    let refs = db.model_refs(path.clone());
+    let sources = db.model_sources(path.clone());
+    if refs.is_empty() && sources.is_empty() {
         return Arc::new(diagnostics);
     }
 
@@ -4349,9 +4370,14 @@ sources:
 
     #[test]
     fn test_type_diagnostic_for_unknown_column() {
-        let (db, paths) = setup_multi_model(&[("model", "SELECT unknown_col FROM some_table")]);
+        // Model must have a smelt.ref() so type_diagnostics doesn't skip it
+        // (models with no refs/sources reference only physical tables and are skipped)
+        let (db, paths) = setup_multi_model(&[
+            ("upstream", "SELECT 1 AS id"),
+            ("model", "SELECT unknown_col FROM smelt.ref('upstream')"),
+        ]);
 
-        let diags = db.type_diagnostics(paths[0].clone());
+        let diags = db.type_diagnostics(paths[1].clone());
         assert!(
             diags
                 .iter()

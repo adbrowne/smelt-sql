@@ -799,6 +799,10 @@ impl BinaryExpr {
                     TILDE_STAR => return Some("~*".to_string()),
                     NOT_TILDE => return Some("!~".to_string()),
                     NOT_TILDE_STAR => return Some("!~*".to_string()),
+                    JSON_ARROW => return Some("->".to_string()),
+                    JSON_ARROW_TEXT => return Some("->>".to_string()),
+                    HASH_ARROW => return Some("#>".to_string()),
+                    HASH_ARROW_TEXT => return Some("#>>".to_string()),
                     _ => {}
                 }
             }

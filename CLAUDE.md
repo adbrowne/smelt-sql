@@ -277,8 +277,9 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 6. **Run `cargo fmt --all` to format code**
 7. **Run `cargo clippy --all-targets` and fix all warnings**
 8. Run `cargo build` and `cargo test` to ensure everything compiles and passes
-9. Update docs/ROADMAP.md with completion status and date
-10. **Commit** with descriptive message (includes ROADMAP.md update)
+9. **Run `cargo test -p smelt-cli --test example_diagnostics`** to verify examples have no LSP diagnostics
+10. Update docs/ROADMAP.md with completion status and date
+11. **Commit** with descriptive message (includes ROADMAP.md update)
 
 ### For Planner Features (Future)
 

@@ -263,12 +263,12 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try column reference
     if let Some(col_ref) = expr.as_column_ref() {
-        return ctx
-            .lookup_column(col_ref.qualifier(), col_ref.name())
-            .cloned();
+        if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name()) {
+            return Some(typed_col.clone());
+        }
     }
 
-    // Try literal inference
+    // Try literal inference (also handles typed literals like DATE '2025-01-15')
     infer_literal_type(&text)
 }
 
@@ -621,7 +621,13 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             nullable: false,
         }),
 
-        SqlFunction::Extract | SqlFunction::DatePart => Some(TypedColumn {
+        SqlFunction::Extract
+        | SqlFunction::DatePart
+        | SqlFunction::Year
+        | SqlFunction::Month
+        | SqlFunction::Day
+        | SqlFunction::DayOfWeek
+        | SqlFunction::Quarter => Some(TypedColumn {
             data_type: DataType::BigInt,
             nullable: true,
         }),
@@ -813,6 +819,35 @@ fn infer_literal_type(text: &str) -> Option<TypedColumn> {
     if let Some(num_type) = infer_numeric_literal_type(text) {
         return Some(TypedColumn {
             data_type: num_type,
+            nullable: false,
+        });
+    }
+
+    // SQL standard typed literals: DATE '...', TIMESTAMP '...', TIME '...', INTERVAL '...'
+    let upper = text.to_uppercase();
+    if upper.starts_with("DATE ") || upper.starts_with("DATE'") {
+        return Some(TypedColumn {
+            data_type: DataType::Date,
+            nullable: false,
+        });
+    }
+    if upper.starts_with("TIMESTAMP ") || upper.starts_with("TIMESTAMP'") {
+        return Some(TypedColumn {
+            data_type: DataType::Timestamp {
+                with_timezone: false,
+            },
+            nullable: false,
+        });
+    }
+    if upper.starts_with("TIME ") || upper.starts_with("TIME'") {
+        return Some(TypedColumn {
+            data_type: DataType::Time,
+            nullable: false,
+        });
+    }
+    if upper.starts_with("INTERVAL ") || upper.starts_with("INTERVAL'") {
+        return Some(TypedColumn {
+            data_type: DataType::Interval,
             nullable: false,
         });
     }
