@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775221919099,
+  "lastUpdate": 1775221920261,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12641,6 +12641,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.60200870448906,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "10834b5193f3df1de5d13d48413c5341c07c1bd1",
+          "message": "Merge pull request #99 from adbrowne/worktree-gtd2\n\nAdd diagnostics for undeclared column references",
+          "timestamp": "2026-04-04T00:10:53+11:00",
+          "tree_id": "a11794827df43ae4e5d4ed10fd5a6e329d0a9337",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/10834b5193f3df1de5d13d48413c5341c07c1bd1"
+        },
+        "date": 1775221919892,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.823866160839398,
             "unit": "MB/s"
           }
         ]
