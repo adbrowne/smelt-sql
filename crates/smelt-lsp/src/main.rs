@@ -565,6 +565,46 @@ fn collect_from_model_names(db: &Database, path: &std::path::Path) -> Vec<String
     names
 }
 
+/// Build project context JSON from discovered files for Python model execution.
+/// Extracts model names, tags, and directories from the file paths registered in Salsa.
+fn build_python_context(all_files: &[PathBuf], config: &smelt_core::Config) -> String {
+    use smelt_core::python_utils::{ProjectContextData, ProjectModelInfo};
+
+    let mut models = Vec::new();
+    for path in all_files {
+        let path_str = path.to_string_lossy();
+
+        // Extract model name: for virtual paths like "file.sql::model_name", use the segment
+        // after "::". For regular paths, use the file stem.
+        let name = if let Some(pos) = path_str.find("::") {
+            path_str[pos + 2..].to_string()
+        } else {
+            match path.file_stem().and_then(|s| s.to_str()) {
+                Some(stem) => stem.to_string(),
+                None => continue,
+            }
+        };
+
+        // Extract directory from parent path's file name
+        let directory = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        let tags = config.get_tags(&name, None);
+
+        models.push(ProjectModelInfo {
+            name,
+            tags,
+            directory,
+        });
+    }
+
+    let context = ProjectContextData { models };
+    serde_json::to_string(&context).expect("Failed to serialize project context")
+}
+
 /// (virtual_path, start_line_offset) for each section in a multi-model file.
 type MultiModelEntry = Vec<(PathBuf, u32)>;
 
@@ -838,6 +878,24 @@ impl Backend {
         let cache = self.python_cache.clone();
         let client = self.client.clone();
 
+        // Build context from current model list
+        let context_json = {
+            let db_guard = db.lock().await;
+            let all_files = db_guard.all_files();
+            let config =
+                smelt_core::Config::load(&project_root).unwrap_or_else(|_| smelt_core::Config {
+                    name: String::new(),
+                    version: 1,
+                    model_paths: vec!["models".to_string()],
+                    seed_paths: vec!["seeds".to_string()],
+                    targets: std::collections::HashMap::new(),
+                    default_materialization: smelt_core::Materialization::View,
+                    models: std::collections::HashMap::new(),
+                    python: None,
+                });
+            build_python_context(&all_files, &config)
+        };
+
         // Spawn background task for subprocess execution
         tokio::task::spawn(async move {
             let py_path_for_blocking = py_path.clone();
@@ -850,6 +908,7 @@ impl Backend {
                     &py_path_for_blocking,
                     &project_root_for_blocking,
                     &mut cache_guard,
+                    &context_json,
                 )
             })
             .await;
@@ -1094,10 +1153,20 @@ impl LanguageServer for Backend {
                         }
                     }
 
-                    // Load config to get model_paths (defaults to ["models"])
-                    let model_paths = smelt_core::Config::load(&project_root)
-                        .map(|c| c.model_paths)
-                        .unwrap_or_else(|_| vec!["models".to_string()]);
+                    // Load config (defaults to a minimal config with model_paths = ["models"])
+                    let config = smelt_core::Config::load(&project_root).unwrap_or_else(|_| {
+                        smelt_core::Config {
+                            name: String::new(),
+                            version: 1,
+                            model_paths: vec!["models".to_string()],
+                            seed_paths: vec!["seeds".to_string()],
+                            targets: std::collections::HashMap::new(),
+                            default_materialization: smelt_core::Materialization::View,
+                            models: std::collections::HashMap::new(),
+                            python: None,
+                        }
+                    });
+                    let model_paths = config.model_paths.clone();
 
                     // Scan model directories for this project
                     for model_path in &model_paths {
@@ -1156,12 +1225,14 @@ impl LanguageServer for Backend {
                         }
 
                         // Discover Python models and register their generated SQL
+                        let context_json = build_python_context(&all_files, &config);
                         let mut cache = self.python_cache.lock().await;
                         *cache = PythonModelCache::load(&project_root);
                         let scan_result = python_scan::discover_python_models(
                             &models_path,
                             &project_root,
                             &mut cache,
+                            &context_json,
                         );
                         drop(cache);
 

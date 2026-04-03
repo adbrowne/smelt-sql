@@ -97,7 +97,7 @@ impl ModelDiscovery {
 
     /// Scan model paths for Python files containing `@model` decorators.
     /// Returns (file_path, decorator_line_numbers, file_content) tuples.
-    pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<usize>, String)>> {
+    pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<u32>, String)>> {
         let mut python_files = Vec::new();
 
         for model_path in &self.model_paths {
@@ -118,7 +118,8 @@ impl ModelDiscovery {
                     let content = std::fs::read_to_string(path)
                         .with_context(|| format!("Failed to read Python file: {:?}", path))?;
 
-                    let decorator_lines = crate::python::scan_for_model_decorators(&content);
+                    let decorator_lines =
+                        smelt_core::python_utils::scan_for_model_decorators(&content);
 
                     if !decorator_lines.is_empty() {
                         python_files.push((path.to_path_buf(), decorator_lines, content));

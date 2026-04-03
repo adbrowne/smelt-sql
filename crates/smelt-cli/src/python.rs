@@ -7,31 +7,18 @@
 #[cfg(not(feature = "python"))]
 use anyhow::Context;
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "python"))]
 use std::process::Command;
 
 use crate::config::Config;
 use crate::discovery::{ModelFile, ModelKind};
 use crate::errors::CliError;
 use crate::metadata::{extract_file_metadata, FileMetadata};
+use smelt_core::python_utils::{self, ProjectContextData, ProjectModelInfo};
 use smelt_core::ModelId;
-
-/// Data passed to Python models as project context.
-#[derive(Debug, Serialize)]
-struct ProjectContextData {
-    models: Vec<ProjectModelInfo>,
-}
-
-/// Model info visible to Python's `project.find_models()`.
-#[derive(Debug, Serialize)]
-struct ProjectModelInfo {
-    name: String,
-    tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    directory: Option<String>,
-}
 
 /// Output from a single Python model function.
 #[derive(Debug, Deserialize)]
@@ -52,95 +39,8 @@ struct PythonQuery {
     directory: Option<String>,
 }
 
-/// Check if a Python file contains `@model` decorators.
-/// Returns the line numbers of `@model` decorators found.
-pub fn scan_for_model_decorators(content: &str) -> Vec<usize> {
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            let trimmed = line.trim();
-            if trimmed == "@model" || trimmed.starts_with("@model(") {
-                Some(i + 1) // 1-indexed
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Find the Python SDK path.
-/// Resolution order: SMELT_PYTHON_SDK env var → project_dir/python/ → walk up from project_dir
-pub fn find_python_sdk(project_dir: &Path) -> Result<PathBuf> {
-    // 1. SMELT_PYTHON_SDK env var
-    if let Ok(sdk_path) = std::env::var("SMELT_PYTHON_SDK") {
-        let path = PathBuf::from(sdk_path);
-        if path.join("smelt").is_dir() {
-            return Ok(path);
-        }
-    }
-
-    // 2. project_dir/python/
-    let project_sdk = project_dir.join("python");
-    if project_sdk.join("smelt").is_dir() {
-        return Ok(project_sdk);
-    }
-
-    // 3. Walk up from project_dir (for monorepo/workspace layouts)
-    let mut current = project_dir.to_path_buf();
-    for _ in 0..5 {
-        let candidate = current.join("python");
-        if candidate.join("smelt").is_dir() {
-            return Ok(candidate);
-        }
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            break;
-        }
-    }
-
-    Err(anyhow!(
-        "smelt Python SDK not found. Expected a 'python/smelt/' directory in or above the project root.\n\
-         Hint: Set SMELT_PYTHON_SDK to the directory containing the smelt Python package."
-    ))
-}
-
-/// Find the Python interpreter to use.
-/// Resolution order: SMELT_PYTHON env var → config python field → python3 → python
-pub fn find_python(config_python: Option<&str>) -> Result<String> {
-    // 1. SMELT_PYTHON env var
-    if let Ok(python) = std::env::var("SMELT_PYTHON") {
-        return Ok(python);
-    }
-
-    // 2. Config python field
-    if let Some(python) = config_python {
-        return Ok(python.to_string());
-    }
-
-    // 3. Try python3
-    if Command::new("python3")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        return Ok("python3".to_string());
-    }
-
-    // 4. Try python
-    if Command::new("python")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        return Ok("python".to_string());
-    }
-
-    Err(CliError::PythonNotFound.into())
-}
+// Shared helpers (find_python, find_python_sdk, scan_for_model_decorators,
+// build_decorator_map, build_pythonpath) are in smelt_core::python_utils.
 
 /// Execute a Python model file and return the generated SQL models (subprocess path).
 #[cfg(not(feature = "python"))]
@@ -150,7 +50,7 @@ fn run_python_model(
     project_context_json: &str,
     python_sdk_path: &Path,
 ) -> Result<Vec<PythonModelOutput>> {
-    let pythonpath = build_pythonpath(python_sdk_path, file_path);
+    let pythonpath = python_utils::build_pythonpath(python_sdk_path, file_path);
     let output = Command::new(python)
         .arg("-m")
         .arg("smelt.runner")
@@ -255,59 +155,6 @@ fn build_project_context(
     serde_json::to_string(&context).expect("Failed to serialize project context")
 }
 
-/// Build PYTHONPATH by prepending SDK path and model file's parent directory
-/// to any existing PYTHONPATH. Uses platform-appropriate path separator.
-#[cfg(not(feature = "python"))]
-fn build_pythonpath(sdk_path: &Path, file_path: &Path) -> std::ffi::OsString {
-    let mut paths: Vec<PathBuf> = vec![sdk_path.to_path_buf()];
-    if let Some(parent) = file_path.parent() {
-        paths.push(parent.to_path_buf());
-    }
-    if let Ok(existing) = std::env::var("PYTHONPATH") {
-        for p in std::env::split_paths(&existing) {
-            paths.push(p);
-        }
-    }
-    std::env::join_paths(paths).unwrap_or_else(|_| sdk_path.as_os_str().to_os_string())
-}
-
-/// Build a map from function name to the line number of its `@model` decorator.
-/// Scans for `@model` (or `@model(...)`) followed by `def <name>`.
-pub fn build_decorator_map(content: &str) -> HashMap<String, usize> {
-    let mut map = HashMap::new();
-    let lines: Vec<&str> = content.lines().collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim();
-        if trimmed == "@model" || trimmed.starts_with("@model(") {
-            let decorator_line = i + 1; // 1-indexed
-                                        // Scan forward for the `def` line, skipping blank lines
-            let mut j = i + 1;
-            while j < lines.len() {
-                let def_trimmed = lines[j].trim();
-                if def_trimmed.is_empty() {
-                    j += 1;
-                    continue;
-                }
-                if def_trimmed.starts_with("def ") {
-                    if let Some(name) = def_trimmed
-                        .strip_prefix("def ")
-                        .and_then(|rest| rest.split('(').next())
-                        .map(|n| n.trim().to_string())
-                    {
-                        map.insert(name, decorator_line);
-                    }
-                }
-                break;
-            }
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
-    map
-}
-
 /// Discover and execute Python models.
 ///
 /// Uses iterative discovery with fixed-point validation:
@@ -315,7 +162,7 @@ pub fn build_decorator_map(content: &str) -> HashMap<String, usize> {
 /// 2. If new models produced, rebuild context and re-run
 /// 3. Stop when output stabilizes (or max rounds reached)
 pub fn discover_python_models(
-    python_files: &[(PathBuf, Vec<usize>, String)], // (path, decorator_lines, content)
+    python_files: &[(PathBuf, Vec<u32>, String)], // (path, decorator_lines, content)
     sql_models: &[ModelFile],
     config: &Config,
     project_dir: &Path,
@@ -333,16 +180,22 @@ pub fn discover_python_models(
         String::new()
     };
     #[cfg(not(feature = "python"))]
-    let python = find_python(config_python)?;
-    let python_sdk_path = find_python_sdk(project_dir)?;
+    let python = python_utils::find_python(config_python)
+        .ok_or::<anyhow::Error>(CliError::PythonNotFound.into())?;
+    let python_sdk_path = python_utils::find_python_sdk(project_dir).ok_or_else(|| {
+        anyhow!(
+            "smelt Python SDK not found. Expected a 'python/smelt/' directory in or above the project root.\n\
+             Hint: Set SMELT_PYTHON_SDK to the directory containing the smelt Python package."
+        )
+    })?;
 
     let max_rounds = 5;
     let mut python_models: Vec<ModelFile> = Vec::new();
 
     // Pre-compute decorator maps once (they don't change across rounds)
-    let decorator_maps: Vec<HashMap<String, usize>> = python_files
+    let decorator_maps: Vec<HashMap<String, u32>> = python_files
         .iter()
-        .map(|(_, _, content)| build_decorator_map(content))
+        .map(|(_, _, content)| python_utils::build_decorator_map(content))
         .collect();
 
     for _round in 0..max_rounds {
@@ -355,8 +208,11 @@ pub fn discover_python_models(
             let outputs = run_python_model(&python, file_path, &context_json, &python_sdk_path)?;
 
             for output in outputs {
-                // Look up the decorator line for this specific model function
-                let source_line = decorator_map.get(&output.name).copied().unwrap_or(1);
+                // Look up the decorator line for this specific model function (convert 0-indexed to 1-indexed)
+                let source_line = decorator_map
+                    .get(&output.name)
+                    .map(|&line| line as usize + 1)
+                    .unwrap_or(1);
 
                 // Parse the returned SQL through smelt-parser
                 let parse = smelt_parser::parse(&output.sql);
@@ -513,48 +369,6 @@ pub struct PythonModelQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_scan_for_model_decorators() {
-        let content = r#"
-from smelt import model
-
-@model
-def combined_events(project):
-    return "SELECT 1"
-
-def helper():
-    pass
-
-@model
-def another_model(project):
-    return "SELECT 2"
-"#;
-        let lines = scan_for_model_decorators(content);
-        assert_eq!(lines, vec![4, 11]);
-    }
-
-    #[test]
-    fn test_scan_no_decorators() {
-        let content = "def foo(): pass\n";
-        let lines = scan_for_model_decorators(content);
-        assert!(lines.is_empty());
-    }
-
-    #[test]
-    fn test_scan_ignores_non_model_decorators() {
-        let content = r#"
-@other_decorator
-def foo():
-    pass
-
-@model
-def bar(project):
-    return "SELECT 1"
-"#;
-        let lines = scan_for_model_decorators(content);
-        assert_eq!(lines, vec![6]);
-    }
 
     #[test]
     fn test_python_model_end_to_end() {
@@ -783,51 +597,7 @@ def union_model(project):
         assert!(!models_equal(&[model_a], &[model_b]));
     }
 
-    #[test]
-    fn test_build_decorator_map() {
-        let content = r#"from smelt import model
-
-@model
-def first_model(project):
-    return "SELECT 1"
-
-@model
-def second_model(project):
-    return "SELECT 2"
-"#;
-        let map = build_decorator_map(content);
-        assert_eq!(map.get("first_model"), Some(&3));
-        assert_eq!(map.get("second_model"), Some(&7));
-    }
-
-    #[test]
-    fn test_build_decorator_map_with_gaps() {
-        // Blank lines between @model and def should be handled
-        let content = r#"from smelt import model
-
-@model
-
-def my_model(project):
-    return "SELECT 1"
-"#;
-        let map = build_decorator_map(content);
-        assert_eq!(map.get("my_model"), Some(&3));
-    }
-
-    #[test]
-    fn test_scan_decorator_with_parens() {
-        let content = r#"from smelt import model
-
-@model()
-def my_model(project):
-    return "SELECT 1"
-"#;
-        let lines = scan_for_model_decorators(content);
-        assert_eq!(lines, vec![3]);
-
-        let map = build_decorator_map(content);
-        assert_eq!(map.get("my_model"), Some(&3));
-    }
+    // build_decorator_map and scan_for_model_decorators tests are in smelt_core::python_utils
 
     #[test]
     fn test_multiple_models_one_file() {
