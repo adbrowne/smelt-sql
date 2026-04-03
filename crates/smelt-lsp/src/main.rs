@@ -719,6 +719,7 @@ impl Backend {
         project_root: &std::path::Path,
     ) -> Vec<PathBuf> {
         let mut registered = Vec::new();
+        let known_files = db.all_files();
 
         // Try to detect multi-model file
         if let Ok(FileMetadata::Multi { models }) = extract_file_metadata(content) {
@@ -740,8 +741,20 @@ impl Backend {
                     .filter(|&c| c == '\n')
                     .count() as u32;
 
-                db.set_file_text(virtual_path.clone(), Arc::new(sql_content.to_string()));
-                db.set_file_project_root(virtual_path.clone(), project_root.to_path_buf());
+                // Only mutate Salsa inputs when values actually changed.
+                // Unnecessary mutations increment Salsa's global revision, which
+                // triggers memo validation across ALL queries. During validation
+                // of circular model dependencies, Salsa 0.16.1 panics because its
+                // cycle detection expects queries in the stack but the validation
+                // path (maybe_changed_since -> read_upgrade) sets InProgress
+                // without pushing to the stack.
+                let is_known = known_files.contains(&virtual_path);
+                if !is_known || *db.file_text(virtual_path.clone()) != sql_content {
+                    db.set_file_text(virtual_path.clone(), Arc::new(sql_content.to_string()));
+                }
+                if !is_known {
+                    db.set_file_project_root(virtual_path.clone(), project_root.to_path_buf());
+                }
 
                 virtual_entries.push((virtual_path.clone(), start_line));
                 registered.push(virtual_path);
@@ -752,9 +765,15 @@ impl Backend {
             mm.insert(real_path.to_path_buf(), virtual_entries);
         } else {
             // Single-model or no frontmatter: register as-is
-            db.set_file_text(real_path.to_path_buf(), Arc::new(content.to_string()));
-            db.set_file_project_root(real_path.to_path_buf(), project_root.to_path_buf());
-            registered.push(real_path.to_path_buf());
+            let path_buf = real_path.to_path_buf();
+            let is_known = known_files.contains(&path_buf);
+            if !is_known || *db.file_text(path_buf.clone()) != content {
+                db.set_file_text(path_buf.clone(), Arc::new(content.to_string()));
+            }
+            if !is_known {
+                db.set_file_project_root(path_buf.clone(), project_root.to_path_buf());
+            }
+            registered.push(path_buf);
 
             // Clean up any old multi-model mapping
             let mut mm = self.multi_model_files.lock().await;
@@ -762,6 +781,37 @@ impl Backend {
         }
 
         registered
+    }
+
+    /// Query Salsa diagnostics for a file, catching any panics from Salsa's
+    /// cycle detection bug (salsa 0.16.1 panics during memo validation when
+    /// circular model dependencies exist).
+    fn query_diagnostics(db: &Database, path: PathBuf) -> Vec<DbDiagnostic> {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let db = AssertUnwindSafe(db);
+        let path_for_log = path.clone();
+        let path2 = path.clone();
+        match catch_unwind(move || {
+            let file_diags = db.file_diagnostics(path);
+            let type_diags = db.type_diagnostics(path2);
+            file_diags
+                .iter()
+                .chain(type_diags.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+        }) {
+            Ok(diags) => diags,
+            Err(_) => {
+                // Salsa panicked (likely cycle detection during memo validation
+                // with circular model dependencies). The PanicGuard cleanup resets
+                // InProgress states to NotComputed, so the database is still usable.
+                eprintln!(
+                    "[WARN] Diagnostics unavailable for {} (Salsa cycle detection panic caught — likely circular model dependency)",
+                    path_for_log.display()
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Publish diagnostics for a file
@@ -779,10 +829,9 @@ impl Backend {
             let mut lsp_diagnostics = Vec::new();
 
             for (virtual_path, start_line) in virtual_entries {
-                let diagnostics = db.file_diagnostics(virtual_path.clone());
-                let type_diags = db.type_diagnostics(virtual_path.clone());
+                let diagnostics = Self::query_diagnostics(&db, virtual_path.clone());
 
-                for d in diagnostics.iter().chain(type_diags.iter()) {
+                for d in &diagnostics {
                     let mut lsp_diag = self.to_lsp_diagnostic(d);
                     // Adjust line numbers to be relative to the original file
                     lsp_diag.range.start.line += start_line;
@@ -799,12 +848,10 @@ impl Backend {
         } else {
             drop(mm);
             let db = self.db.lock().await;
-            let diagnostics = db.file_diagnostics(path.clone());
-            let type_diags = db.type_diagnostics(path);
+            let diagnostics = Self::query_diagnostics(&db, path);
 
             let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
                 .iter()
-                .chain(type_diags.iter())
                 .map(|d| self.to_lsp_diagnostic(d))
                 .collect();
 
@@ -992,7 +1039,8 @@ impl Backend {
                     files.retain(|f| f != old_vp);
                 }
 
-                // Register new models
+                // Register new models (skip mutations when values unchanged)
+                let mut files_changed = false;
                 for py_model in &scan_result.models {
                     let virtual_sql_path = py_model
                         .source_path
@@ -1000,19 +1048,30 @@ impl Backend {
                         .unwrap_or_else(|| std::path::Path::new("."))
                         .join(format!("{}.sql", py_model.name));
 
-                    db_guard
-                        .set_file_text(virtual_sql_path.clone(), Arc::new(py_model.sql.clone()));
-                    db_guard.set_file_project_root(virtual_sql_path.clone(), project_root.clone());
+                    let is_known = files.contains(&virtual_sql_path);
+                    if !is_known || *db_guard.file_text(virtual_sql_path.clone()) != py_model.sql {
+                        db_guard.set_file_text(
+                            virtual_sql_path.clone(),
+                            Arc::new(py_model.sql.clone()),
+                        );
+                    }
+                    if !is_known {
+                        db_guard
+                            .set_file_project_root(virtual_sql_path.clone(), project_root.clone());
+                    }
                     sources.insert(
                         virtual_sql_path.clone(),
                         (py_model.source_path.clone(), py_model.decorator_line),
                     );
-                    if !files.contains(&virtual_sql_path) {
+                    if !is_known {
                         files.push(virtual_sql_path);
+                        files_changed = true;
                     }
                 }
 
-                db_guard.set_all_files(Arc::new(files));
+                if files_changed {
+                    db_guard.set_all_files(Arc::new(files));
+                }
             }
 
             // Republish all diagnostics since ref resolution may have changed
@@ -1023,11 +1082,9 @@ impl Backend {
             for path in files.iter() {
                 if let Ok(uri) = Url::from_file_path(path) {
                     let db_guard = db.lock().await;
-                    let diagnostics = db_guard.file_diagnostics(path.clone());
-                    let type_diags = db_guard.type_diagnostics(path.clone());
+                    let diagnostics = Backend::query_diagnostics(&db_guard, path.clone());
                     let lsp_diagnostics: Vec<lsp_types::Diagnostic> = diagnostics
                         .iter()
-                        .chain(type_diags.iter())
                         .map(|d| lsp_types::Diagnostic {
                             range: Range {
                                 start: Position {
@@ -1408,12 +1465,7 @@ impl LanguageServer for Backend {
             // If this file wasn't seen during init, find its project root
             let project_roots = db.all_project_roots();
             let has_project_root = project_roots.iter().any(|root| path.starts_with(root));
-            if has_project_root {
-                // Find matching project root (longest prefix match)
-                if let Some(project_root) = find_project_root_for_file(&path, &project_roots) {
-                    db.set_file_project_root(path.clone(), project_root);
-                }
-            } else {
+            if !has_project_root {
                 // Try to discover project root by walking up
                 if let Some(project_root) = find_project_root_by_walking_up(&path) {
                     // Register this new project
@@ -1436,6 +1488,7 @@ impl LanguageServer for Backend {
                 }
             }
             // Register file content (handles multi-model splitting)
+            // register_sql_content skips mutations when content hasn't changed
             let project_root_for_reg = db
                 .all_project_roots()
                 .iter()
@@ -1450,13 +1503,18 @@ impl LanguageServer for Backend {
                     &project_root_for_reg,
                 )
                 .await;
-            let mut files = (*db.all_files()).clone();
-            for rp in &registered_paths {
-                if !files.contains(rp) {
-                    files.push(rp.clone());
-                }
+            // Only update all_files if new paths were registered
+            let current_files = db.all_files();
+            let new_paths: Vec<_> = registered_paths
+                .iter()
+                .filter(|rp| !current_files.contains(rp))
+                .cloned()
+                .collect();
+            if !new_paths.is_empty() {
+                let mut files = (*current_files).clone();
+                files.extend(new_paths);
+                db.set_all_files(Arc::new(files));
             }
-            db.set_all_files(Arc::new(files));
             drop(db);
             self.publish_diagnostics(uri).await;
         } else if path.extension().and_then(|s| s.to_str()) != Some("py") {

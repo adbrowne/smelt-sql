@@ -4573,6 +4573,60 @@ sources:
         );
     }
 
+    #[test]
+    fn test_circular_ref_type_diagnostics_no_panic() {
+        // Simulates what the LSP does: calls both file_diagnostics and type_diagnostics
+        // on all models, including circular ones.
+        let (db, paths) = setup_multi_model(&[
+            ("cyc_a", "SELECT x FROM smelt.ref('cyc_b')"),
+            ("cyc_b", "SELECT y FROM smelt.ref('cyc_a')"),
+        ]);
+
+        // This should not panic — mimics publish_all_diagnostics in the LSP
+        for path in &paths {
+            let _file_diags = db.file_diagnostics(path.clone());
+            let _type_diags = db.type_diagnostics(path.clone());
+        }
+    }
+
+    #[test]
+    fn test_self_ref_type_diagnostics_no_panic() {
+        let (db, paths) = setup_multi_model(&[("self_ref", "SELECT x FROM smelt.ref('self_ref')")]);
+
+        let _file_diags = db.file_diagnostics(paths[0].clone());
+        let _type_diags = db.type_diagnostics(paths[0].clone());
+    }
+
+    #[test]
+    fn test_circular_ref_incremental_update_no_panic() {
+        // Simulates the LSP pattern: query diagnostics, then mutate file, then query again.
+        // This exercises Salsa's memoized value validation path which is different from
+        // first-time computation.
+        let (mut db, paths) = setup_multi_model(&[
+            ("cyc_a", "SELECT x FROM smelt.ref('cyc_b')"),
+            ("cyc_b", "SELECT y FROM smelt.ref('cyc_a')"),
+        ]);
+
+        // First pass: populate caches
+        for path in &paths {
+            let _file_diags = db.file_diagnostics(path.clone());
+            let _type_diags = db.type_diagnostics(path.clone());
+        }
+
+        // Mutate one file (triggers Salsa revision change)
+        db.set_file_text(
+            paths[0].clone(),
+            Arc::new("SELECT x, 1 AS extra FROM smelt.ref('cyc_b')".to_string()),
+        );
+
+        // Second pass: this exercises the validation path where Salsa checks
+        // if memoized values are still valid
+        for path in &paths {
+            let _file_diags = db.file_diagnostics(path.clone());
+            let _type_diags = db.type_diagnostics(path.clone());
+        }
+    }
+
     // ============================================================
     // Cross-model type mismatch diagnostic tests
     // ============================================================
