@@ -16,6 +16,10 @@ impl File {
         }
     }
 
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
     }
@@ -34,12 +38,6 @@ impl File {
             .descendants()
             .filter_map(FunctionCall::cast)
             .filter_map(SourceCall::from_function_call)
-    }
-
-    /// Get the underlying syntax node (for printer)
-    #[allow(dead_code)] // Used by printer module
-    pub(crate) fn syntax(&self) -> &SyntaxNode {
-        &self.0
     }
 }
 
@@ -486,9 +484,7 @@ impl TableRef {
         None
     }
 
-    /// Get the underlying syntax node (for printer)
-    #[allow(dead_code)] // Used by printer module
-    pub(crate) fn syntax(&self) -> &SyntaxNode {
+    pub fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
 
@@ -1875,6 +1871,10 @@ impl Cte {
         } else {
             None
         }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 
     /// Get the CTE name
