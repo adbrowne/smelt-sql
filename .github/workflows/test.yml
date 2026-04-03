@@ -88,6 +88,9 @@ jobs:
         env:
           PROPTEST_CASES: 100
 
+      - name: Verify example workspaces have no diagnostics
+        run: cargo test -p smelt-cli --test example_diagnostics
+
       - name: Run smelt model tests (example projects)
         run: |
           cargo run -p smelt-cli --quiet -- test --project-dir examples/retail_analytics

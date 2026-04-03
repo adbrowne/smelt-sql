@@ -1,15 +1,15 @@
 -- Channel attribution with subqueries in FROM and multi-table JOIN
 SELECT
-    referrer_source,
-    device_type,
-    total_events,
-    purchases,
+    channel_stats.referrer_source,
+    channel_stats.device_type,
+    channel_stats.total_events,
+    channel_stats.purchases,
     CASE
-        WHEN total_events > 0
-        THEN CAST(purchases AS FLOAT) / CAST(total_events AS FLOAT)
+        WHEN channel_stats.total_events > 0
+        THEN CAST(channel_stats.purchases AS FLOAT) / CAST(channel_stats.total_events AS FLOAT)
         ELSE 0.0
     END AS conversion_rate,
-    revenue_attributed
+    revenue_stats.revenue_attributed
 FROM (
     SELECT
         f.referrer_source,

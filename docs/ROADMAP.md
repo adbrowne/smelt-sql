@@ -204,6 +204,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - VSCode extension with syntax highlighting and auto-activation
 
 **Next steps**:
+- LSP Python model integration: execute Python models and register their generated SQL in the Salsa DB so type inference and diagnostics work across Python→SQL model boundaries (currently only CLI commands do this; the LSP doesn't run Python discovery)
 - Dialect-specific informational hints ("QUALIFY will be rewritten for PostgreSQL")
 - Optimizer opportunity suggestions as code actions
 - Rename refactoring across models
