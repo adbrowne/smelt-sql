@@ -1012,11 +1012,15 @@ impl<'a> Parser<'a> {
                 }
                 self.finish_node();
             } else if self.at(BETWEEN_KW) {
-                // BETWEEN low AND high
-                self.parse_between_expr();
+                // BETWEEN low AND high — use checkpoint to include left operand
+                self.start_node_at(checkpoint, BETWEEN_EXPR);
+                self.parse_between_body();
+                self.finish_node();
             } else if self.at(IN_KW) {
-                // IN (values...)
-                self.parse_in_expr();
+                // IN (values...) — use checkpoint to include left operand
+                self.start_node_at(checkpoint, IN_EXPR);
+                self.parse_in_body();
+                self.finish_node();
             } else if self.at(LIKE_KW) || self.at(ILIKE_KW) {
                 // LIKE / ILIKE pattern
                 self.start_node_at(checkpoint, BINARY_EXPR);
@@ -1030,8 +1034,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_between_expr(&mut self) {
-        self.start_node(BETWEEN_EXPR);
+    /// Parse the body of a BETWEEN expression (BETWEEN low AND high).
+    /// Caller is responsible for creating the BETWEEN_EXPR node with the left operand.
+    fn parse_between_body(&mut self) {
         self.expect(BETWEEN_KW);
 
         // Parse lower bound
@@ -1047,18 +1052,16 @@ impl<'a> Parser<'a> {
         // Parse upper bound
         self.skip_trivia();
         self.parse_additive_expr();
-
-        self.finish_node();
     }
 
-    fn parse_in_expr(&mut self) {
-        self.start_node(IN_EXPR);
+    /// Parse the body of an IN expression (IN (values...)).
+    /// Caller is responsible for creating the IN_EXPR node with the left operand.
+    fn parse_in_body(&mut self) {
         self.expect(IN_KW);
 
         self.skip_trivia();
         if !self.expect(LPAREN) {
             self.error("Expected '(' after IN".to_string());
-            self.finish_node();
             return;
         }
 
@@ -1087,7 +1090,6 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(RPAREN);
-        self.finish_node();
     }
 
     fn parse_concat_expr(&mut self) {
@@ -1173,8 +1175,10 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
 
         if self.at(NULL_KW) {
-            // NULL literal
+            // NULL literal — wrap in EXPRESSION so Expr::cast() works
+            self.start_node(EXPRESSION);
             self.advance();
+            self.finish_node();
             return;
         }
 
@@ -1226,13 +1230,19 @@ impl<'a> Parser<'a> {
                 self.start_node_at(checkpoint, FUNCTION_CALL);
                 self.parse_arg_list();
                 self.finish_node();
+            } else {
+                // Bare keyword used as identifier — wrap in EXPRESSION
+                self.start_node_at(checkpoint, EXPRESSION);
+                self.finish_node();
             }
         } else if self.at(IDENT) && self.is_typed_literal() {
             // Typed literal: DATE '2024-01-01', TIMESTAMP '...', etc.
-            // Consume the type keyword and the string literal together
+            // Wrap in EXPRESSION so Expr::cast() works
+            self.start_node(EXPRESSION);
             self.advance(); // type keyword (IDENT)
             self.skip_trivia();
             self.advance(); // string literal
+            self.finish_node();
         } else if self.at(IDENT) {
             // Could be column reference, qualified name, or function call
             let checkpoint = self.builder.checkpoint();
@@ -1272,19 +1282,31 @@ impl<'a> Parser<'a> {
                     if self.at(OVER_KW) {
                         self.parse_window_spec();
                     }
+                } else {
+                    // Qualified name (table.column) — wrap in EXPRESSION
+                    self.start_node_at(checkpoint, EXPRESSION);
+                    self.finish_node();
                 }
-                // else: just a qualified name (table.column), no extra node needed
             } else if self.at(DOUBLE_COLON) {
                 // PostgreSQL cast: expr::type
+                // Wrap the identifier in EXPRESSION first, then wrap all in CAST_EXPR
+                self.start_node_at(checkpoint, EXPRESSION);
+                self.finish_node();
                 self.start_node_at(checkpoint, CAST_EXPR);
                 self.advance(); // consume ::
                 self.skip_trivia();
                 self.parse_type_spec();
                 self.finish_node();
+            } else {
+                // Simple identifier — wrap in EXPRESSION
+                self.start_node_at(checkpoint, EXPRESSION);
+                self.finish_node();
             }
-            // else: just an identifier, no extra node needed
         } else if self.current().is_literal() || self.at(STAR) {
+            // Literal or STAR — wrap in EXPRESSION so Expr::cast() works
+            self.start_node(EXPRESSION);
             self.advance();
+            self.finish_node();
         } else {
             self.error(format!("Expected expression, found {:?}", self.current()));
         }
@@ -2387,7 +2409,7 @@ mod tests {
             .find_map(CaseExpr::cast)
             .expect("should have a CaseExpr");
         assert!(
-            !case_node.has_case_value(),
+            case_node.case_value().is_none(),
             "searched CASE has no case value"
         );
         assert_eq!(case_node.when_clauses().count(), 2);
@@ -2406,7 +2428,10 @@ mod tests {
             .descendants()
             .find_map(CaseExpr::cast)
             .expect("should have a CaseExpr");
-        assert!(case_node.has_case_value(), "simple CASE has a case value");
+        assert!(
+            case_node.case_value().is_some(),
+            "simple CASE has a case value"
+        );
         assert_eq!(case_node.when_clauses().count(), 2);
         assert!(case_node.else_expr().is_some(), "should have ELSE");
     }
@@ -2442,7 +2467,7 @@ mod tests {
             .next()
             .expect("should have a WHEN clause");
         assert!(when.condition().is_some(), "WHEN should have a condition");
-        assert!(when.has_result(), "WHEN should have a result");
+        assert!(when.result().is_some(), "WHEN should have a result");
     }
 
     #[test]
@@ -2474,7 +2499,7 @@ mod tests {
             .find_map(CastExpr::cast)
             .expect("should have a CastExpr");
         assert!(cast_node.is_double_colon_cast());
-        assert!(cast_node.has_expression(), "should have expression");
+        assert!(cast_node.expression().is_some(), "should have expression");
     }
 
     #[test]
@@ -2489,8 +2514,8 @@ mod tests {
             .find_map(BinaryExpr::cast)
             .expect("should have a BinaryExpr");
         assert_eq!(bin.operator().as_deref(), Some("+"));
-        assert!(bin.has_left(), "should have left operand");
-        assert!(bin.has_right(), "should have right operand");
+        assert!(bin.left().is_some(), "should have left operand");
+        assert!(bin.right().is_some(), "should have right operand");
         assert!(!bin.is_unary());
     }
 
@@ -4139,6 +4164,76 @@ LIMIT 100
         // Third item: no alias
         assert_eq!(items[2].alias(), None);
         assert_eq!(items[2].column_name().as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn test_select_item_implicit_alias() {
+        let input = "SELECT b y, a + 1 total, c FROM t";
+        let (_, select) = parse_select(input);
+        let list = select.select_list().expect("should have select list");
+        let items: Vec<_> = list.items().collect();
+        assert_eq!(items.len(), 3);
+
+        // First item: implicit alias (no AS keyword)
+        assert_eq!(items[0].alias().as_deref(), Some("y"));
+        assert_eq!(items[0].column_name().as_deref(), Some("y"));
+
+        // Second item: implicit alias on expression
+        assert_eq!(items[1].alias().as_deref(), Some("total"));
+        assert_eq!(items[1].column_name().as_deref(), Some("total"));
+
+        // Third item: no alias
+        assert_eq!(items[2].alias(), None);
+        assert_eq!(items[2].column_name().as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn test_case_value_accessible() {
+        // Verifies bare-token fix: CASE value should be an accessible Expr
+        let input = "SELECT CASE status WHEN 1 THEN 'active' ELSE 'inactive' END FROM t";
+        let (_, select) = parse_select(input);
+        let list = select.select_list().expect("should have select list");
+        let item = list.items().next().expect("should have item");
+        let expr = item.expression().expect("should have expression");
+        let case_expr = expr.as_case().expect("should be CASE expression");
+        assert!(
+            case_expr.case_value().is_some(),
+            "case_value() should find 'status' — bare atoms are now wrapped in EXPRESSION"
+        );
+    }
+
+    #[test]
+    fn test_binary_expr_operands_accessible() {
+        // Verifies bare-token fix: binary expr operands should be accessible Exprs
+        let input = "SELECT a + b FROM t";
+        let (_, select) = parse_select(input);
+        let list = select.select_list().expect("should have select list");
+        let item = list.items().next().expect("should have item");
+        let expr = item.expression().expect("should have expression");
+        let binary = expr.as_binary().expect("should be binary expression");
+        assert!(
+            binary.left().is_some(),
+            "left() should find 'a' — bare atoms are now wrapped in EXPRESSION"
+        );
+        assert!(
+            binary.right().is_some(),
+            "right() should find 'b' — bare atoms are now wrapped in EXPRESSION"
+        );
+    }
+
+    #[test]
+    fn test_cast_expr_operand_accessible() {
+        // Verifies bare-token fix: CAST operand should be accessible
+        let input = "SELECT CAST(x AS INTEGER) FROM t";
+        let (_, select) = parse_select(input);
+        let list = select.select_list().expect("should have select list");
+        let item = list.items().next().expect("should have item");
+        let expr = item.expression().expect("should have expression");
+        let cast_expr = expr.as_cast().expect("should be CAST expression");
+        assert!(
+            cast_expr.expression().is_some(),
+            "expression() should find 'x' — bare atoms are now wrapped in EXPRESSION"
+        );
     }
 
     #[test]
