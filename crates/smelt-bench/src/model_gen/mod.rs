@@ -36,6 +36,7 @@ impl GeneratedWorkspace {
 /// - `models/` containing SQL and Python model files
 /// - `smelt.yml` project configuration
 /// - `sources.yml` source definitions
+#[allow(clippy::type_complexity)]
 fn generate_workspace_into(
     spec: &GraphSpec,
     root: &Path,
