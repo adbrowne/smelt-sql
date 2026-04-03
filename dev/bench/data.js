@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775219338819,
+  "lastUpdate": 1775219340089,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12518,6 +12518,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.95607187150914,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "16e65d414dbb84619a77dafda2d1c513401be14c",
+          "message": "Merge pull request #98 from adbrowne/fix/python-arglist-too-long\n\nFix PyO3 dict_items extraction error in python_models",
+          "timestamp": "2026-04-03T23:27:15+11:00",
+          "tree_id": "c8cc8cdc6647e3aca2532b6ec29ca426b441b521",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/16e65d414dbb84619a77dafda2d1c513401be14c"
+        },
+        "date": 1775219339660,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.60200870448906,
             "unit": "MB/s"
           }
         ]
