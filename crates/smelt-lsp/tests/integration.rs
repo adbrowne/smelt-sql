@@ -890,3 +890,254 @@ SELECT n FROM counter"#,
         );
     }
 }
+
+// =============================================================================
+// Goto-Definition Extended Tests
+// =============================================================================
+
+mod goto_definition_extended {
+    use super::*;
+
+    #[test]
+    fn test_source_resolves_to_table_def() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"version: 1
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model("model", "SELECT id FROM smelt.source('raw.users')");
+
+        let resolved =
+            ws.db
+                .resolve_source(ws.project_root(), "raw".to_string(), "users".to_string());
+        assert!(resolved.is_some());
+        let table_def = resolved.unwrap();
+        assert_eq!(table_def.name, "users");
+        assert_eq!(table_def.columns.len(), 2);
+    }
+
+    #[test]
+    fn test_model_schema_columns_have_ranges() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS user_id, 'hello' AS user_name");
+
+        let schema = ws.db.model_schema(ws.model_path("upstream"));
+        assert_eq!(schema.columns.len(), 2);
+
+        // Each column should have a non-zero range
+        for col in &schema.columns {
+            let start: usize = col.range.start().into();
+            let end: usize = col.range.end().into();
+            assert!(
+                end > start,
+                "Column '{}' should have a valid range",
+                col.name
+            );
+        }
+
+        assert_eq!(schema.columns[0].name, "user_id");
+        assert_eq!(schema.columns[1].name, "user_name");
+    }
+
+    #[test]
+    fn test_column_traced_through_single_ref() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
+        ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
+
+        // The downstream model's schema should have user_id with FromModel source
+        let schema = ws.db.model_schema(ws.model_path("orders"));
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "user_id");
+
+        // The upstream model should have user_id with a valid range
+        let upstream_schema = ws.db.model_schema(ws.model_path("users"));
+        let user_id_col = upstream_schema.find_column("user_id");
+        assert!(user_id_col.is_some(), "Upstream should have user_id column");
+    }
+
+    #[test]
+    fn test_wildcard_model_has_row_extensions() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id");
+        ws.add_model("passthrough", "SELECT * FROM smelt.ref('users')");
+
+        let schema = ws.db.model_schema(ws.model_path("passthrough"));
+        // SELECT * should create row extensions, not explicit columns
+        assert!(
+            !schema.row_extensions.is_empty(),
+            "Should have row extensions for SELECT *"
+        );
+        assert_eq!(schema.row_extensions[0].ref_name, "users");
+    }
+
+    #[test]
+    fn test_resolved_schema_expands_wildcards() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
+        ws.add_model("passthrough", "SELECT * FROM smelt.ref('users')");
+
+        let resolved = ws.db.resolved_model_schema(ws.model_path("passthrough"));
+        assert!(resolved.is_fully_resolved);
+        assert_eq!(resolved.columns.len(), 2);
+
+        let col_names: Vec<&str> = resolved.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(col_names.contains(&"user_id"));
+        assert!(col_names.contains(&"user_name"));
+    }
+
+    #[test]
+    fn test_column_through_wildcard_chain() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("base", "SELECT 1 AS col_a, 2 AS col_b");
+        ws.add_model("middle", "SELECT * FROM smelt.ref('base')");
+        ws.add_model("top", "SELECT col_a FROM smelt.ref('middle')");
+
+        // The 'base' model should have col_a as an explicit column
+        let base_schema = ws.db.model_schema(ws.model_path("base"));
+        assert!(base_schema.find_column("col_a").is_some());
+
+        // 'middle' has wildcard, so resolved schema should include col_a
+        let middle_resolved = ws.db.resolved_model_schema(ws.model_path("middle"));
+        let col_names: Vec<&str> = middle_resolved
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(col_names.contains(&"col_a"));
+
+        // 'top' explicitly selects col_a
+        let top_schema = ws.db.model_schema(ws.model_path("top"));
+        assert_eq!(top_schema.columns.len(), 1);
+        assert_eq!(top_schema.columns[0].name, "col_a");
+    }
+
+    #[test]
+    fn test_cte_columns_available_in_context() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "model",
+            r#"WITH totals AS (
+    SELECT 1 AS total_count, 2 AS total_amount
+)
+SELECT total_count FROM totals"#,
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        assert!(ctx.is_cte("totals"));
+
+        let columns = ctx.cte_columns("totals");
+        let col_names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
+        assert!(col_names.contains(&"total_count"));
+        assert!(col_names.contains(&"total_amount"));
+    }
+
+    #[test]
+    fn test_source_column_available_in_context() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"version: 1
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+"#,
+        );
+        ws.add_model("model", "SELECT event_id FROM smelt.source('raw.events')");
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        // Should be able to look up source columns
+        let result = ctx.lookup_column(Some("events"), "event_id");
+        assert!(result.is_some(), "Should find event_id in source context");
+    }
+
+    #[test]
+    fn test_model_sources_extracts_source_call_info() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("model", "SELECT event_id FROM smelt.source('raw.events') e");
+
+        let sources = ws.db.model_sources(ws.model_path("model"));
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_name, "raw");
+        assert_eq!(sources[0].table_name, "events");
+        assert_eq!(sources[0].qualified_name, "raw.events");
+    }
+
+    #[test]
+    fn test_cte_with_wildcard_resolves_upstream_columns() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
+        ws.add_model(
+            "model",
+            r#"WITH user_cte AS (
+    SELECT * FROM smelt.ref('users')
+)
+SELECT user_id FROM user_cte"#,
+        );
+
+        // The CTE should expose upstream columns through wildcard
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        assert!(ctx.is_cte("user_cte"), "user_cte should be recognized");
+
+        // The final model should resolve user_id
+        let result = ctx.lookup_column(None, "user_id");
+        assert!(result.is_some(), "Should find user_id through CTE wildcard");
+    }
+
+    #[test]
+    fn test_cte_with_explicit_and_wildcard_columns() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("base", "SELECT 1 AS col_a, 2 AS col_b");
+        ws.add_model(
+            "model",
+            r#"WITH enriched AS (
+    SELECT *, 3 AS col_c FROM smelt.ref('base')
+)
+SELECT col_a, col_c FROM enriched"#,
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        assert!(ctx.is_cte("enriched"));
+
+        // col_c is explicit in the CTE
+        let col_c = ctx.lookup_column(Some("enriched"), "col_c");
+        assert!(col_c.is_some(), "Should find explicit col_c in CTE");
+
+        // col_a comes through the wildcard
+        let col_a = ctx.lookup_column(Some("enriched"), "col_a");
+        assert!(
+            col_a.is_some(),
+            "Should find col_a through CTE wildcard from upstream"
+        );
+    }
+
+    #[test]
+    fn test_table_alias_in_type_context() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id");
+        ws.add_model("model", "SELECT u.user_id FROM smelt.ref('users') AS u");
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        // Alias 'u' should resolve to 'users'
+        let resolved = ctx.resolve_alias("u");
+        assert_eq!(resolved, Some("users".to_string()));
+
+        // Should find user_id through the alias
+        let result = ctx.lookup_column(Some("u"), "user_id");
+        assert!(result.is_some(), "Should find user_id through alias 'u'");
+    }
+}

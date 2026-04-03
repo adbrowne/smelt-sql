@@ -48,6 +48,523 @@ fn format_type(typed_col: &TypedColumn) -> String {
     format!("{}{}", typed_col.data_type, nullable_suffix)
 }
 
+/// Find the 0-indexed line number of a table definition inside a sources.yml file.
+/// Searches for the table name under the correct source name section.
+fn find_source_table_line(
+    sources_path: &std::path::Path,
+    source_name: &str,
+    table_name: &str,
+) -> u32 {
+    let content = match std::fs::read_to_string(sources_path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    let mut in_source = false;
+    let mut in_tables = false;
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect source name (e.g., "  raw:" at source level)
+        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
+            in_source = true;
+            in_tables = false;
+            continue;
+        }
+
+        if in_source {
+            // Detect tables section
+            if trimmed == "tables:" {
+                in_tables = true;
+                continue;
+            }
+
+            // A new top-level key resets context (left-aligned or less indented non-tables key)
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !trimmed.starts_with('#')
+                && !line.starts_with(' ')
+            {
+                in_source = false;
+                in_tables = false;
+                continue;
+            }
+        }
+
+        if in_source && in_tables {
+            // Look for the table name as a YAML key (e.g., "      users:" or "      - name: users")
+            if trimmed.starts_with(&format!("{}:", table_name)) {
+                return i as u32;
+            }
+        }
+    }
+
+    0
+}
+
+/// Find the 0-indexed line number of a column definition inside a sources.yml file.
+fn find_source_column_line(
+    sources_path: &std::path::Path,
+    source_name: &str,
+    table_name: &str,
+    column_name: &str,
+) -> u32 {
+    let content = match std::fs::read_to_string(sources_path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    let mut in_source = false;
+    let mut in_table = false;
+    let mut in_columns = false;
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
+            in_source = true;
+            in_table = false;
+            in_columns = false;
+            continue;
+        }
+        if in_source && trimmed.starts_with(&format!("{}:", table_name)) {
+            in_table = true;
+            in_columns = false;
+            continue;
+        }
+        if in_source && in_table && trimmed == "columns:" {
+            in_columns = true;
+            continue;
+        }
+        // Reset on new table or source
+        if in_source
+            && in_table
+            && in_columns
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('-')
+            && !trimmed.starts_with('#')
+            && !trimmed.contains("name:")
+            && !trimmed.contains("type:")
+            && !trimmed.contains("description:")
+            && !trimmed.contains("data_latency:")
+        {
+            // Likely a new section key; stop looking
+            break;
+        }
+
+        if in_source && in_table && in_columns {
+            // Match "- name: column_name"
+            if trimmed.starts_with("- name:") {
+                let name = trimmed.trim_start_matches("- name:").trim();
+                if name == column_name {
+                    return i as u32;
+                }
+            }
+        }
+    }
+
+    // Fall back to table line
+    find_source_table_line(sources_path, source_name, table_name)
+}
+
+/// A resolved column definition location for goto-definition
+#[derive(Debug, Clone)]
+struct ColumnDefLocation {
+    path: PathBuf,
+    line: u32,
+    col: u32,
+    end_line: u32,
+    end_col: u32,
+}
+
+/// Resolve a column reference to its definition location(s).
+///
+/// Traces through wildcard (`SELECT *`) chains until finding an explicit column definition.
+/// Returns multiple locations for ambiguous (unqualified) columns.
+fn resolve_column_definitions(
+    db: &Database,
+    current_path: &std::path::Path,
+    qualifier: Option<&str>,
+    column_name: &str,
+) -> Vec<ColumnDefLocation> {
+    let ctx = db.type_context(current_path.to_path_buf());
+
+    // Determine which sources this column could come from
+    let resolved_qualifier =
+        qualifier.and_then(|q| ctx.resolve_alias(q).or_else(|| Some(q.to_string())));
+    let effective_qualifier = resolved_qualifier.as_deref().or(qualifier);
+
+    // Try to find the column in each source type
+    let mut locations = Vec::new();
+
+    // Check CTE columns
+    find_column_in_ctes(
+        db,
+        current_path,
+        effective_qualifier,
+        column_name,
+        &ctx,
+        &mut locations,
+    );
+
+    // Check model columns (from smelt.ref() sources)
+    find_column_in_models(
+        db,
+        current_path,
+        effective_qualifier,
+        column_name,
+        &ctx,
+        &mut locations,
+    );
+
+    // Check source columns (from smelt.source())
+    find_column_in_sources(
+        db,
+        current_path,
+        effective_qualifier,
+        column_name,
+        &ctx,
+        &mut locations,
+    );
+
+    locations
+}
+
+/// Find column definitions in CTEs
+fn find_column_in_ctes(
+    db: &Database,
+    current_path: &std::path::Path,
+    qualifier: Option<&str>,
+    column_name: &str,
+    ctx: &smelt_db::TypeContext,
+    locations: &mut Vec<ColumnDefLocation>,
+) {
+    // If qualifier is specified, only check that CTE
+    let cte_names: Vec<String> = if let Some(q) = qualifier {
+        if ctx.is_cte(q) {
+            vec![q.to_string()]
+        } else {
+            vec![]
+        }
+    } else {
+        ctx.cte_names().map(|s| s.to_string()).collect()
+    };
+
+    if cte_names.is_empty() {
+        return;
+    }
+
+    // Parse the current file to find CTE definitions
+    let parse = db.parse_file(current_path.to_path_buf());
+    let text = db.file_text(current_path.to_path_buf());
+    let syntax = parse.syntax();
+    let file = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return,
+    };
+
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return,
+    };
+    let with_clause = match select_stmt.with_clause() {
+        Some(w) => w,
+        None => return,
+    };
+
+    for cte in with_clause.ctes() {
+        let cte_name = match cte.name() {
+            Some(n) => n,
+            None => continue,
+        };
+        if !cte_names.contains(&cte_name) {
+            continue;
+        }
+
+        // Check if this CTE has the column — look at its SELECT list
+        let cte_select = match cte.query().and_then(|q| q.select_stmt()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let cte_select_list = match cte_select.select_list() {
+            Some(l) => l,
+            None => continue,
+        };
+
+        // Check explicit column list first
+        let explicit_names = cte.column_names();
+        if !explicit_names.is_empty() {
+            // CTE has explicit column names — match by position
+            for (i, explicit_name) in explicit_names.iter().enumerate() {
+                if explicit_name == column_name {
+                    // Point to the i-th select item
+                    if let Some(item) = cte_select_list.items().nth(i) {
+                        let pr = smelt_parser::ast::text_range_to_range(&text, item.range());
+                        locations.push(ColumnDefLocation {
+                            path: current_path.to_path_buf(),
+                            line: pr.start.line,
+                            col: pr.start.column,
+                            end_line: pr.end.line,
+                            end_col: pr.end.column,
+                        });
+                    }
+                    break;
+                }
+            }
+        } else {
+            // No explicit column names — first check named columns, then wildcards
+            let mut found_explicit = false;
+            let mut has_wildcard = false;
+            for item in cte_select_list.items() {
+                if item.is_wildcard() {
+                    has_wildcard = true;
+                    continue;
+                }
+                if let Some(name) = item.column_name() {
+                    if name == column_name {
+                        let pr = smelt_parser::ast::text_range_to_range(&text, item.range());
+                        locations.push(ColumnDefLocation {
+                            path: current_path.to_path_buf(),
+                            line: pr.start.line,
+                            col: pr.start.column,
+                            end_line: pr.end.line,
+                            end_col: pr.end.column,
+                        });
+                        found_explicit = true;
+                        break;
+                    }
+                }
+            }
+            // If no explicit match, trace through wildcards
+            if !found_explicit && has_wildcard {
+                if let Some(from_clause) = cte_select.from_clause() {
+                    let all_refs = from_clause
+                        .table_refs()
+                        .chain(from_clause.joins().filter_map(|j| j.table_ref()));
+                    for table_ref in all_refs {
+                        if let Some(func) = table_ref.function_call() {
+                            if let Some(ref_call) =
+                                smelt_parser::ast::RefCall::from_function_call(func)
+                            {
+                                if let Some(model_name) = ref_call.model_name() {
+                                    if let Some(upstream_path) = db.resolve_ref(model_name) {
+                                        find_column_in_model_chain(
+                                            db,
+                                            &upstream_path,
+                                            column_name,
+                                            10,
+                                            locations,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Find column definitions in upstream models (through smelt.ref() calls).
+/// Traces through wildcard chains until finding an explicit definition.
+fn find_column_in_models(
+    db: &Database,
+    current_path: &std::path::Path,
+    qualifier: Option<&str>,
+    column_name: &str,
+    ctx: &smelt_db::TypeContext,
+    locations: &mut Vec<ColumnDefLocation>,
+) {
+    // Determine which models to check
+    let model_names: Vec<String> = if let Some(q) = qualifier {
+        // Qualified: check only this model
+        if ctx.is_cte(q) {
+            return; // Already handled by CTE check
+        }
+        vec![q.to_string()]
+    } else {
+        // Unqualified: check all models in FROM clause
+        collect_from_model_names(db, current_path)
+    };
+
+    for model_name in &model_names {
+        if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
+            if find_column_in_model_chain(db, &upstream_path, column_name, 10, locations)
+                && qualifier.is_some()
+            {
+                return; // Qualified lookup: stop after first match
+            }
+        }
+    }
+}
+
+/// Recursively find a column definition through wildcard chains.
+/// Returns true if the column was found.
+fn find_column_in_model_chain(
+    db: &Database,
+    model_path: &std::path::Path,
+    column_name: &str,
+    depth_limit: usize,
+    locations: &mut Vec<ColumnDefLocation>,
+) -> bool {
+    if depth_limit == 0 {
+        return false;
+    }
+
+    let schema = db.model_schema(model_path.to_path_buf());
+    let text = db.file_text(model_path.to_path_buf());
+
+    // First check explicit columns
+    for col in &schema.columns {
+        if col.name == column_name {
+            let pr = smelt_parser::ast::text_range_to_range(&text, col.range);
+            locations.push(ColumnDefLocation {
+                path: model_path.to_path_buf(),
+                line: pr.start.line,
+                col: pr.start.column,
+                end_line: pr.end.line,
+                end_col: pr.end.column,
+            });
+            return true;
+        }
+    }
+
+    // If not found in explicit columns, check wildcard extensions
+    for ext in &schema.row_extensions {
+        if let Some(upstream_path) = db.resolve_ref(ext.ref_name.clone()) {
+            if find_column_in_model_chain(
+                db,
+                &upstream_path,
+                column_name,
+                depth_limit - 1,
+                locations,
+            ) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Find column definitions in source tables (from smelt.source() calls)
+fn find_column_in_sources(
+    db: &Database,
+    current_path: &std::path::Path,
+    qualifier: Option<&str>,
+    column_name: &str,
+    ctx: &smelt_db::TypeContext,
+    locations: &mut Vec<ColumnDefLocation>,
+) {
+    let project_root = db.file_project_root(current_path.to_path_buf());
+    let sources_path = project_root.join("sources.yml");
+    if !sources_path.exists() {
+        return;
+    }
+
+    // Get source references from FROM clause
+    let parse = db.parse_file(current_path.to_path_buf());
+    let syntax = parse.syntax();
+    let file = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return,
+    };
+
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return,
+    };
+    let from_clause = match select_stmt.from_clause() {
+        Some(f) => f,
+        None => return,
+    };
+
+    // Collect source references with their aliases
+    let mut source_refs: Vec<(String, String, Option<String>)> = Vec::new(); // (source_name, table_name, alias)
+    let all_table_refs = from_clause
+        .table_refs()
+        .chain(from_clause.joins().filter_map(|j| j.table_ref()));
+
+    for table_ref in all_table_refs {
+        if let Some(func) = table_ref.function_call() {
+            if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
+                if let (Some(sn), Some(tn)) = (source_call.source_name(), source_call.table_name())
+                {
+                    let alias = table_ref.alias();
+                    source_refs.push((sn, tn, alias));
+                }
+            }
+        }
+    }
+
+    for (source_name, table_name, alias) in &source_refs {
+        // Check if this source matches the qualifier
+        if let Some(q) = qualifier {
+            let resolved_q = ctx.resolve_alias(q).unwrap_or_else(|| q.to_string());
+            let qualified_name = format!("{}.{}", source_name, table_name);
+            if resolved_q != qualified_name && q != table_name && Some(q.to_string()) != *alias {
+                continue;
+            }
+        }
+
+        // Check if the source has this column
+        if let Some(table_def) = db.resolve_source(
+            project_root.clone(),
+            source_name.clone(),
+            table_name.clone(),
+        ) {
+            if table_def.columns.iter().any(|c| c.name == column_name) {
+                let line =
+                    find_source_column_line(&sources_path, source_name, table_name, column_name);
+                locations.push(ColumnDefLocation {
+                    path: sources_path.clone(),
+                    line,
+                    col: 0,
+                    end_line: line,
+                    end_col: 0,
+                });
+                if qualifier.is_some() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Collect model names from FROM clause ref() calls
+fn collect_from_model_names(db: &Database, path: &std::path::Path) -> Vec<String> {
+    let parse = db.parse_file(path.to_path_buf());
+    let syntax = parse.syntax();
+    let file = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let select_stmt = match file.select_stmt() {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let from_clause = match select_stmt.from_clause() {
+        Some(f) => f,
+        None => return vec![],
+    };
+
+    let mut names = Vec::new();
+    let all_refs = from_clause
+        .table_refs()
+        .chain(from_clause.joins().filter_map(|j| j.table_ref()));
+
+    for table_ref in all_refs {
+        if let Some(func) = table_ref.function_call() {
+            if let Some(ref_call) = smelt_parser::ast::RefCall::from_function_call(func) {
+                if let Some(model_name) = ref_call.model_name() {
+                    names.push(model_name);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// (virtual_path, start_line_offset) for each section in a multi-model file.
 type MultiModelEntry = Vec<(PathBuf, u32)>;
 
@@ -1001,9 +1518,26 @@ impl LanguageServer for Backend {
             offset
         };
 
-        // Find RefCall at cursor position using AST and resolve the target path
-        let resolved_path = if let Some(file) = AstFile::cast(syntax) {
+        // Resolve goto-definition target while holding the db lock and AST.
+        // We collect the result as plain data (no Rowan nodes) so we can drop
+        // the non-Send AST before any await points.
+        enum GotoTarget {
+            RefModel(PathBuf),
+            SourceFile {
+                sources_path: PathBuf,
+                source_name: String,
+                table_name: String,
+            },
+            /// CTE definition in the same file — target is an LSP Range
+            SameFile(Range),
+            /// Column definitions (potentially multiple for ambiguous refs)
+            ColumnDefs(Vec<ColumnDefLocation>),
+        }
+
+        let target = if let Some(file) = AstFile::cast(syntax) {
             let mut result = None;
+
+            // Check RefCall at cursor position
             for ref_call in file.refs() {
                 let range = ref_call.range();
                 let start: usize = range.start().into();
@@ -1011,38 +1545,303 @@ impl LanguageServer for Backend {
 
                 if cursor_offset >= start && cursor_offset <= end {
                     if let Some(ref_name) = ref_call.model_name() {
-                        result = db.resolve_ref(ref_name);
+                        if let Some(target_path) = db.resolve_ref(ref_name) {
+                            result = Some(GotoTarget::RefModel(target_path));
+                        }
+                    }
+                    break;
+                }
+            }
+
+            // Check SourceCall at cursor position
+            if result.is_none() {
+                for source_call in file.sources() {
+                    let range = source_call.range();
+                    let start: usize = range.start().into();
+                    let end: usize = range.end().into();
+
+                    if cursor_offset >= start && cursor_offset <= end {
+                        if let (Some(source_name), Some(table_name)) =
+                            (source_call.source_name(), source_call.table_name())
+                        {
+                            let project_root = db.file_project_root(effective_path.clone());
+                            if db
+                                .resolve_source(
+                                    project_root.clone(),
+                                    source_name.clone(),
+                                    table_name.clone(),
+                                )
+                                .is_some()
+                            {
+                                let sources_path = project_root.join("sources.yml");
+                                if sources_path.exists() {
+                                    result = Some(GotoTarget::SourceFile {
+                                        sources_path,
+                                        source_name,
+                                        table_name,
+                                    });
+                                }
+                            }
+                        }
                         break;
                     }
                 }
             }
+
+            // Check CTE references in FROM/JOIN clauses
+            if result.is_none() {
+                if let Some(select_stmt) = file.select_stmt() {
+                    // Collect CTE names and their definition ranges (converted to LSP Range)
+                    let mut cte_defs: HashMap<String, Range> = HashMap::new();
+                    if let Some(with_clause) = select_stmt.with_clause() {
+                        for cte in with_clause.ctes() {
+                            if let Some(name) = cte.name() {
+                                let pr = smelt_parser::ast::text_range_to_range(
+                                    &text,
+                                    cte.syntax().text_range(),
+                                );
+                                cte_defs.insert(
+                                    name,
+                                    Range {
+                                        start: Position::new(pr.start.line, pr.start.column),
+                                        end: Position::new(pr.end.line, pr.end.column),
+                                    },
+                                );
+                            }
+                        }
+                    }
+
+                    if !cte_defs.is_empty() {
+                        // Check FROM clause table refs
+                        let table_refs_to_check: Vec<_> =
+                            if let Some(from_clause) = select_stmt.from_clause() {
+                                from_clause
+                                    .table_refs()
+                                    .chain(from_clause.joins().filter_map(|j| j.table_ref()))
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+
+                        for table_ref in table_refs_to_check {
+                            // Only check plain identifiers (not function calls or subqueries)
+                            if table_ref.function_call().is_some() || table_ref.subquery().is_some()
+                            {
+                                continue;
+                            }
+                            let tr_range = table_ref.syntax().text_range();
+                            let tr_start: usize = tr_range.start().into();
+                            let tr_end: usize = tr_range.end().into();
+
+                            if cursor_offset >= tr_start && cursor_offset <= tr_end {
+                                if let Some(ident) = table_ref.identifier() {
+                                    if let Some(lsp_range) = cte_defs.get(&ident) {
+                                        result = Some(GotoTarget::SameFile(*lsp_range));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check column references at cursor position
+            if result.is_none() {
+                // Walk syntax descendants to find the tightest expression containing cursor
+                let mut best_expr: Option<smelt_parser::ast::Expr> = None;
+                let mut best_len = usize::MAX;
+
+                for node in file.syntax().descendants() {
+                    if let Some(expr) = smelt_parser::ast::Expr::cast(node) {
+                        let range = expr.text_range();
+                        let start: usize = range.start().into();
+                        let end: usize = range.end().into();
+                        let len = end - start;
+
+                        if cursor_offset >= start && cursor_offset <= end && len < best_len {
+                            best_len = len;
+                            best_expr = Some(expr);
+                        }
+                    }
+                }
+
+                if let Some(expr) = best_expr {
+                    if let Some(col_ref) = expr.as_column_ref() {
+                        // Check if cursor is on the qualifier token — if so, jump to
+                        // the CTE or table alias definition rather than doing column resolution
+                        let cursor_on_qualifier = col_ref.qualifier().is_some() && {
+                            use smelt_parser::SyntaxKind::{DOT, IDENT};
+                            expr.syntax()
+                                .children_with_tokens()
+                                .filter_map(|e| e.into_token())
+                                .find(|t| t.kind() == IDENT || t.kind() == DOT)
+                                .map(|first_ident| {
+                                    let start: usize = first_ident.text_range().start().into();
+                                    let end: usize = first_ident.text_range().end().into();
+                                    first_ident.kind() == IDENT
+                                        && cursor_offset >= start
+                                        && cursor_offset <= end
+                                })
+                                .unwrap_or(false)
+                        };
+
+                        if cursor_on_qualifier {
+                            let qualifier = col_ref.qualifier().unwrap();
+
+                            // Check if qualifier is a CTE name
+                            if let Some(select_stmt) = file.select_stmt() {
+                                if let Some(with_clause) = select_stmt.with_clause() {
+                                    for cte in with_clause.ctes() {
+                                        if cte.name().as_deref() == Some(qualifier) {
+                                            let pr = smelt_parser::ast::text_range_to_range(
+                                                &text,
+                                                cte.syntax().text_range(),
+                                            );
+                                            result = Some(GotoTarget::SameFile(Range {
+                                                start: Position::new(
+                                                    pr.start.line,
+                                                    pr.start.column,
+                                                ),
+                                                end: Position::new(pr.end.line, pr.end.column),
+                                            }));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Check if qualifier is a table alias in FROM/JOIN
+                            if result.is_none() {
+                                if let Some(select_stmt) = file.select_stmt() {
+                                    if let Some(from_clause) = select_stmt.from_clause() {
+                                        let table_refs: Vec<_> = from_clause
+                                            .table_refs()
+                                            .chain(
+                                                from_clause.joins().filter_map(|j| j.table_ref()),
+                                            )
+                                            .collect();
+
+                                        for table_ref in table_refs {
+                                            let matches = table_ref.alias().as_deref()
+                                                == Some(qualifier)
+                                                || table_ref.identifier().as_deref()
+                                                    == Some(qualifier);
+                                            if matches {
+                                                let pr = smelt_parser::ast::text_range_to_range(
+                                                    &text,
+                                                    table_ref.syntax().text_range(),
+                                                );
+                                                result = Some(GotoTarget::SameFile(Range {
+                                                    start: Position::new(
+                                                        pr.start.line,
+                                                        pr.start.column,
+                                                    ),
+                                                    end: Position::new(pr.end.line, pr.end.column),
+                                                }));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            let defs = resolve_column_definitions(
+                                &db,
+                                &effective_path,
+                                col_ref.qualifier(),
+                                col_ref.name(),
+                            );
+                            if !defs.is_empty() {
+                                result = Some(GotoTarget::ColumnDefs(defs));
+                            }
+                        }
+                    }
+                }
+            }
+
             result
         } else {
             None
         };
         drop(db);
 
-        // If we found a target, map virtual .sql paths back to .py sources
-        if let Some(target_path) = resolved_path {
-            let py_sources = self.python_model_sources.lock().await;
-            let (actual_path, target_line) = py_sources
-                .get(&target_path)
-                .map(|(p, line)| (p.clone(), *line))
-                .unwrap_or((target_path, 0));
-            drop(py_sources);
+        // Convert target to LSP response
+        match target {
+            Some(GotoTarget::RefModel(target_path)) => {
+                // Map virtual .sql paths back to .py sources
+                let py_sources = self.python_model_sources.lock().await;
+                let (actual_path, target_line) = py_sources
+                    .get(&target_path)
+                    .map(|(p, line)| (p.clone(), *line))
+                    .unwrap_or((target_path, 0));
+                drop(py_sources);
 
-            if let Ok(target_uri) = Url::from_file_path(&actual_path) {
-                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: target_uri,
-                    range: Range {
-                        start: Position::new(target_line, 0),
-                        end: Position::new(target_line, 0),
-                    },
-                })));
+                if let Ok(target_uri) = Url::from_file_path(&actual_path) {
+                    Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: Position::new(target_line, 0),
+                            end: Position::new(target_line, 0),
+                        },
+                    })))
+                } else {
+                    Ok(None)
+                }
             }
-        }
+            Some(GotoTarget::SourceFile {
+                sources_path,
+                source_name,
+                table_name,
+            }) => {
+                let target_line = find_source_table_line(&sources_path, &source_name, &table_name);
 
-        Ok(None)
+                if let Ok(target_uri) = Url::from_file_path(&sources_path) {
+                    Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: Position::new(target_line, 0),
+                            end: Position::new(target_line, 0),
+                        },
+                    })))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(GotoTarget::SameFile(target_range)) => {
+                if let Ok(target_uri) = Url::from_file_path(&path) {
+                    Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: target_range,
+                    })))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(GotoTarget::ColumnDefs(defs)) => {
+                let locations: Vec<Location> = defs
+                    .iter()
+                    .filter_map(|def| {
+                        Url::from_file_path(&def.path).ok().map(|uri| Location {
+                            uri,
+                            range: Range {
+                                start: Position::new(def.line, def.col),
+                                end: Position::new(def.end_line, def.end_col),
+                            },
+                        })
+                    })
+                    .collect();
+
+                match locations.len() {
+                    0 => Ok(None),
+                    1 => Ok(Some(GotoDefinitionResponse::Scalar(
+                        locations.into_iter().next().unwrap(),
+                    ))),
+                    _ => Ok(Some(GotoDefinitionResponse::Array(locations))),
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
