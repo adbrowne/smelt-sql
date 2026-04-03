@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775259359423,
+  "lastUpdate": 1775259361029,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13010,6 +13010,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.934949955341555,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "dccfe7be4401253818448f9721c0e0efceeef877",
+          "message": "Fix CI release builds by enabling bundled-duckdb feature\n\nThe Dev Release and Release workflows were failing because cargo/maturin\nlinked against system DuckDB which isn't available in CI runners. Add\n--features bundled-duckdb to compile DuckDB from source, and propagate\nthe bundled-duckdb feature from smelt-cli to smelt-ui.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T10:33:56+11:00",
+          "tree_id": "02527e2ec482bd96a3af2e37de5ab8ee39182d5c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/dccfe7be4401253818448f9721c0e0efceeef877"
+        },
+        "date": 1775259360391,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.31084630168435,
             "unit": "MB/s"
           }
         ]
