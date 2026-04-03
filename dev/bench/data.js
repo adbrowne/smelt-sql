@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775254639970,
+  "lastUpdate": 1775259359423,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9869,6 +9869,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.418515,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "dccfe7be4401253818448f9721c0e0efceeef877",
+          "message": "Fix CI release builds by enabling bundled-duckdb feature\n\nThe Dev Release and Release workflows were failing because cargo/maturin\nlinked against system DuckDB which isn't available in CI runners. Add\n--features bundled-duckdb to compile DuckDB from source, and propagate\nthe bundled-duckdb feature from smelt-cli to smelt-ui.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T10:33:56+11:00",
+          "tree_id": "02527e2ec482bd96a3af2e37de5ab8ee39182d5c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/dccfe7be4401253818448f9721c0e0efceeef877"
+        },
+        "date": 1775259358447,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.848149,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.471982,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.643379,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.40199,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003296,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 39.75365,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028262,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015299,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011351,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.43769,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.541979,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.912520000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.372020000000003,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.219234,
             "unit": "ms"
           }
         ]
