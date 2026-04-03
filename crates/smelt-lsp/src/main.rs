@@ -789,8 +789,9 @@ impl Backend {
     fn query_diagnostics(db: &Database, path: PathBuf) -> Vec<DbDiagnostic> {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         let db = AssertUnwindSafe(db);
+        let path_for_log = path.clone();
         let path2 = path.clone();
-        catch_unwind(move || {
+        match catch_unwind(move || {
             let file_diags = db.file_diagnostics(path);
             let type_diags = db.type_diagnostics(path2);
             file_diags
@@ -798,11 +799,19 @@ impl Backend {
                 .chain(type_diags.iter())
                 .cloned()
                 .collect::<Vec<_>>()
-        })
-        // Salsa panicked (likely cycle detection during memo validation).
-        // The PanicGuard cleanup resets InProgress states to NotComputed,
-        // so the database is still usable for subsequent queries.
-        .unwrap_or_default()
+        }) {
+            Ok(diags) => diags,
+            Err(_) => {
+                // Salsa panicked (likely cycle detection during memo validation
+                // with circular model dependencies). The PanicGuard cleanup resets
+                // InProgress states to NotComputed, so the database is still usable.
+                eprintln!(
+                    "[WARN] Diagnostics unavailable for {} (Salsa cycle detection panic caught — likely circular model dependency)",
+                    path_for_log.display()
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Publish diagnostics for a file
