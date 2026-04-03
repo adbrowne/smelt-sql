@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775190409892,
+  "lastUpdate": 1775190411116,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11534,6 +11534,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 27.770100518152777,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f343c0ce1836ed17521b25d2d70ee390c4b200e6",
+          "message": "Use system DuckDB in CI and document for local dev\n\nThread a `bundled-duckdb` feature through smelt-cli, smelt-ui, and\nsmelt-db so builds can link against a pre-installed system DuckDB\nlibrary instead of compiling it from C++ source each time.\n\n- Add .github/actions/setup-duckdb composite action (downloads + caches\n  libduckdb v1.5.0)\n- Update test.yml: lint and test jobs use system DuckDB, clippy now\n  runs on all workspace crates\n- Update compat.yml: type-property-spark job uses system DuckDB\n- Update CLAUDE.md with system DuckDB setup and commands (recommended)\n- Fix pre-existing clippy::type_complexity warning in smelt-bench\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-03T15:25:25+11:00",
+          "tree_id": "3827b506e275f6a547642ab0c86a1f400dfe699b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f343c0ce1836ed17521b25d2d70ee390c4b200e6"
+        },
+        "date": 1775190410718,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 27.12119890630051,
             "unit": "MB/s"
           }
         ]
