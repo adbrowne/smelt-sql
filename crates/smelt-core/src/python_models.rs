@@ -88,8 +88,10 @@ pub fn run_python_model_file(
     loader.call_method1("exec_module", (&module,))?;
 
     // Iterate registered models and call each function
+    let builtins = py.import("builtins")?;
+    let list_fn = builtins.getattr("list")?;
     let items = registered_models.call_method0("items")?;
-    let items_list: Vec<(String, Bound<'_, PyAny>)> = items.extract()?;
+    let items_list: Vec<(String, Bound<'_, PyAny>)> = list_fn.call1((items,))?.extract()?;
 
     let mut results = Vec::new();
     for (name, func) in &items_list {
