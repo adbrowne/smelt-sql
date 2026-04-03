@@ -933,6 +933,16 @@ fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
                             nullable: true, // Assume nullable by default
                         },
                     );
+                } else {
+                    ctx.add_source_column(
+                        &source.name,
+                        &table.name,
+                        &col.name,
+                        TypedColumn {
+                            data_type: DataType::Unknown,
+                            nullable: true,
+                        },
+                    );
                 }
             }
         }
@@ -1529,6 +1539,24 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
                 });
             }
             _ => {} // Type successfully inferred
+        }
+    }
+
+    // Check for undeclared column references
+    let parse = db.parse_file(path.clone());
+    let syntax = parse.syntax();
+    if let Some(file) = AstFile::cast(syntax) {
+        if let Some(select_stmt) = file.select_stmt() {
+            let ctx = db.type_context(path.clone());
+            let undeclared = type_inference::check_undeclared_columns(&select_stmt, &ctx);
+            for (message, text_range) in undeclared {
+                let range = smelt_parser::ast::text_range_to_range(&text, text_range);
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message,
+                    range,
+                });
+            }
         }
     }
 
@@ -4805,6 +4833,192 @@ sources:
                 .iter()
                 .any(|d| d.message.contains("PIVOT") || d.message.contains("UNPIVOT")),
             "Normal query should not trigger PIVOT/UNPIVOT diagnostic"
+        );
+    }
+
+    // ============================================================
+    // Undeclared column diagnostic tests
+    // ============================================================
+
+    #[test]
+    fn test_undeclared_column_from_source() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "my_model",
+                "SELECT event_id, missing_col FROM smelt.source('raw.events')",
+            )],
+        );
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        let undeclared: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("not found"))
+            .collect();
+        assert_eq!(undeclared.len(), 1, "Should report one undeclared column");
+        assert!(
+            undeclared[0].message.contains("missing_col"),
+            "Message should name the column: {}",
+            undeclared[0].message
+        );
+    }
+
+    #[test]
+    fn test_declared_column_no_diagnostic() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: user_id
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "my_model",
+                "SELECT event_id, user_id FROM smelt.source('raw.events')",
+            )],
+        );
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        let undeclared: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("not found"))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "No undeclared column diagnostics expected, got: {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_undeclared_column_from_ref() {
+        let (db, paths) = setup_multi_model(&[
+            (
+                "upstream",
+                "SELECT user_id, event_count FROM smelt.source('raw.events')",
+            ),
+            (
+                "downstream",
+                "SELECT user_id, nonexistent FROM smelt.ref('upstream')",
+            ),
+        ]);
+
+        let diags = db.type_diagnostics(paths[1].clone());
+        let undeclared: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("not found"))
+            .collect();
+        assert_eq!(
+            undeclared.len(),
+            1,
+            "Should report one undeclared column from upstream ref"
+        );
+        assert!(undeclared[0].message.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_untyped_source_column_no_diagnostic() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+          - name: user_id
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "my_model",
+                "SELECT event_id, user_id FROM smelt.source('raw.events')",
+            )],
+        );
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        let undeclared: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("not found"))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "Untyped source column should still resolve, got: {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_cte_column_no_false_positive() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[(
+                "my_model",
+                "WITH cte AS (SELECT event_id, 1 AS extra FROM smelt.source('raw.events')) SELECT event_id, extra FROM cte",
+            )],
+        );
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        let undeclared: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("not found"))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "CTE columns should not produce false positives, got: {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_select_star_no_diagnostic() {
+        let sources_yaml = r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+"#;
+        let (db, paths) = setup_multi_model_with_sources(
+            sources_yaml,
+            &[("my_model", "SELECT * FROM smelt.source('raw.events')")],
+        );
+
+        let diags = db.type_diagnostics(paths[0].clone());
+        let undeclared: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("not found"))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "SELECT * should not trigger undeclared column diagnostic, got: {:?}",
+            undeclared
         );
     }
 }

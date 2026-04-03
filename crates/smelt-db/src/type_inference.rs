@@ -128,6 +128,41 @@ impl TypeContext {
             .collect()
     }
 
+    /// Check if a qualifier (table name/alias) resolves to a known source, model, or CTE.
+    /// Returns a human-readable description like "source 'raw.sessions'" or "model 'upstream'".
+    pub fn describe_qualifier(&self, qualifier: &str) -> Option<String> {
+        // Check aliases first
+        let resolved = self
+            .aliases
+            .get(qualifier)
+            .map(|s| s.as_str())
+            .unwrap_or(qualifier);
+
+        // Check CTEs
+        if self.cte_names.contains(resolved) {
+            return Some(format!("CTE '{}'", resolved));
+        }
+
+        // Check model columns
+        let model_prefix = format!("{}.", resolved);
+        if self
+            .model_columns
+            .keys()
+            .any(|k| k.starts_with(&model_prefix))
+        {
+            return Some(format!("model '{}'", resolved));
+        }
+
+        // Check source columns (could be table_name or source_name.table_name)
+        for key in self.source_columns.keys() {
+            if key.starts_with(&model_prefix) {
+                return Some(format!("source '{}'", resolved));
+            }
+        }
+
+        None
+    }
+
     /// Look up a column type by name (with optional qualifier).
     /// CTEs shadow outer scope, so we check them first.
     /// Records missed lookups (when None is returned) for property-based test
@@ -1267,6 +1302,61 @@ pub fn walk_select_columns_with_visitor(
 /// Covers SELECT list, WHERE, GROUP BY, HAVING, QUALIFY, JOIN ON, and ORDER BY.
 pub fn walk_select_columns(select_stmt: &SelectStmt, ctx: &TypeContext) {
     walk_select_columns_with_visitor(select_stmt, ctx, None, &mut |_, _, _, _| {});
+}
+
+/// Check for column references that don't resolve against declared schemas.
+/// Returns diagnostics with accurate source positions.
+pub fn check_undeclared_columns(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<(String, TextRange)> {
+    let mut undeclared = Vec::new();
+
+    // Collect SELECT aliases — these are valid references in GROUP BY / ORDER BY / HAVING
+    let mut select_aliases = std::collections::HashSet::new();
+    if let Some(select_list) = select_stmt.select_list() {
+        for item in select_list.items() {
+            if let Some(alias) = item.alias() {
+                select_aliases.insert(alias.to_lowercase());
+            }
+        }
+    }
+
+    walk_select_columns_with_visitor(
+        select_stmt,
+        ctx,
+        None,
+        &mut |qualifier, col_name, _, range| {
+            // Skip SQL keywords that may be parsed as identifiers
+            let lower = col_name.to_lowercase();
+            if matches!(lower.as_str(), "true" | "false" | "null") {
+                return;
+            }
+
+            // Skip unqualified references to SELECT aliases (valid in GROUP BY/ORDER BY)
+            if qualifier.is_none() && select_aliases.contains(&lower) {
+                return;
+            }
+
+            if ctx.lookup_column(qualifier, col_name).is_some() {
+                return;
+            }
+
+            let message = if let Some(q) = qualifier {
+                if let Some(desc) = ctx.describe_qualifier(q) {
+                    format!("Column '{}' not found in {}", col_name, desc)
+                } else {
+                    format!("Column '{}.{}' not found", q, col_name)
+                }
+            } else {
+                "Column '{}' not found in any source, model, or CTE".replace("{}", col_name)
+            };
+
+            undeclared.push((message, range));
+        },
+    );
+
+    undeclared
 }
 
 ///
