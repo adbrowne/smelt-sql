@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775213856132,
+  "lastUpdate": 1775218966540,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9399,6 +9399,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.395702,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "42d5148035057b3bf2c2a685877753f33c015792",
+          "message": "Merge pull request #97 from adbrowne/fix/python-arglist-too-long\n\nFix Python model E2BIG error on large projects",
+          "timestamp": "2026-04-03T23:21:05+11:00",
+          "tree_id": "990b129db881c4b6b55b045fba00d93cb0352b20",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/42d5148035057b3bf2c2a685877753f33c015792"
+        },
+        "date": 1775218965352,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 32.381828,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 31.224002,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.5330130000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.34014,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003697,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.544039999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.027186,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014442,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010533,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.103402,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1.84983,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.9411000000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.584,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.966814,
             "unit": "ms"
           }
         ]
