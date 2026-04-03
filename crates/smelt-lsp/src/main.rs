@@ -311,10 +311,13 @@ fn find_column_in_ctes(
                 }
             }
         } else {
-            // No explicit column names — match by inferred name
+            // No explicit column names — first check named columns, then wildcards
+            let mut found_explicit = false;
+            let mut has_wildcard = false;
             for item in cte_select_list.items() {
                 if item.is_wildcard() {
-                    continue; // TODO: trace through CTE wildcards
+                    has_wildcard = true;
+                    continue;
                 }
                 if let Some(name) = item.column_name() {
                     if name == column_name {
@@ -326,7 +329,35 @@ fn find_column_in_ctes(
                             end_line: pr.end.line,
                             end_col: pr.end.column,
                         });
+                        found_explicit = true;
                         break;
+                    }
+                }
+            }
+            // If no explicit match, trace through wildcards
+            if !found_explicit && has_wildcard {
+                if let Some(from_clause) = cte_select.from_clause() {
+                    let all_refs = from_clause
+                        .table_refs()
+                        .chain(from_clause.joins().filter_map(|j| j.table_ref()));
+                    for table_ref in all_refs {
+                        if let Some(func) = table_ref.function_call() {
+                            if let Some(ref_call) =
+                                smelt_parser::ast::RefCall::from_function_call(func)
+                            {
+                                if let Some(model_name) = ref_call.model_name() {
+                                    if let Some(upstream_path) = db.resolve_ref(model_name) {
+                                        find_column_in_model_chain(
+                                            db,
+                                            &upstream_path,
+                                            column_name,
+                                            10,
+                                            locations,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1637,14 +1668,93 @@ impl LanguageServer for Backend {
 
                 if let Some(expr) = best_expr {
                     if let Some(col_ref) = expr.as_column_ref() {
-                        let defs = resolve_column_definitions(
-                            &db,
-                            &effective_path,
-                            col_ref.qualifier(),
-                            col_ref.name(),
-                        );
-                        if !defs.is_empty() {
-                            result = Some(GotoTarget::ColumnDefs(defs));
+                        // Check if cursor is on the qualifier token — if so, jump to
+                        // the CTE or table alias definition rather than doing column resolution
+                        let cursor_on_qualifier = col_ref.qualifier().is_some() && {
+                            use smelt_parser::SyntaxKind::{DOT, IDENT};
+                            expr.syntax()
+                                .children_with_tokens()
+                                .filter_map(|e| e.into_token())
+                                .find(|t| t.kind() == IDENT || t.kind() == DOT)
+                                .map(|first_ident| {
+                                    let start: usize = first_ident.text_range().start().into();
+                                    let end: usize = first_ident.text_range().end().into();
+                                    first_ident.kind() == IDENT
+                                        && cursor_offset >= start
+                                        && cursor_offset <= end
+                                })
+                                .unwrap_or(false)
+                        };
+
+                        if cursor_on_qualifier {
+                            let qualifier = col_ref.qualifier().unwrap();
+
+                            // Check if qualifier is a CTE name
+                            if let Some(select_stmt) = file.select_stmt() {
+                                if let Some(with_clause) = select_stmt.with_clause() {
+                                    for cte in with_clause.ctes() {
+                                        if cte.name().as_deref() == Some(qualifier) {
+                                            let pr = smelt_parser::ast::text_range_to_range(
+                                                &text,
+                                                cte.syntax().text_range(),
+                                            );
+                                            result = Some(GotoTarget::SameFile(Range {
+                                                start: Position::new(
+                                                    pr.start.line,
+                                                    pr.start.column,
+                                                ),
+                                                end: Position::new(pr.end.line, pr.end.column),
+                                            }));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Check if qualifier is a table alias in FROM/JOIN
+                            if result.is_none() {
+                                if let Some(select_stmt) = file.select_stmt() {
+                                    if let Some(from_clause) = select_stmt.from_clause() {
+                                        let table_refs: Vec<_> = from_clause
+                                            .table_refs()
+                                            .chain(
+                                                from_clause.joins().filter_map(|j| j.table_ref()),
+                                            )
+                                            .collect();
+
+                                        for table_ref in table_refs {
+                                            let matches = table_ref.alias().as_deref()
+                                                == Some(qualifier)
+                                                || table_ref.identifier().as_deref()
+                                                    == Some(qualifier);
+                                            if matches {
+                                                let pr = smelt_parser::ast::text_range_to_range(
+                                                    &text,
+                                                    table_ref.syntax().text_range(),
+                                                );
+                                                result = Some(GotoTarget::SameFile(Range {
+                                                    start: Position::new(
+                                                        pr.start.line,
+                                                        pr.start.column,
+                                                    ),
+                                                    end: Position::new(pr.end.line, pr.end.column),
+                                                }));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            let defs = resolve_column_definitions(
+                                &db,
+                                &effective_path,
+                                col_ref.qualifier(),
+                                col_ref.name(),
+                            );
+                            if !defs.is_empty() {
+                                result = Some(GotoTarget::ColumnDefs(defs));
+                            }
                         }
                     }
                 }

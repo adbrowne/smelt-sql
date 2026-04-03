@@ -1076,4 +1076,68 @@ sources:
         assert_eq!(sources[0].table_name, "events");
         assert_eq!(sources[0].qualified_name, "raw.events");
     }
+
+    #[test]
+    fn test_cte_with_wildcard_resolves_upstream_columns() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
+        ws.add_model(
+            "model",
+            r#"WITH user_cte AS (
+    SELECT * FROM smelt.ref('users')
+)
+SELECT user_id FROM user_cte"#,
+        );
+
+        // The CTE should expose upstream columns through wildcard
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        assert!(ctx.is_cte("user_cte"), "user_cte should be recognized");
+
+        // The final model should resolve user_id
+        let result = ctx.lookup_column(None, "user_id");
+        assert!(result.is_some(), "Should find user_id through CTE wildcard");
+    }
+
+    #[test]
+    fn test_cte_with_explicit_and_wildcard_columns() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("base", "SELECT 1 AS col_a, 2 AS col_b");
+        ws.add_model(
+            "model",
+            r#"WITH enriched AS (
+    SELECT *, 3 AS col_c FROM smelt.ref('base')
+)
+SELECT col_a, col_c FROM enriched"#,
+        );
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        assert!(ctx.is_cte("enriched"));
+
+        // col_c is explicit in the CTE
+        let col_c = ctx.lookup_column(Some("enriched"), "col_c");
+        assert!(col_c.is_some(), "Should find explicit col_c in CTE");
+
+        // col_a comes through the wildcard
+        let col_a = ctx.lookup_column(Some("enriched"), "col_a");
+        assert!(
+            col_a.is_some(),
+            "Should find col_a through CTE wildcard from upstream"
+        );
+    }
+
+    #[test]
+    fn test_table_alias_in_type_context() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id");
+        ws.add_model("model", "SELECT u.user_id FROM smelt.ref('users') AS u");
+
+        let ctx = ws.db.type_context(ws.model_path("model"));
+        // Alias 'u' should resolve to 'users'
+        let resolved = ctx.resolve_alias("u");
+        assert_eq!(resolved, Some("users".to_string()));
+
+        // Should find user_id through the alias
+        let result = ctx.lookup_column(Some("u"), "user_id");
+        assert!(result.is_some(), "Should find user_id through alias 'u'");
+    }
 }
