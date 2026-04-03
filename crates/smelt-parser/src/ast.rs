@@ -193,16 +193,28 @@ impl SelectItem {
         self.0.children().find_map(Expr::cast)
     }
 
-    /// Get the explicit alias if present (the identifier after AS keyword)
+    /// Get the alias if present (explicit `AS alias` or implicit `expr alias`)
     pub fn alias(&self) -> Option<String> {
         let mut found_as = false;
+        let mut found_expr = false;
 
         for child in self.0.children_with_tokens() {
-            if let Some(token) = child.as_token() {
-                if token.kind() == AS_KW {
-                    found_as = true;
-                } else if found_as && token.kind() == IDENT {
-                    return Some(token.text().to_string());
+            match &child {
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == AS_KW {
+                        found_as = true;
+                    } else if token.kind() == IDENT {
+                        if found_as {
+                            // Explicit alias: `expr AS alias`
+                            return Some(token.text().to_string());
+                        } else if found_expr {
+                            // Implicit alias: `expr alias` (IDENT after expression node)
+                            return Some(token.text().to_string());
+                        }
+                    }
+                }
+                rowan::NodeOrToken::Node(_) => {
+                    found_expr = true;
                 }
             }
         }
@@ -544,8 +556,24 @@ impl Expr {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         // Accept any node that looks like an expression
         match node.kind() {
-            EXPRESSION | BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR => Some(Self(node)),
+            EXPRESSION => {
+                // Unwrap nested EXPRESSION wrappers to the innermost one.
+                // parse_expression() wraps in EXPRESSION, and parse_primary_expr()
+                // also wraps bare atoms in EXPRESSION — this avoids double-wrapping
+                // issues in accessors that look for direct-child tokens.
+                let mut inner = node;
+                loop {
+                    let children: Vec<_> = inner.children().collect();
+                    if children.len() == 1 && children[0].kind() == EXPRESSION {
+                        inner = children.into_iter().next().unwrap();
+                    } else {
+                        break;
+                    }
+                }
+                Some(Self(inner))
+            }
+            BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | SUBQUERY | BETWEEN_EXPR
+            | IN_EXPR | EXISTS_EXPR => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1307,7 +1335,7 @@ impl CaseExpr {
     /// Get the case value expression (for simple CASE)
     /// Returns None for searched CASE (CASE WHEN ...)
     pub fn case_value(&self) -> Option<Expr> {
-        // The case value is the first EXPRESSION child, before any WHEN_CLAUSE
+        // The case value is the first EXPRESSION-like child, before any WHEN_CLAUSE
         self.0
             .children()
             .take_while(|n| n.kind() != WHEN_CLAUSE)
@@ -1686,6 +1714,7 @@ impl LimitClause {
             .0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
+            .filter(|t| !matches!(t.kind(), WHITESPACE | COMMENT))
             .collect();
 
         for i in 0..tokens.len() {
@@ -1705,6 +1734,7 @@ impl LimitClause {
             .0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
+            .filter(|t| !matches!(t.kind(), WHITESPACE | COMMENT))
             .collect();
 
         for i in 0..tokens.len() {

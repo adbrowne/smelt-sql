@@ -898,54 +898,10 @@ fn infer_numeric_literal_type(text: &str) -> Option<DataType> {
     None
 }
 
-/// Infer the type of a binary operand. First tries the Expr child node (for expressions
-/// wrapped in EXPRESSION nodes). Falls back to resolving bare IDENT/NUMBER tokens directly,
-/// which handles the case where the parser produces BINARY_EXPR with token-level operands.
+/// Infer the type of a binary operand by finding the nth Expr child node.
 fn infer_binary_operand(binary: &BinaryExpr, nth: usize, ctx: &TypeContext) -> Option<TypedColumn> {
-    // Try child Expr nodes first (works when operands are wrapped in EXPRESSION nodes)
-    let expr = binary.node().children().filter_map(Expr::cast).nth(nth);
-    if let Some(e) = expr {
-        return infer_expression_type(&e, ctx);
-    }
-
-    // Fall back to bare tokens: find the nth IDENT or NUMBER token
-    // (skipping operator tokens like PLUS, MINUS, STAR, etc.)
-    use smelt_parser::SyntaxKind;
-    let mut value_token_idx = 0;
-    for child in binary.node().children_with_tokens() {
-        if let Some(token) = child.into_token() {
-            let kind = token.kind();
-            if matches!(
-                kind,
-                SyntaxKind::IDENT | SyntaxKind::NUMBER | SyntaxKind::STRING
-            ) {
-                if value_token_idx == nth {
-                    return match kind {
-                        SyntaxKind::IDENT => ctx.lookup_column(None, token.text()).cloned(),
-                        SyntaxKind::NUMBER => {
-                            let text = token.text();
-                            Some(TypedColumn {
-                                data_type: if text.contains('.') {
-                                    DataType::Double
-                                } else {
-                                    DataType::BigInt
-                                },
-                                nullable: false,
-                            })
-                        }
-                        SyntaxKind::STRING => Some(TypedColumn {
-                            data_type: DataType::Varchar { max_length: None },
-                            nullable: false,
-                        }),
-                        _ => None,
-                    };
-                }
-                value_token_idx += 1;
-            }
-        }
-    }
-
-    None
+    let expr = binary.node().children().filter_map(Expr::cast).nth(nth)?;
+    infer_expression_type(&expr, ctx)
 }
 
 /// Infer the result type of a binary expression
@@ -1181,22 +1137,6 @@ pub fn walk_expression_columns_with_visitor(
         if let Some(else_expr) = case_expr.else_expr() {
             walk_expression_columns_with_visitor(&else_expr, ctx, None, visitor);
         }
-        // Also check for bare IDENT tokens as CASE value (parser artifact:
-        // `CASE status WHEN ...` may have `status` as a bare token, not wrapped
-        // in an EXPRESSION node). Scan the CASE_EXPR node's direct tokens.
-        for child in case_expr.syntax().children_with_tokens() {
-            if let Some(node) = child.as_node() {
-                if node.kind() == smelt_parser::SyntaxKind::WHEN_CLAUSE {
-                    break;
-                }
-            }
-            if let Some(token) = child.as_token() {
-                if token.kind() == smelt_parser::SyntaxKind::IDENT {
-                    let _ = ctx.lookup_column(None, token.text());
-                    visitor(None, token.text(), None, token.text_range());
-                }
-            }
-        }
         return;
     }
 
@@ -1255,20 +1195,10 @@ pub fn walk_expression_columns_with_visitor(
     }
 
     // For all other expression types (CAST, BETWEEN, IN, chained binary, etc.):
-    // Walk all child nodes that can be cast to Expr, plus bare IDENT tokens.
-    // This handles the parser's flat structure for chained binary operators
-    // (e.g., `a || b || c` creates sibling BINARY_EXPR nodes).
+    // Walk all child nodes that can be cast to Expr.
     for child in expr.syntax().children() {
         if let Some(child_expr) = Expr::cast(child) {
             walk_expression_columns_with_visitor(&child_expr, ctx, type_hint, visitor);
-        }
-    }
-    for child in expr.syntax().children_with_tokens() {
-        if let Some(token) = child.as_token() {
-            if token.kind() == smelt_parser::SyntaxKind::IDENT {
-                let _ = ctx.lookup_column(None, token.text());
-                visitor(None, token.text(), type_hint, token.text_range());
-            }
         }
     }
 }

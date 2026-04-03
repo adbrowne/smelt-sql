@@ -3606,8 +3606,8 @@ sources:
         assert!(users_input.columns.iter().any(|c| c.name == "user_name"));
 
         let orders_input = orders_input.unwrap();
-        // Note: o.user_id from ON clause may not be collected due to parser limitation
-        // (BinaryExpr in ON conditions doesn't wrap operands in EXPRESSION nodes)
+        // Note: o.user_id from ON clause should be collected now that bare atoms
+        // are wrapped in EXPRESSION nodes
         assert!(
             orders_input.columns.iter().any(|c| c.name == "amount"),
             "orders columns: {:?}",
@@ -3635,9 +3635,8 @@ sources:
             event_type_col.is_some(),
             "event_type from WHERE should appear in inputs"
         );
-        // Note: type constraint from literal comparison (e.g., = 'click' -> VARCHAR)
-        // is limited by parser structure where binary expression children aren't
-        // wrapped in EXPRESSION nodes, so the whole WHERE expr is seen as a column ref.
+        // Note: type constraints from literal comparisons (e.g., = 'click' -> VARCHAR)
+        // should now work since binary expression operands are wrapped in EXPRESSION nodes.
     }
 
     #[test]
