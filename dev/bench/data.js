@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775218966540,
+  "lastUpdate": 1775218968206,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12395,6 +12395,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.97741439754333,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "42d5148035057b3bf2c2a685877753f33c015792",
+          "message": "Merge pull request #97 from adbrowne/fix/python-arglist-too-long\n\nFix Python model E2BIG error on large projects",
+          "timestamp": "2026-04-03T23:21:05+11:00",
+          "tree_id": "990b129db881c4b6b55b045fba00d93cb0352b20",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/42d5148035057b3bf2c2a685877753f33c015792"
+        },
+        "date": 1775218967520,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.95607187150914,
             "unit": "MB/s"
           }
         ]
