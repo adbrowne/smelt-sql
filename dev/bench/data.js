@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775213854365,
+  "lastUpdate": 1775213856132,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12272,6 +12272,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.60152391363857,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5f5b347949a684e541690a44180c90eb3918ddbb",
+          "message": "Fix goto-definition for column references in SELECT lists\n\nChange expression-finding loop comparison from < to <= so deeper AST\nnodes with the same range replace shallower parents. Add integration\ntests for bare columns, qualified columns, ref model columns, and\nWHERE clause columns.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-03T21:56:07+11:00",
+          "tree_id": "0e1bfee26a68d7a9e9a02d77cccfdb2f1ee98fa5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5f5b347949a684e541690a44180c90eb3918ddbb"
+        },
+        "date": 1775213855440,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.97741439754333,
             "unit": "MB/s"
           }
         ]
