@@ -13,5 +13,6 @@ GROUP BY CUBE(
   sessions.visit_source,
   sessions.platform,
   sessions.visit_campaign,
-  sessions.product_category
+  sessions.product_category,
+  sessions.foo_bar
 )

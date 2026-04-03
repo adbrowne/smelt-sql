@@ -57,3 +57,21 @@ sources:
             type: TIMESTAMP
           - name: session_end
             type: TIMESTAMP
+          - name: visitor_id
+            type: INTEGER
+          - name: product_views
+            type: INTEGER
+          - name: widget_views
+            type: INTEGER
+          - name: product_revenue
+            type: DECIMAL(10,2)
+          - name: visit_source
+            type: VARCHAR
+          - name: platform
+            type: VARCHAR
+          - name: visit_campaign
+            type: VARCHAR
+          - name: product_category
+            type: VARCHAR
+          - name: foo_bar
+            type: VARCHAR
