@@ -1141,3 +1141,206 @@ SELECT col_a, col_c FROM enriched"#,
         assert!(result.is_some(), "Should find user_id through alias 'u'");
     }
 }
+
+// =============================================================================
+// Column Goto-Definition Tests
+// =============================================================================
+//
+// These tests verify the expression-finding logic used by the goto-definition
+// handler. The handler walks AST descendants to find the tightest Expr at the
+// cursor, then calls as_column_ref() to extract the column reference.
+
+mod column_goto_definition {
+    use super::*;
+    use smelt_parser::ast::{Expr, File as AstFile};
+
+    /// Helper: find the tightest Expr at a byte offset, using the same logic
+    /// as the goto-definition handler in main.rs.
+    fn find_expr_at_offset(file: &AstFile, cursor_offset: usize) -> Option<Expr> {
+        let mut best_expr: Option<Expr> = None;
+        let mut best_len = usize::MAX;
+
+        for node in file.syntax().descendants() {
+            if let Some(expr) = Expr::cast(node) {
+                let range = expr.text_range();
+                let start: usize = range.start().into();
+                let end: usize = range.end().into();
+                let len = end - start;
+
+                if cursor_offset >= start && cursor_offset <= end && len <= best_len {
+                    best_len = len;
+                    best_expr = Some(expr);
+                }
+            }
+        }
+
+        best_expr
+    }
+
+    #[test]
+    fn test_bare_column_in_select_resolves_column_ref() {
+        // This is the core bug: bare `event_timestamp` in SELECT has the same
+        // text range for SELECT_ITEM and inner EXPRESSION nodes. The fix
+        // (len <= best_len) ensures the deeper EXPRESSION is selected.
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"version: 1
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_timestamp
+            type: TIMESTAMP
+          - name: user_id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT\n    event_timestamp\nFROM smelt.source('raw.events')",
+        );
+
+        let parse = ws.db.parse_file(ws.model_path("model"));
+        let file = AstFile::cast(parse.syntax()).unwrap();
+
+        // Cursor on "event_timestamp" (byte offset within the identifier)
+        let text = "SELECT\n    event_timestamp\nFROM smelt.source('raw.events')";
+        let col_start = text.find("event_timestamp").unwrap();
+        let cursor = col_start + 5; // middle of the identifier
+
+        let expr = find_expr_at_offset(&file, cursor);
+        assert!(expr.is_some(), "Should find an expression at cursor");
+
+        let col_ref = expr.unwrap().as_column_ref();
+        assert!(
+            col_ref.is_some(),
+            "Expression should resolve to a ColumnRef"
+        );
+
+        let col_ref = col_ref.unwrap();
+        assert_eq!(col_ref.name(), "event_timestamp");
+        assert!(col_ref.qualifier().is_none());
+    }
+
+    #[test]
+    fn test_qualified_column_in_select_resolves_column_ref() {
+        // Open question 1: qualified columns like e.event_timestamp
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"version: 1
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_timestamp
+            type: TIMESTAMP
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT\n    e.event_timestamp\nFROM smelt.source('raw.events') e",
+        );
+
+        let parse = ws.db.parse_file(ws.model_path("model"));
+        let file = AstFile::cast(parse.syntax()).unwrap();
+
+        let text = "SELECT\n    e.event_timestamp\nFROM smelt.source('raw.events') e";
+        // Cursor on the column name part (after the dot)
+        let col_start = text.find("event_timestamp").unwrap();
+        let cursor = col_start + 3;
+
+        let expr = find_expr_at_offset(&file, cursor);
+        assert!(expr.is_some(), "Should find an expression at cursor");
+
+        let col_ref = expr.unwrap().as_column_ref();
+        assert!(
+            col_ref.is_some(),
+            "Qualified expression should resolve to a ColumnRef"
+        );
+
+        let col_ref = col_ref.unwrap();
+        assert_eq!(col_ref.name(), "event_timestamp");
+        assert_eq!(col_ref.qualifier(), Some("e"));
+    }
+
+    #[test]
+    fn test_column_from_ref_model_resolves() {
+        // Open question 2: columns from smelt.ref() models
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
+        ws.add_model("model", "SELECT\n    user_id\nFROM smelt.ref('users')");
+
+        let parse = ws.db.parse_file(ws.model_path("model"));
+        let file = AstFile::cast(parse.syntax()).unwrap();
+
+        let text = "SELECT\n    user_id\nFROM smelt.ref('users')";
+        let col_start = text.find("user_id").unwrap();
+        let cursor = col_start + 3;
+
+        let expr = find_expr_at_offset(&file, cursor);
+        assert!(expr.is_some(), "Should find an expression at cursor");
+
+        let col_ref = expr.unwrap().as_column_ref();
+        assert!(
+            col_ref.is_some(),
+            "Column from ref model should resolve to ColumnRef"
+        );
+
+        let col_ref = col_ref.unwrap();
+        assert_eq!(col_ref.name(), "user_id");
+        assert!(col_ref.qualifier().is_none());
+
+        // Also verify the column can be found in the upstream model schema
+        let upstream_schema = ws.db.model_schema(ws.model_path("users"));
+        assert!(
+            upstream_schema.find_column("user_id").is_some(),
+            "Upstream model should have user_id column"
+        );
+    }
+
+    #[test]
+    fn test_column_in_where_clause_resolves() {
+        // Open question 3: columns in WHERE should work because the parent
+        // node (WHERE_CLAUSE) has a larger range than the EXPRESSION
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"version: 1
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: is_active
+            type: BOOLEAN
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT event_id FROM smelt.source('raw.events') WHERE is_active",
+        );
+
+        let parse = ws.db.parse_file(ws.model_path("model"));
+        let file = AstFile::cast(parse.syntax()).unwrap();
+
+        let text = "SELECT event_id FROM smelt.source('raw.events') WHERE is_active";
+        let col_start = text.find("is_active").unwrap();
+        let cursor = col_start + 3;
+
+        let expr = find_expr_at_offset(&file, cursor);
+        assert!(expr.is_some(), "Should find expression in WHERE clause");
+
+        let col_ref = expr.unwrap().as_column_ref();
+        assert!(
+            col_ref.is_some(),
+            "Column in WHERE clause should resolve to ColumnRef"
+        );
+
+        let col_ref = col_ref.unwrap();
+        assert_eq!(col_ref.name(), "is_active");
+        assert!(col_ref.qualifier().is_none());
+    }
+}

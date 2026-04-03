@@ -1730,7 +1730,7 @@ impl LanguageServer for Backend {
                         let end: usize = range.end().into();
                         let len = end - start;
 
-                        if cursor_offset >= start && cursor_offset <= end && len < best_len {
+                        if cursor_offset >= start && cursor_offset <= end && len <= best_len {
                             best_len = len;
                             best_expr = Some(expr);
                         }
