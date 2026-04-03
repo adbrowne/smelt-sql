@@ -11,7 +11,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(not(feature = "python"))]
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::Config;
 use crate::discovery::{ModelFile, ModelKind};
@@ -51,13 +51,30 @@ fn run_python_model(
     python_sdk_path: &Path,
 ) -> Result<Vec<PythonModelOutput>> {
     let pythonpath = python_utils::build_pythonpath(python_sdk_path, file_path);
-    let output = Command::new(python)
+    // Pass context via stdin to avoid OS argument size limits (E2BIG).
+    let mut child = Command::new(python)
         .arg("-m")
         .arg("smelt.runner")
         .arg(file_path)
-        .arg(project_context_json)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("PYTHONPATH", pythonpath)
-        .output()
+        .spawn()
+        .with_context(|| format!("Failed to execute Python model: {}", file_path.display()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(project_context_json.as_bytes())
+            .with_context(|| {
+                format!(
+                    "Failed to write context to Python model: {}",
+                    file_path.display()
+                )
+            })?;
+    }
+    let output = child
+        .wait_with_output()
         .with_context(|| format!("Failed to execute Python model: {}", file_path.display()))?;
 
     if !output.status.success() {

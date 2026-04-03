@@ -14,15 +14,20 @@ import sys
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 3:
+        # Legacy: context passed as command-line argument
+        file_path = sys.argv[1]
+        project_json = sys.argv[2]
+    elif len(sys.argv) == 2:
+        # Preferred: context passed via stdin (avoids OS argument size limits)
+        file_path = sys.argv[1]
+        project_json = sys.stdin.read()
+    else:
         print(
-            "Usage: python -m smelt.runner <model_file> <project_json>",
+            "Usage: python -m smelt.runner <model_file> [<project_json>]",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    file_path = sys.argv[1]
-    project_json = sys.argv[2]
 
     project_data = json.loads(project_json)
 

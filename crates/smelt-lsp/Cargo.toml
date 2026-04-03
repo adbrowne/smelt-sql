@@ -28,6 +28,7 @@ walkdir = "2.4"
 pyo3 = { workspace = true, optional = true }
 
 [features]
+default = ["python"]
 python = ["smelt-core/python", "pyo3"]
 
 [dev-dependencies]

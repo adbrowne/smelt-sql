@@ -14,7 +14,7 @@ use smelt_core::python_utils;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(not(feature = "python"))]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A Python model discovered and executed.
@@ -145,14 +145,34 @@ fn execute_python_file(
     sdk_path: &Path,
 ) -> (Vec<PythonModelOutput>, Option<PythonModelError>) {
     let pythonpath = python_utils::build_pythonpath(sdk_path, file_path);
-    let output = match Command::new(python)
+    // Pass context via stdin to avoid OS argument size limits (E2BIG).
+    let mut child = match Command::new(python)
         .arg("-m")
         .arg("smelt.runner")
         .arg(file_path)
-        .arg(context_json)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("PYTHONPATH", pythonpath)
-        .output()
+        .spawn()
     {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                Vec::new(),
+                Some(PythonModelError {
+                    source_path: file_path.to_path_buf(),
+                    message: format!("Failed to run Python: {}", e),
+                    line: None,
+                }),
+            );
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(context_json.as_bytes());
+    }
+    let output = match child.wait_with_output() {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
@@ -203,7 +223,7 @@ fn execute_python_file(
     use pyo3::prelude::*;
     use pyo3::types::PyTracebackMethods;
 
-    let result: Result<Vec<PythonModelOutput>, String> = Python::with_gil(|py| {
+    let result: Result<Vec<PythonModelOutput>, String> = Python::attach(|py| {
         smelt_core::python_models::ensure_sdk_on_path(py, sdk_path)
             .map_err(|e| format!("Failed to set up Python SDK path: {}", e))?;
 
