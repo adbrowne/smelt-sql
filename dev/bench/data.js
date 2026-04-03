@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775212169664,
+  "lastUpdate": 1775212170764,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12149,6 +12149,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.771636590858947,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "945dedbc3d40437c6bc844a49fb091015508ff3f",
+          "message": "Default to system DuckDB instead of bundled\n\nRemove bundled-duckdb from default features in all crates so bare\ncargo build/test/clippy commands use the system libduckdb.so instead\nof compiling DuckDB from C++ source. Bundled mode is still available\nvia explicit --features flags.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-03T21:28:17+11:00",
+          "tree_id": "478cb0d452e446d6f782e74066c88a09ea4d89fa",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/945dedbc3d40437c6bc844a49fb091015508ff3f"
+        },
+        "date": 1775212170427,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.60152391363857,
             "unit": "MB/s"
           }
         ]
