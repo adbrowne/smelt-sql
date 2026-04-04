@@ -986,13 +986,17 @@ pub fn generate_expr(
                 .filter(|c| c.data_type.is_numeric())
                 .collect();
 
+            // Rotate through arithmetic operators that share numeric promotion rules
+            let ops = ["+", "-", "*", "%"];
+            let op = ops[expr_idx % ops.len()];
+
             if num_cols.len() >= 2 && func_idx.is_multiple_of(3) {
                 // Mixed-type binary op: pick two different numeric columns
                 let col_a = num_cols[expr_idx % num_cols.len()];
                 let col_b = num_cols[(expr_idx + 1) % num_cols.len()];
                 let expected = promote_numeric_type(&col_a.data_type, &col_b.data_type);
                 Some(TypedExpr {
-                    sql: format!("{} + {}", col_a.name, col_b.name),
+                    sql: format!("{} {} {}", col_a.name, op, col_b.name),
                     alias,
                     expected_smelt_type: expected,
                 })
@@ -1000,7 +1004,7 @@ pub fn generate_expr(
                 // Same-type arithmetic
                 let expected = num_col.data_type.clone();
                 Some(TypedExpr {
-                    sql: format!("{} + {}", num_col.name, num_col.name),
+                    sql: format!("{} {} {}", num_col.name, op, num_col.name),
                     alias,
                     expected_smelt_type: expected,
                 })

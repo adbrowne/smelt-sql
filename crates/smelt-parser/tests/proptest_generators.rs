@@ -62,6 +62,7 @@ pub fn arb_binary_op() -> impl Strategy<Value = String> {
         Just("-"),
         Just("*"),
         Just("/"),
+        Just("%"),
         Just("AND"),
         Just("OR"),
     ]
