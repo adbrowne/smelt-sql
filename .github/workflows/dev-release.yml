@@ -129,6 +129,12 @@ jobs:
           manylinux: 2_28
           docker-options: -e CXXFLAGS=-DDUCKDB_CUSTOM_PLATFORM=${{ contains(matrix.target, 'aarch64') && 'linux_arm64_gcc4' || 'linux_amd64_gcc4' }}
           before-script-linux: |
+            # Use Python 3.9+ for PyO3 abi3-py39 compatibility (manylinux system python may be 3.8)
+            if [ -d /opt/python/cp39-cp39/bin ]; then
+              export PATH=/opt/python/cp39-cp39/bin:$PATH
+            elif [ -d /opt/python/cp310-cp310/bin ]; then
+              export PATH=/opt/python/cp310-cp310/bin:$PATH
+            fi
             cargo build --release -p smelt-lsp
             mkdir -p smelt_sql.data/scripts
             cp target/release/smelt-lsp smelt_sql.data/scripts/
