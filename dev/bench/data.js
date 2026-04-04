@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775298730638,
+  "lastUpdate": 1775298731733,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13625,6 +13625,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.834385473840282,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c97c929d92f22a275557c875955f2f589c932cd6",
+          "message": "Fix Linux wheel builds: use manylinux_2_28 for Python 3.9+ compatibility\n\nThe manylinux auto (2014) container ships Python 3.8, which conflicts\nwith the abi3-py39 feature requirement. Switch to manylinux_2_28 which\nincludes Python 3.9+.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T21:30:21+11:00",
+          "tree_id": "30460f2b9a8dd6a583c79d4728d607026022ca20",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c97c929d92f22a275557c875955f2f589c932cd6"
+        },
+        "date": 1775298731428,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.182237998679284,
             "unit": "MB/s"
           }
         ]
