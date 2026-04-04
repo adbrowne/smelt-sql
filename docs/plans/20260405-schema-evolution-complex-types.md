@@ -438,29 +438,29 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 6: DuckDB Backend DDL Generation [ ]
+## Phase 6: DuckDB Backend DDL Generation [x]
 
 **Goal:** Translate `SchemaOperation`s into DuckDB-specific SQL statements.
 
 ### Work Items
 
-- [ ] 6a. Create `fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -> Vec<String>` in a new module `smelt-state/src/ddl_duckdb.rs` (or `smelt-backend-duckdb`):
+- [x] 6a. Create `fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -> Vec<String>` in a new module `smelt-state/src/ddl_duckdb.rs`:
   - `AddColumn` → `ALTER TABLE s.t ADD COLUMN name TYPE [NOT NULL DEFAULT expr]`
   - `RemoveColumn` → `ALTER TABLE s.t DROP COLUMN name`
   - `WidenColumnType` → `ALTER TABLE s.t ALTER COLUMN name TYPE new_type`
   - `ChangeNullability` → UPDATE + `ALTER TABLE s.t ALTER COLUMN name SET/DROP NOT NULL`
   - `AddStructField` → `ALTER TABLE s.t ADD COLUMN col.path.field TYPE` (dot-notation)
   - `RemoveStructField` → `ALTER TABLE s.t DROP COLUMN col.path.field` (dot-notation)
-  - `WidenNestedType` → `ALTER TABLE s.t ALTER COLUMN col TYPE new_type USING struct_pack(...)`
+  - `WidenNestedType` → dot-notation `ALTER COLUMN col.path TYPE new_type` for struct fields, full MAP type for map values
   - `BackfillColumn` → `UPDATE s.t SET name = expression`
   - `RewriteColumn` → `ALTER TABLE s.t ALTER COLUMN col TYPE new_type USING expr`
-- [ ] 6b. Implement `fn build_struct_pack_expr(column: &str, old_type: &DataType, new_type: &DataType) -> String`:
+- [x] 6b. Implement `fn build_struct_pack_expr(column: &str, old_type: &DataType, new_type: &DataType) -> Option<String>`:
   - Generates `struct_pack(field1 := col.field1::NEW_TYPE, field2 := col.field2, ...)` expressions
   - Handles nested structs recursively
   - Includes new fields with NULL or default value
   - Handles type casts for widened fields
-- [ ] 6c. Handle deeply nested cases: Array of Struct widening requires `list_transform` or full column rewrite with USING expression.
-- [ ] 6d. Wire DuckDB DDL generation into `plan_migration()` when dialect is DuckDB.
+- [x] 6c. Handle deeply nested cases: `build_list_transform_expr()` generates `list_transform(col, x -> struct_pack(...))` for Array-of-Struct widening. Also added `build_using_expr()` convenience function.
+- [x] 6d. Wire DuckDB DDL generation into `plan_migration()` — complex type `SchemaChange` variants now route through `plan_schema_operations()` → `generate_duckdb_ddl()`.
 
 ### Red-Green Tests
 
@@ -1040,3 +1040,29 @@ cargo test -p smelt-cli --test example_diagnostics
 - `plan_migration()` was updated with basic DDL generation for complex types rather than full delegation to `plan_schema_operations()` — this avoids a large refactor while Phase 6 will introduce proper backend-specific DDL generators
 - Struct changes are grouped per column in `plan_schema_operations()` to enable future RewriteColumn combination (Phase 6 will generate struct_pack expressions)
 - Map value widening emits `WidenNestedType` with path `["value"]` to distinguish from column-level operations
+
+### Session 6 — 2026-04-05
+
+**Phase completed:** Phase 6 (DuckDB Backend DDL Generation)
+
+**What was done:**
+- Created `smelt-state/src/ddl_duckdb.rs` — new module for DuckDB-specific DDL generation from abstract `SchemaOperation`s
+- Implemented `generate_duckdb_ddl()` handling all 9 `SchemaOperation` variants:
+  - `AddColumn`, `RemoveColumn`, `WidenColumnType`, `ChangeNullability` (scalar ops)
+  - `AddStructField`, `RemoveStructField` using DuckDB dot-notation (`col.path.field`)
+  - `WidenNestedType` using dot-notation for struct fields, full MAP type reconstruction for map values
+  - `BackfillColumn` (UPDATE), `RewriteColumn` (ALTER COLUMN TYPE ... USING expr)
+- Implemented `build_struct_pack_expr()` — recursively generates `struct_pack(field := ...)` expressions:
+  - Handles unchanged fields (pass-through), widened fields (cast), new fields (NULL::TYPE)
+  - Recursively handles nested struct-in-struct with inner `struct_pack()` calls
+- Implemented `build_list_transform_expr()` for array-of-struct widening:
+  - Generates `list_transform(col, x -> struct_pack(...))` for Array(Struct) type changes
+- Added `build_using_expr()` convenience function (tries struct_pack first, then list_transform)
+- Wired DDL generation into `plan_migration()` — complex type `SchemaChange` variants now route through `plan_schema_operations()` → `generate_duckdb_ddl()` instead of inline DDL generation
+- 28 new tests: 22 in `ddl_duckdb.rs` (DDL generation, struct_pack, list_transform, using_expr), 6 in `schema_tracking.rs` (end-to-end DDL pipeline tests)
+- All 125 smelt-state tests pass, 45 smelt-types tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- `WidenNestedType` uses DuckDB dot-notation (`ALTER COLUMN col.field TYPE new_type`) rather than struct_pack USING expressions for individual field widenings. struct_pack is reserved for `RewriteColumn` operations that transform the entire struct.
+- Map value widening reconstructs the full `MAP(VARCHAR, new_value_type)` type for ALTER COLUMN TYPE. The key type defaults to VARCHAR since the `WidenNestedType` operation doesn't carry the full map type.
+- `build_struct_pack_expr()` returns `Option<String>` (None for non-struct types) rather than panicking.

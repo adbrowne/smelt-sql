@@ -1206,53 +1206,21 @@ pub fn plan_migration(
                     ));
                 }
             }
-            // Complex type changes — delegate to plan_schema_operations() and
-            // generate basic DuckDB DDL. Phase 6 will add a full backend-specific
-            // DDL generator; this bridge keeps plan_migration() working.
-            SchemaChange::StructFieldAdded {
-                column,
-                path,
-                field_name,
-                field_type,
-                ..
-            } => {
-                let dot_path = format_nested_path(column, path, field_name);
-                statements.push(format!(
-                    "ALTER TABLE {} ADD COLUMN {} {}",
-                    qualified_table, dot_path, field_type
-                ));
-            }
-            SchemaChange::StructFieldRemoved {
-                column,
-                path,
-                field_name,
-            } => {
-                let dot_path = format_nested_path(column, path, field_name);
-                statements.push(format!(
-                    "ALTER TABLE {} DROP COLUMN {}",
-                    qualified_table, dot_path
-                ));
-            }
-            SchemaChange::NestedTypeChange { column, to, .. } => {
-                // For nested type widening, ALTER COLUMN TYPE on the top-level column.
-                // Phase 6 will generate struct_pack USING expressions.
-                statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                    qualified_table, column, to
-                ));
-            }
-            SchemaChange::ArrayElementTypeChange { column, to, .. } => {
-                statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}[]",
-                    qualified_table, column, to
-                ));
-            }
-            SchemaChange::MapValueTypeChange { column, to, .. } => {
-                // Simple placeholder — Phase 6 will handle MAP type DDL properly
-                statements.push(format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE MAP(VARCHAR, {})",
-                    qualified_table, column, to
-                ));
+            // Complex type changes — delegate to ddl_duckdb module for proper
+            // DuckDB-specific DDL generation including struct_pack and list_transform.
+            SchemaChange::StructFieldAdded { .. }
+            | SchemaChange::StructFieldRemoved { .. }
+            | SchemaChange::NestedTypeChange { .. }
+            | SchemaChange::ArrayElementTypeChange { .. }
+            | SchemaChange::MapValueTypeChange { .. } => {
+                // Convert this single change into SchemaOperations, then generate DDL.
+                let single_diff = SchemaDiff {
+                    changes: vec![change.clone()],
+                };
+                let plan = plan_schema_operations(&single_diff, column_defaults, backfill_exprs);
+                let ddl_stmts =
+                    crate::ddl_duckdb::generate_duckdb_ddl(schema, table, &plan.operations);
+                statements.extend(ddl_stmts);
             }
             SchemaChange::MapKeyTypeChange { .. } | SchemaChange::IncompatibleTypeChange { .. } => {
                 // These should have been caught by requires_full_refresh() above.
@@ -2809,5 +2777,118 @@ mod tests {
 
         assert!(!plan.requires_full_refresh);
         assert!(plan.operations.is_empty());
+    }
+
+    // ── DDL pipeline integration tests (diff → plan_migration → DuckDB DDL) ──
+
+    #[test]
+    fn test_ddl_pipeline_struct_field_add() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration("main", "t", &diff, false, &no_defaults(), &HashMap::new());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.t ADD COLUMN meta.b VARCHAR"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ddl_pipeline_nested_struct_field_add() {
+        let deployed = vec![col("data", "STRUCT(inner STRUCT(x INTEGER))", true)];
+        let inferred = vec![col(
+            "data",
+            "STRUCT(inner STRUCT(x INTEGER, y VARCHAR))",
+            true,
+        )];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration("main", "t", &diff, false, &no_defaults(), &HashMap::new());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.t ADD COLUMN data.inner.y VARCHAR"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ddl_pipeline_struct_field_removal() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        // Need allow_column_removal since struct field removal is treated like column removal
+        let action = plan_migration("main", "t", &diff, true, &no_defaults(), &HashMap::new());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert_eq!(statements[0], "ALTER TABLE main.t DROP COLUMN meta.b");
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ddl_pipeline_array_element_widening() {
+        let deployed = vec![col("scores", "INTEGER[]", true)];
+        let inferred = vec![col("scores", "BIGINT[]", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration("main", "t", &diff, false, &no_defaults(), &HashMap::new());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.t ALTER COLUMN scores TYPE BIGINT[]"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ddl_pipeline_nested_type_widening() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a BIGINT, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration("main", "t", &diff, false, &no_defaults(), &HashMap::new());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                // DuckDB supports dot-notation ALTER COLUMN TYPE for struct fields
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.t ALTER COLUMN meta.a TYPE BIGINT"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ddl_pipeline_map_value_widening() {
+        let deployed = vec![col("m", "MAP(VARCHAR, INTEGER)", true)];
+        let inferred = vec![col("m", "MAP(VARCHAR, BIGINT)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration("main", "t", &diff, false, &no_defaults(), &HashMap::new());
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert_eq!(
+                    statements[0],
+                    "ALTER TABLE main.t ALTER COLUMN m TYPE MAP(VARCHAR, BIGINT)"
+                );
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
     }
 }
