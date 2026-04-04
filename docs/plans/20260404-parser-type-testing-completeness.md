@@ -155,20 +155,20 @@
 
 ---
 
-## Phase 9: Parser Error Recovery Tests `[ ]`
+## Phase 9: Parser Error Recovery Tests `[x]`
 
 **Priority**: Low — only 2 error recovery tests exist, but parser works well in practice.
 
 **Goal**: Add error recovery tests for common incomplete SQL patterns.
 
 **Work**:
-- [ ] Missing SELECT list
-- [ ] Incomplete CASE (missing END)
-- [ ] Incomplete CTE (missing AS/SELECT)
-- [ ] Dangling operators (e.g., `SELECT a +`)
-- [ ] Missing closing parenthesis
-- [ ] Incomplete BETWEEN (missing AND)
-- [ ] Verify error recovery produces usable partial AST (not empty)
+- [x] Missing SELECT list
+- [x] Incomplete CASE (missing END)
+- [x] Incomplete CTE (missing AS/SELECT)
+- [x] Dangling operators (e.g., `SELECT a +`)
+- [x] Missing closing parenthesis
+- [x] Incomplete BETWEEN (missing AND)
+- [x] Verify error recovery produces usable partial AST (not empty)
 
 **Verification**: `cargo test -p smelt-parser` passes with new error recovery tests
 
@@ -407,3 +407,22 @@ Each Claude Code session records what it accomplished here.
 - All 223 parser tests pass, zero clippy warnings.
 
 **Decisions**: Depth tracking at `parse_expression` and `parse_select_stmt` is sufficient because these are the two recursive entry points through which all nesting passes. No need to track `parse_unary_expr` separately since it always goes through `parse_expression` first.
+
+### Session 9 — 2026-04-04
+
+**Phase**: 9 (Parser Error Recovery Tests)
+**Status**: Complete
+
+**What was done**:
+- Added 16 new error recovery tests to `parser.rs` covering all Phase 9 work items:
+  - Missing SELECT list: `test_error_recovery_missing_select_list`, `test_error_recovery_select_only`
+  - Incomplete CASE: `test_error_recovery_incomplete_case_missing_end`, `test_error_recovery_incomplete_case_missing_then`
+  - Incomplete CTE: `test_error_recovery_incomplete_cte_missing_as`, `test_error_recovery_incomplete_cte_missing_select`
+  - Dangling operators: `test_error_recovery_dangling_operator_plus`, `test_error_recovery_dangling_operator_equals`
+  - Missing closing paren: `test_error_recovery_missing_closing_paren`, `test_error_recovery_missing_closing_paren_in_function`
+  - Incomplete BETWEEN: `test_error_recovery_incomplete_between_missing_and`, `test_error_recovery_between_missing_upper_bound`
+  - Partial AST verification: `test_error_recovery_partial_ast_has_content`, `test_error_recovery_completely_invalid_input`, `test_error_recovery_empty_input`, `test_error_recovery_multiple_errors_still_produces_tree`
+- Added `parse_with_errors()` test helper that asserts errors exist and verifies the root FILE node is present.
+- All 239 parser tests pass (16 new + 223 existing), zero clippy warnings.
+
+**Decisions**: None — the existing parser error recovery mechanisms (sync_to, expect, error nodes) already handle all the tested cases well. No parser changes were needed, only test additions.

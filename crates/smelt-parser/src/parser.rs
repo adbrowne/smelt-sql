@@ -4455,4 +4455,253 @@ LIMIT 100
             result.errors
         );
     }
+
+    // ---- Phase 9: Error Recovery Tests ----
+
+    /// Helper: parse SQL expecting errors, return Parse and check partial AST is usable
+    fn parse_with_errors(sql: &str) -> Parse {
+        let result = parse(sql);
+        assert!(
+            !result.errors.is_empty(),
+            "Expected parse errors for: {sql}"
+        );
+        // Verify root node exists (parser didn't panic or produce empty tree)
+        let root = result.syntax();
+        assert_eq!(root.kind(), FILE);
+        result
+    }
+
+    #[test]
+    fn test_error_recovery_missing_select_list() {
+        // SELECT FROM users — missing select list items
+        let result = parse_with_errors("SELECT FROM users");
+
+        // Should still produce a SELECT_STMT with a FROM clause
+        let file = File::cast(result.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        assert!(
+            select.from_clause().is_some(),
+            "FROM clause should be recoverable despite missing select list"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_select_only() {
+        // Just "SELECT" with nothing after — should error but not panic
+        let result = parse("SELECT");
+        // Parser may or may not error depending on how it handles empty select list
+        // The key check: it doesn't panic and produces a tree
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should still produce a SELECT_STMT node"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_case_missing_end() {
+        // CASE without END
+        let result = parse_with_errors("SELECT CASE WHEN x > 0 THEN 'pos' ELSE 'neg'");
+
+        // Should produce a CASE_EXPR in the tree (partial but present)
+        let case_node = result.syntax().descendants().find_map(CaseExpr::cast);
+        assert!(
+            case_node.is_some(),
+            "Should produce a partial CASE_EXPR node"
+        );
+        // The error should mention END
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("END")),
+            "Error should mention missing END: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_case_missing_then() {
+        // CASE WHEN without THEN
+        let result = parse_with_errors("SELECT CASE WHEN x > 0 END");
+
+        // Should produce a partial tree with CASE_EXPR
+        let case_node = result.syntax().descendants().find_map(CaseExpr::cast);
+        assert!(
+            case_node.is_some(),
+            "Should produce a partial CASE_EXPR node"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("THEN")),
+            "Error should mention missing THEN: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_cte_missing_as() {
+        // WITH cte_name (missing AS (SELECT ...))
+        let result = parse_with_errors("WITH my_cte SELECT 1");
+
+        // Should produce errors mentioning AS
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("AS")),
+            "Error should mention missing AS: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_cte_missing_select() {
+        // WITH my_cte AS () — empty CTE body
+        let result = parse_with_errors("WITH my_cte AS ()");
+
+        // Should produce an error about missing SELECT/VALUES
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("SELECT") || e.message.contains("Expected")),
+            "Error should mention missing content: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_dangling_operator_plus() {
+        // SELECT a + — dangling operator at end
+        let result = parse_with_errors("SELECT a +");
+
+        // Should have a SELECT_STMT with partial expression tree
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite dangling operator"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_dangling_operator_equals() {
+        // SELECT a = — dangling comparison
+        let result = parse_with_errors("SELECT a =");
+
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite dangling comparison"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_missing_closing_paren() {
+        // SELECT (a + b — missing closing paren
+        let result = parse_with_errors("SELECT (a + b");
+
+        // Should produce an error about missing )
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains(")") || e.message.contains("RPAREN")),
+            "Error should mention missing closing paren: {:?}",
+            result.errors
+        );
+
+        // Should still produce a SELECT_STMT
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite missing paren"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_missing_closing_paren_in_function() {
+        // SELECT COUNT(a — missing closing paren on function call
+        let result = parse_with_errors("SELECT COUNT(a");
+
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite unclosed function call"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_between_missing_and() {
+        // SELECT a BETWEEN 1 — missing AND and upper bound
+        let result = parse_with_errors("SELECT a BETWEEN 1");
+
+        // Should mention AND
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("AND")),
+            "Error should mention missing AND: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_between_missing_upper_bound() {
+        // SELECT a BETWEEN 1 AND — missing upper bound
+        let result = parse_with_errors("SELECT a BETWEEN 1 AND");
+
+        // Should produce an error (dangling AND)
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite incomplete BETWEEN"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_partial_ast_has_content() {
+        // Multiple errors: SELECT list cut short + missing FROM table
+        let result = parse_with_errors("SELECT a, FROM");
+
+        // Despite errors, the partial AST should have structure
+        let file = File::cast(result.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+
+        // The select list should exist and have at least one item
+        let select_list = select.select_list().unwrap();
+        assert!(
+            select_list.items().count() >= 1,
+            "Partial AST should preserve at least the first select item"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_completely_invalid_input() {
+        // Garbage input
+        let result = parse_with_errors("XYZZY PLUGH");
+
+        // Should still produce a FILE node (never panics)
+        let root = result.syntax();
+        assert_eq!(root.kind(), FILE);
+    }
+
+    #[test]
+    fn test_error_recovery_empty_input() {
+        // Empty string
+        let result = parse("");
+        // Empty is valid (empty file) — may or may not have errors
+        // Key assertion: doesn't panic
+        let root = result.syntax();
+        assert_eq!(root.kind(), FILE);
+    }
+
+    #[test]
+    fn test_error_recovery_multiple_errors_still_produces_tree() {
+        // Many things wrong: bad CASE, unclosed paren, missing FROM target
+        let result = parse_with_errors("SELECT CASE WHEN THEN END, (a + , b FROM");
+
+        // Should produce a tree with multiple error nodes but not panic
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT even with many errors"
+        );
+        assert!(
+            result.errors.len() >= 2,
+            "Should report multiple errors: {:?}",
+            result.errors
+        );
+    }
 }
