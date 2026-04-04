@@ -2,9 +2,19 @@
 
 This document describes smelt's type inference semantics and where they intentionally differ from backend databases (DuckDB, Spark, etc.). These are design decisions, not bugs.
 
-## Design Principle
+## Design Principle: Strict by Default
 
-**Prefer strictness over permissiveness.** smelt catches errors at compile time, not runtime. When there's ambiguity, smelt rejects the construct with a clear diagnostic rather than silently coercing.
+**smelt catches errors at compile time, not runtime.** This is settled doctrine, not a temporary choice.
+
+When there is ambiguity in types, coercion, or nullability, smelt rejects the construct with a clear diagnostic rather than silently coercing. Users must write explicit CASTs to convert between type families. The LSP provides quick-fixes to reduce friction — the authoring experience is fluid, but committed code is strict.
+
+**Why strictness?** Both DuckDB and Spark silently coerce across type families (e.g., `true + 1`, `42 + '3'`). This is convenient for ad-hoc queries but dangerous in production pipelines where implicit coercion masks real bugs — a VARCHAR column accidentally used in arithmetic, a Boolean treated as an integer, or a type change in an upstream model silently propagating incorrect results. smelt is a compiler for production data pipelines, not an interactive query tool.
+
+**In practice, this means:**
+- Cross-family operations (e.g., `Integer + Varchar`, `Boolean + Integer`) produce `Unknown` with a diagnostic, not an implicit cast
+- Mixed-type array literals (e.g., `[1, 'hello']`) are rejected, not coerced to a common type
+- UNION branches with incompatible type families produce diagnostics
+- Nullable precision is tracked accurately so downstream consumers can rely on it
 
 ## DataType System
 
@@ -133,7 +143,15 @@ For Decimal + Decimal, precision and scale are both widened: `max(p1, p2)` and `
 
 ### Cross-Family
 
-Incompatible type families (e.g., Integer + Text, Boolean + Date) produce `Unknown`. smelt does not implicitly cast across type families. DuckDB is more permissive here (e.g., Boolean + Integer -> Integer).
+Incompatible type families (e.g., Integer + Text, Boolean + Date) produce `Unknown` with a diagnostic. smelt does not implicitly cast across type families — use an explicit CAST instead.
+
+| Expression | smelt | DuckDB | Spark |
+|-----------|-------|--------|-------|
+| `TRUE + 1` | Error (cross-family) | Integer (2) | Integer (2) |
+| `42 + '3'` | Error (cross-family) | Integer (45) | Double (45.0) |
+| `'abc' + 1` | Error (cross-family) | Error | NULL or Error (ANSI mode) |
+
+Both DuckDB and Spark silently coerce across families. smelt requires explicit CASTs — see [Design Principle](#design-principle-strict-by-default).
 
 ## Temporal Arithmetic Rules
 

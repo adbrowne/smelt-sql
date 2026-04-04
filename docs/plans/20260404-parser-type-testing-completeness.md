@@ -250,6 +250,30 @@
 
 ---
 
+## Follow-Up Work
+
+Items identified during plan review (2026-04-04) that should be tracked for future sessions:
+
+### 1. Struct DuckDB Validation (from Phase 12)
+
+DuckDB is now available in the environment. The two unchecked Phase 12 items should be completed:
+- [ ] Validate struct type inference against DuckDB for sample expressions
+- [ ] Update proptest generators to include struct expressions
+
+### 2. Modulo Operator (`%`) Support
+
+The parser does not currently support `%` as a binary operator. This should be added — there's no reason to exclude it. Requires lexer + parser + type inference changes (follows same numeric promotion rules as `*`).
+
+### 3. Review BackendSpecific Divergences
+
+The 7 BackendSpecific divergences in `divergences.rs` have not been reviewed to determine if any should be aligned with backends rather than maintained as divergences. Review each and decide:
+- `sum_integer` (BigInt vs DuckDB's Decimal(38,0))
+- `avg_decimal` (Double vs Spark's Decimal)
+- `ceil_floor_double` (Double vs Spark's BigInt)
+- `sign_double`, `sign_integer`, `sign_bigint`, `sign_decimal` (SmallInt vs backend input type)
+
+---
+
 ## Decisions Log
 
 Decisions made during implementation that may need review. These are filled in as work progresses.
