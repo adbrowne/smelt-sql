@@ -44,6 +44,54 @@ pub enum SchemaChange {
         from_nullable: bool,
         to_nullable: bool,
     },
+    /// A field was added to a struct column (possibly nested).
+    StructFieldAdded {
+        column: String,
+        path: Vec<String>,
+        field_name: String,
+        field_type: String,
+        nullable: bool,
+    },
+    /// A field was removed from a struct column (possibly nested).
+    StructFieldRemoved {
+        column: String,
+        path: Vec<String>,
+        field_name: String,
+    },
+    /// A type changed inside a nested struct field.
+    NestedTypeChange {
+        column: String,
+        path: Vec<String>,
+        from: String,
+        to: String,
+    },
+    /// The element type of an array column changed.
+    ArrayElementTypeChange {
+        column: String,
+        path: Vec<String>,
+        from: String,
+        to: String,
+    },
+    /// The key type of a map column changed (always unsafe).
+    MapKeyTypeChange {
+        column: String,
+        from: String,
+        to: String,
+    },
+    /// The value type of a map column changed.
+    MapValueTypeChange {
+        column: String,
+        path: Vec<String>,
+        from: String,
+        to: String,
+    },
+    /// Incompatible structural change (e.g., struct→scalar, field reorder).
+    IncompatibleTypeChange {
+        column: String,
+        from: String,
+        to: String,
+        reason: String,
+    },
 }
 
 /// Result of comparing deployed schema to inferred schema.
@@ -75,6 +123,24 @@ impl SchemaDiff {
             SchemaChange::ChangeNullability {
                 to_nullable: true, ..
             } => false,
+            // Struct field added: nullable is safe, not nullable requires refresh
+            SchemaChange::StructFieldAdded { nullable, .. } => !nullable,
+            // Struct field removed: doesn't require refresh (like column removal, needs flag)
+            SchemaChange::StructFieldRemoved { .. } => false,
+            // Nested type change: safe if widening
+            SchemaChange::NestedTypeChange { from, to, .. } => !is_safe_type_widening_str(from, to),
+            // Array element type change: safe if widening
+            SchemaChange::ArrayElementTypeChange { from, to, .. } => {
+                !is_safe_type_widening_str(from, to)
+            }
+            // Map key type change: always unsafe
+            SchemaChange::MapKeyTypeChange { .. } => true,
+            // Map value type change: safe if widening
+            SchemaChange::MapValueTypeChange { from, to, .. } => {
+                !is_safe_type_widening_str(from, to)
+            }
+            // Incompatible type change: always unsafe
+            SchemaChange::IncompatibleTypeChange { .. } => true,
         })
     }
 
@@ -111,9 +177,296 @@ impl SchemaDiff {
                     let to_str = if *to_nullable { "NULL" } else { "NOT NULL" };
                     format!("ALTER COLUMN {} {} -> {}", name, from_str, to_str)
                 }
+                SchemaChange::StructFieldAdded {
+                    column,
+                    path,
+                    field_name,
+                    field_type,
+                    ..
+                } => {
+                    let full_path = format_nested_path(column, path, field_name);
+                    format!("ADD STRUCT FIELD {} {}", full_path, field_type)
+                }
+                SchemaChange::StructFieldRemoved {
+                    column,
+                    path,
+                    field_name,
+                } => {
+                    let full_path = format_nested_path(column, path, field_name);
+                    format!("DROP STRUCT FIELD {}", full_path)
+                }
+                SchemaChange::NestedTypeChange {
+                    column,
+                    path,
+                    from,
+                    to,
+                } => {
+                    let full_path = format_nested_path_no_leaf(column, path);
+                    format!("ALTER NESTED TYPE {} {} -> {}", full_path, from, to)
+                }
+                SchemaChange::ArrayElementTypeChange {
+                    column,
+                    path,
+                    from,
+                    to,
+                } => {
+                    let full_path = format_nested_path_no_leaf(column, path);
+                    format!("ALTER ARRAY ELEMENT TYPE {} {} -> {}", full_path, from, to)
+                }
+                SchemaChange::MapKeyTypeChange {
+                    column, from, to, ..
+                } => {
+                    format!("ALTER MAP KEY TYPE {} {} -> {}", column, from, to)
+                }
+                SchemaChange::MapValueTypeChange {
+                    column,
+                    path,
+                    from,
+                    to,
+                } => {
+                    let full_path = format_nested_path_no_leaf(column, path);
+                    format!("ALTER MAP VALUE TYPE {} {} -> {}", full_path, from, to)
+                }
+                SchemaChange::IncompatibleTypeChange {
+                    column,
+                    from,
+                    to,
+                    reason,
+                } => {
+                    format!(
+                        "INCOMPATIBLE TYPE CHANGE {} {} -> {} ({})",
+                        column, from, to, reason
+                    )
+                }
             })
             .collect()
     }
+}
+
+/// Format a nested path like "column.path1.path2.field_name"
+fn format_nested_path(column: &str, path: &[String], field_name: &str) -> String {
+    let mut parts = vec![column.to_string()];
+    parts.extend(path.iter().cloned());
+    parts.push(field_name.to_string());
+    parts.join(".")
+}
+
+/// Format a nested path without a leaf field: "column.path1.path2"
+fn format_nested_path_no_leaf(column: &str, path: &[String]) -> String {
+    let mut parts = vec![column.to_string()];
+    parts.extend(path.iter().cloned());
+    parts.join(".")
+}
+
+/// Produce fine-grained `SchemaChange` variants by recursively comparing two `DataType` values.
+///
+/// - Struct vs Struct: detect field additions/removals at end, type changes per field, reordering.
+/// - Array vs Array: compare element types recursively.
+/// - Map vs Map: compare key types (unsafe if changed) and value types recursively.
+/// - Different kinds (struct vs scalar, etc.): `IncompatibleTypeChange`.
+/// - Scalar vs Scalar with same normalized type: no changes.
+/// - Scalar vs Scalar with different types: `NestedTypeChange` if inside a struct, or the caller handles it.
+pub fn diff_types(
+    column: &str,
+    path: &[String],
+    old: &DataType,
+    new: &DataType,
+) -> Vec<SchemaChange> {
+    let old_n = old.normalize();
+    let new_n = new.normalize();
+
+    // If normalized types are equal, no change
+    if old_n == new_n {
+        return vec![];
+    }
+
+    match (&old_n, &new_n) {
+        (DataType::Struct(old_fields), DataType::Struct(new_fields)) => {
+            diff_struct_fields(column, path, old_fields, new_fields, old, new)
+        }
+        (DataType::Array(old_elem), DataType::Array(new_elem)) => {
+            // Recurse into array element
+            let inner = diff_types(column, path, old_elem, new_elem);
+            if inner.is_empty() {
+                vec![]
+            } else {
+                // If the inner diff is just scalar changes, emit ArrayElementTypeChange
+                // For nested struct changes inside arrays, pass them through
+                let mut result = vec![];
+                for change in inner {
+                    match change {
+                        // A scalar-level change at the element level → ArrayElementTypeChange
+                        SchemaChange::NestedTypeChange {
+                            column: c,
+                            path: p,
+                            from,
+                            to,
+                        } if p == path => {
+                            result.push(SchemaChange::ArrayElementTypeChange {
+                                column: c,
+                                path: path.to_vec(),
+                                from,
+                                to,
+                            });
+                        }
+                        // Nested struct changes inside array elements pass through
+                        other => result.push(other),
+                    }
+                }
+                result
+            }
+        }
+        (DataType::Map(old_k, old_v), DataType::Map(new_k, new_v)) => {
+            let mut changes = vec![];
+            let old_k_n = old_k.normalize();
+            let new_k_n = new_k.normalize();
+            if old_k_n != new_k_n {
+                changes.push(SchemaChange::MapKeyTypeChange {
+                    column: column.to_string(),
+                    from: old_k.to_sql(),
+                    to: new_k.to_sql(),
+                });
+            }
+            let old_v_n = old_v.normalize();
+            let new_v_n = new_v.normalize();
+            if old_v_n != new_v_n {
+                // If value is a complex type, recurse structurally
+                if old_v.is_complex() || new_v.is_complex() {
+                    let mut value_path = path.to_vec();
+                    value_path.push("value".to_string());
+                    let inner = diff_types(column, &value_path, old_v, new_v);
+                    changes.extend(inner);
+                } else {
+                    // Simple scalar value type change
+                    changes.push(SchemaChange::MapValueTypeChange {
+                        column: column.to_string(),
+                        path: path.to_vec(),
+                        from: old_v.to_sql(),
+                        to: new_v.to_sql(),
+                    });
+                }
+            }
+            changes
+        }
+        // Different structural kinds → incompatible
+        _ => {
+            // Check if one is complex and the other isn't, or different complex kinds
+            let old_is_struct = matches!(old_n, DataType::Struct(_));
+            let new_is_struct = matches!(new_n, DataType::Struct(_));
+            let old_is_array = matches!(old_n, DataType::Array(_));
+            let new_is_array = matches!(new_n, DataType::Array(_));
+            let old_is_map = matches!(old_n, DataType::Map(_, _));
+            let new_is_map = matches!(new_n, DataType::Map(_, _));
+
+            let old_is_complex = old_is_struct || old_is_array || old_is_map;
+            let new_is_complex = new_is_struct || new_is_array || new_is_map;
+
+            if old_is_complex || new_is_complex {
+                let reason = if old_is_struct && !new_is_struct {
+                    "struct to non-struct".to_string()
+                } else if !old_is_struct && new_is_struct {
+                    "non-struct to struct".to_string()
+                } else if old_is_array && !new_is_array {
+                    "array to non-array".to_string()
+                } else if !old_is_array && new_is_array {
+                    "non-array to array".to_string()
+                } else {
+                    format!("{} to {}", old.to_sql(), new.to_sql())
+                };
+                vec![SchemaChange::IncompatibleTypeChange {
+                    column: column.to_string(),
+                    from: old.to_sql(),
+                    to: new.to_sql(),
+                    reason,
+                }]
+            } else {
+                // Both are scalars with different types → NestedTypeChange
+                vec![SchemaChange::NestedTypeChange {
+                    column: column.to_string(),
+                    path: path.to_vec(),
+                    from: old.to_sql(),
+                    to: new.to_sql(),
+                }]
+            }
+        }
+    }
+}
+
+/// Compare struct fields in order, detecting additions, removals, reordering, and type changes.
+fn diff_struct_fields(
+    column: &str,
+    path: &[String],
+    old_fields: &[(String, DataType)],
+    new_fields: &[(String, DataType)],
+    old_type: &DataType,
+    new_type: &DataType,
+) -> Vec<SchemaChange> {
+    // Check for field reordering: the common fields must appear in the same order
+    let old_names: Vec<&str> = old_fields.iter().map(|(n, _)| n.as_str()).collect();
+    let new_names: Vec<&str> = new_fields.iter().map(|(n, _)| n.as_str()).collect();
+
+    // Find common field names preserving order from old
+    let old_common: Vec<&str> = old_names
+        .iter()
+        .filter(|n| new_names.contains(n))
+        .copied()
+        .collect();
+    let new_common: Vec<&str> = new_names
+        .iter()
+        .filter(|n| old_names.contains(n))
+        .copied()
+        .collect();
+
+    if old_common != new_common {
+        return vec![SchemaChange::IncompatibleTypeChange {
+            column: column.to_string(),
+            from: old_type.to_sql(),
+            to: new_type.to_sql(),
+            reason: "struct field order changed".to_string(),
+        }];
+    }
+
+    let mut changes = vec![];
+    let old_map: HashMap<&str, &DataType> =
+        old_fields.iter().map(|(n, t)| (n.as_str(), t)).collect();
+    let new_map: HashMap<&str, &DataType> =
+        new_fields.iter().map(|(n, t)| (n.as_str(), t)).collect();
+
+    // Detect removed fields (in old but not in new)
+    for (name, _) in old_fields {
+        if !new_map.contains_key(name.as_str()) {
+            changes.push(SchemaChange::StructFieldRemoved {
+                column: column.to_string(),
+                path: path.to_vec(),
+                field_name: name.clone(),
+            });
+        }
+    }
+
+    // Detect added fields (in new but not in old) — must be at end after all common fields
+    for (name, dt) in new_fields {
+        if !old_map.contains_key(name.as_str()) {
+            changes.push(SchemaChange::StructFieldAdded {
+                column: column.to_string(),
+                path: path.to_vec(),
+                field_name: name.clone(),
+                field_type: dt.to_sql(),
+                nullable: true, // struct fields added to existing data are always nullable
+            });
+        }
+    }
+
+    // Detect type changes on common fields
+    for (name, old_dt) in old_fields {
+        if let Some(new_dt) = new_map.get(name.as_str()) {
+            let mut field_path = path.to_vec();
+            field_path.push(name.clone());
+            let field_changes = diff_types(column, &field_path, old_dt, new_dt);
+            changes.extend(field_changes);
+        }
+    }
+
+    changes
 }
 
 /// Compare a deployed schema against a new (inferred) schema to detect changes.
@@ -153,11 +506,30 @@ pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) ->
             let to_normalized = normalize_type(&col.data_type);
 
             if !normalized_types_equal(&from_normalized, &to_normalized) {
-                changes.push(SchemaChange::ChangeType {
-                    name: col.name.clone(),
-                    from: deployed_col.data_type.clone(),
-                    to: col.data_type.clone(),
-                });
+                // If both types parse and at least one is complex, use structural diff
+                if let (NormalizedType::Parsed(old_dt), NormalizedType::Parsed(new_dt)) =
+                    (&from_normalized, &to_normalized)
+                {
+                    if old_dt.is_complex() || new_dt.is_complex() {
+                        let parsed_old = parse_type(&deployed_col.data_type).unwrap();
+                        let parsed_new = parse_type(&col.data_type).unwrap();
+                        let structural_changes =
+                            diff_types(&col.name, &[], &parsed_old, &parsed_new);
+                        changes.extend(structural_changes);
+                    } else {
+                        changes.push(SchemaChange::ChangeType {
+                            name: col.name.clone(),
+                            from: deployed_col.data_type.clone(),
+                            to: col.data_type.clone(),
+                        });
+                    }
+                } else {
+                    changes.push(SchemaChange::ChangeType {
+                        name: col.name.clone(),
+                        from: deployed_col.data_type.clone(),
+                        to: col.data_type.clone(),
+                    });
+                }
             }
 
             if deployed_col.nullable != col.nullable {
@@ -442,6 +814,21 @@ pub fn plan_migration(
                         qualified_table, name
                     ));
                 }
+            }
+            // Complex type changes — Phase 5 will generate proper SchemaOperations.
+            // For now, these are handled by requires_full_refresh() which gates
+            // whether we even reach this point. Safe variants (like StructFieldAdded
+            // with nullable=true) won't trigger full refresh, so we note them as
+            // pass-through for now.
+            SchemaChange::StructFieldAdded { .. }
+            | SchemaChange::StructFieldRemoved { .. }
+            | SchemaChange::NestedTypeChange { .. }
+            | SchemaChange::ArrayElementTypeChange { .. }
+            | SchemaChange::MapKeyTypeChange { .. }
+            | SchemaChange::MapValueTypeChange { .. }
+            | SchemaChange::IncompatibleTypeChange { .. } => {
+                // Phase 5 will convert these to proper DDL via SchemaOperations.
+                // For now, they're detected by diff and checked by requires_full_refresh().
             }
         }
     }
@@ -1015,7 +1402,11 @@ mod tests {
             1,
             "STRUCT(a INTEGER) vs STRUCT(a BIGINT) should detect change"
         );
-        assert!(matches!(&diff.changes[0], SchemaChange::ChangeType { .. }));
+        // Phase 3: now produces NestedTypeChange instead of flat ChangeType
+        assert!(matches!(
+            &diff.changes[0],
+            SchemaChange::NestedTypeChange { .. }
+        ));
     }
 
     #[test]
@@ -1138,6 +1529,352 @@ mod tests {
                 assert!(statements[1].contains("ALTER COLUMN amount TYPE BIGINT"));
             }
             other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    // === Phase 3: Structural diff for complex types ===
+
+    #[test]
+    fn test_struct_field_addition() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::StructFieldAdded {
+                column,
+                path,
+                field_name,
+                field_type,
+                nullable,
+            } => {
+                assert_eq!(column, "meta");
+                assert!(path.is_empty());
+                assert_eq!(field_name, "b");
+                assert_eq!(field_type, "VARCHAR");
+                assert!(*nullable);
+            }
+            other => panic!("Expected StructFieldAdded, got {:?}", other),
+        }
+        assert!(!diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_struct_field_removal() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::StructFieldRemoved {
+                column,
+                path,
+                field_name,
+            } => {
+                assert_eq!(column, "meta");
+                assert!(path.is_empty());
+                assert_eq!(field_name, "b");
+            }
+            other => panic!("Expected StructFieldRemoved, got {:?}", other),
+        }
+        // Struct field removal is like column removal — doesn't require refresh
+        assert!(!diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_nested_struct_field_addition() {
+        let deployed = vec![col("data", "STRUCT(inner STRUCT(x INTEGER))", true)];
+        let inferred = vec![col(
+            "data",
+            "STRUCT(inner STRUCT(x INTEGER, y VARCHAR))",
+            true,
+        )];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::StructFieldAdded {
+                column,
+                path,
+                field_name,
+                ..
+            } => {
+                assert_eq!(column, "data");
+                assert_eq!(path, &vec!["inner".to_string()]);
+                assert_eq!(field_name, "y");
+            }
+            other => panic!("Expected StructFieldAdded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_array_element_type_widening() {
+        let deployed = vec![col("scores", "INTEGER[]", true)];
+        let inferred = vec![col("scores", "BIGINT[]", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::ArrayElementTypeChange {
+                column, from, to, ..
+            } => {
+                assert_eq!(column, "scores");
+                assert_eq!(from, "INTEGER");
+                assert_eq!(to, "BIGINT");
+            }
+            other => panic!("Expected ArrayElementTypeChange, got {:?}", other),
+        }
+        // INTEGER → BIGINT is safe widening
+        assert!(!diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_array_element_type_unsafe() {
+        let deployed = vec![col("scores", "BIGINT[]", true)];
+        let inferred = vec![col("scores", "INTEGER[]", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        assert!(matches!(
+            &diff.changes[0],
+            SchemaChange::ArrayElementTypeChange { .. }
+        ));
+        // BIGINT → INTEGER is narrowing → requires refresh
+        assert!(diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_map_value_struct_field_addition() {
+        let deployed = vec![col("lookup", "MAP(VARCHAR, STRUCT(a INTEGER))", true)];
+        let inferred = vec![col(
+            "lookup",
+            "MAP(VARCHAR, STRUCT(a INTEGER, b TEXT))",
+            true,
+        )];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::StructFieldAdded {
+                column,
+                path,
+                field_name,
+                ..
+            } => {
+                assert_eq!(column, "lookup");
+                assert_eq!(path, &vec!["value".to_string()]);
+                assert_eq!(field_name, "b");
+            }
+            other => panic!("Expected StructFieldAdded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_struct_field_reorder_is_incompatible() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(b VARCHAR, a INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::IncompatibleTypeChange { column, reason, .. } => {
+                assert_eq!(column, "meta");
+                assert!(
+                    reason.contains("struct field order changed"),
+                    "reason: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected IncompatibleTypeChange, got {:?}", other),
+        }
+        assert!(diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_struct_to_scalar_is_incompatible() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let inferred = vec![col("meta", "INTEGER", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::IncompatibleTypeChange { column, reason, .. } => {
+                assert_eq!(column, "meta");
+                assert!(
+                    reason.contains("struct to non-struct"),
+                    "reason: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected IncompatibleTypeChange, got {:?}", other),
+        }
+        assert!(diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_scalar_to_struct_is_incompatible() {
+        let deployed = vec![col("meta", "INTEGER", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        assert!(matches!(
+            &diff.changes[0],
+            SchemaChange::IncompatibleTypeChange { .. }
+        ));
+        assert!(diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_map_key_type_change_is_unsafe() {
+        let deployed = vec![col("m", "MAP(INTEGER, VARCHAR)", true)];
+        let inferred = vec![col("m", "MAP(BIGINT, VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        assert!(matches!(
+            &diff.changes[0],
+            SchemaChange::MapKeyTypeChange { .. }
+        ));
+        assert!(diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_map_value_type_widening() {
+        let deployed = vec![col("m", "MAP(VARCHAR, INTEGER)", true)];
+        let inferred = vec![col("m", "MAP(VARCHAR, BIGINT)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::MapValueTypeChange {
+                column, from, to, ..
+            } => {
+                assert_eq!(column, "m");
+                assert_eq!(from, "INTEGER");
+                assert_eq!(to, "BIGINT");
+            }
+            other => panic!("Expected MapValueTypeChange, got {:?}", other),
+        }
+        // INTEGER → BIGINT is safe widening
+        assert!(!diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_nested_struct_type_widening() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a BIGINT, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        match &diff.changes[0] {
+            SchemaChange::NestedTypeChange {
+                column,
+                path,
+                from,
+                to,
+            } => {
+                assert_eq!(column, "meta");
+                assert_eq!(path, &vec!["a".to_string()]);
+                assert_eq!(from, "INTEGER");
+                assert_eq!(to, "BIGINT");
+            }
+            other => panic!("Expected NestedTypeChange, got {:?}", other),
+        }
+        // INTEGER → BIGINT is safe widening
+        assert!(!diff.requires_full_refresh());
+    }
+
+    #[test]
+    fn test_multiple_struct_changes() {
+        // Multiple changes in one struct: field added + type widened
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a BIGINT, b VARCHAR, c BOOLEAN)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 2);
+        // Should have both a StructFieldAdded and a NestedTypeChange
+        let has_field_added = diff.changes.iter().any(
+            |c| matches!(c, SchemaChange::StructFieldAdded { field_name, .. } if field_name == "c"),
+        );
+        let has_type_change = diff
+            .changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::NestedTypeChange { path, .. } if path == &vec!["a".to_string()]));
+        assert!(has_field_added, "Should have StructFieldAdded for 'c'");
+        assert!(has_type_change, "Should have NestedTypeChange for 'a'");
+    }
+
+    #[test]
+    fn test_summary_nested_changes() {
+        let diff = SchemaDiff {
+            changes: vec![
+                SchemaChange::StructFieldAdded {
+                    column: "meta".to_string(),
+                    path: vec![],
+                    field_name: "b".to_string(),
+                    field_type: "VARCHAR".to_string(),
+                    nullable: true,
+                },
+                SchemaChange::NestedTypeChange {
+                    column: "meta".to_string(),
+                    path: vec!["a".to_string()],
+                    from: "INTEGER".to_string(),
+                    to: "BIGINT".to_string(),
+                },
+                SchemaChange::IncompatibleTypeChange {
+                    column: "data".to_string(),
+                    from: "STRUCT(a INTEGER)".to_string(),
+                    to: "INTEGER".to_string(),
+                    reason: "struct to non-struct".to_string(),
+                },
+            ],
+        };
+        let summary = diff.summary();
+        assert_eq!(summary.len(), 3);
+        assert!(summary[0].contains("ADD STRUCT FIELD meta.b"));
+        assert!(summary[1].contains("ALTER NESTED TYPE meta.a"));
+        assert!(summary[2].contains("INCOMPATIBLE TYPE CHANGE data"));
+    }
+
+    #[test]
+    fn test_diff_types_direct_struct() {
+        // Direct call to diff_types for unit testing
+        let old = DataType::Struct(vec![
+            ("a".to_string(), DataType::Integer),
+            ("b".to_string(), DataType::Varchar { max_length: None }),
+        ]);
+        let new = DataType::Struct(vec![
+            ("a".to_string(), DataType::Integer),
+            ("b".to_string(), DataType::Varchar { max_length: None }),
+            ("c".to_string(), DataType::Boolean),
+        ]);
+        let changes = diff_types("col", &[], &old, &new);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0],
+            SchemaChange::StructFieldAdded { field_name, .. } if field_name == "c"
+        ));
+    }
+
+    #[test]
+    fn test_diff_types_deeply_nested_struct_change() {
+        // STRUCT(inner STRUCT(deep STRUCT(x INTEGER))) → STRUCT(inner STRUCT(deep STRUCT(x BIGINT)))
+        let old = DataType::Struct(vec![(
+            "inner".to_string(),
+            DataType::Struct(vec![(
+                "deep".to_string(),
+                DataType::Struct(vec![("x".to_string(), DataType::Integer)]),
+            )]),
+        )]);
+        let new = DataType::Struct(vec![(
+            "inner".to_string(),
+            DataType::Struct(vec![(
+                "deep".to_string(),
+                DataType::Struct(vec![("x".to_string(), DataType::BigInt)]),
+            )]),
+        )]);
+        let changes = diff_types("col", &[], &old, &new);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            SchemaChange::NestedTypeChange { path, from, to, .. } => {
+                assert_eq!(
+                    path,
+                    &vec!["inner".to_string(), "deep".to_string(), "x".to_string()]
+                );
+                assert_eq!(from, "INTEGER");
+                assert_eq!(to, "BIGINT");
+            }
+            other => panic!("Expected NestedTypeChange, got {:?}", other),
         }
     }
 }

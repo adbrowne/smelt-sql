@@ -299,10 +299,11 @@ fn print_json(entries: &[ModelDiffEntry]) {
             }
             ModelDiffStatus::Changed { diff, action } => {
                 changed += 1;
-                let changes: Vec<_> = diff
-                    .changes
-                    .iter()
-                    .map(|c| match c {
+                let changes: Vec<_> =
+                    diff.changes
+                        .iter()
+                        .map(|c| {
+                            match c {
                         smelt_state::schema_tracking::SchemaChange::AddColumn {
                             name,
                             data_type,
@@ -339,8 +340,71 @@ fn print_json(entries: &[ModelDiffEntry]) {
                             "from_nullable": from_nullable,
                             "to_nullable": to_nullable
                         }),
-                    })
-                    .collect();
+                        smelt_state::schema_tracking::SchemaChange::StructFieldAdded {
+                            column, path, field_name, field_type, nullable,
+                        } => json!({
+                            "type": "struct_field_added",
+                            "column": column,
+                            "path": path,
+                            "field_name": field_name,
+                            "field_type": field_type,
+                            "nullable": nullable
+                        }),
+                        smelt_state::schema_tracking::SchemaChange::StructFieldRemoved {
+                            column, path, field_name,
+                        } => json!({
+                            "type": "struct_field_removed",
+                            "column": column,
+                            "path": path,
+                            "field_name": field_name
+                        }),
+                        smelt_state::schema_tracking::SchemaChange::NestedTypeChange {
+                            column, path, from, to,
+                        } => json!({
+                            "type": "nested_type_change",
+                            "column": column,
+                            "path": path,
+                            "from": from,
+                            "to": to
+                        }),
+                        smelt_state::schema_tracking::SchemaChange::ArrayElementTypeChange {
+                            column, path, from, to,
+                        } => json!({
+                            "type": "array_element_type_change",
+                            "column": column,
+                            "path": path,
+                            "from": from,
+                            "to": to
+                        }),
+                        smelt_state::schema_tracking::SchemaChange::MapKeyTypeChange {
+                            column, from, to,
+                        } => json!({
+                            "type": "map_key_type_change",
+                            "column": column,
+                            "from": from,
+                            "to": to
+                        }),
+                        smelt_state::schema_tracking::SchemaChange::MapValueTypeChange {
+                            column, path, from, to,
+                        } => json!({
+                            "type": "map_value_type_change",
+                            "column": column,
+                            "path": path,
+                            "from": from,
+                            "to": to
+                        }),
+                        smelt_state::schema_tracking::SchemaChange::IncompatibleTypeChange {
+                            column, from, to, reason,
+                        } => json!({
+                            "type": "incompatible_type_change",
+                            "column": column,
+                            "from": from,
+                            "to": to,
+                            "reason": reason
+                        }),
+                    }
+                        })
+                        .collect();
 
                 let (action_str, statements) = match action {
                     MigrationAction::NoChange => ("no_change", vec![]),

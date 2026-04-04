@@ -143,13 +143,13 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 3: Structural Diff for Complex Types [ ]
+## Phase 3: Structural Diff for Complex Types [x]
 
 **Goal:** `diff_schemas()` produces fine-grained `SchemaChange` variants for Struct field additions, removals, type changes — not just opaque `ChangeType`.
 
 ### Work Items
 
-- [ ] 3a. Add new `SchemaChange` variants for nested type changes:
+- [x] 3a. Add new `SchemaChange` variants for nested type changes:
   ```rust
   SchemaChange::StructFieldAdded {
       column: String,       // top-level column name
@@ -184,14 +184,14 @@ cargo clippy --all-targets
       reason: String,       // e.g., "struct to array", "field reordered"
   }
   ```
-- [ ] 3b. Implement `fn diff_types(column: &str, path: &[String], old: &DataType, new: &DataType) -> Vec<SchemaChange>`:
+- [x] 3b. Implement `fn diff_types(column: &str, path: &[String], old: &DataType, new: &DataType) -> Vec<SchemaChange>`:
   - **Struct vs Struct**: Compare fields in order. Detect additions at end (safe), removals, type changes per field, reordering (unsafe).
   - **Array vs Array**: Compare element types recursively.
   - **Map vs Map**: Compare key types (change = unsafe) and value types recursively.
   - **Struct vs non-Struct** (or vice versa): `IncompatibleTypeChange`.
   - **Scalar vs Scalar**: Delegate to existing widening logic.
-- [ ] 3c. Integrate `diff_types()` into `diff_schemas()` — when a column's type changes, call `diff_types()` instead of emitting a flat `ChangeType`.
-- [ ] 3d. Update `SchemaDiff::requires_full_refresh()` to handle new variants:
+- [x] 3c. Integrate `diff_types()` into `diff_schemas()` — when a column's type changes, call `diff_types()` instead of emitting a flat `ChangeType`.
+- [x] 3d. Update `SchemaDiff::requires_full_refresh()` to handle new variants:
   - `StructFieldAdded` (nullable): safe
   - `StructFieldAdded` (not nullable, no default): requires refresh
   - `StructFieldRemoved`: requires flag (like column removal)
@@ -200,7 +200,7 @@ cargo clippy --all-targets
   - `MapKeyTypeChange`: always unsafe
   - `MapValueTypeChange`: safe if widening
   - `IncompatibleTypeChange`: always unsafe
-- [ ] 3e. Update `SchemaDiff::summary()` for human-readable nested change descriptions.
+- [x] 3e. Update `SchemaDiff::summary()` for human-readable nested change descriptions.
 
 ### Red-Green Tests
 
@@ -974,3 +974,24 @@ cargo test -p smelt-cli --test example_diagnostics
 **Decisions:**
 - `VARCHAR` and `TEXT` now normalize to the same type (`Varchar { max_length: None }`), so `VARCHAR → TEXT` is no longer a "widening" — it's the same type. Updated existing test accordingly.
 - `normalize_type()` returns `NormalizedType` enum (not raw `DataType`) to handle unparseable types gracefully via uppercase string fallback.
+
+### Session 3 — 2026-04-05
+
+**Phase completed:** Phase 3 (Structural Diff for Complex Types)
+
+**What was done:**
+- Added 7 new `SchemaChange` variants: `StructFieldAdded`, `StructFieldRemoved`, `NestedTypeChange`, `ArrayElementTypeChange`, `MapKeyTypeChange`, `MapValueTypeChange`, `IncompatibleTypeChange`
+- Implemented `diff_types()` — recursive structural comparison of `DataType` values producing fine-grained change variants
+- Implemented `diff_struct_fields()` — detects field additions, removals, reordering (unsafe), and per-field type changes with path tracking
+- Integrated `diff_types()` into `diff_schemas()` — when both types parse and at least one is complex, uses structural diff instead of flat `ChangeType`
+- Updated `requires_full_refresh()` for all new variants with correct safety rules
+- Updated `summary()` for human-readable nested change descriptions (e.g., "ADD STRUCT FIELD meta.inner.b VARCHAR")
+- Updated `plan_migration()` match to handle new variants (pass-through for now; Phase 5 will generate proper DDL)
+- Updated `smelt-cli/src/commands/diff.rs` JSON serialization to handle new `SchemaChange` variants
+- Updated Phase 2 test `test_complex_type_real_change_detected` to expect `NestedTypeChange` instead of `ChangeType`
+- 16 new tests covering: struct field add/remove, nested struct field add, array element widening (safe/unsafe), map value struct field add, struct reorder (incompatible), struct-to-scalar (incompatible), map key change (unsafe), map value widening, nested type widening, multiple changes, summary formatting, direct diff_types unit tests, deeply nested struct changes
+- All 63 smelt-state tests pass, all smelt-types and smelt-cli tests pass, clippy clean
+
+**Decisions:**
+- Map scalar value type changes emit `MapValueTypeChange` directly (not recursing through `diff_types` for scalars). Complex map values (e.g., struct) recurse structurally.
+- New complex type variants in `plan_migration()` are pass-through for now — Phase 5 will convert them to proper `SchemaOperation`s and DDL.
