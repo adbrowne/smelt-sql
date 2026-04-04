@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775298456729,
+  "lastUpdate": 1775298458982,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13502,6 +13502,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.137650782517284,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e0af42f60452248d72617b762e79a02e9f967da0",
+          "message": "Research: Struct/Array gaps in schema evolution\n\nDocument how complex types (Struct, Array) flow through schema\nevolution as opaque SQL strings with no structural comparison,\nnormalization, or safe-widening rules.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T21:25:40+11:00",
+          "tree_id": "687539651522e9dce0cbeb6785fb65f0a94c9f15",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e0af42f60452248d72617b762e79a02e9f967da0"
+        },
+        "date": 1775298458288,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.834385473840282,
             "unit": "MB/s"
           }
         ]
