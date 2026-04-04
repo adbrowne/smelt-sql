@@ -620,6 +620,19 @@ fn is_safe_type_widening(from: &DataType, to: &DataType) -> bool {
             },
         ) => p2 >= p1 && s2 >= s1 && (p2 > p1 || s2 > s1),
 
+        // Array: safe if element type widening is safe
+        (DataType::Array(from_elem), DataType::Array(to_elem)) => {
+            is_safe_type_widening(from_elem, to_elem)
+        }
+
+        // Map: safe if value type widening is safe AND key type is unchanged
+        (DataType::Map(from_key, from_val), DataType::Map(to_key, to_val)) => {
+            from_key == to_key && is_safe_type_widening(from_val, to_val)
+        }
+
+        // Struct changes are NOT widening — they go through diff_types/field-level diff
+        (DataType::Struct(_), DataType::Struct(_)) => false,
+
         _ => false,
     }
 }
@@ -1530,6 +1543,177 @@ mod tests {
             }
             other => panic!("Expected AlterTable, got {:?}", other),
         }
+    }
+
+    // === Phase 4: Safe widening rules for nested types ===
+
+    #[test]
+    fn test_array_element_widening_safe() {
+        // Array(Integer) -> Array(BigInt) is safe
+        assert!(is_safe_type_widening(
+            &DataType::Array(Box::new(DataType::Integer)),
+            &DataType::Array(Box::new(DataType::BigInt))
+        ));
+        // Array(Float) -> Array(Double) is safe
+        assert!(is_safe_type_widening(
+            &DataType::Array(Box::new(DataType::Float)),
+            &DataType::Array(Box::new(DataType::Double))
+        ));
+        // Array(Varchar(50)) -> Array(Varchar(100)) is safe
+        assert!(is_safe_type_widening(
+            &DataType::Array(Box::new(DataType::Varchar {
+                max_length: Some(50)
+            })),
+            &DataType::Array(Box::new(DataType::Varchar {
+                max_length: Some(100)
+            }))
+        ));
+    }
+
+    #[test]
+    fn test_array_element_narrowing_unsafe() {
+        // Array(BigInt) -> Array(Integer) is narrowing
+        assert!(!is_safe_type_widening(
+            &DataType::Array(Box::new(DataType::BigInt)),
+            &DataType::Array(Box::new(DataType::Integer))
+        ));
+    }
+
+    #[test]
+    fn test_nested_array_widening() {
+        // Array(Array(Integer)) -> Array(Array(BigInt)) is safe
+        assert!(is_safe_type_widening(
+            &DataType::Array(Box::new(DataType::Array(Box::new(DataType::Integer)))),
+            &DataType::Array(Box::new(DataType::Array(Box::new(DataType::BigInt))))
+        ));
+    }
+
+    #[test]
+    fn test_map_value_widening_safe() {
+        // Map(Varchar, Integer) -> Map(Varchar, BigInt) is safe
+        assert!(is_safe_type_widening(
+            &DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer)
+            ),
+            &DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::BigInt)
+            )
+        ));
+    }
+
+    #[test]
+    fn test_map_key_change_never_safe() {
+        // Map key change is NEVER safe, even if it's a widening
+        assert!(!is_safe_type_widening(
+            &DataType::Map(
+                Box::new(DataType::Integer),
+                Box::new(DataType::Varchar { max_length: None })
+            ),
+            &DataType::Map(
+                Box::new(DataType::BigInt),
+                Box::new(DataType::Varchar { max_length: None })
+            )
+        ));
+    }
+
+    #[test]
+    fn test_struct_not_widening() {
+        // Struct changes are NOT widening — they go through diff_types
+        assert!(!is_safe_type_widening(
+            &DataType::Struct(vec![("a".to_string(), DataType::Integer)]),
+            &DataType::Struct(vec![("a".to_string(), DataType::BigInt)])
+        ));
+        // Adding a field is also not a widening
+        assert!(!is_safe_type_widening(
+            &DataType::Struct(vec![("a".to_string(), DataType::Integer)]),
+            &DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Varchar { max_length: None })
+            ])
+        ));
+    }
+
+    #[test]
+    fn test_array_widening_via_str() {
+        // String-based interface should also work for array widening
+        assert!(is_safe_type_widening_str("INTEGER[]", "BIGINT[]"));
+        assert!(!is_safe_type_widening_str("BIGINT[]", "INTEGER[]"));
+        assert!(is_safe_type_widening_str(
+            "MAP(VARCHAR, INTEGER)",
+            "MAP(VARCHAR, BIGINT)"
+        ));
+        assert!(!is_safe_type_widening_str(
+            "MAP(INTEGER, VARCHAR)",
+            "MAP(BIGINT, VARCHAR)"
+        ));
+    }
+
+    #[test]
+    fn test_array_widening_no_full_refresh() {
+        // Integration: diff with safe array widening should NOT require full refresh
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ArrayElementTypeChange {
+                column: "scores".to_string(),
+                path: vec![],
+                from: "INTEGER".to_string(),
+                to: "BIGINT".to_string(),
+            }],
+        };
+        assert!(
+            !diff.requires_full_refresh(),
+            "Safe array element widening should not require full refresh"
+        );
+    }
+
+    #[test]
+    fn test_array_narrowing_requires_full_refresh() {
+        // Narrowing array element type DOES require full refresh
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::ArrayElementTypeChange {
+                column: "scores".to_string(),
+                path: vec![],
+                from: "BIGINT".to_string(),
+                to: "INTEGER".to_string(),
+            }],
+        };
+        assert!(
+            diff.requires_full_refresh(),
+            "Array element narrowing should require full refresh"
+        );
+    }
+
+    #[test]
+    fn test_map_value_widening_no_full_refresh() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::MapValueTypeChange {
+                column: "lookup".to_string(),
+                path: vec![],
+                from: "INTEGER".to_string(),
+                to: "BIGINT".to_string(),
+            }],
+        };
+        assert!(
+            !diff.requires_full_refresh(),
+            "Safe map value widening should not require full refresh"
+        );
+    }
+
+    #[test]
+    fn test_nested_type_widening_no_full_refresh() {
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::NestedTypeChange {
+                column: "meta".to_string(),
+                path: vec!["a".to_string()],
+                from: "INTEGER".to_string(),
+                to: "BIGINT".to_string(),
+            }],
+        };
+        assert!(
+            !diff.requires_full_refresh(),
+            "Safe nested type widening should not require full refresh"
+        );
     }
 
     // === Phase 3: Structural diff for complex types ===

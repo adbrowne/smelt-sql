@@ -259,22 +259,24 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 4: Safe Widening Rules for Nested Types [ ]
+## Phase 4: Safe Widening Rules for Nested Types [x]
 
 **Goal:** `is_safe_type_widening()` works recursively for Array elements, Struct fields, and Map values. Returns detailed information about what widening is needed.
 
 ### Work Items
 
-- [ ] 4a. Refactor `is_safe_type_widening()` to work on `DataType` values (not strings):
+- [x] 4a. Refactor `is_safe_type_widening()` to work on `DataType` values (not strings):
   ```rust
   pub fn is_safe_type_widening(from: &DataType, to: &DataType) -> bool
   ```
-- [ ] 4b. Implement recursive widening rules:
+  *Already done in Phase 2 — function already accepts `&DataType`.*
+- [x] 4b. Implement recursive widening rules:
   - **Array**: safe if element type widening is safe
   - **Struct**: NOT a widening (struct changes are handled by field-level diff)
   - **Map**: safe if value type widening is safe AND key type is unchanged
   - **Scalar**: existing rules (SMALLINT→INTEGER, FLOAT→DOUBLE, VARCHAR widening, DECIMAL widening)
-- [ ] 4c. Update `SchemaDiff::requires_full_refresh()` to use the new `DataType`-based widening check for `NestedTypeChange` and `ArrayElementTypeChange` variants.
+- [x] 4c. Update `SchemaDiff::requires_full_refresh()` to use the new `DataType`-based widening check for `NestedTypeChange` and `ArrayElementTypeChange` variants.
+  *Already uses `is_safe_type_widening_str()` which delegates to `is_safe_type_widening()` — recursive rules now flow through automatically.*
 
 ### Red-Green Tests
 
@@ -995,3 +997,20 @@ cargo test -p smelt-cli --test example_diagnostics
 **Decisions:**
 - Map scalar value type changes emit `MapValueTypeChange` directly (not recursing through `diff_types` for scalars). Complex map values (e.g., struct) recurse structurally.
 - New complex type variants in `plan_migration()` are pass-through for now — Phase 5 will convert them to proper `SchemaOperation`s and DDL.
+
+### Session 4 — 2026-04-05
+
+**Phase completed:** Phase 4 (Safe Widening Rules for Nested Types)
+
+**What was done:**
+- Added recursive widening rules to `is_safe_type_widening()` for Array, Map, and Struct types
+  - **Array**: safe if element type widening is safe (recursive)
+  - **Map**: safe if value type widening is safe AND key type is unchanged
+  - **Struct**: explicitly NOT a widening (struct changes go through field-level diff)
+- 11 new tests: array element widening (safe/unsafe), nested array widening, map value widening, map key change (never safe), struct not widening, string-based array/map widening, integration tests for `requires_full_refresh()` with array/map/nested changes
+- All smelt-state and smelt-types tests pass, clippy clean
+
+**Decisions:**
+- 4a was already done in Phase 2 (`is_safe_type_widening` already accepted `&DataType`)
+- 4c was already handled — `requires_full_refresh()` uses `is_safe_type_widening_str()` which delegates to `is_safe_type_widening()`, so recursive rules flow through automatically
+- Phase was smaller than expected since earlier phases set up the right abstractions
