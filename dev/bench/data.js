@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775298731733,
+  "lastUpdate": 1775299244397,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10433,6 +10433,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.286746,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e1d6f475311291be1ed1e544f8520e2ac86a8ed7",
+          "message": "Fix wheel builds: use Python 3.9 from /opt/python in manylinux container\n\nThe manylinux_2_28 system python3 is still 3.8. Prepend the cpython 3.9\nbin directory to PATH in before-script-linux so PyO3's abi3-py39 build\nconfig finds a compatible interpreter.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T21:38:50+11:00",
+          "tree_id": "ecb2ca12cd6aae9a5d12b668c0d8e1ba88e8161c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e1d6f475311291be1ed1e544f8520e2ac86a8ed7"
+        },
+        "date": 1775299243221,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.736871,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.447116,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.628633,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.349301,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003176,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 38.752916,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.028192,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.013496,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009458,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.149614,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.3293239999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.93928,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.9213,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.295968,
             "unit": "ms"
           }
         ]
