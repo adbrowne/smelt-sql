@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775299244397,
+  "lastUpdate": 1775299246114,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13748,6 +13748,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.182237998679284,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e1d6f475311291be1ed1e544f8520e2ac86a8ed7",
+          "message": "Fix wheel builds: use Python 3.9 from /opt/python in manylinux container\n\nThe manylinux_2_28 system python3 is still 3.8. Prepend the cpython 3.9\nbin directory to PATH in before-script-linux so PyO3's abi3-py39 build\nconfig finds a compatible interpreter.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T21:38:50+11:00",
+          "tree_id": "ecb2ca12cd6aae9a5d12b668c0d8e1ba88e8161c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e1d6f475311291be1ed1e544f8520e2ac86a8ed7"
+        },
+        "date": 1775299245438,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.16477175637005,
             "unit": "MB/s"
           }
         ]
