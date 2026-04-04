@@ -153,6 +153,34 @@ impl SelectStmt {
         }
         None
     }
+
+    /// Check if this SELECT has any set operation (UNION, INTERSECT, or EXCEPT)
+    pub fn has_set_operation(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
+    }
+
+    /// Get the SELECT statement after any set operation (UNION, INTERSECT, or EXCEPT)
+    pub fn set_operation_select(&self) -> Option<SelectStmt> {
+        let mut found_set_op = false;
+
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if matches!(token.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW) {
+                    found_set_op = true;
+                }
+            } else if found_set_op {
+                if let Some(n) = child.as_node() {
+                    if n.kind() == SELECT_STMT {
+                        return SelectStmt::cast(n.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// SELECT list (columns)

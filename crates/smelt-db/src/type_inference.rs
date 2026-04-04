@@ -1626,17 +1626,17 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
 /// - INTEGER + DOUBLE → DOUBLE
 /// - Unknown + T → T (Unknown is dominated by any known type)
 pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
-    // If either is Unknown, prefer the other
-    if matches!(t1.data_type, DataType::Unknown) {
+    // If either is Unknown or Null, prefer the other (Null makes result nullable)
+    if matches!(t1.data_type, DataType::Unknown | DataType::Null) {
         return TypedColumn {
             data_type: t2.data_type.clone(),
-            nullable: t1.nullable || t2.nullable,
+            nullable: t1.nullable || t2.nullable || matches!(t1.data_type, DataType::Null),
         };
     }
-    if matches!(t2.data_type, DataType::Unknown) {
+    if matches!(t2.data_type, DataType::Unknown | DataType::Null) {
         return TypedColumn {
             data_type: t1.data_type.clone(),
-            nullable: t1.nullable || t2.nullable,
+            nullable: t1.nullable || t2.nullable || matches!(t2.data_type, DataType::Null),
         };
     }
 
@@ -1668,51 +1668,50 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
         };
     }
 
-    // Numeric type promotion hierarchy: SmallInt < Integer < BigInt < Decimal < Double
+    // Check if both types are in the same family before cross-type promotion
+    let both_numeric = t1.data_type.is_numeric() && t2.data_type.is_numeric();
+    let both_string = t1.data_type.is_string() && t2.data_type.is_string();
+    let both_temporal = t1.data_type.is_temporal() && t2.data_type.is_temporal();
+
     let promoted_type = match (&t1.data_type, &t2.data_type) {
-        // Double dominates all numerics
-        (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
-
-        // Decimal dominates integers
-        (DataType::Decimal { precision, scale }, _)
-        | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
-            precision: *precision,
-            scale: *scale,
+        // Numeric type promotion: SmallInt < Integer < BigInt < Float < Decimal < Double
+        _ if both_numeric => match (&t1.data_type, &t2.data_type) {
+            (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
+            (DataType::Float, _) | (_, DataType::Float) => DataType::Float,
+            (DataType::Decimal { precision, scale }, _)
+            | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
+            (DataType::BigInt, _) | (_, DataType::BigInt) => DataType::BigInt,
+            (DataType::Integer, _) | (_, DataType::Integer) => DataType::Integer,
+            _ => t1.data_type.clone(),
         },
 
-        // BigInt dominates smaller integers
-        (DataType::BigInt, DataType::SmallInt | DataType::Integer)
-        | (DataType::SmallInt | DataType::Integer, DataType::BigInt) => DataType::BigInt,
+        // String type promotion: all string types → Text
+        _ if both_string => DataType::Text,
 
-        // Integer dominates SmallInt
-        (DataType::Integer, DataType::SmallInt) | (DataType::SmallInt, DataType::Integer) => {
-            DataType::Integer
-        }
-
-        // Text is a catch-all for string types
-        (DataType::Text, _) | (_, DataType::Text) => DataType::Text,
-        (DataType::Varchar { .. }, _) | (_, DataType::Varchar { .. }) => DataType::Text,
-        (DataType::Char { .. }, _) | (_, DataType::Char { .. }) => DataType::Text,
-
-        // Timestamp types - prefer timezone-aware if either has it
-        (
-            DataType::Timestamp { with_timezone: tz1 },
-            DataType::Timestamp { with_timezone: tz2 },
-        ) => DataType::Timestamp {
-            with_timezone: *tz1 || *tz2,
-        },
-        (DataType::Timestamp { with_timezone }, _) | (_, DataType::Timestamp { with_timezone }) => {
-            DataType::Timestamp {
+        // Temporal type promotion
+        _ if both_temporal => match (&t1.data_type, &t2.data_type) {
+            (
+                DataType::Timestamp { with_timezone: tz1 },
+                DataType::Timestamp { with_timezone: tz2 },
+            ) => DataType::Timestamp {
+                with_timezone: *tz1 || *tz2,
+            },
+            (DataType::Timestamp { with_timezone }, _)
+            | (_, DataType::Timestamp { with_timezone }) => DataType::Timestamp {
                 with_timezone: *with_timezone,
+            },
+            (DataType::Date, DataType::Time) | (DataType::Time, DataType::Date) => {
+                DataType::Timestamp {
+                    with_timezone: false,
+                }
             }
-        }
-        (DataType::Date, DataType::Time) | (DataType::Time, DataType::Date) => {
-            DataType::Timestamp {
-                with_timezone: false,
-            }
-        }
+            _ => DataType::Unknown,
+        },
 
-        // For incompatible types, return Unknown (could be an error in strict mode)
+        // For incompatible type families, return Unknown (could be an error in strict mode)
         _ => DataType::Unknown,
     };
 
@@ -1747,17 +1746,17 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
         }
     }
 
-    // If there's a UNION, recursively get types from the second SELECT and combine
-    if select_stmt.has_union() {
-        if let Some(union_select) = select_stmt.union_select() {
-            let union_types = infer_select_column_types(&union_select, ctx);
+    // If there's a set operation (UNION/INTERSECT/EXCEPT), recursively get types and combine
+    if select_stmt.has_set_operation() {
+        if let Some(next_select) = select_stmt.set_operation_select() {
+            let next_types = infer_select_column_types(&next_select, ctx);
 
             // Combine types - use the wider type for each column position
-            for (i, union_type) in union_types.into_iter().enumerate() {
+            for (i, next_type) in next_types.into_iter().enumerate() {
                 if i < column_types.len() {
-                    column_types[i] = promote_types(&column_types[i], &union_type);
+                    column_types[i] = promote_types(&column_types[i], &next_type);
                 }
-                // If union has more columns, they're ignored (SQL requires same column count)
+                // If next has more columns, they're ignored (SQL requires same column count)
             }
         }
     }
@@ -2379,5 +2378,208 @@ mod tests {
         // Column TIMESTAMP - Column TIMESTAMP → Interval
         let types = infer_sql_with_ctx("WITH t AS (SELECT 1 AS ts) SELECT ts - ts FROM t", &ctx);
         assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_promote_types_numeric_hierarchy() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // SmallInt + Integer → Integer
+        assert_eq!(
+            promote_types(&mk(DataType::SmallInt), &mk(DataType::Integer)).data_type,
+            DataType::Integer
+        );
+        // Integer + BigInt → BigInt
+        assert_eq!(
+            promote_types(&mk(DataType::Integer), &mk(DataType::BigInt)).data_type,
+            DataType::BigInt
+        );
+        // BigInt + Float → Float
+        assert_eq!(
+            promote_types(&mk(DataType::BigInt), &mk(DataType::Float)).data_type,
+            DataType::Float
+        );
+        // Float + Double → Double
+        assert_eq!(
+            promote_types(&mk(DataType::Float), &mk(DataType::Double)).data_type,
+            DataType::Double
+        );
+        // Float + Decimal → Float
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Float),
+                &mk(DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                })
+            )
+            .data_type,
+            DataType::Float
+        );
+        // Decimal + Integer → Decimal
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }),
+                &mk(DataType::Integer)
+            )
+            .data_type,
+            DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_promote_types_null_handling() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Null + Integer → Integer (nullable)
+        let result = promote_types(&mk(DataType::Null), &mk(DataType::Integer));
+        assert_eq!(result.data_type, DataType::Integer);
+        assert!(result.nullable);
+
+        // Integer + Null → Integer (nullable)
+        let result = promote_types(&mk(DataType::Integer), &mk(DataType::Null));
+        assert_eq!(result.data_type, DataType::Integer);
+        assert!(result.nullable);
+
+        // Unknown + Text → Text
+        let result = promote_types(&mk(DataType::Unknown), &mk(DataType::Text));
+        assert_eq!(result.data_type, DataType::Text);
+    }
+
+    #[test]
+    fn test_promote_types_temporal() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Date + Timestamp → Timestamp
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Date),
+                &mk(DataType::Timestamp {
+                    with_timezone: false
+                })
+            )
+            .data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // Date + Time → Timestamp
+        assert_eq!(
+            promote_types(&mk(DataType::Date), &mk(DataType::Time)).data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_promote_types_string() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Varchar + Text → Text
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Varchar {
+                    max_length: Some(10)
+                }),
+                &mk(DataType::Text)
+            )
+            .data_type,
+            DataType::Text
+        );
+
+        // Varchar + Varchar → Text (different discriminant doesn't matter, same variant)
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Varchar {
+                    max_length: Some(10)
+                }),
+                &mk(DataType::Varchar {
+                    max_length: Some(20)
+                })
+            )
+            .data_type,
+            DataType::Varchar {
+                max_length: Some(10)
+            } // same discriminant, returns first
+        );
+    }
+
+    #[test]
+    fn test_union_type_inference() {
+        // UNION of SmallInt + Integer → Integer
+        let types =
+            infer_sql("SELECT CAST(1 AS SMALLINT) AS x UNION ALL SELECT CAST(2 AS INTEGER) AS x");
+        assert_eq!(types[0].data_type, DataType::Integer);
+
+        // UNION of Integer + BigInt → BigInt
+        let types =
+            infer_sql("SELECT CAST(1 AS INTEGER) AS x UNION ALL SELECT CAST(2 AS BIGINT) AS x");
+        assert_eq!(types[0].data_type, DataType::BigInt);
+
+        // 3-way UNION: SmallInt + Integer + BigInt → BigInt
+        let types = infer_sql(
+            "SELECT CAST(1 AS SMALLINT) AS x UNION ALL SELECT CAST(2 AS INTEGER) AS x UNION ALL SELECT CAST(3 AS BIGINT) AS x"
+        );
+        assert_eq!(types[0].data_type, DataType::BigInt);
+    }
+
+    #[test]
+    fn test_intersect_except_type_inference() {
+        // INTERSECT should also promote types
+        let types =
+            infer_sql("SELECT CAST(1 AS SMALLINT) AS x INTERSECT SELECT CAST(2 AS INTEGER) AS x");
+        assert_eq!(types[0].data_type, DataType::Integer);
+
+        // EXCEPT should also promote types
+        let types =
+            infer_sql("SELECT CAST(1 AS INTEGER) AS x EXCEPT SELECT CAST(2 AS BIGINT) AS x");
+        assert_eq!(types[0].data_type, DataType::BigInt);
+    }
+
+    #[test]
+    fn test_promote_types_decimal_precision() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Decimal(10,2) + Decimal(18,4) → Decimal(18,4) (takes max)
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }),
+                &mk(DataType::Decimal {
+                    precision: 18,
+                    scale: 4
+                })
+            )
+            .data_type,
+            DataType::Decimal {
+                precision: 18,
+                scale: 4
+            }
+        );
     }
 }

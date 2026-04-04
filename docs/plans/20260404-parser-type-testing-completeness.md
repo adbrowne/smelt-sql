@@ -88,19 +88,19 @@
 
 ---
 
-## Phase 5: UNION Type Widening `[ ]`
+## Phase 5: UNION Type Widening `[x]`
 
 **Priority**: Medium — `promote_types()` exists but needs systematic coverage.
 
 **Goal**: Implement full promotion matrix in `promote_types()` and create `prop_setop_types.rs`.
 
 **Work**:
-- [ ] Implement promotion rules from research doc (SmallInt+Integer→Integer, etc.)
-- [ ] Handle Date+Timestamp→Timestamp, Varchar+Text→Text
-- [ ] Handle Null promotion (Any+Null→Any nullable)
-- [ ] Decimal precision arithmetic for Decimal+Decimal promotion
-- [ ] Create `prop_setop_types.rs` testing UNION with varying column types
-- [ ] Validate against DuckDB oracle
+- [x] Implement promotion rules from research doc (SmallInt+Integer→Integer, etc.)
+- [x] Handle Date+Timestamp→Timestamp, Varchar+Text→Text
+- [x] Handle Null promotion (Any+Null→Any nullable)
+- [x] Decimal precision arithmetic for Decimal+Decimal promotion
+- [x] Create `prop_setop_types.rs` testing UNION with varying column types
+- [x] Validate against DuckDB oracle
 
 **Verification**: `cargo test -p smelt-db --test prop_setop_types` passes
 
@@ -260,6 +260,10 @@ Decisions made during implementation that may need review. These are filled in a
 
 3. **% (modulo) not tested (Phase 2)**: The parser doesn't support `%` as a binary operator, so it was excluded from the coercion matrix. The plan item mentioned `%` but it's not applicable.
 
+4. **promote_types() family-gated promotion (Phase 5)**: Restructured `promote_types()` to gate numeric, string, and temporal promotion by type family (`is_numeric()`, `is_string()`, `is_temporal()`). Previously, wildcard arms like `(DataType::Float, _)` would incorrectly match cross-family pairs (e.g., Float+Varchar → Float). Now cross-family combinations correctly return Unknown. DuckDB is more permissive (e.g., Boolean+Integer → Integer, Numeric+Varchar → Varchar), but per the design principle we prefer strictness.
+
+5. **INTERSECT/EXCEPT type inference (Phase 5)**: Added `has_set_operation()` and `set_operation_select()` AST methods that handle all three set operations (UNION, INTERSECT, EXCEPT). Updated `infer_select_column_types()` to use these generic methods instead of the UNION-specific ones. All set operations use the same type promotion logic.
+
 ---
 
 ## Session Log
@@ -325,3 +329,27 @@ Each Claude Code session records what it accomplished here.
 - All 106 lib tests pass, zero clippy warnings.
 
 **Decisions**: None — temporal arithmetic rules follow standard SQL semantics and match DuckDB behavior.
+
+### Session 5 — 2026-04-04
+
+**Phase**: 5 (UNION Type Widening)
+**Status**: Complete
+
+**What was done**:
+- Restructured `promote_types()` to gate promotion by type family:
+  - Numeric promotion now only applies when both types are numeric (via `is_numeric()`)
+  - String promotion only when both are strings (via `is_string()`)
+  - Temporal promotion only when both are temporal (via `is_temporal()`)
+  - Cross-family combinations return Unknown (strict by design)
+- Added Float to `promote_types()` numeric hierarchy: `Double > Float > Decimal > BigInt > Integer > SmallInt`
+- Added Null type handling: `Null + T → T (nullable)`
+- Added `has_set_operation()` and `set_operation_select()` AST methods handling UNION/INTERSECT/EXCEPT generically
+- Updated `infer_select_column_types()` to use new generic set operation methods
+- Created `prop_setop_types.rs` with 42 tests:
+  - 3 proptests (256 cases each): numeric set op promotion, 3-way numeric union, multi-column union
+  - 3 exhaustive deterministic tests: 6×6 numeric matrix, 10×6 same-type all set ops, 10×10 all-type cross matrix
+  - 10 smoke tests for specific promotion rules
+- Added 7 new unit tests in `type_inference.rs`: promote_types numeric hierarchy, null handling, temporal, string, decimal precision, union inference, intersect/except inference
+- All 113 lib tests + 42 proptest tests pass, zero clippy warnings.
+
+**Decisions**: See Decisions Log entries 4-5.
