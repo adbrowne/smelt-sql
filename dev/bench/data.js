@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775262476911,
+  "lastUpdate": 1775262478746,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13256,6 +13256,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.986867686772708,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0986e451ac008d411673b39f8e5bf18fe71980a9",
+          "message": "Update docs site with March 21 – April 4 feature additions\n\n- CLI: add smelt docs generate command reference\n- Targets: add Spark requirements, cross-engine Parquet exchange section\n- Editor: add expanded goto-definition (sources, CTEs, columns) and diagnostics docs\n- Web UI: replace stub with full feature docs (model detail, run planner, execution, file watching)\n- Architecture: update LSP section with new capabilities\n- Project structure: add .smelt/schemas/ dir, multi_engine example\n- CLI: note logical/physical graph output in smelt explain\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T11:26:05+11:00",
+          "tree_id": "e0b7dc6491f767ed55c2cfd25b088f1bbfcd33a9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0986e451ac008d411673b39f8e5bf18fe71980a9"
+        },
+        "date": 1775262478251,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.863573226674877,
             "unit": "MB/s"
           }
         ]
