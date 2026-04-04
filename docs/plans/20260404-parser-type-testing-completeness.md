@@ -18,7 +18,7 @@
 
 ---
 
-## Phase 1: Nested Function Proptest Generators `[ ]`
+## Phase 1: Nested Function Proptest Generators `[~]`
 
 **Priority**: Highest — most common real-world pattern with zero proptest coverage.
 

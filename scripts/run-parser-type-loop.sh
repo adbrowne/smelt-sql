@@ -54,8 +54,8 @@ for i in $(seq 1 "$MAX_SESSIONS"); do
     SESSION_LOG="$LOG_DIR/session-$(printf '%02d' "$i")-$(date '+%Y%m%d-%H%M%S').log"
 
     # Run Claude Code headlessly
-    claude --print \
-        --allowedTools "Edit,Write,Read,Glob,Grep,Bash,Agent,TaskCreate,TaskUpdate" \
+    claude --print --verbose \
+        --dangerously-skip-permissions \
         --max-turns 100 \
         "You are executing an autonomous implementation loop for the parser & type system testing completeness plan.
 
