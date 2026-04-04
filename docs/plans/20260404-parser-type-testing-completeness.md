@@ -3,7 +3,7 @@
 **Date**: 2026-04-04
 **Research**: `docs/research/2026-04-04-parser-type-testing-completeness.md`
 **Branch**: `parser-type-testing-completeness`
-**PR**: TBD (will be filled in after first push)
+**PR**: https://github.com/adbrowne/smelt-sql/pull/101
 
 ## Status Key
 
