@@ -64,6 +64,8 @@ pub enum DataType {
     Array(Box<DataType>),
     /// Struct with named fields: STRUCT(a INTEGER, b VARCHAR)
     Struct(Vec<(String, DataType)>),
+    /// Map from key type to value type: MAP(VARCHAR, INTEGER)
+    Map(Box<DataType>, Box<DataType>),
 
     // Special types
     /// NULL literal type
@@ -91,6 +93,14 @@ impl DataType {
         matches!(
             self,
             DataType::Varchar { .. } | DataType::Char { .. } | DataType::Text
+        )
+    }
+
+    /// Check if this type is a complex/nested type (Array, Struct, Map)
+    pub fn is_complex(&self) -> bool {
+        matches!(
+            self,
+            DataType::Array(_) | DataType::Struct(_) | DataType::Map(_, _)
         )
     }
 
@@ -153,6 +163,9 @@ impl DataType {
                     .map(|(name, dt)| format!("{} {}", name, dt.to_sql()))
                     .collect();
                 format!("STRUCT({})", field_strs.join(", "))
+            }
+            DataType::Map(key, value) => {
+                format!("MAP({}, {})", key.to_sql(), value.to_sql())
             }
             DataType::Null => "NULL".to_string(),
             DataType::Unknown => "UNKNOWN".to_string(),
@@ -271,6 +284,32 @@ mod tests {
         .is_numeric());
         assert!(!DataType::Varchar { max_length: None }.is_numeric());
         assert!(!DataType::Date.is_numeric());
+    }
+
+    #[test]
+    fn test_is_complex() {
+        assert!(DataType::Array(Box::new(DataType::Integer)).is_complex());
+        assert!(DataType::Struct(vec![("a".to_string(), DataType::Integer)]).is_complex());
+        assert!(DataType::Map(
+            Box::new(DataType::Varchar { max_length: None }),
+            Box::new(DataType::Integer)
+        )
+        .is_complex());
+        assert!(!DataType::Integer.is_complex());
+        assert!(!DataType::Varchar { max_length: None }.is_complex());
+        assert!(!DataType::Boolean.is_complex());
+    }
+
+    #[test]
+    fn test_map_to_sql() {
+        assert_eq!(
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer)
+            )
+            .to_sql(),
+            "MAP(VARCHAR, INTEGER)"
+        );
     }
 
     #[test]
