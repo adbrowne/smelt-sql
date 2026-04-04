@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775259361029,
+  "lastUpdate": 1775260903615,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -9963,6 +9963,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.219234,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "77ac162e413e51fc3db12660af62a2cd88a18492",
+          "message": "Update roadmap and README with March 30 – April 4 changes\n\n- Roadmap: add LSP goto-def expansion, column diagnostics, Python model\n  integration, parser fixes, ecosystem updates (ACE-FCA, system DuckDB,\n  CI diagnostics gate). Reorganize What's Next with new priorities\n  (Metrics DSL, smelt validate, PostgreSQL backend, orchestrator).\n- README: replace outdated Dec 2024/2025 status with current capabilities.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T11:00:22+11:00",
+          "tree_id": "382d29ecef89329bc433b6f81e5a3851767fef47",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/77ac162e413e51fc3db12660af62a2cd88a18492"
+        },
+        "date": 1775260903094,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.341417,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.081505,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.597275,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.344523,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002675,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 37.473072,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.017633,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.011341,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.008686,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.94272,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.158419,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.731769999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.89099,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.390634,
             "unit": "ms"
           }
         ]
