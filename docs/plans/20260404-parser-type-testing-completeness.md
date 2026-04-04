@@ -18,17 +18,17 @@
 
 ---
 
-## Phase 1: Nested Function Proptest Generators `[~]`
+## Phase 1: Nested Function Proptest Generators `[x]`
 
 **Priority**: Highest — most common real-world pattern with zero proptest coverage.
 
 **Goal**: Create `prop_nested_functions.rs` in `crates/smelt-db/tests/` that generates nested function calls 2-4 levels deep and validates type inference against DuckDB.
 
 **Work**:
-- [ ] Add generator strategies for nested function compositions (e.g., `LENGTH(UPPER(col))`, `COALESCE(SUM(x), 0)`, `CAST(EXTRACT(YEAR FROM ts) AS VARCHAR)`)
-- [ ] Wire into existing DuckDB oracle infrastructure
-- [ ] Run with 256 cases, register any new divergences
-- [ ] Verify passes in CI (`cargo test -p smelt-db`)
+- [x] Add generator strategies for nested function compositions (e.g., `LENGTH(UPPER(col))`, `COALESCE(SUM(x), 0)`, `CAST(EXTRACT(YEAR FROM ts) AS VARCHAR)`)
+- [x] Wire into existing DuckDB oracle infrastructure
+- [x] Run with 256 cases, register any new divergences
+- [x] Verify passes in CI (`cargo test -p smelt-db`)
 
 **Verification**: `cargo test -p smelt-db --test prop_nested_functions` passes
 
@@ -262,4 +262,14 @@ Decisions made during implementation that may need review. These are filled in a
 
 Each Claude Code session records what it accomplished here.
 
-*(Empty — will be populated during loop execution)*
+### Session 1 — 2026-04-04
+
+**Phase**: 1 (Nested Function Proptest Generators)
+**Status**: Complete
+
+**What was done**:
+- `prop_nested_functions.rs` was already written with full infrastructure: WrapperFunc-based nesting chains (2-4 levels deep), 256-case proptest, and 8 deterministic smoke tests covering string→string, string→numeric, numeric→numeric, and COALESCE nesting patterns.
+- Cleaned up dead code warnings: removed unused `WrapperInput` enum and `accepts` field from `WrapperFunc`, removed empty `numeric_to_string_wrappers()` placeholder.
+- All 35 tests pass (256 proptest cases + helper module tests + smoke tests). Zero warnings from clippy.
+
+**Decisions**: None — implementation was already in good shape, only cleanup needed.
