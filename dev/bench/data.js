@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775300053800,
+  "lastUpdate": 1775300054802,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13871,6 +13871,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.16477175637005,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "d3e7790d3e78b94a7a21c253dc3b0aba6d341514",
+          "message": "Fix wheel builds: build smelt-lsp without python feature in CI\n\nThe manylinux container lacks a shared Python library needed by PyO3's\nauto-initialize feature. Since the LSP binary doesn't need Python\nembedding, build with --no-default-features to skip the python feature.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T21:52:19+11:00",
+          "tree_id": "720e5857903b76d22542c5a14586ccab3dbf8d10",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/d3e7790d3e78b94a7a21c253dc3b0aba6d341514"
+        },
+        "date": 1775300054536,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.215192781034776,
             "unit": "MB/s"
           }
         ]
