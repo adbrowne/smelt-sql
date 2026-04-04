@@ -230,21 +230,21 @@
 
 ---
 
-## Phase 13: Type Semantics Documentation `[ ]`
+## Phase 13: Type Semantics Documentation `[x]`
 
 **Priority**: Low — documentation only, no code changes.
 
 **Goal**: Create `docs/type_semantics.md` documenting where smelt differs from backends.
 
 **Work**:
-- [ ] Integer division is truncating
-- [ ] SUM of integers returns BigInt (not Decimal)
-- [ ] String functions return Text (not Varchar)
-- [ ] CEIL/FLOOR of Double returns Double
-- [ ] UNION type promotion rules
-- [ ] Temporal arithmetic rules
-- [ ] Array type rules
-- [ ] Struct type rules and field access semantics
+- [x] Integer division is truncating
+- [x] SUM of integers returns BigInt (not Decimal)
+- [x] String functions return Text (not Varchar)
+- [x] CEIL/FLOOR of Double returns Double
+- [x] UNION type promotion rules
+- [x] Temporal arithmetic rules
+- [x] Array type rules
+- [x] Struct type rules and field access semantics
 
 **Verification**: File exists and is accurate
 
@@ -482,3 +482,25 @@ Each Claude Code session records what it accomplished here.
 - Deferred: DuckDB validation (not available in worktree) and proptest generators (marked optional in plan)
 
 **Decisions**: Struct field access is implemented as a fallback in the column reference resolution path rather than a separate AST pattern. When `s.name` is parsed as a qualified column ref with qualifier `s` and name `name`, and no column `s.name` exists, we check if bare column `s` has Struct type and resolve `name` as a field. This avoids parser changes and naturally handles the SQL ambiguity between `table.column` and `struct.field`.
+
+### Session 13 — 2026-04-04
+
+**Phase**: 13 (Type Semantics Documentation)
+**Status**: Complete
+
+**What was done**:
+- Created `docs/type_semantics.md` documenting all of smelt's type inference semantics and backend divergences:
+  - Integer division (truncating, preserves integer types — differs from DuckDB's Double)
+  - SUM returns BigInt for integers (DuckDB returns Decimal(38,0))
+  - String functions return Text (DuckDB/Spark return Varchar)
+  - CEIL/FLOOR of Double returns Double (Spark returns BigInt)
+  - SIGN returns SmallInt (backends return input type)
+  - Full UNION type promotion rules: numeric hierarchy, string promotion, temporal promotion, cross-family rejection
+  - Temporal arithmetic rules: all DATE/TIMESTAMP/TIME/INTERVAL combinations
+  - Array type rules: literal inference, mixed-type rejection, subscript/slice
+  - Struct type rules: named/positional fields, dot-notation field access
+  - Nullability rules: COALESCE, CASE, CAST, aggregates, subqueries
+  - Complete divergence registry (15 divergences: 8 ByDesign, 7 BackendSpecific)
+- No code changes — documentation only phase.
+
+**Decisions**: None — documentation reflects existing implemented behavior.
