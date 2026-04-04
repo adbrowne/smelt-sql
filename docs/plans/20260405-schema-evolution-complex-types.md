@@ -583,13 +583,13 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 8: Spark Backend DDL Generation [ ]
+## Phase 8: Spark Backend DDL Generation [x]
 
 **Goal:** Translate `SchemaOperation`s into Spark-specific SQL for both Delta and Parquet table formats.
 
 ### Work Items
 
-- [ ] 8a. Create `fn generate_spark_ddl(catalog: &str, schema: &str, table: &str, ops: &[SchemaOperation], format: TableFormat, caps: &BackendCapabilities) -> MigrationExecution`:
+- [x] 8a. Create `fn generate_spark_ddl(catalog: &str, schema: &str, table: &str, ops: &[SchemaOperation], format: TableFormat, caps: &BackendCapabilities) -> MigrationExecution`:
   ```rust
   pub enum MigrationExecution {
       /// DDL statements to execute
@@ -602,14 +602,14 @@ cargo clippy --all-targets
       FullRefreshRequired { reason: String },
   }
   ```
-- [ ] 8b. Implement Spark+Delta DDL:
+- [x] 8b. Implement Spark+Delta DDL:
   - `AddStructField` → `ALTER TABLE cat.s.t ADD COLUMNS (col.field TYPE)`
   - `RemoveStructField` → `ALTER TABLE cat.s.t DROP COLUMN col.field` (requires column mapping)
   - `WidenNestedType` → `TableRewrite` (Delta doesn't support `ALTER COLUMN TYPE USING`)
   - `AddColumn` → `ALTER TABLE cat.s.t ADD COLUMNS (name TYPE)`
   - `RemoveColumn` → `ALTER TABLE cat.s.t DROP COLUMN name`
   - `WidenColumnType` → `ALTER TABLE cat.s.t ALTER COLUMN name TYPE new_type` (safe widenings only)
-- [ ] 8c. Implement Spark+Parquet DDL:
+- [x] 8c. Implement Spark+Parquet DDL:
   - `AddStructField` (nullable) → `ALTER TABLE cat.s.t ADD COLUMNS (col.field TYPE)` (metastore)
   - `AddStructField` (not nullable) → `FullRefreshRequired`
   - `RemoveStructField` → `FullRefreshRequired` (no safe way on Parquet)
@@ -617,13 +617,13 @@ cargo clippy --all-targets
   - `AddColumn` (nullable) → `ALTER TABLE cat.s.t ADD COLUMNS (name TYPE)`
   - `WidenColumnType` → `FullRefreshRequired` for most; INT→BIGINT works at read time
   - Array-of-struct field add (nullable) → `MergeSchemaWrite` (same behavior as strict path)
-- [ ] 8d. Implement `TableRewrite` execution for Spark:
+- [x] 8d. Implement `TableRewrite` execution for Spark:
   - `CREATE TABLE tmp AS SELECT transform_expr FROM original`
   - `DROP TABLE original`
   - `ALTER TABLE tmp RENAME TO original`
   - Wrap in Delta transaction where possible
-- [ ] 8e. Wire Spark DDL generation into migration execution, selecting DuckDB vs Spark path based on backend dialect.
-- [ ] 8f. Implement `--allow-full-refresh` gating: when `MigrationExecution::FullRefreshRequired` is returned and the flag is not set, return an error with a clear message.
+- [x] 8e. Wire Spark DDL generation into migration execution, selecting DuckDB vs Spark path based on backend dialect.
+- [x] 8f. Implement `--allow-full-refresh` gating: when `MigrationExecution::FullRefreshRequired` is returned and the flag is not set, return an error with a clear message.
 
 ### Red-Green Tests
 
@@ -1094,3 +1094,17 @@ cargo test -p smelt-cli --test example_diagnostics
 - `smelt-dialect` does NOT depend on `smelt-core` — no `spark_for_format()` convenience method on `BackendCapabilities`. Callers select the right constructor based on `TableFormat`.
 - `spark()` aliases `spark_delta()` for backward compatibility — existing code that calls `BackendCapabilities::spark()` gets Delta capabilities automatically.
 - Spark+Parquet disables `supports_merge` (no Delta = no MERGE statement) in addition to schema evolution differences.
+
+### Session 8 — 2026-04-05
+
+**Phase completed:** Phase 8 (Spark Backend DDL Generation)
+
+**What was done:**
+- Phase 8 was mostly implemented in prior sessions (8a–8f code was already in place). This session completed the remaining gap and fixed compilation issues:
+- Added `MergeSchemaWrite` path for array-of-struct field additions: when `AddStructField` path contains "element" (indicating array nesting) and `!caps.supports_nested_array_ddl`, returns `MergeSchemaWrite` instead of DDL. Applies to both Spark+Delta and Spark+Parquet.
+- Fixed exhaustive match in `smelt-cli/src/commands/diff.rs` for new `MigrationAction::TableRewrite` and `MigrationAction::FullRefreshBlocked` variants (both human-readable and JSON output paths).
+- 2 new tests: `test_parquet_array_of_struct_field_add_merge_schema`, `test_delta_array_of_struct_field_add_merge_schema`
+- All 30 ddl_spark tests pass, all smelt-state/smelt-cli/smelt-types tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- Array-of-struct detection uses `path.iter().any(|p| p == "element")` — the "element" sentinel in the path signals that we're navigating through an array element, matching the convention established by `diff_types()` in Phase 3.

@@ -247,6 +247,12 @@ fn print_text(entries: &[ModelDiffEntry]) {
                             if columns.len() == 1 { "" } else { "s" }
                         );
                     }
+                    MigrationAction::TableRewrite { select_expr } => {
+                        println!("  -> Requires: table rewrite ({})", select_expr);
+                    }
+                    MigrationAction::FullRefreshBlocked { reason } => {
+                        println!("  -> Blocked: requires --allow-full-refresh ({})", reason);
+                    }
                 }
                 println!();
             }
@@ -414,6 +420,10 @@ fn print_json(entries: &[ModelDiffEntry]) {
                     MigrationAction::FullRefresh { .. } => ("full_refresh", vec![]),
                     MigrationAction::RequiresColumnRemovalFlag { .. } => {
                         ("requires_column_removal_flag", vec![])
+                    }
+                    MigrationAction::TableRewrite { .. } => ("table_rewrite", vec![]),
+                    MigrationAction::FullRefreshBlocked { .. } => {
+                        ("full_refresh_blocked", vec![])
                     }
                 };
 

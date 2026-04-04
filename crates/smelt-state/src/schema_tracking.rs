@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use smelt_dialect::BackendCapabilities;
 use smelt_types::{parse_type, DataType};
 use std::collections::HashMap;
+
+use crate::ddl_spark::{self, MigrationExecution, SparkTableFormat};
 
 /// Persisted schema for a deployed model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1038,6 +1041,23 @@ pub enum MigrationAction {
     FullRefresh { reason: String },
     /// Column removal detected — requires explicit flag.
     RequiresColumnRemovalFlag { columns: Vec<String> },
+    /// Table rewrite needed (Spark: CREATE TABLE tmp AS SELECT ... FROM original).
+    TableRewrite { select_expr: String },
+    /// Full refresh required but `--allow-full-refresh` not set — blocked.
+    FullRefreshBlocked { reason: String },
+}
+
+/// Which backend DDL generator to use for migration planning.
+#[derive(Debug, Clone)]
+pub enum DdlBackend {
+    /// DuckDB — supports struct dot-notation, ALTER COLUMN USING, list_transform.
+    DuckDb,
+    /// Spark — requires catalog name; limited ALTER support depending on format.
+    Spark {
+        catalog: String,
+        format: SparkTableFormat,
+        capabilities: BackendCapabilities,
+    },
 }
 
 /// Plan the migration action for a model based on the schema diff.
@@ -1047,6 +1067,8 @@ pub enum MigrationAction {
 /// instead of triggering a full refresh.
 ///
 /// `backfill_exprs` maps column names to SQL expressions for UPDATE backfill.
+///
+/// `backend` selects the DDL generator. Defaults to DuckDB if `None`.
 pub fn plan_migration(
     schema: &str,
     table: &str,
@@ -1054,6 +1076,29 @@ pub fn plan_migration(
     allow_column_removal: bool,
     column_defaults: &HashMap<String, String>,
     backfill_exprs: &HashMap<String, String>,
+) -> MigrationAction {
+    plan_migration_for_backend(
+        schema,
+        table,
+        diff,
+        allow_column_removal,
+        column_defaults,
+        backfill_exprs,
+        &DdlBackend::DuckDb,
+    )
+}
+
+/// Plan the migration action for a specific backend.
+///
+/// Like `plan_migration`, but allows selecting DuckDB vs Spark DDL generation.
+pub fn plan_migration_for_backend(
+    schema: &str,
+    table: &str,
+    diff: &SchemaDiff,
+    allow_column_removal: bool,
+    column_defaults: &HashMap<String, String>,
+    backfill_exprs: &HashMap<String, String>,
+    backend: &DdlBackend,
 ) -> MigrationAction {
     if diff.is_empty() {
         return MigrationAction::NoChange;
@@ -1206,8 +1251,7 @@ pub fn plan_migration(
                     ));
                 }
             }
-            // Complex type changes — delegate to ddl_duckdb module for proper
-            // DuckDB-specific DDL generation including struct_pack and list_transform.
+            // Complex type changes — delegate to backend-specific DDL module.
             SchemaChange::StructFieldAdded { .. }
             | SchemaChange::StructFieldRemoved { .. }
             | SchemaChange::NestedTypeChange { .. }
@@ -1218,9 +1262,44 @@ pub fn plan_migration(
                     changes: vec![change.clone()],
                 };
                 let plan = plan_schema_operations(&single_diff, column_defaults, backfill_exprs);
-                let ddl_stmts =
-                    crate::ddl_duckdb::generate_duckdb_ddl(schema, table, &plan.operations);
-                statements.extend(ddl_stmts);
+
+                match backend {
+                    DdlBackend::DuckDb => {
+                        let ddl_stmts =
+                            crate::ddl_duckdb::generate_duckdb_ddl(schema, table, &plan.operations);
+                        statements.extend(ddl_stmts);
+                    }
+                    DdlBackend::Spark {
+                        catalog,
+                        format,
+                        capabilities,
+                    } => {
+                        let result = ddl_spark::generate_spark_ddl(
+                            catalog,
+                            schema,
+                            table,
+                            &plan.operations,
+                            *format,
+                            capabilities,
+                        );
+                        match result {
+                            MigrationExecution::Statements(stmts) => {
+                                statements.extend(stmts);
+                            }
+                            MigrationExecution::TableRewrite { select_expr } => {
+                                return MigrationAction::TableRewrite { select_expr };
+                            }
+                            MigrationExecution::FullRefreshRequired { reason } => {
+                                return MigrationAction::FullRefreshBlocked { reason };
+                            }
+                            MigrationExecution::MergeSchemaWrite { .. } => {
+                                // MergeSchemaWrite means the write itself handles the evolution.
+                                // No DDL statements needed; the caller should set mergeSchema option.
+                                // For now, treat as no-op DDL (the write path handles it).
+                            }
+                        }
+                    }
+                }
             }
             SchemaChange::MapKeyTypeChange { .. } | SchemaChange::IncompatibleTypeChange { .. } => {
                 // These should have been caught by requires_full_refresh() above.
@@ -2889,6 +2968,116 @@ mod tests {
                 );
             }
             other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    // ── Spark backend routing tests ───────────────────────────────────
+
+    fn spark_delta_backend() -> DdlBackend {
+        DdlBackend::Spark {
+            catalog: "cat".into(),
+            format: SparkTableFormat::Delta,
+            capabilities: BackendCapabilities::spark_delta(),
+        }
+    }
+
+    fn spark_parquet_backend() -> DdlBackend {
+        DdlBackend::Spark {
+            catalog: "cat".into(),
+            format: SparkTableFormat::Parquet,
+            capabilities: BackendCapabilities::spark_parquet(),
+        }
+    }
+
+    #[test]
+    fn test_spark_delta_struct_field_add() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "db",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &spark_delta_backend(),
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(statements.len(), 1);
+                assert!(statements[0].contains("cat.db.t"));
+                assert!(statements[0].contains("ADD COLUMNS"));
+                assert!(statements[0].contains("meta.b STRING"));
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_spark_delta_nested_widen_returns_table_rewrite() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a BIGINT, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "db",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &spark_delta_backend(),
+        );
+        match action {
+            MigrationAction::TableRewrite { select_expr } => {
+                assert!(select_expr.contains("meta"));
+            }
+            other => panic!("Expected TableRewrite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_spark_parquet_nested_widen_blocked() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a BIGINT, b VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "db",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &spark_parquet_backend(),
+        );
+        match action {
+            MigrationAction::FullRefreshBlocked { reason } => {
+                assert!(reason.contains("Parquet"));
+            }
+            other => panic!("Expected FullRefreshBlocked, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_spark_parquet_struct_field_remove_blocked() {
+        let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "db",
+            "t",
+            &diff,
+            true,
+            &no_defaults(),
+            &HashMap::new(),
+            &spark_parquet_backend(),
+        );
+        match action {
+            MigrationAction::FullRefreshBlocked { reason } => {
+                assert!(reason.contains("Parquet"));
+                assert!(reason.contains("column mapping"));
+            }
+            other => panic!("Expected FullRefreshBlocked, got {:?}", other),
         }
     }
 }

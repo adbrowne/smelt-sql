@@ -64,6 +64,10 @@ pub enum SchemaEvolutionResult {
     FullRefreshRequired { reason: String },
     /// Column removal blocked — requires --allow-column-removal flag.
     ColumnRemovalBlocked { columns: Vec<String> },
+    /// Full refresh required but `--allow-full-refresh` not set — blocked.
+    FullRefreshBlocked { reason: String },
+    /// Table rewrite performed (Spark: CREATE TABLE tmp AS SELECT ... FROM original).
+    TableRewrite { description: String },
 }
 
 /// Infer the current schema columns from the model's inferred types.
@@ -190,6 +194,23 @@ pub async fn check_and_migrate(
 
         MigrationAction::RequiresColumnRemovalFlag { columns } => {
             Ok(SchemaEvolutionResult::ColumnRemovalBlocked { columns })
+        }
+
+        MigrationAction::FullRefreshBlocked { reason } => {
+            if _allow_full_refresh {
+                // User opted in — treat as a full refresh
+                Ok(SchemaEvolutionResult::FullRefreshRequired { reason })
+            } else {
+                Ok(SchemaEvolutionResult::FullRefreshBlocked { reason })
+            }
+        }
+
+        MigrationAction::TableRewrite { select_expr } => {
+            // Table rewrite is a Spark-specific operation (Phase 10 will implement execution).
+            // For now, report it back to the caller.
+            Ok(SchemaEvolutionResult::TableRewrite {
+                description: select_expr,
+            })
         }
     }
 }

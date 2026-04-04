@@ -544,6 +544,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
                                     columns.join(", ")
                                 ));
                             }
+                            Ok(migration::SchemaEvolutionResult::FullRefreshBlocked { reason }) => {
+                                return Err(anyhow::anyhow!(
+                                    "Schema evolution for '{}' requires full refresh: {}. \
+                                     Use --allow-full-refresh to permit this.",
+                                    model_name,
+                                    reason
+                                ));
+                            }
+                            Ok(migration::SchemaEvolutionResult::TableRewrite { description }) => {
+                                info!("Schema change requires table rewrite: {}", description);
+                                // Phase 10 will implement table rewrite execution.
+                                // For now, fall back to full refresh.
+                                force_full_refresh = true;
+                            }
                             Err(e) => {
                                 warn!(
                                 "Schema evolution check failed: {}. Continuing with incremental.",

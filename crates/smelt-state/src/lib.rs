@@ -1,4 +1,5 @@
 pub mod ddl_duckdb;
+pub mod ddl_spark;
 pub mod file_store;
 pub mod history;
 pub mod intervals;
