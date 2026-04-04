@@ -215,7 +215,11 @@ GROUP BY event_date, user_id
 
 ### Design: Strict with LSP Quick-Fixes
 
-The type system is strict (inspired by Haskell) but the LSP provides quick-fixes to reduce friction. The goal: committed code is strict, authoring experience is fluid.
+The type system is **strict by default** — this is settled doctrine, not a temporary choice. smelt catches type errors at compile time, not runtime. Cross-family implicit coercion (e.g., `Boolean + Integer`, `Numeric + Varchar`) is always rejected with a clear diagnostic, even though both DuckDB and Spark would accept it. The rationale: implicit coercion is convenient for ad-hoc queries but dangerous in production pipelines where it masks real bugs.
+
+The LSP provides quick-fixes to reduce friction. The goal: committed code is strict, authoring experience is fluid.
+
+For full details on type inference semantics and backend divergences, see [docs/type_semantics.md](type_semantics.md).
 
 ```sql
 -- User writes:

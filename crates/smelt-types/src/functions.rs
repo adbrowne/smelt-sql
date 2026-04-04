@@ -79,6 +79,7 @@ pub enum SqlFunction {
     // Null handling
     Coalesce,
     Nullif,
+    Ifnull,
 
     // Date/time functions
     Now,
@@ -235,6 +236,7 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::NthValue,
     SqlFunction::Coalesce,
     SqlFunction::Nullif,
+    SqlFunction::Ifnull,
     SqlFunction::Now,
     SqlFunction::CurrentTimestamp,
     SqlFunction::CurrentDate,
@@ -353,6 +355,8 @@ impl SqlFunction {
             }
             // JSON keys alias (DuckDB)
             "JSON_KEYS" => Some(Self::JsonObjectKeys),
+            // Null handling aliases
+            "NVL" => Some(Self::Ifnull),
             _ => None,
         }
     }
@@ -406,6 +410,7 @@ impl SqlFunction {
             Self::NthValue => "NTH_VALUE",
             Self::Coalesce => "COALESCE",
             Self::Nullif => "NULLIF",
+            Self::Ifnull => "IFNULL",
             Self::Now => "NOW",
             Self::CurrentTimestamp => "CURRENT_TIMESTAMP",
             Self::CurrentDate => "CURRENT_DATE",
@@ -538,7 +543,7 @@ impl SqlFunction {
                 FunctionCategory::WindowNavigation
             }
 
-            Self::Coalesce | Self::Nullif => FunctionCategory::NullHandling,
+            Self::Coalesce | Self::Nullif | Self::Ifnull => FunctionCategory::NullHandling,
 
             Self::Now
             | Self::CurrentTimestamp

@@ -31,6 +31,10 @@ pub fn parse(input: &str) -> Parse {
     parser.finish()
 }
 
+/// Maximum nesting depth for recursive parse functions.
+/// Prevents stack overflow on adversarial or deeply nested input.
+const MAX_PARSE_DEPTH: u32 = 256;
+
 struct Parser<'a> {
     input: &'a str,
     tokens: &'a [Token],
@@ -38,6 +42,7 @@ struct Parser<'a> {
     offset: usize,
     builder: GreenNodeBuilder<'static>,
     errors: Vec<ParseError>,
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -49,6 +54,7 @@ impl<'a> Parser<'a> {
             offset: 0,
             builder: GreenNodeBuilder::new(),
             errors: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -160,6 +166,17 @@ impl<'a> Parser<'a> {
         });
     }
 
+    /// Check if we've exceeded the maximum nesting depth.
+    /// Returns true if too deep (caller should bail out).
+    fn too_deep(&mut self) -> bool {
+        if self.depth >= MAX_PARSE_DEPTH {
+            self.error("Expression nesting depth exceeds maximum of 256".to_string());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Synchronize to one of the given tokens (error recovery)
     fn sync_to(&mut self, kinds: &[SyntaxKind]) {
         while !self.at(EOF) && !self.at_any(kinds) {
@@ -232,6 +249,12 @@ impl<'a> Parser<'a> {
 
     fn parse_select_stmt(&mut self) {
         self.start_node(SELECT_STMT);
+
+        if self.too_deep() {
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
 
         // WITH clause MUST come first (before SELECT)
         self.skip_trivia();
@@ -356,6 +379,7 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.depth -= 1;
         self.finish_node();
     }
 
@@ -927,7 +951,13 @@ impl<'a> Parser<'a> {
         self.start_node(EXPRESSION);
         self.skip_trivia();
 
+        if self.too_deep() {
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
         self.parse_or_expr();
+        self.depth -= 1;
 
         self.finish_node();
     }
@@ -1146,7 +1176,7 @@ impl<'a> Parser<'a> {
         self.parse_unary_expr();
 
         self.skip_trivia();
-        while self.at_any(&[STAR, DIVIDE]) {
+        while self.at_any(&[STAR, DIVIDE, PERCENT]) {
             self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
@@ -2517,6 +2547,43 @@ mod tests {
         assert!(bin.left().is_some(), "should have left operand");
         assert!(bin.right().is_some(), "should have right operand");
         assert!(!bin.is_unary());
+    }
+
+    #[test]
+    fn test_modulo_operator() {
+        let input = "SELECT a % b FROM t";
+        let parse = parse(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+        let bin = parse
+            .syntax()
+            .descendants()
+            .find_map(BinaryExpr::cast)
+            .expect("should have a BinaryExpr");
+        assert_eq!(bin.operator().as_deref(), Some("%"));
+        assert!(bin.left().is_some(), "should have left operand");
+        assert!(bin.right().is_some(), "should have right operand");
+    }
+
+    #[test]
+    fn test_modulo_precedence() {
+        // % should have same precedence as * and /
+        let input = "SELECT a + b % c FROM t";
+        let parse = parse(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+        // The outer binary should be +, with b%c on the right
+        let bins: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter_map(BinaryExpr::cast)
+            .collect();
+        // Should have two binary exprs: a + (b % c)
+        assert_eq!(bins.len(), 2);
+        // Outer is +
+        assert_eq!(bins[0].operator().as_deref(), Some("+"));
+        // Inner is %
+        assert_eq!(bins[1].operator().as_deref(), Some("%"));
     }
 
     #[test]
@@ -4342,5 +4409,336 @@ LIMIT 100
             .expect("should have a FunctionCall");
         assert_eq!(func.namespace().as_deref(), Some("smelt"));
         assert_eq!(func.name().as_deref(), Some("ref"));
+    }
+
+    // Phase 8: Parser Depth Limit (Stack Safety)
+
+    #[test]
+    fn test_deeply_nested_parens_produces_error() {
+        // 300 levels of nested parentheses — exceeds the 256 depth limit
+        let depth = 300;
+        let mut input = String::new();
+        input.push_str("SELECT ");
+        for _ in 0..depth {
+            input.push('(');
+        }
+        input.push('1');
+        for _ in 0..depth {
+            input.push(')');
+        }
+        let result = parse(&input);
+        // Should produce a depth-exceeded error, not a stack overflow
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("nesting depth")),
+            "Expected nesting depth error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_subqueries_produces_error() {
+        // 300 levels of nested subqueries — exceeds the 256 depth limit
+        let depth = 300;
+        let mut input = String::new();
+        for _ in 0..depth {
+            input.push_str("SELECT (");
+        }
+        input.push_str("SELECT 1");
+        for _ in 0..depth {
+            input.push(')');
+        }
+        let result = parse(&input);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("nesting depth")),
+            "Expected nesting depth error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_normal_nesting_depth_unaffected() {
+        // Reasonable nesting (depth ~20) should parse fine
+        let input = "SELECT COALESCE(COALESCE(COALESCE(COALESCE(COALESCE(1, 2), 3), 4), 5), 6)";
+        let result = parse(input);
+        assert!(
+            result.errors.is_empty(),
+            "Normal nesting should have no errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_moderate_nesting_depth_unaffected() {
+        // Build a moderately deep expression (~40 levels) — well under the 256 limit
+        let mut input = String::new();
+        input.push_str("SELECT ");
+        for _ in 0..40 {
+            input.push('(');
+        }
+        input.push('1');
+        for _ in 0..40 {
+            input.push(')');
+        }
+        let result = parse(&input);
+        assert!(
+            result.errors.is_empty(),
+            "Moderate nesting (40 levels) should parse fine: {:?}",
+            result.errors
+        );
+    }
+
+    // ---- Phase 9: Error Recovery Tests ----
+
+    /// Helper: parse SQL expecting errors, return Parse and check partial AST is usable
+    fn parse_with_errors(sql: &str) -> Parse {
+        let result = parse(sql);
+        assert!(
+            !result.errors.is_empty(),
+            "Expected parse errors for: {sql}"
+        );
+        // Verify root node exists (parser didn't panic or produce empty tree)
+        let root = result.syntax();
+        assert_eq!(root.kind(), FILE);
+        result
+    }
+
+    #[test]
+    fn test_error_recovery_missing_select_list() {
+        // SELECT FROM users — missing select list items
+        let result = parse_with_errors("SELECT FROM users");
+
+        // Should still produce a SELECT_STMT with a FROM clause
+        let file = File::cast(result.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        assert!(
+            select.from_clause().is_some(),
+            "FROM clause should be recoverable despite missing select list"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_select_only() {
+        // Just "SELECT" with nothing after — should error but not panic
+        let result = parse("SELECT");
+        // Parser may or may not error depending on how it handles empty select list
+        // The key check: it doesn't panic and produces a tree
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should still produce a SELECT_STMT node"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_case_missing_end() {
+        // CASE without END
+        let result = parse_with_errors("SELECT CASE WHEN x > 0 THEN 'pos' ELSE 'neg'");
+
+        // Should produce a CASE_EXPR in the tree (partial but present)
+        let case_node = result.syntax().descendants().find_map(CaseExpr::cast);
+        assert!(
+            case_node.is_some(),
+            "Should produce a partial CASE_EXPR node"
+        );
+        // The error should mention END
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("END")),
+            "Error should mention missing END: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_case_missing_then() {
+        // CASE WHEN without THEN
+        let result = parse_with_errors("SELECT CASE WHEN x > 0 END");
+
+        // Should produce a partial tree with CASE_EXPR
+        let case_node = result.syntax().descendants().find_map(CaseExpr::cast);
+        assert!(
+            case_node.is_some(),
+            "Should produce a partial CASE_EXPR node"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("THEN")),
+            "Error should mention missing THEN: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_cte_missing_as() {
+        // WITH cte_name (missing AS (SELECT ...))
+        let result = parse_with_errors("WITH my_cte SELECT 1");
+
+        // Should produce errors mentioning AS
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("AS")),
+            "Error should mention missing AS: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_cte_missing_select() {
+        // WITH my_cte AS () — empty CTE body
+        let result = parse_with_errors("WITH my_cte AS ()");
+
+        // Should produce an error about missing SELECT/VALUES
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("SELECT") || e.message.contains("Expected")),
+            "Error should mention missing content: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_dangling_operator_plus() {
+        // SELECT a + — dangling operator at end
+        let result = parse_with_errors("SELECT a +");
+
+        // Should have a SELECT_STMT with partial expression tree
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite dangling operator"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_dangling_operator_equals() {
+        // SELECT a = — dangling comparison
+        let result = parse_with_errors("SELECT a =");
+
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite dangling comparison"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_missing_closing_paren() {
+        // SELECT (a + b — missing closing paren
+        let result = parse_with_errors("SELECT (a + b");
+
+        // Should produce an error about missing )
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains(")") || e.message.contains("RPAREN")),
+            "Error should mention missing closing paren: {:?}",
+            result.errors
+        );
+
+        // Should still produce a SELECT_STMT
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite missing paren"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_missing_closing_paren_in_function() {
+        // SELECT COUNT(a — missing closing paren on function call
+        let result = parse_with_errors("SELECT COUNT(a");
+
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite unclosed function call"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_incomplete_between_missing_and() {
+        // SELECT a BETWEEN 1 — missing AND and upper bound
+        let result = parse_with_errors("SELECT a BETWEEN 1");
+
+        // Should mention AND
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("AND")),
+            "Error should mention missing AND: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_between_missing_upper_bound() {
+        // SELECT a BETWEEN 1 AND — missing upper bound
+        let result = parse_with_errors("SELECT a BETWEEN 1 AND");
+
+        // Should produce an error (dangling AND)
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT despite incomplete BETWEEN"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_partial_ast_has_content() {
+        // Multiple errors: SELECT list cut short + missing FROM table
+        let result = parse_with_errors("SELECT a, FROM");
+
+        // Despite errors, the partial AST should have structure
+        let file = File::cast(result.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+
+        // The select list should exist and have at least one item
+        let select_list = select.select_list().unwrap();
+        assert!(
+            select_list.items().count() >= 1,
+            "Partial AST should preserve at least the first select item"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_completely_invalid_input() {
+        // Garbage input
+        let result = parse_with_errors("XYZZY PLUGH");
+
+        // Should still produce a FILE node (never panics)
+        let root = result.syntax();
+        assert_eq!(root.kind(), FILE);
+    }
+
+    #[test]
+    fn test_error_recovery_empty_input() {
+        // Empty string
+        let result = parse("");
+        // Empty is valid (empty file) — may or may not have errors
+        // Key assertion: doesn't panic
+        let root = result.syntax();
+        assert_eq!(root.kind(), FILE);
+    }
+
+    #[test]
+    fn test_error_recovery_multiple_errors_still_produces_tree() {
+        // Many things wrong: bad CASE, unclosed paren, missing FROM target
+        let result = parse_with_errors("SELECT CASE WHEN THEN END, (a + , b FROM");
+
+        // Should produce a tree with multiple error nodes but not panic
+        let file = File::cast(result.syntax()).unwrap();
+        assert!(
+            file.select_stmt().is_some(),
+            "Should produce a SELECT_STMT even with many errors"
+        );
+        assert!(
+            result.errors.len() >= 2,
+            "Should report multiple errors: {:?}",
+            result.errors
+        );
     }
 }

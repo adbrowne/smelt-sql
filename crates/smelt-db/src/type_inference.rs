@@ -4,7 +4,8 @@
 /// including literals, column references, CAST expressions, and aggregates.
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, SelectStmt, Subquery,
+    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, RowConstructor, SelectStmt,
+    StructLiteral, Subquery,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -249,7 +250,7 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try CAST expression first
     if let Some(cast_expr) = expr.as_cast() {
-        return infer_cast_type(&cast_expr);
+        return infer_cast_type(&cast_expr, ctx);
     }
 
     // Try CASE expression
@@ -296,10 +297,52 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         });
     }
 
-    // Try column reference
+    // Try array literal
+    if let Some(array_lit) = expr.as_array_literal() {
+        return infer_array_literal_type(&array_lit, ctx);
+    }
+
+    // Try array subscript
+    if let Some(_subscript) = expr.as_array_subscript() {
+        return infer_array_subscript_type(expr, ctx);
+    }
+
+    // Try array slice
+    if let Some(_slice) = expr.as_array_slice() {
+        return infer_array_slice_type(expr, ctx);
+    }
+
+    // Try ROW constructor
+    if let Some(row) = expr.as_row_constructor() {
+        return infer_row_constructor_type(&row, ctx);
+    }
+
+    // Try struct literal
+    if let Some(struct_lit) = expr.as_struct_literal() {
+        return infer_struct_literal_type(&struct_lit, ctx);
+    }
+
+    // Try column reference (includes struct field access for qualified refs like s.field_name)
     if let Some(col_ref) = expr.as_column_ref() {
         if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name()) {
             return Some(typed_col.clone());
+        }
+        // If qualified ref didn't resolve as a column, try struct field access:
+        // treat qualifier as a column name and name as a field name
+        if let Some(qualifier) = col_ref.qualifier() {
+            if let Some(struct_col) = ctx.lookup_column(None, qualifier) {
+                if let DataType::Struct(fields) = &struct_col.data_type {
+                    let field_lower = col_ref.name().to_lowercase();
+                    for (name, dt) in fields {
+                        if name.to_lowercase() == field_lower {
+                            return Some(TypedColumn {
+                                data_type: dt.clone(),
+                                nullable: true, // Field access may be null
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -307,48 +350,84 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     infer_literal_type(&text)
 }
 
-/// Infer the type of a CAST expression
-fn infer_cast_type(cast_expr: &CastExpr) -> Option<TypedColumn> {
+/// Infer the type of a CAST expression.
+/// Preserves nullability from the input expression: if the input is non-nullable,
+/// the CAST result is also non-nullable.
+fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let type_spec = cast_expr.type_spec()?;
     let type_text = type_spec.full_text();
 
     // Parse the type specification
     let data_type = parse_type(&type_text).ok()?;
 
+    // Check if the input expression is nullable
+    let nullable = cast_expr
+        .expression()
+        .and_then(|e| infer_expression_type(&e, ctx))
+        .is_none_or(|t| t.nullable);
+
     Some(TypedColumn {
         data_type,
-        // CAST can produce NULL if the input is NULL
-        nullable: true,
+        nullable,
     })
 }
 
-/// Infer the type of a CASE expression
-/// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses)
+/// Infer the type of a CASE expression.
+/// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses).
+/// Non-nullable only when an ELSE clause is present AND all branches (THEN + ELSE) are non-nullable.
+/// Without ELSE, the implicit default is NULL, making the result always nullable.
 fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<TypedColumn> {
-    // Try to get the type from the first WHEN clause's THEN expression
+    let has_else = case_expr.else_expr().is_some();
+
+    // Collect types from all WHEN/THEN branches
+    let mut result_data_type: Option<DataType> = None;
+    let mut all_branches_non_nullable = true;
+
     for when_clause in case_expr.when_clauses() {
         if let Some(result_expr) = when_clause.result() {
             if let Some(result_type) = infer_expression_type(&result_expr, ctx) {
-                return Some(TypedColumn {
-                    data_type: result_type.data_type,
-                    // CASE is always nullable (could return NULL if no conditions match without ELSE)
-                    nullable: true,
-                });
+                if result_type.nullable {
+                    all_branches_non_nullable = false;
+                }
+                if result_data_type.is_none()
+                    && !matches!(result_type.data_type, DataType::Unknown | DataType::Null)
+                {
+                    result_data_type = Some(result_type.data_type);
+                }
+            } else {
+                all_branches_non_nullable = false;
             }
+        } else {
+            all_branches_non_nullable = false;
         }
     }
 
-    // Fall back to ELSE expression if no WHEN clauses have inferable types
+    // Check ELSE branch
     if let Some(else_expr) = case_expr.else_expr() {
         if let Some(else_type) = infer_expression_type(&else_expr, ctx) {
-            return Some(TypedColumn {
-                data_type: else_type.data_type,
-                nullable: true,
-            });
+            if else_type.nullable {
+                all_branches_non_nullable = false;
+            }
+            if result_data_type.is_none()
+                && !matches!(else_type.data_type, DataType::Unknown | DataType::Null)
+            {
+                result_data_type = Some(else_type.data_type);
+            }
+        } else {
+            all_branches_non_nullable = false;
         }
     }
 
-    None
+    let data_type = result_data_type?;
+
+    // Non-nullable only when ELSE is present and all branches are non-nullable.
+    // Without ELSE, the implicit default is NULL.
+    let nullable = !(has_else && all_branches_non_nullable);
+
+    Some(TypedColumn {
+        data_type,
+        nullable,
+    })
 }
 
 /// Infer the type of a scalar subquery
@@ -381,7 +460,7 @@ fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedCo
 ///
 /// This creates a new context that inherits from the parent context
 /// and adds any CTEs defined in the subquery's WITH clause.
-fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
+pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
     let mut ctx = parent_ctx.clone();
 
     // Process any WITH clause in this subquery
@@ -483,21 +562,51 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         }
 
         SqlFunction::Coalesce => {
-            // Try all arguments, return first concrete (non-Unknown, non-Null) type
+            // Try all arguments, return first concrete (non-Unknown, non-Null) type.
+            // COALESCE is non-nullable when at least one argument is non-nullable
+            // or is a non-null literal, because the result will always have a value.
+            let mut result_type = None;
+            let mut has_non_nullable_arg = false;
             for arg in func.arguments() {
                 if let Some(arg_type) = infer_expression_type(&arg, ctx) {
-                    if !matches!(arg_type.data_type, DataType::Unknown | DataType::Null) {
-                        return Some(TypedColumn {
-                            data_type: arg_type.data_type,
-                            nullable: true,
-                        });
+                    if !arg_type.nullable {
+                        has_non_nullable_arg = true;
+                    }
+                    if result_type.is_none()
+                        && !matches!(arg_type.data_type, DataType::Unknown | DataType::Null)
+                    {
+                        result_type = Some(arg_type.data_type.clone());
                     }
                 }
             }
-            first_arg_type_or(func, ctx, DataType::Unknown, true)
+            let data_type = result_type.unwrap_or(DataType::Unknown);
+            Some(TypedColumn {
+                data_type,
+                nullable: !has_non_nullable_arg,
+            })
         }
 
         SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::Unknown, true),
+
+        SqlFunction::Ifnull => {
+            // IFNULL(a, b) is equivalent to COALESCE(a, b).
+            // Non-nullable when either argument is non-nullable.
+            let args = func.arguments();
+            let first_type = args.first().and_then(|a| infer_expression_type(a, ctx));
+            let second_type = args.get(1).and_then(|a| infer_expression_type(a, ctx));
+            let data_type = first_type
+                .as_ref()
+                .filter(|t| !matches!(t.data_type, DataType::Unknown | DataType::Null))
+                .or(second_type.as_ref())
+                .map(|t| t.data_type.clone())
+                .unwrap_or(DataType::Unknown);
+            let has_non_nullable = first_type.as_ref().is_some_and(|t| !t.nullable)
+                || second_type.as_ref().is_some_and(|t| !t.nullable);
+            Some(TypedColumn {
+                data_type,
+                nullable: !has_non_nullable,
+            })
+        }
 
         SqlFunction::RowNumber
         | SqlFunction::Rank
@@ -820,6 +929,150 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
     }
 }
 
+/// Infer the type of an array literal (ARRAY[1, 2, 3]).
+/// All elements must have the same type; mixed-type arrays return None (error).
+/// Empty arrays return Array(Unknown).
+fn infer_array_literal_type(
+    array_lit: &smelt_parser::ArrayLiteral,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    let elements = array_lit.elements();
+
+    if elements.is_empty() {
+        return Some(TypedColumn {
+            data_type: DataType::Array(Box::new(DataType::Unknown)),
+            nullable: false,
+        });
+    }
+
+    // Infer element types
+    let mut element_typed: Option<TypedColumn> = None;
+
+    for elem in &elements {
+        if let Some(typed) = infer_expression_type(elem, ctx) {
+            match &element_typed {
+                None => {
+                    // First element sets the type (skip Null — it's compatible with anything)
+                    if typed.data_type != DataType::Null {
+                        element_typed = Some(typed);
+                    }
+                }
+                Some(existing) => {
+                    if typed.data_type == DataType::Null {
+                        // NULL is compatible with any element type
+                        continue;
+                    }
+                    if typed.data_type != existing.data_type {
+                        // Try promotion
+                        let promoted = promote_types(existing, &typed);
+                        if promoted.data_type == DataType::Unknown {
+                            // Mixed types that can't be promoted — reject
+                            return None;
+                        }
+                        element_typed = Some(promoted);
+                    }
+                }
+            }
+        } else {
+            // Can't infer element type
+            return None;
+        }
+    }
+
+    let elem_type = element_typed.map(|t| t.data_type).unwrap_or(DataType::Null);
+    Some(TypedColumn {
+        data_type: DataType::Array(Box::new(elem_type)),
+        nullable: false, // The array itself is not nullable; elements may be
+    })
+}
+
+/// Infer the type of an array subscript (arr[i]).
+/// Returns the element type of the array.
+fn infer_array_subscript_type(expr: &smelt_parser::Expr, ctx: &TypeContext) -> Option<TypedColumn> {
+    // The expr contains both the base expression and the ARRAY_SUBSCRIPT node as children.
+    // We need to find the base expression (which should be a column ref or other expr
+    // that evaluates to an array type) and extract the element type.
+
+    // Find the first child Expr that is NOT inside the ARRAY_SUBSCRIPT
+    let base_exprs: Vec<_> = expr
+        .syntax()
+        .children()
+        .filter_map(smelt_parser::Expr::cast)
+        .collect();
+
+    // The first Expr child should be the base (e.g., the column reference)
+    if let Some(base_expr) = base_exprs.first() {
+        if let Some(base_type) = infer_expression_type(base_expr, ctx) {
+            if let DataType::Array(inner) = base_type.data_type {
+                return Some(TypedColumn {
+                    data_type: *inner,
+                    nullable: true, // Array element access can always be NULL (out of bounds)
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Infer the type of an array slice (arr[start:end]).
+/// Returns the same array type as the base.
+fn infer_array_slice_type(expr: &smelt_parser::Expr, ctx: &TypeContext) -> Option<TypedColumn> {
+    // Similar to subscript — find the base expression
+    let base_exprs: Vec<_> = expr
+        .syntax()
+        .children()
+        .filter_map(smelt_parser::Expr::cast)
+        .collect();
+
+    if let Some(base_expr) = base_exprs.first() {
+        if let Some(base_type) = infer_expression_type(base_expr, ctx) {
+            if let DataType::Array(_) = &base_type.data_type {
+                return Some(TypedColumn {
+                    data_type: base_type.data_type,
+                    nullable: true, // Slice result could be NULL
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Infer the type of a ROW constructor: ROW(1, 2, 3) → Struct with positional fields.
+fn infer_row_constructor_type(row: &RowConstructor, ctx: &TypeContext) -> Option<TypedColumn> {
+    let elements = row.elements();
+    let mut fields = Vec::new();
+
+    for (i, elem) in elements.iter().enumerate() {
+        let typed = infer_expression_type(elem, ctx)?;
+        // Positional fields: v1, v2, v3, ...
+        fields.push((format!("v{}", i + 1), typed.data_type));
+    }
+
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false, // The struct itself is not nullable
+    })
+}
+
+/// Infer the type of a struct literal: STRUCT(1 AS a, 'hello' AS b) → Struct with named fields.
+fn infer_struct_literal_type(struct_lit: &StructLiteral, ctx: &TypeContext) -> Option<TypedColumn> {
+    let fields_ast = struct_lit.fields();
+    let mut fields = Vec::new();
+
+    for (i, (expr, name)) in fields_ast.iter().enumerate() {
+        let typed = infer_expression_type(expr, ctx)?;
+        let field_name = name.clone().unwrap_or_else(|| format!("v{}", i + 1));
+        fields.push((field_name, typed.data_type));
+    }
+
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false, // The struct itself is not nullable
+    })
+}
+
 /// Infer the type of a literal value
 fn infer_literal_type(text: &str) -> Option<TypedColumn> {
     let text = text.trim();
@@ -939,6 +1192,50 @@ fn infer_binary_operand(binary: &BinaryExpr, nth: usize, ctx: &TypeContext) -> O
     infer_expression_type(&expr, ctx)
 }
 
+/// Promote two numeric operands to their common widest type.
+/// Priority: Double > Float > Decimal > BigInt > Integer > SmallInt
+fn promote_numeric_operands(
+    left: Option<DataType>,
+    right: Option<DataType>,
+) -> Option<TypedColumn> {
+    match (left, right) {
+        (Some(DataType::Double), _) | (_, Some(DataType::Double)) => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+        (Some(DataType::Float), _) | (_, Some(DataType::Float)) => Some(TypedColumn {
+            data_type: DataType::Float,
+            nullable: true,
+        }),
+        (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
+            Some(TypedColumn {
+                data_type: DataType::Decimal {
+                    precision: 38,
+                    scale: 10,
+                },
+                nullable: true,
+            })
+        }
+        (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: true,
+        }),
+        (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => Some(TypedColumn {
+            data_type: DataType::Integer,
+            nullable: true,
+        }),
+        (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => Some(TypedColumn {
+            data_type: DataType::SmallInt,
+            nullable: true,
+        }),
+        (Some(l), _) => Some(TypedColumn {
+            data_type: l,
+            nullable: true,
+        }),
+        _ => None,
+    }
+}
+
 /// Infer the result type of a binary expression
 fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let op = binary.operator()?;
@@ -974,46 +1271,90 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             nullable: true,
         }),
 
-        // Arithmetic operators - promote to widest numeric type
-        "+" | "*" | "/" => {
+        // Addition — handles numeric promotion and temporal arithmetic
+        "+" => {
             let left = infer_binary_operand(binary, 0, ctx);
             let right = infer_binary_operand(binary, 1, ctx);
+            let lt = left.as_ref().map(|t| &t.data_type);
+            let rt = right.as_ref().map(|t| &t.data_type);
 
-            // Promote to widest numeric type
-            match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
-                (Some(DataType::Double), _) | (_, Some(DataType::Double)) => Some(TypedColumn {
-                    data_type: DataType::Double,
-                    nullable: true,
-                }),
-                (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
-                    Some(TypedColumn {
-                        data_type: DataType::Decimal {
-                            precision: 38,
-                            scale: 10,
+            // Temporal arithmetic for +
+            match (lt, rt) {
+                // DATE + INTERVAL → Timestamp, INTERVAL + DATE → Timestamp
+                (Some(DataType::Date), Some(DataType::Interval))
+                | (Some(DataType::Interval), Some(DataType::Date)) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Timestamp {
+                            with_timezone: false,
                         },
                         nullable: true,
-                    })
+                    });
                 }
-                (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
-                    data_type: DataType::BigInt,
-                    nullable: true,
-                }),
-                (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => Some(TypedColumn {
-                    data_type: DataType::Integer,
-                    nullable: true,
-                }),
-                (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => {
-                    Some(TypedColumn {
-                        data_type: DataType::SmallInt,
+                // TIMESTAMP + INTERVAL → Timestamp, INTERVAL + TIMESTAMP → Timestamp
+                (Some(DataType::Timestamp { with_timezone }), Some(DataType::Interval))
+                | (Some(DataType::Interval), Some(DataType::Timestamp { with_timezone })) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Timestamp {
+                            with_timezone: *with_timezone,
+                        },
                         nullable: true,
-                    })
+                    });
                 }
-                (Some(l), _) => Some(TypedColumn {
-                    data_type: l,
-                    nullable: true,
-                }),
-                _ => None,
+                // TIME + INTERVAL → Time, INTERVAL + TIME → Time
+                (Some(DataType::Time), Some(DataType::Interval))
+                | (Some(DataType::Interval), Some(DataType::Time)) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Time,
+                        nullable: true,
+                    });
+                }
+                // INTERVAL + INTERVAL → Interval
+                (Some(DataType::Interval), Some(DataType::Interval)) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Interval,
+                        nullable: true,
+                    });
+                }
+                _ => {}
             }
+
+            // Numeric promotion
+            Some(promote_numeric_operands(
+                left.map(|t| t.data_type),
+                right.map(|t| t.data_type),
+            )?)
+        }
+
+        // Multiplication, division, and modulo — handles numeric promotion and INTERVAL * numeric
+        "*" | "/" | "%" => {
+            let left = infer_binary_operand(binary, 0, ctx);
+            let right = infer_binary_operand(binary, 1, ctx);
+            let lt = left.as_ref().map(|t| &t.data_type);
+            let rt = right.as_ref().map(|t| &t.data_type);
+
+            // INTERVAL * numeric → Interval, numeric * INTERVAL → Interval
+            // INTERVAL / numeric → Interval
+            match (lt, rt) {
+                (Some(DataType::Interval), Some(r)) if r.is_numeric() => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Interval,
+                        nullable: true,
+                    });
+                }
+                (Some(l), Some(DataType::Interval)) if l.is_numeric() => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Interval,
+                        nullable: true,
+                    });
+                }
+                _ => {}
+            }
+
+            // Numeric promotion
+            Some(promote_numeric_operands(
+                left.map(|t| t.data_type),
+                right.map(|t| t.data_type),
+            )?)
         }
 
         // Minus can be binary (a - b) or unary (-a)
@@ -1046,48 +1387,72 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
                 // Binary minus: a - b
                 let left = infer_binary_operand(binary, 0, ctx);
                 let right = infer_binary_operand(binary, 1, ctx);
+                let lt = left.as_ref().map(|t| &t.data_type);
+                let rt = right.as_ref().map(|t| &t.data_type);
 
-                // Promote to widest numeric type
-                match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
-                    (Some(DataType::Double), _) | (_, Some(DataType::Double)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::Double,
+                // Temporal arithmetic for -
+                match (lt, rt) {
+                    // DATE - DATE → Interval
+                    (Some(DataType::Date), Some(DataType::Date)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
                             nullable: true,
-                        })
+                        });
                     }
-                    (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
-                        Some(TypedColumn {
-                            data_type: DataType::Decimal {
-                                precision: 38,
-                                scale: 10,
+                    // TIMESTAMP - TIMESTAMP → Interval
+                    (Some(DataType::Timestamp { .. }), Some(DataType::Timestamp { .. })) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
+                            nullable: true,
+                        });
+                    }
+                    // TIME - TIME → Interval
+                    (Some(DataType::Time), Some(DataType::Time)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
+                            nullable: true,
+                        });
+                    }
+                    // DATE - INTERVAL → Timestamp
+                    (Some(DataType::Date), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Timestamp {
+                                with_timezone: false,
                             },
                             nullable: true,
-                        })
+                        });
                     }
-                    (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::BigInt,
+                    // TIMESTAMP - INTERVAL → Timestamp
+                    (Some(DataType::Timestamp { with_timezone }), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Timestamp {
+                                with_timezone: *with_timezone,
+                            },
                             nullable: true,
-                        })
+                        });
                     }
-                    (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::Integer,
+                    // TIME - INTERVAL → Time
+                    (Some(DataType::Time), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Time,
                             nullable: true,
-                        })
+                        });
                     }
-                    (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::SmallInt,
+                    // INTERVAL - INTERVAL → Interval
+                    (Some(DataType::Interval), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
                             nullable: true,
-                        })
+                        });
                     }
-                    (Some(l), _) => Some(TypedColumn {
-                        data_type: l,
-                        nullable: true,
-                    }),
-                    _ => None,
+                    _ => {}
                 }
+
+                // Numeric promotion
+                Some(promote_numeric_operands(
+                    left.map(|t| t.data_type),
+                    right.map(|t| t.data_type),
+                )?)
             }
         }
 
@@ -1448,17 +1813,17 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
 /// - INTEGER + DOUBLE → DOUBLE
 /// - Unknown + T → T (Unknown is dominated by any known type)
 pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
-    // If either is Unknown, prefer the other
-    if matches!(t1.data_type, DataType::Unknown) {
+    // If either is Unknown or Null, prefer the other (Null makes result nullable)
+    if matches!(t1.data_type, DataType::Unknown | DataType::Null) {
         return TypedColumn {
             data_type: t2.data_type.clone(),
-            nullable: t1.nullable || t2.nullable,
+            nullable: t1.nullable || t2.nullable || matches!(t1.data_type, DataType::Null),
         };
     }
-    if matches!(t2.data_type, DataType::Unknown) {
+    if matches!(t2.data_type, DataType::Unknown | DataType::Null) {
         return TypedColumn {
             data_type: t1.data_type.clone(),
-            nullable: t1.nullable || t2.nullable,
+            nullable: t1.nullable || t2.nullable || matches!(t2.data_type, DataType::Null),
         };
     }
 
@@ -1490,51 +1855,50 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
         };
     }
 
-    // Numeric type promotion hierarchy: SmallInt < Integer < BigInt < Decimal < Double
+    // Check if both types are in the same family before cross-type promotion
+    let both_numeric = t1.data_type.is_numeric() && t2.data_type.is_numeric();
+    let both_string = t1.data_type.is_string() && t2.data_type.is_string();
+    let both_temporal = t1.data_type.is_temporal() && t2.data_type.is_temporal();
+
     let promoted_type = match (&t1.data_type, &t2.data_type) {
-        // Double dominates all numerics
-        (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
-
-        // Decimal dominates integers
-        (DataType::Decimal { precision, scale }, _)
-        | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
-            precision: *precision,
-            scale: *scale,
+        // Numeric type promotion: SmallInt < Integer < BigInt < Float < Decimal < Double
+        _ if both_numeric => match (&t1.data_type, &t2.data_type) {
+            (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
+            (DataType::Float, _) | (_, DataType::Float) => DataType::Float,
+            (DataType::Decimal { precision, scale }, _)
+            | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
+            (DataType::BigInt, _) | (_, DataType::BigInt) => DataType::BigInt,
+            (DataType::Integer, _) | (_, DataType::Integer) => DataType::Integer,
+            _ => t1.data_type.clone(),
         },
 
-        // BigInt dominates smaller integers
-        (DataType::BigInt, DataType::SmallInt | DataType::Integer)
-        | (DataType::SmallInt | DataType::Integer, DataType::BigInt) => DataType::BigInt,
+        // String type promotion: all string types → Text
+        _ if both_string => DataType::Text,
 
-        // Integer dominates SmallInt
-        (DataType::Integer, DataType::SmallInt) | (DataType::SmallInt, DataType::Integer) => {
-            DataType::Integer
-        }
-
-        // Text is a catch-all for string types
-        (DataType::Text, _) | (_, DataType::Text) => DataType::Text,
-        (DataType::Varchar { .. }, _) | (_, DataType::Varchar { .. }) => DataType::Text,
-        (DataType::Char { .. }, _) | (_, DataType::Char { .. }) => DataType::Text,
-
-        // Timestamp types - prefer timezone-aware if either has it
-        (
-            DataType::Timestamp { with_timezone: tz1 },
-            DataType::Timestamp { with_timezone: tz2 },
-        ) => DataType::Timestamp {
-            with_timezone: *tz1 || *tz2,
-        },
-        (DataType::Timestamp { with_timezone }, _) | (_, DataType::Timestamp { with_timezone }) => {
-            DataType::Timestamp {
+        // Temporal type promotion
+        _ if both_temporal => match (&t1.data_type, &t2.data_type) {
+            (
+                DataType::Timestamp { with_timezone: tz1 },
+                DataType::Timestamp { with_timezone: tz2 },
+            ) => DataType::Timestamp {
+                with_timezone: *tz1 || *tz2,
+            },
+            (DataType::Timestamp { with_timezone }, _)
+            | (_, DataType::Timestamp { with_timezone }) => DataType::Timestamp {
                 with_timezone: *with_timezone,
+            },
+            (DataType::Date, DataType::Time) | (DataType::Time, DataType::Date) => {
+                DataType::Timestamp {
+                    with_timezone: false,
+                }
             }
-        }
-        (DataType::Date, DataType::Time) | (DataType::Time, DataType::Date) => {
-            DataType::Timestamp {
-                with_timezone: false,
-            }
-        }
+            _ => DataType::Unknown,
+        },
 
-        // For incompatible types, return Unknown (could be an error in strict mode)
+        // For incompatible type families, return Unknown (could be an error in strict mode)
         _ => DataType::Unknown,
     };
 
@@ -1569,17 +1933,17 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
         }
     }
 
-    // If there's a UNION, recursively get types from the second SELECT and combine
-    if select_stmt.has_union() {
-        if let Some(union_select) = select_stmt.union_select() {
-            let union_types = infer_select_column_types(&union_select, ctx);
+    // If there's a set operation (UNION/INTERSECT/EXCEPT), recursively get types and combine
+    if select_stmt.has_set_operation() {
+        if let Some(next_select) = select_stmt.set_operation_select() {
+            let next_types = infer_select_column_types(&next_select, ctx);
 
             // Combine types - use the wider type for each column position
-            for (i, union_type) in union_types.into_iter().enumerate() {
+            for (i, next_type) in next_types.into_iter().enumerate() {
                 if i < column_types.len() {
-                    column_types[i] = promote_types(&column_types[i], &union_type);
+                    column_types[i] = promote_types(&column_types[i], &next_type);
                 }
-                // If union has more columns, they're ignored (SQL requires same column count)
+                // If next has more columns, they're ignored (SQL requires same column count)
             }
         }
     }
@@ -1905,5 +2269,704 @@ mod tests {
         // String aggregate
         let string_agg = infer_function_type_by_name("STRING_AGG", &ctx).unwrap();
         assert_eq!(string_agg.data_type, DataType::Text);
+    }
+
+    /// Parse a SQL SELECT and return the inferred types of all columns.
+    fn infer_sql(sql: &str) -> Vec<TypedColumn> {
+        infer_sql_with_ctx(sql, &TypeContext::new())
+    }
+
+    fn infer_sql_with_ctx(sql: &str, ctx: &TypeContext) -> Vec<TypedColumn> {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        let select_stmt = file.select_stmt().expect("no SelectStmt in parsed SQL");
+        infer_select_column_types(&select_stmt, ctx)
+    }
+
+    #[test]
+    fn test_coalesce_nullability() {
+        // COALESCE with a non-null literal → non-nullable
+        let types = infer_sql("SELECT COALESCE(NULL, 42)");
+        assert_eq!(types[0].data_type, DataType::SmallInt);
+        assert!(
+            !types[0].nullable,
+            "COALESCE with non-null literal should be non-nullable"
+        );
+
+        // COALESCE with all nullable columns → nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT COALESCE(a, b) FROM t",
+            &ctx,
+        );
+        assert_eq!(types[0].data_type, DataType::Integer);
+        assert!(
+            types[0].nullable,
+            "COALESCE with all nullable args should be nullable"
+        );
+
+        // COALESCE where second arg is non-nullable → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::not_null(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT COALESCE(a, b) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "COALESCE with non-nullable arg should be non-nullable"
+        );
+
+        // COALESCE with a non-null literal as fallback → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a) SELECT COALESCE(a, 0) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "COALESCE with literal fallback should be non-nullable"
+        );
+    }
+
+    #[test]
+    fn test_case_nullability() {
+        // CASE without ELSE → always nullable (implicit NULL)
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 END");
+        assert_eq!(types[0].data_type, DataType::SmallInt);
+        assert!(types[0].nullable, "CASE without ELSE should be nullable");
+
+        // CASE with ELSE, all branches non-nullable → non-nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 ELSE 0 END");
+        assert!(
+            !types[0].nullable,
+            "CASE with ELSE and non-nullable branches should be non-nullable"
+        );
+
+        // CASE with ELSE, but a branch returns NULL → nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN NULL ELSE 0 END");
+        assert!(
+            types[0].nullable,
+            "CASE with NULL branch should be nullable"
+        );
+
+        // CASE with ELSE that is NULL → nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 ELSE NULL END");
+        assert!(types[0].nullable, "CASE with NULL ELSE should be nullable");
+
+        // CASE with multiple WHEN branches, all non-nullable + ELSE → non-nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 WHEN 2 = 2 THEN 99 ELSE 0 END");
+        assert!(
+            !types[0].nullable,
+            "CASE with all non-nullable branches and ELSE should be non-nullable"
+        );
+    }
+
+    #[test]
+    fn test_cast_nullability() {
+        // CAST of non-nullable literal → non-nullable
+        let types = infer_sql("SELECT CAST(42 AS VARCHAR)");
+        assert_eq!(types[0].data_type, DataType::Varchar { max_length: None });
+        assert!(
+            !types[0].nullable,
+            "CAST of non-nullable literal should be non-nullable"
+        );
+
+        // CAST of NULL → nullable
+        let types = infer_sql("SELECT CAST(NULL AS INTEGER)");
+        assert!(types[0].nullable, "CAST of NULL should be nullable");
+
+        // CAST of non-nullable column → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "x", TypedColumn::not_null(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS x) SELECT CAST(x AS VARCHAR) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "CAST of non-nullable column should be non-nullable"
+        );
+
+        // CAST of nullable column → nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "x", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS x) SELECT CAST(x AS VARCHAR) FROM t",
+            &ctx,
+        );
+        assert!(
+            types[0].nullable,
+            "CAST of nullable column should be nullable"
+        );
+    }
+
+    #[test]
+    fn test_ifnull_nullability() {
+        // IFNULL with non-null literal fallback → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        let types =
+            infer_sql_with_ctx("WITH t AS (SELECT 1 AS a) SELECT IFNULL(a, 0) FROM t", &ctx);
+        assert_eq!(types[0].data_type, DataType::Integer);
+        assert!(
+            !types[0].nullable,
+            "IFNULL with non-null literal fallback should be non-nullable"
+        );
+
+        // IFNULL with both nullable → nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT IFNULL(a, b) FROM t",
+            &ctx,
+        );
+        assert!(
+            types[0].nullable,
+            "IFNULL with both nullable should be nullable"
+        );
+
+        // IFNULL where first arg is non-nullable → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::not_null(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT IFNULL(a, b) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "IFNULL with non-nullable first arg should be non-nullable"
+        );
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_date_interval() {
+        // DATE + INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS DATE) + INTERVAL '1' DAY");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // DATE - INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS DATE) - INTERVAL '1' DAY");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // DATE - DATE → Interval
+        let types = infer_sql("SELECT CAST('2024-01-01' AS DATE) - CAST('2024-01-02' AS DATE)");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_timestamp_interval() {
+        // TIMESTAMP + INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS TIMESTAMP) + INTERVAL '1' HOUR");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // TIMESTAMP - INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS TIMESTAMP) - INTERVAL '1' HOUR");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // TIMESTAMP - TIMESTAMP → Interval
+        let types =
+            infer_sql("SELECT CAST('2024-01-01' AS TIMESTAMP) - CAST('2024-01-02' AS TIMESTAMP)");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_interval_ops() {
+        // INTERVAL + INTERVAL → Interval
+        let types = infer_sql("SELECT INTERVAL '1' DAY + INTERVAL '2' HOUR");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // INTERVAL - INTERVAL → Interval
+        let types = infer_sql("SELECT INTERVAL '1' DAY - INTERVAL '2' HOUR");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // INTERVAL * numeric → Interval
+        let types = infer_sql("SELECT INTERVAL '1' DAY * 3");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // numeric * INTERVAL → Interval
+        let types = infer_sql("SELECT 3 * INTERVAL '1' DAY");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // INTERVAL / numeric → Interval
+        let types = infer_sql("SELECT INTERVAL '6' HOUR / 2");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_time() {
+        // TIME + INTERVAL → Time
+        let types = infer_sql("SELECT CAST('12:00:00' AS TIME) + INTERVAL '1' HOUR");
+        assert_eq!(types[0].data_type, DataType::Time);
+
+        // TIME - INTERVAL → Time
+        let types = infer_sql("SELECT CAST('12:00:00' AS TIME) - INTERVAL '1' HOUR");
+        assert_eq!(types[0].data_type, DataType::Time);
+
+        // TIME - TIME → Interval
+        let types = infer_sql("SELECT CAST('12:00:00' AS TIME) - CAST('10:00:00' AS TIME)");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_with_columns() {
+        // Test with typed columns from context
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "d", TypedColumn::not_null(DataType::Date));
+        ctx.add_cte_column(
+            "t",
+            "ts",
+            TypedColumn::not_null(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        );
+        ctx.add_cte_column("t", "i", TypedColumn::not_null(DataType::Interval));
+
+        // Column DATE + INTERVAL → Timestamp
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS d) SELECT d + INTERVAL '1' DAY FROM t",
+            &ctx,
+        );
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // Column TIMESTAMP - Column TIMESTAMP → Interval
+        let types = infer_sql_with_ctx("WITH t AS (SELECT 1 AS ts) SELECT ts - ts FROM t", &ctx);
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_promote_types_numeric_hierarchy() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // SmallInt + Integer → Integer
+        assert_eq!(
+            promote_types(&mk(DataType::SmallInt), &mk(DataType::Integer)).data_type,
+            DataType::Integer
+        );
+        // Integer + BigInt → BigInt
+        assert_eq!(
+            promote_types(&mk(DataType::Integer), &mk(DataType::BigInt)).data_type,
+            DataType::BigInt
+        );
+        // BigInt + Float → Float
+        assert_eq!(
+            promote_types(&mk(DataType::BigInt), &mk(DataType::Float)).data_type,
+            DataType::Float
+        );
+        // Float + Double → Double
+        assert_eq!(
+            promote_types(&mk(DataType::Float), &mk(DataType::Double)).data_type,
+            DataType::Double
+        );
+        // Float + Decimal → Float
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Float),
+                &mk(DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                })
+            )
+            .data_type,
+            DataType::Float
+        );
+        // Decimal + Integer → Decimal
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }),
+                &mk(DataType::Integer)
+            )
+            .data_type,
+            DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_promote_types_null_handling() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Null + Integer → Integer (nullable)
+        let result = promote_types(&mk(DataType::Null), &mk(DataType::Integer));
+        assert_eq!(result.data_type, DataType::Integer);
+        assert!(result.nullable);
+
+        // Integer + Null → Integer (nullable)
+        let result = promote_types(&mk(DataType::Integer), &mk(DataType::Null));
+        assert_eq!(result.data_type, DataType::Integer);
+        assert!(result.nullable);
+
+        // Unknown + Text → Text
+        let result = promote_types(&mk(DataType::Unknown), &mk(DataType::Text));
+        assert_eq!(result.data_type, DataType::Text);
+    }
+
+    #[test]
+    fn test_promote_types_temporal() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Date + Timestamp → Timestamp
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Date),
+                &mk(DataType::Timestamp {
+                    with_timezone: false
+                })
+            )
+            .data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // Date + Time → Timestamp
+        assert_eq!(
+            promote_types(&mk(DataType::Date), &mk(DataType::Time)).data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_promote_types_string() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Varchar + Text → Text
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Varchar {
+                    max_length: Some(10)
+                }),
+                &mk(DataType::Text)
+            )
+            .data_type,
+            DataType::Text
+        );
+
+        // Varchar + Varchar → Text (different discriminant doesn't matter, same variant)
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Varchar {
+                    max_length: Some(10)
+                }),
+                &mk(DataType::Varchar {
+                    max_length: Some(20)
+                })
+            )
+            .data_type,
+            DataType::Varchar {
+                max_length: Some(10)
+            } // same discriminant, returns first
+        );
+    }
+
+    #[test]
+    fn test_union_type_inference() {
+        // UNION of SmallInt + Integer → Integer
+        let types =
+            infer_sql("SELECT CAST(1 AS SMALLINT) AS x UNION ALL SELECT CAST(2 AS INTEGER) AS x");
+        assert_eq!(types[0].data_type, DataType::Integer);
+
+        // UNION of Integer + BigInt → BigInt
+        let types =
+            infer_sql("SELECT CAST(1 AS INTEGER) AS x UNION ALL SELECT CAST(2 AS BIGINT) AS x");
+        assert_eq!(types[0].data_type, DataType::BigInt);
+
+        // 3-way UNION: SmallInt + Integer + BigInt → BigInt
+        let types = infer_sql(
+            "SELECT CAST(1 AS SMALLINT) AS x UNION ALL SELECT CAST(2 AS INTEGER) AS x UNION ALL SELECT CAST(3 AS BIGINT) AS x"
+        );
+        assert_eq!(types[0].data_type, DataType::BigInt);
+    }
+
+    #[test]
+    fn test_intersect_except_type_inference() {
+        // INTERSECT should also promote types
+        let types =
+            infer_sql("SELECT CAST(1 AS SMALLINT) AS x INTERSECT SELECT CAST(2 AS INTEGER) AS x");
+        assert_eq!(types[0].data_type, DataType::Integer);
+
+        // EXCEPT should also promote types
+        let types =
+            infer_sql("SELECT CAST(1 AS INTEGER) AS x EXCEPT SELECT CAST(2 AS BIGINT) AS x");
+        assert_eq!(types[0].data_type, DataType::BigInt);
+    }
+
+    #[test]
+    fn test_promote_types_decimal_precision() {
+        let mk = |dt: DataType| TypedColumn {
+            data_type: dt,
+            nullable: false,
+        };
+
+        // Decimal(10,2) + Decimal(18,4) → Decimal(18,4) (takes max)
+        assert_eq!(
+            promote_types(
+                &mk(DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }),
+                &mk(DataType::Decimal {
+                    precision: 18,
+                    scale: 4
+                })
+            )
+            .data_type,
+            DataType::Decimal {
+                precision: 18,
+                scale: 4
+            }
+        );
+    }
+
+    #[test]
+    fn test_array_literal_integer() {
+        let types = infer_sql("SELECT ARRAY[1, 2, 3]");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::SmallInt))
+        );
+        assert!(!types[0].nullable, "array literal should be non-nullable");
+    }
+
+    #[test]
+    fn test_array_literal_string() {
+        let types = infer_sql("SELECT ARRAY['a', 'b', 'c']");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Text))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_empty() {
+        let types = infer_sql("SELECT ARRAY[]");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Unknown))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_with_null() {
+        // ARRAY[1, NULL, 3] — NULL is compatible, element type is SmallInt
+        let types = infer_sql("SELECT ARRAY[1, NULL, 3]");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::SmallInt))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_numeric_promotion() {
+        // ARRAY[1, 2.5] — SmallInt + Decimal should promote
+        let types = infer_sql("SELECT ARRAY[1, 100000]");
+        // 1 is SmallInt, 100000 is Integer → promoted to Integer
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Integer))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_mixed_types_rejected() {
+        // ARRAY[1, 'hello'] — Integer + Text can't be promoted → should fail inference
+        let types = infer_sql("SELECT ARRAY[1, 'hello']");
+        // Mixed types return Unknown since the array literal inference returns None
+        assert_eq!(types[0].data_type, DataType::Unknown);
+    }
+
+    #[test]
+    fn test_array_subscript_from_column() {
+        // With a column of Array(Integer) type, subscript should return Integer
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "arr",
+            TypedColumn::not_null(DataType::Array(Box::new(DataType::Integer))),
+        );
+        let types = infer_sql_with_ctx("SELECT arr[1]", &ctx);
+        assert_eq!(types[0].data_type, DataType::Integer);
+        assert!(types[0].nullable, "array element access should be nullable");
+    }
+
+    #[test]
+    fn test_array_slice_from_column() {
+        // Slice should return the same array type
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "arr",
+            TypedColumn::not_null(DataType::Array(Box::new(DataType::Integer))),
+        );
+        let types = infer_sql_with_ctx("SELECT arr[1:3]", &ctx);
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Integer))
+        );
+    }
+
+    #[test]
+    fn test_row_constructor_type() {
+        // ROW(1, 'hello', TRUE) → Struct with positional fields
+        let types = infer_sql("SELECT ROW(1, 'hello', TRUE)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("v1".to_string(), DataType::SmallInt),
+                ("v2".to_string(), DataType::Text),
+                ("v3".to_string(), DataType::Boolean),
+            ])
+        );
+        assert!(!types[0].nullable); // Struct itself is not nullable
+    }
+
+    #[test]
+    fn test_struct_literal_named_fields() {
+        // STRUCT(1 AS a, 'hello' AS b) → Struct with named fields
+        let types = infer_sql("SELECT STRUCT(1 AS a, 'hello' AS b)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::SmallInt),
+                ("b".to_string(), DataType::Text),
+            ])
+        );
+        assert!(!types[0].nullable);
+    }
+
+    #[test]
+    fn test_struct_literal_unnamed_fields() {
+        // STRUCT(1, 2, 3) without AS → positional names
+        let types = infer_sql("SELECT STRUCT(1, 2, 3)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("v1".to_string(), DataType::SmallInt),
+                ("v2".to_string(), DataType::SmallInt),
+                ("v3".to_string(), DataType::SmallInt),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_mixed_named_unnamed() {
+        // STRUCT(1 AS a, 'hello') → mix of named and positional
+        let types = infer_sql("SELECT STRUCT(1 AS a, 'hello')");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::SmallInt),
+                ("v2".to_string(), DataType::Text),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_struct_field_access() {
+        // Field access on a struct-typed column
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "s",
+            TypedColumn::not_null(DataType::Struct(vec![
+                ("name".to_string(), DataType::Text),
+                ("age".to_string(), DataType::Integer),
+            ])),
+        );
+        let types = infer_sql_with_ctx("SELECT s.name", &ctx);
+        assert_eq!(types[0].data_type, DataType::Text);
+        assert!(types[0].nullable); // Field access is nullable (struct could be null)
+    }
+
+    #[test]
+    fn test_struct_field_access_case_insensitive() {
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "s",
+            TypedColumn::not_null(DataType::Struct(vec![("Name".to_string(), DataType::Text)])),
+        );
+        let types = infer_sql_with_ctx("SELECT s.name", &ctx);
+        assert_eq!(types[0].data_type, DataType::Text);
+    }
+
+    #[test]
+    fn test_struct_display() {
+        let dt = DataType::Struct(vec![
+            ("a".to_string(), DataType::Integer),
+            ("b".to_string(), DataType::Text),
+        ]);
+        assert_eq!(dt.to_sql(), "STRUCT(a INTEGER, b TEXT)");
+    }
+
+    #[test]
+    fn test_modulo_operator() {
+        // Integer % Integer → Integer
+        let types = infer_sql("SELECT 10 % 3");
+        assert_eq!(types[0].data_type, DataType::SmallInt);
+
+        // CAST to explicit types
+        let types = infer_sql("SELECT CAST(10 AS INTEGER) % CAST(3 AS INTEGER)");
+        assert_eq!(types[0].data_type, DataType::Integer);
+
+        // BigInt % Integer → BigInt (promotion)
+        let types = infer_sql("SELECT CAST(10 AS BIGINT) % CAST(3 AS INTEGER)");
+        assert_eq!(types[0].data_type, DataType::BigInt);
+
+        // Double % Double → Double
+        let types = infer_sql("SELECT CAST(10.5 AS DOUBLE) % CAST(3.0 AS DOUBLE)");
+        assert_eq!(types[0].data_type, DataType::Double);
     }
 }

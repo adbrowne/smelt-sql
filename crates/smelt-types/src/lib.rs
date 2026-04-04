@@ -59,9 +59,11 @@ pub enum DataType {
     /// Time interval
     Interval,
 
-    // Complex types (future expansion)
+    // Complex types
     /// Array of elements
     Array(Box<DataType>),
+    /// Struct with named fields: STRUCT(a INTEGER, b VARCHAR)
+    Struct(Vec<(String, DataType)>),
 
     // Special types
     /// NULL literal type
@@ -145,6 +147,13 @@ impl DataType {
             }
             DataType::Interval => "INTERVAL".to_string(),
             DataType::Array(inner) => format!("{}[]", inner.to_sql()),
+            DataType::Struct(fields) => {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, dt)| format!("{} {}", name, dt.to_sql()))
+                    .collect();
+                format!("STRUCT({})", field_strs.join(", "))
+            }
             DataType::Null => "NULL".to_string(),
             DataType::Unknown => "UNKNOWN".to_string(),
         }

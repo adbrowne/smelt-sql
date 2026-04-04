@@ -153,6 +153,34 @@ impl SelectStmt {
         }
         None
     }
+
+    /// Check if this SELECT has any set operation (UNION, INTERSECT, or EXCEPT)
+    pub fn has_set_operation(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
+    }
+
+    /// Get the SELECT statement after any set operation (UNION, INTERSECT, or EXCEPT)
+    pub fn set_operation_select(&self) -> Option<SelectStmt> {
+        let mut found_set_op = false;
+
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if matches!(token.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW) {
+                    found_set_op = true;
+                }
+            } else if found_set_op {
+                if let Some(n) = child.as_node() {
+                    if n.kind() == SELECT_STMT {
+                        return SelectStmt::cast(n.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// SELECT list (columns)
@@ -710,6 +738,46 @@ impl Expr {
             .or_else(|| BinaryExpr::cast(self.0.clone()))
     }
 
+    /// Check if this is an array literal (ARRAY[1, 2, 3])
+    pub fn as_array_literal(&self) -> Option<ArrayLiteral> {
+        self.0
+            .children()
+            .find_map(ArrayLiteral::cast)
+            .or_else(|| ArrayLiteral::cast(self.0.clone()))
+    }
+
+    /// Check if this contains an array subscript (expr[index])
+    pub fn as_array_subscript(&self) -> Option<ArraySubscript> {
+        self.0
+            .children()
+            .find_map(ArraySubscript::cast)
+            .or_else(|| ArraySubscript::cast(self.0.clone()))
+    }
+
+    /// Check if this contains an array slice (expr[start:end])
+    pub fn as_array_slice(&self) -> Option<ArraySlice> {
+        self.0
+            .children()
+            .find_map(ArraySlice::cast)
+            .or_else(|| ArraySlice::cast(self.0.clone()))
+    }
+
+    /// Check if this is a ROW constructor (ROW(1, 2, 3))
+    pub fn as_row_constructor(&self) -> Option<RowConstructor> {
+        self.0
+            .children()
+            .find_map(RowConstructor::cast)
+            .or_else(|| RowConstructor::cast(self.0.clone()))
+    }
+
+    /// Check if this is a struct literal (STRUCT(1 AS a, 'hello' AS b))
+    pub fn as_struct_literal(&self) -> Option<StructLiteral> {
+        self.0
+            .children()
+            .find_map(StructLiteral::cast)
+            .or_else(|| StructLiteral::cast(self.0.clone()))
+    }
+
     /// Check if this expression has a window specification (OVER clause)
     pub fn window_spec(&self) -> Option<WindowSpec> {
         self.0.children().find_map(WindowSpec::cast)
@@ -806,6 +874,7 @@ impl BinaryExpr {
                     MINUS => return Some("-".to_string()),
                     STAR | MULTIPLY => return Some("*".to_string()),
                     DIVIDE => return Some("/".to_string()),
+                    PERCENT => return Some("%".to_string()),
                     EQ => return Some("=".to_string()),
                     NE => return Some("<>".to_string()),
                     LT => return Some("<".to_string()),
@@ -994,6 +1063,25 @@ impl FilterClause {
     }
 }
 
+/// Array literal: ARRAY[1, 2, 3]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayLiteral(SyntaxNode);
+
+impl ArrayLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARRAY_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get all element expressions in the array literal
+    pub fn elements(&self) -> Vec<Expr> {
+        self.0.children().filter_map(Expr::cast).collect()
+    }
+}
+
 /// Array subscript: expr[index]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArraySubscript(SyntaxNode);
@@ -1032,6 +1120,82 @@ impl ArraySlice {
     pub fn end(&self) -> Option<Expr> {
         // Get the second expression (after the colon)
         self.0.children().filter_map(Expr::cast).nth(1)
+    }
+}
+
+/// ROW constructor: ROW(1, 2, 3)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowConstructor(SyntaxNode);
+
+impl RowConstructor {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_CONSTRUCTOR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get all element expressions in the ROW constructor
+    pub fn elements(&self) -> Vec<Expr> {
+        self.0.children().filter_map(Expr::cast).collect()
+    }
+}
+
+/// Struct literal: STRUCT(1 AS a, 'hello' AS b)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructLiteral(SyntaxNode);
+
+impl StructLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get field expressions and their optional names.
+    /// Returns (expression, optional_name) pairs.
+    pub fn fields(&self) -> Vec<(Expr, Option<String>)> {
+        let mut result = Vec::new();
+        let mut current_expr: Option<Expr> = None;
+
+        for child in self.0.children_with_tokens() {
+            match child {
+                rowan::NodeOrToken::Node(node) => {
+                    if let Some(expr) = Expr::cast(node) {
+                        // If we had a previous expression without a name, push it
+                        if let Some(prev) = current_expr.take() {
+                            result.push((prev, None));
+                        }
+                        current_expr = Some(expr);
+                    }
+                }
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == AS_KW {
+                        // Next IDENT token is the field name
+                        continue;
+                    }
+                    if token.kind() == IDENT {
+                        if let Some(expr) = current_expr.take() {
+                            result.push((expr, Some(token.text().to_string())));
+                        }
+                    }
+                    if token.kind() == COMMA {
+                        // Flush any pending unnamed expression
+                        if let Some(expr) = current_expr.take() {
+                            result.push((expr, None));
+                        }
+                    }
+                }
+            }
+        }
+        // Flush last expression
+        if let Some(expr) = current_expr.take() {
+            result.push((expr, None));
+        }
+        result
     }
 }
 
