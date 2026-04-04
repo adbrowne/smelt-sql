@@ -249,7 +249,7 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try CAST expression first
     if let Some(cast_expr) = expr.as_cast() {
-        return infer_cast_type(&cast_expr);
+        return infer_cast_type(&cast_expr, ctx);
     }
 
     // Try CASE expression
@@ -307,48 +307,84 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     infer_literal_type(&text)
 }
 
-/// Infer the type of a CAST expression
-fn infer_cast_type(cast_expr: &CastExpr) -> Option<TypedColumn> {
+/// Infer the type of a CAST expression.
+/// Preserves nullability from the input expression: if the input is non-nullable,
+/// the CAST result is also non-nullable.
+fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let type_spec = cast_expr.type_spec()?;
     let type_text = type_spec.full_text();
 
     // Parse the type specification
     let data_type = parse_type(&type_text).ok()?;
 
+    // Check if the input expression is nullable
+    let nullable = cast_expr
+        .expression()
+        .and_then(|e| infer_expression_type(&e, ctx))
+        .is_none_or(|t| t.nullable);
+
     Some(TypedColumn {
         data_type,
-        // CAST can produce NULL if the input is NULL
-        nullable: true,
+        nullable,
     })
 }
 
-/// Infer the type of a CASE expression
-/// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses)
+/// Infer the type of a CASE expression.
+/// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses).
+/// Non-nullable only when an ELSE clause is present AND all branches (THEN + ELSE) are non-nullable.
+/// Without ELSE, the implicit default is NULL, making the result always nullable.
 fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<TypedColumn> {
-    // Try to get the type from the first WHEN clause's THEN expression
+    let has_else = case_expr.else_expr().is_some();
+
+    // Collect types from all WHEN/THEN branches
+    let mut result_data_type: Option<DataType> = None;
+    let mut all_branches_non_nullable = true;
+
     for when_clause in case_expr.when_clauses() {
         if let Some(result_expr) = when_clause.result() {
             if let Some(result_type) = infer_expression_type(&result_expr, ctx) {
-                return Some(TypedColumn {
-                    data_type: result_type.data_type,
-                    // CASE is always nullable (could return NULL if no conditions match without ELSE)
-                    nullable: true,
-                });
+                if result_type.nullable {
+                    all_branches_non_nullable = false;
+                }
+                if result_data_type.is_none()
+                    && !matches!(result_type.data_type, DataType::Unknown | DataType::Null)
+                {
+                    result_data_type = Some(result_type.data_type);
+                }
+            } else {
+                all_branches_non_nullable = false;
             }
+        } else {
+            all_branches_non_nullable = false;
         }
     }
 
-    // Fall back to ELSE expression if no WHEN clauses have inferable types
+    // Check ELSE branch
     if let Some(else_expr) = case_expr.else_expr() {
         if let Some(else_type) = infer_expression_type(&else_expr, ctx) {
-            return Some(TypedColumn {
-                data_type: else_type.data_type,
-                nullable: true,
-            });
+            if else_type.nullable {
+                all_branches_non_nullable = false;
+            }
+            if result_data_type.is_none()
+                && !matches!(else_type.data_type, DataType::Unknown | DataType::Null)
+            {
+                result_data_type = Some(else_type.data_type);
+            }
+        } else {
+            all_branches_non_nullable = false;
         }
     }
 
-    None
+    let data_type = result_data_type?;
+
+    // Non-nullable only when ELSE is present and all branches are non-nullable.
+    // Without ELSE, the implicit default is NULL.
+    let nullable = !(has_else && all_branches_non_nullable);
+
+    Some(TypedColumn {
+        data_type,
+        nullable,
+    })
 }
 
 /// Infer the type of a scalar subquery
@@ -483,21 +519,51 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         }
 
         SqlFunction::Coalesce => {
-            // Try all arguments, return first concrete (non-Unknown, non-Null) type
+            // Try all arguments, return first concrete (non-Unknown, non-Null) type.
+            // COALESCE is non-nullable when at least one argument is non-nullable
+            // or is a non-null literal, because the result will always have a value.
+            let mut result_type = None;
+            let mut has_non_nullable_arg = false;
             for arg in func.arguments() {
                 if let Some(arg_type) = infer_expression_type(&arg, ctx) {
-                    if !matches!(arg_type.data_type, DataType::Unknown | DataType::Null) {
-                        return Some(TypedColumn {
-                            data_type: arg_type.data_type,
-                            nullable: true,
-                        });
+                    if !arg_type.nullable {
+                        has_non_nullable_arg = true;
+                    }
+                    if result_type.is_none()
+                        && !matches!(arg_type.data_type, DataType::Unknown | DataType::Null)
+                    {
+                        result_type = Some(arg_type.data_type.clone());
                     }
                 }
             }
-            first_arg_type_or(func, ctx, DataType::Unknown, true)
+            let data_type = result_type.unwrap_or(DataType::Unknown);
+            Some(TypedColumn {
+                data_type,
+                nullable: !has_non_nullable_arg,
+            })
         }
 
         SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::Unknown, true),
+
+        SqlFunction::Ifnull => {
+            // IFNULL(a, b) is equivalent to COALESCE(a, b).
+            // Non-nullable when either argument is non-nullable.
+            let args = func.arguments();
+            let first_type = args.first().and_then(|a| infer_expression_type(a, ctx));
+            let second_type = args.get(1).and_then(|a| infer_expression_type(a, ctx));
+            let data_type = first_type
+                .as_ref()
+                .filter(|t| !matches!(t.data_type, DataType::Unknown | DataType::Null))
+                .or(second_type.as_ref())
+                .map(|t| t.data_type.clone())
+                .unwrap_or(DataType::Unknown);
+            let has_non_nullable = first_type.as_ref().is_some_and(|t| !t.nullable)
+                || second_type.as_ref().is_some_and(|t| !t.nullable);
+            Some(TypedColumn {
+                data_type,
+                nullable: !has_non_nullable,
+            })
+        }
 
         SqlFunction::RowNumber
         | SqlFunction::Rank
@@ -1883,5 +1949,181 @@ mod tests {
         // String aggregate
         let string_agg = infer_function_type_by_name("STRING_AGG", &ctx).unwrap();
         assert_eq!(string_agg.data_type, DataType::Text);
+    }
+
+    /// Parse a SQL SELECT and return the inferred types of all columns.
+    fn infer_sql(sql: &str) -> Vec<TypedColumn> {
+        infer_sql_with_ctx(sql, &TypeContext::new())
+    }
+
+    fn infer_sql_with_ctx(sql: &str, ctx: &TypeContext) -> Vec<TypedColumn> {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        let select_stmt = file.select_stmt().expect("no SelectStmt in parsed SQL");
+        infer_select_column_types(&select_stmt, ctx)
+    }
+
+    #[test]
+    fn test_coalesce_nullability() {
+        // COALESCE with a non-null literal → non-nullable
+        let types = infer_sql("SELECT COALESCE(NULL, 42)");
+        assert_eq!(types[0].data_type, DataType::SmallInt);
+        assert!(
+            !types[0].nullable,
+            "COALESCE with non-null literal should be non-nullable"
+        );
+
+        // COALESCE with all nullable columns → nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT COALESCE(a, b) FROM t",
+            &ctx,
+        );
+        assert_eq!(types[0].data_type, DataType::Integer);
+        assert!(
+            types[0].nullable,
+            "COALESCE with all nullable args should be nullable"
+        );
+
+        // COALESCE where second arg is non-nullable → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::not_null(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT COALESCE(a, b) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "COALESCE with non-nullable arg should be non-nullable"
+        );
+
+        // COALESCE with a non-null literal as fallback → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a) SELECT COALESCE(a, 0) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "COALESCE with literal fallback should be non-nullable"
+        );
+    }
+
+    #[test]
+    fn test_case_nullability() {
+        // CASE without ELSE → always nullable (implicit NULL)
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 END");
+        assert_eq!(types[0].data_type, DataType::SmallInt);
+        assert!(types[0].nullable, "CASE without ELSE should be nullable");
+
+        // CASE with ELSE, all branches non-nullable → non-nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 ELSE 0 END");
+        assert!(
+            !types[0].nullable,
+            "CASE with ELSE and non-nullable branches should be non-nullable"
+        );
+
+        // CASE with ELSE, but a branch returns NULL → nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN NULL ELSE 0 END");
+        assert!(
+            types[0].nullable,
+            "CASE with NULL branch should be nullable"
+        );
+
+        // CASE with ELSE that is NULL → nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 ELSE NULL END");
+        assert!(types[0].nullable, "CASE with NULL ELSE should be nullable");
+
+        // CASE with multiple WHEN branches, all non-nullable + ELSE → non-nullable
+        let types = infer_sql("SELECT CASE WHEN 1 = 1 THEN 42 WHEN 2 = 2 THEN 99 ELSE 0 END");
+        assert!(
+            !types[0].nullable,
+            "CASE with all non-nullable branches and ELSE should be non-nullable"
+        );
+    }
+
+    #[test]
+    fn test_cast_nullability() {
+        // CAST of non-nullable literal → non-nullable
+        let types = infer_sql("SELECT CAST(42 AS VARCHAR)");
+        assert_eq!(types[0].data_type, DataType::Varchar { max_length: None });
+        assert!(
+            !types[0].nullable,
+            "CAST of non-nullable literal should be non-nullable"
+        );
+
+        // CAST of NULL → nullable
+        let types = infer_sql("SELECT CAST(NULL AS INTEGER)");
+        assert!(types[0].nullable, "CAST of NULL should be nullable");
+
+        // CAST of non-nullable column → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "x", TypedColumn::not_null(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS x) SELECT CAST(x AS VARCHAR) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "CAST of non-nullable column should be non-nullable"
+        );
+
+        // CAST of nullable column → nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "x", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS x) SELECT CAST(x AS VARCHAR) FROM t",
+            &ctx,
+        );
+        assert!(
+            types[0].nullable,
+            "CAST of nullable column should be nullable"
+        );
+    }
+
+    #[test]
+    fn test_ifnull_nullability() {
+        // IFNULL with non-null literal fallback → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        let types =
+            infer_sql_with_ctx("WITH t AS (SELECT 1 AS a) SELECT IFNULL(a, 0) FROM t", &ctx);
+        assert_eq!(types[0].data_type, DataType::Integer);
+        assert!(
+            !types[0].nullable,
+            "IFNULL with non-null literal fallback should be non-nullable"
+        );
+
+        // IFNULL with both nullable → nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT IFNULL(a, b) FROM t",
+            &ctx,
+        );
+        assert!(
+            types[0].nullable,
+            "IFNULL with both nullable should be nullable"
+        );
+
+        // IFNULL where first arg is non-nullable → non-nullable
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "a", TypedColumn::not_null(DataType::Integer));
+        ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT IFNULL(a, b) FROM t",
+            &ctx,
+        );
+        assert!(
+            !types[0].nullable,
+            "IFNULL with non-nullable first arg should be non-nullable"
+        );
     }
 }

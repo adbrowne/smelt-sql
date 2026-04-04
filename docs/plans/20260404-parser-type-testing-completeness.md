@@ -51,19 +51,19 @@
 
 ---
 
-## Phase 3: COALESCE/CASE Nullability Precision `[ ]`
+## Phase 3: COALESCE/CASE Nullability Precision `[x]`
 
 **Priority**: Medium — doesn't cause runtime errors but weakens type guarantees.
 
 **Goal**: Fix over-nullability in `type_inference.rs` for COALESCE, CASE with ELSE, and CAST.
 
 **Work**:
-- [ ] COALESCE: non-nullable when at least one arg is non-nullable or a non-null literal
-- [ ] CASE WHEN ... ELSE: non-nullable when ELSE present AND all branches non-nullable
-- [ ] CAST of non-nullable expr to non-nullable type: preserve non-nullable
-- [ ] IFNULL/NVL: same as COALESCE with 2 args
-- [ ] Add unit tests for each case in type inference tests
-- [ ] Verify existing tests still pass
+- [x] COALESCE: non-nullable when at least one arg is non-nullable or a non-null literal
+- [x] CASE WHEN ... ELSE: non-nullable when ELSE present AND all branches non-nullable
+- [x] CAST of non-nullable expr to non-nullable type: preserve non-nullable
+- [x] IFNULL/NVL: same as COALESCE with 2 args
+- [x] Add unit tests for each case in type inference tests
+- [x] Verify existing tests still pass
 
 **Verification**: `cargo test -p smelt-db` passes, new nullability unit tests pass
 
@@ -293,3 +293,19 @@ Each Claude Code session records what it accomplished here.
 - Registered 5 new divergences in `divergences.rs` for DuckDB's non-truncating division behavior.
 
 **Decisions**: See Decisions Log entries 1-3.
+
+### Session 3 — 2026-04-04
+
+**Phase**: 3 (COALESCE/CASE Nullability Precision)
+**Status**: Complete
+
+**What was done**:
+- Fixed COALESCE nullability: now returns non-nullable when at least one argument is non-nullable or a non-null literal. Previously always returned `nullable: true`.
+- Fixed CASE WHEN nullability: now returns non-nullable when an ELSE clause is present AND all branches (THEN + ELSE) are non-nullable. Without ELSE, remains nullable (implicit NULL default).
+- Fixed CAST nullability: now preserves the input expression's nullability. Previously always returned `nullable: true`.
+- Added `Ifnull` variant to `SqlFunction` enum with `NVL` as a dialect alias. IFNULL uses the same nullability logic as COALESCE (non-nullable when either arg is non-nullable).
+- Added 4 new unit tests (16 assertions total): `test_coalesce_nullability`, `test_case_nullability`, `test_cast_nullability`, `test_ifnull_nullability`.
+- Added `infer_sql` and `infer_sql_with_ctx` test helpers for parsing SQL and running type inference in tests.
+- All 101 lib tests pass, zero clippy warnings.
+
+**Decisions**: None — straightforward implementation of well-defined nullability rules.
