@@ -1,19 +1,18 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use smelt_backend::Backend;
-use smelt_core::metadata::{yaml_value_to_sql_literal, ModelMetadata};
+use smelt_core::metadata::ModelMetadata;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::schema_tracking::{
     diff_schemas, plan_migration, DeployedColumn, DeployedSchema, MigrationAction,
 };
 use std::collections::HashMap;
-use tracing::warn;
 
 /// Extract column default values and backfill expressions from model metadata.
 ///
 /// Returns `(column_defaults, backfill_exprs)` where:
-/// - `column_defaults` maps column name → SQL literal (from `default:` in frontmatter)
+/// - `column_defaults` maps column name → SQL expression string (from `default:` in frontmatter)
 /// - `backfill_exprs` maps column name → SQL expression (from `backfill:` in frontmatter)
 pub fn extract_evolution_maps(
     metadata: Option<&ModelMetadata>,
@@ -27,13 +26,7 @@ pub fn extract_evolution_maps(
                     col_meta
                         .default
                         .as_ref()
-                        .and_then(|v| match yaml_value_to_sql_literal(v) {
-                            Ok(sql) => Some((name.clone(), sql)),
-                            Err(e) => {
-                                warn!("Column '{}': {} — ignoring default", name, e);
-                                None
-                            }
-                        })
+                        .map(|expr| (name.clone(), expr.clone()))
                 })
                 .collect();
             let backfills: HashMap<String, String> = m

@@ -661,26 +661,27 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 9: `default:` as SQL Expression String [ ]
+## Phase 9: `default:` as SQL Expression String [x]
 
 **Goal:** Breaking change — `default:` in column metadata becomes a raw SQL expression string instead of a YAML value converted to SQL.
 
 ### Work Items
 
-- [ ] 9a. Change `ColumnMetadata.default` from `Option<serde_yaml::Value>` to `Option<String>` in `smelt-core/src/metadata.rs`.
-- [ ] 9b. Remove `yaml_value_to_sql_literal()` function (no longer needed).
-- [ ] 9c. Update `extract_evolution_maps()` in `smelt-cli/src/migration.rs` to pass through the string directly instead of calling `yaml_value_to_sql_literal()`.
-- [ ] 9d. Update all tests that use `default:` in frontmatter:
+- [x] 9a. Change `ColumnMetadata.default` from `Option<serde_yaml::Value>` to `Option<String>` in `smelt-core/src/metadata.rs`.
+- [x] 9b. Remove `yaml_value_to_sql_literal()` function (no longer needed).
+- [x] 9c. Update `extract_evolution_maps()` in `smelt-cli/src/migration.rs` to pass through the string directly instead of calling `yaml_value_to_sql_literal()`.
+- [x] 9d. Update all tests that use `default:` in frontmatter:
   - `default: 0` → `default: "0"`
   - `default: unknown` → `default: "'unknown'"`
   - `default: true` → `default: "TRUE"`
   - `default: null` → `default: "NULL"`
-- [ ] 9e. Add tests for complex type defaults:
+- [x] 9e. Add tests for complex type defaults:
   - `default: "STRUCT_PACK(status := 'unknown', count := 0)"`
   - `default: "[]::VARCHAR[]"`
   - `default: "MAP {}"`
   - `default: "ARRAY[1, 2, 3]"`
-- [ ] 9f. Update existing schema evolution tests in `smelt-cli/tests/incremental/schema_evolution.rs`.
+- [x] 9f. Update existing schema evolution tests in `smelt-cli/tests/incremental/schema_evolution.rs`.
+  *No changes needed — integration tests don't use `default:` in frontmatter.*
 
 ### Red-Green Tests
 
@@ -1108,3 +1109,19 @@ cargo test -p smelt-cli --test example_diagnostics
 
 **Decisions:**
 - Array-of-struct detection uses `path.iter().any(|p| p == "element")` — the "element" sentinel in the path signals that we're navigating through an array element, matching the convention established by `diff_types()` in Phase 3.
+
+### Session 9 — 2026-04-05
+
+**Phase completed:** Phase 9 (`default:` as SQL Expression String)
+
+**What was done:**
+- Changed `ColumnMetadata.default` from `Option<serde_yaml::Value>` to `Option<String>` in `smelt-core/src/metadata.rs`
+- Removed `yaml_value_to_sql_literal()` function and its test — no longer needed since defaults are raw SQL expression strings
+- Simplified `extract_evolution_maps()` in `smelt-cli/src/migration.rs` — now passes through the string directly instead of converting from YAML values. Removed `yaml_value_to_sql_literal` import and unused `tracing::warn` import
+- Updated `test_frontmatter_with_column_default` test: `default: unknown` → `default: "'unknown'"`, `default: 0` → `default: "0"`, assertions check string directly instead of going through `yaml_value_to_sql_literal()`
+- Added `test_frontmatter_with_complex_type_defaults` test covering: `STRUCT_PACK(...)`, `[]::VARCHAR[]`, `MAP {}`, `ARRAY[1, 2, 3]`, `TRUE`, `NULL`
+- No changes needed to `smelt-cli/tests/incremental/schema_evolution.rs` — integration tests don't use `default:` in frontmatter
+- All 95 smelt-core tests pass (excluding pre-existing python_models failures), all smelt-state/smelt-cli tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- This is a breaking change for anyone using unquoted YAML values in `default:` (e.g., `default: 0` would now be parsed as the string `"0"` by serde, which is actually the desired behavior — it's now a SQL expression passed through directly). The old `default: unknown` (unquoted YAML string) would now be `"unknown"` (a SQL identifier) rather than `"'unknown'"` (a SQL string literal). Users must explicitly quote: `default: "'unknown'"`.

@@ -422,9 +422,7 @@ fn print_json(entries: &[ModelDiffEntry]) {
                         ("requires_column_removal_flag", vec![])
                     }
                     MigrationAction::TableRewrite { .. } => ("table_rewrite", vec![]),
-                    MigrationAction::FullRefreshBlocked { .. } => {
-                        ("full_refresh_blocked", vec![])
-                    }
+                    MigrationAction::FullRefreshBlocked { .. } => ("full_refresh_blocked", vec![]),
                 };
 
                 Some(json!({
