@@ -762,6 +762,22 @@ impl Expr {
             .or_else(|| ArraySlice::cast(self.0.clone()))
     }
 
+    /// Check if this is a ROW constructor (ROW(1, 2, 3))
+    pub fn as_row_constructor(&self) -> Option<RowConstructor> {
+        self.0
+            .children()
+            .find_map(RowConstructor::cast)
+            .or_else(|| RowConstructor::cast(self.0.clone()))
+    }
+
+    /// Check if this is a struct literal (STRUCT(1 AS a, 'hello' AS b))
+    pub fn as_struct_literal(&self) -> Option<StructLiteral> {
+        self.0
+            .children()
+            .find_map(StructLiteral::cast)
+            .or_else(|| StructLiteral::cast(self.0.clone()))
+    }
+
     /// Check if this expression has a window specification (OVER clause)
     pub fn window_spec(&self) -> Option<WindowSpec> {
         self.0.children().find_map(WindowSpec::cast)
@@ -1103,6 +1119,82 @@ impl ArraySlice {
     pub fn end(&self) -> Option<Expr> {
         // Get the second expression (after the colon)
         self.0.children().filter_map(Expr::cast).nth(1)
+    }
+}
+
+/// ROW constructor: ROW(1, 2, 3)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowConstructor(SyntaxNode);
+
+impl RowConstructor {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_CONSTRUCTOR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get all element expressions in the ROW constructor
+    pub fn elements(&self) -> Vec<Expr> {
+        self.0.children().filter_map(Expr::cast).collect()
+    }
+}
+
+/// Struct literal: STRUCT(1 AS a, 'hello' AS b)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructLiteral(SyntaxNode);
+
+impl StructLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get field expressions and their optional names.
+    /// Returns (expression, optional_name) pairs.
+    pub fn fields(&self) -> Vec<(Expr, Option<String>)> {
+        let mut result = Vec::new();
+        let mut current_expr: Option<Expr> = None;
+
+        for child in self.0.children_with_tokens() {
+            match child {
+                rowan::NodeOrToken::Node(node) => {
+                    if let Some(expr) = Expr::cast(node) {
+                        // If we had a previous expression without a name, push it
+                        if let Some(prev) = current_expr.take() {
+                            result.push((prev, None));
+                        }
+                        current_expr = Some(expr);
+                    }
+                }
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == AS_KW {
+                        // Next IDENT token is the field name
+                        continue;
+                    }
+                    if token.kind() == IDENT {
+                        if let Some(expr) = current_expr.take() {
+                            result.push((expr, Some(token.text().to_string())));
+                        }
+                    }
+                    if token.kind() == COMMA {
+                        // Flush any pending unnamed expression
+                        if let Some(expr) = current_expr.take() {
+                            result.push((expr, None));
+                        }
+                    }
+                }
+            }
+        }
+        // Flush last expression
+        if let Some(expr) = current_expr.take() {
+            result.push((expr, None));
+        }
+        result
     }
 }
 

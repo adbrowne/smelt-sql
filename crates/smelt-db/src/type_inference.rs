@@ -4,7 +4,8 @@
 /// including literals, column references, CAST expressions, and aggregates.
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, SelectStmt, Subquery,
+    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, RowConstructor, SelectStmt,
+    StructLiteral, Subquery,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -311,10 +312,37 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_array_slice_type(expr, ctx);
     }
 
-    // Try column reference
+    // Try ROW constructor
+    if let Some(row) = expr.as_row_constructor() {
+        return infer_row_constructor_type(&row, ctx);
+    }
+
+    // Try struct literal
+    if let Some(struct_lit) = expr.as_struct_literal() {
+        return infer_struct_literal_type(&struct_lit, ctx);
+    }
+
+    // Try column reference (includes struct field access for qualified refs like s.field_name)
     if let Some(col_ref) = expr.as_column_ref() {
         if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name()) {
             return Some(typed_col.clone());
+        }
+        // If qualified ref didn't resolve as a column, try struct field access:
+        // treat qualifier as a column name and name as a field name
+        if let Some(qualifier) = col_ref.qualifier() {
+            if let Some(struct_col) = ctx.lookup_column(None, qualifier) {
+                if let DataType::Struct(fields) = &struct_col.data_type {
+                    let field_lower = col_ref.name().to_lowercase();
+                    for (name, dt) in fields {
+                        if name.to_lowercase() == field_lower {
+                            return Some(TypedColumn {
+                                data_type: dt.clone(),
+                                nullable: true, // Field access may be null
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1009,6 +1037,40 @@ fn infer_array_slice_type(expr: &smelt_parser::Expr, ctx: &TypeContext) -> Optio
     }
 
     None
+}
+
+/// Infer the type of a ROW constructor: ROW(1, 2, 3) → Struct with positional fields.
+fn infer_row_constructor_type(row: &RowConstructor, ctx: &TypeContext) -> Option<TypedColumn> {
+    let elements = row.elements();
+    let mut fields = Vec::new();
+
+    for (i, elem) in elements.iter().enumerate() {
+        let typed = infer_expression_type(elem, ctx)?;
+        // Positional fields: v1, v2, v3, ...
+        fields.push((format!("v{}", i + 1), typed.data_type));
+    }
+
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false, // The struct itself is not nullable
+    })
+}
+
+/// Infer the type of a struct literal: STRUCT(1 AS a, 'hello' AS b) → Struct with named fields.
+fn infer_struct_literal_type(struct_lit: &StructLiteral, ctx: &TypeContext) -> Option<TypedColumn> {
+    let fields_ast = struct_lit.fields();
+    let mut fields = Vec::new();
+
+    for (i, (expr, name)) in fields_ast.iter().enumerate() {
+        let typed = infer_expression_type(expr, ctx)?;
+        let field_name = name.clone().unwrap_or_else(|| format!("v{}", i + 1));
+        fields.push((field_name, typed.data_type));
+    }
+
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false, // The struct itself is not nullable
+    })
 }
 
 /// Infer the type of a literal value
@@ -2793,5 +2855,99 @@ mod tests {
             types[0].data_type,
             DataType::Array(Box::new(DataType::Integer))
         );
+    }
+
+    #[test]
+    fn test_row_constructor_type() {
+        // ROW(1, 'hello', TRUE) → Struct with positional fields
+        let types = infer_sql("SELECT ROW(1, 'hello', TRUE)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("v1".to_string(), DataType::SmallInt),
+                ("v2".to_string(), DataType::Text),
+                ("v3".to_string(), DataType::Boolean),
+            ])
+        );
+        assert!(!types[0].nullable); // Struct itself is not nullable
+    }
+
+    #[test]
+    fn test_struct_literal_named_fields() {
+        // STRUCT(1 AS a, 'hello' AS b) → Struct with named fields
+        let types = infer_sql("SELECT STRUCT(1 AS a, 'hello' AS b)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::SmallInt),
+                ("b".to_string(), DataType::Text),
+            ])
+        );
+        assert!(!types[0].nullable);
+    }
+
+    #[test]
+    fn test_struct_literal_unnamed_fields() {
+        // STRUCT(1, 2, 3) without AS → positional names
+        let types = infer_sql("SELECT STRUCT(1, 2, 3)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("v1".to_string(), DataType::SmallInt),
+                ("v2".to_string(), DataType::SmallInt),
+                ("v3".to_string(), DataType::SmallInt),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_mixed_named_unnamed() {
+        // STRUCT(1 AS a, 'hello') → mix of named and positional
+        let types = infer_sql("SELECT STRUCT(1 AS a, 'hello')");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::SmallInt),
+                ("v2".to_string(), DataType::Text),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_struct_field_access() {
+        // Field access on a struct-typed column
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "s",
+            TypedColumn::not_null(DataType::Struct(vec![
+                ("name".to_string(), DataType::Text),
+                ("age".to_string(), DataType::Integer),
+            ])),
+        );
+        let types = infer_sql_with_ctx("SELECT s.name", &ctx);
+        assert_eq!(types[0].data_type, DataType::Text);
+        assert!(types[0].nullable); // Field access is nullable (struct could be null)
+    }
+
+    #[test]
+    fn test_struct_field_access_case_insensitive() {
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "s",
+            TypedColumn::not_null(DataType::Struct(vec![("Name".to_string(), DataType::Text)])),
+        );
+        let types = infer_sql_with_ctx("SELECT s.name", &ctx);
+        assert_eq!(types[0].data_type, DataType::Text);
+    }
+
+    #[test]
+    fn test_struct_display() {
+        let dt = DataType::Struct(vec![
+            ("a".to_string(), DataType::Integer),
+            ("b".to_string(), DataType::Text),
+        ]);
+        assert_eq!(dt.to_sql(), "STRUCT(a INTEGER, b TEXT)");
     }
 }
