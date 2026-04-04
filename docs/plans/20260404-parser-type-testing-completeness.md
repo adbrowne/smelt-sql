@@ -203,7 +203,30 @@
 
 ---
 
-## Phase 12: Type Semantics Documentation `[ ]`
+## Phase 12: Struct Type Inference `[ ]`
+
+**Priority**: Medium — parser already handles ROW/STRUCT syntax but type inference returns Unknown.
+
+**Goal**: Add `Struct` variant to `DataType`, implement type inference for struct literals and field access.
+
+**Context**: The parser already parses `ROW(1, 2, 3)` → `ROW_CONSTRUCTOR` and `STRUCT(1 AS a, 'hello' AS b)` → `STRUCT_LITERAL` syntax nodes. But there's no `Struct` DataType variant and type inference ignores these nodes entirely.
+
+**Work**:
+- [ ] Add `Struct(Vec<(String, DataType)>)` variant to `DataType` enum in `crates/smelt-types/src/lib.rs`
+- [ ] Handle `ROW_CONSTRUCTOR` in type inference — infer field types positionally (unnamed fields)
+- [ ] Handle `STRUCT_LITERAL` in type inference — infer named field types from `expr AS name`
+- [ ] Implement struct field access via dot notation (e.g., `s.field`) in type inference
+- [ ] Add `Display`/serialization support for the new Struct variant
+- [ ] Add unit tests for struct literal type inference
+- [ ] Add unit tests for struct field access type inference
+- [ ] Validate struct type inference against DuckDB for sample expressions
+- [ ] Update proptest generators to include struct expressions (optional — can be a follow-up)
+
+**Verification**: `cargo test -p smelt-db` passes, struct literals and field access infer correct types
+
+---
+
+## Phase 13: Type Semantics Documentation `[ ]`
 
 **Priority**: Low — documentation only, no code changes.
 
@@ -217,6 +240,7 @@
 - [ ] UNION type promotion rules
 - [ ] Temporal arithmetic rules
 - [ ] Array type rules
+- [ ] Struct type rules and field access semantics
 
 **Verification**: File exists and is accurate
 
