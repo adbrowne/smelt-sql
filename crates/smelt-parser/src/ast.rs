@@ -738,6 +738,30 @@ impl Expr {
             .or_else(|| BinaryExpr::cast(self.0.clone()))
     }
 
+    /// Check if this is an array literal (ARRAY[1, 2, 3])
+    pub fn as_array_literal(&self) -> Option<ArrayLiteral> {
+        self.0
+            .children()
+            .find_map(ArrayLiteral::cast)
+            .or_else(|| ArrayLiteral::cast(self.0.clone()))
+    }
+
+    /// Check if this contains an array subscript (expr[index])
+    pub fn as_array_subscript(&self) -> Option<ArraySubscript> {
+        self.0
+            .children()
+            .find_map(ArraySubscript::cast)
+            .or_else(|| ArraySubscript::cast(self.0.clone()))
+    }
+
+    /// Check if this contains an array slice (expr[start:end])
+    pub fn as_array_slice(&self) -> Option<ArraySlice> {
+        self.0
+            .children()
+            .find_map(ArraySlice::cast)
+            .or_else(|| ArraySlice::cast(self.0.clone()))
+    }
+
     /// Check if this expression has a window specification (OVER clause)
     pub fn window_spec(&self) -> Option<WindowSpec> {
         self.0.children().find_map(WindowSpec::cast)
@@ -1019,6 +1043,25 @@ impl FilterClause {
     /// Get the filter condition expression
     pub fn expression(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+}
+
+/// Array literal: ARRAY[1, 2, 3]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayLiteral(SyntaxNode);
+
+impl ArrayLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARRAY_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get all element expressions in the array literal
+    pub fn elements(&self) -> Vec<Expr> {
+        self.0.children().filter_map(Expr::cast).collect()
     }
 }
 

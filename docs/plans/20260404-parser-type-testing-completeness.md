@@ -190,18 +190,18 @@
 
 ---
 
-## Phase 11: Array Element Type Inference `[ ]`
+## Phase 11: Array Element Type Inference `[x]`
 
 **Priority**: Low — array subscript returns Unknown currently.
 
 **Goal**: Infer element type for array subscripts and reject mixed-type array literals.
 
 **Work**:
-- [ ] Array literal `[1, 2, 3]` → Array(Integer), infer element type
-- [ ] Array subscript `arr[i]` → element type of arr
-- [ ] Mixed-type array literal → diagnostic error
-- [ ] Empty `ARRAY[]` → Array(Unknown) with warning
-- [ ] Add unit tests
+- [x] Array literal `[1, 2, 3]` → Array(Integer), infer element type
+- [x] Array subscript `arr[i]` → element type of arr
+- [x] Mixed-type array literal → diagnostic error
+- [x] Empty `ARRAY[]` → Array(Unknown) with warning
+- [x] Add unit tests
 
 **Verification**: `cargo test -p smelt-db` passes
 
@@ -441,3 +441,24 @@ Each Claude Code session records what it accomplished here.
 - All 47 tests pass, zero clippy warnings.
 
 **Decisions**: None — subquery type inference was already correctly implemented (scalar → first column type always nullable, IN → Boolean nullable, EXISTS → Boolean non-nullable). No code changes needed, only test additions.
+
+### Session 11 — 2026-04-04
+
+**Phase**: 11 (Array Element Type Inference)
+**Status**: Complete
+
+**What was done**:
+- Added `ArrayLiteral` AST wrapper struct with `elements()` method to `ast.rs`
+- Added `as_array_literal()`, `as_array_subscript()`, `as_array_slice()` methods to `Expr` in `ast.rs`
+- Implemented `infer_array_literal_type()` in `type_inference.rs`:
+  - Infers element type from all elements, uses `promote_types()` for compatible but different types
+  - Returns `None` (→ Unknown) for mixed-type arrays that can't be promoted (e.g., Integer + Text)
+  - Returns `Array(Unknown)` for empty `ARRAY[]`
+  - Handles NULL elements (compatible with any element type)
+  - Array literal itself is non-nullable
+- Implemented `infer_array_subscript_type()`: extracts element type from Array base, always nullable (out-of-bounds possible)
+- Implemented `infer_array_slice_type()`: returns same Array type as base, nullable
+- Added 8 unit tests: integer/string/empty/with-null/numeric-promotion/mixed-types-rejected/subscript/slice
+- All 121 lib tests pass, zero clippy warnings.
+
+**Decisions**: None — straightforward implementation. `DataType::Array(Box<DataType>)` variant already existed in smelt-types.

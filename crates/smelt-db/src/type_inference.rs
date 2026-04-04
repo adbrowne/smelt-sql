@@ -296,6 +296,21 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         });
     }
 
+    // Try array literal
+    if let Some(array_lit) = expr.as_array_literal() {
+        return infer_array_literal_type(&array_lit, ctx);
+    }
+
+    // Try array subscript
+    if let Some(_subscript) = expr.as_array_subscript() {
+        return infer_array_subscript_type(expr, ctx);
+    }
+
+    // Try array slice
+    if let Some(_slice) = expr.as_array_slice() {
+        return infer_array_slice_type(expr, ctx);
+    }
+
     // Try column reference
     if let Some(col_ref) = expr.as_column_ref() {
         if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name()) {
@@ -884,6 +899,116 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
             first_arg_type_or(func, ctx, DataType::BigInt, true)
         }
     }
+}
+
+/// Infer the type of an array literal (ARRAY[1, 2, 3]).
+/// All elements must have the same type; mixed-type arrays return None (error).
+/// Empty arrays return Array(Unknown).
+fn infer_array_literal_type(
+    array_lit: &smelt_parser::ArrayLiteral,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    let elements = array_lit.elements();
+
+    if elements.is_empty() {
+        return Some(TypedColumn {
+            data_type: DataType::Array(Box::new(DataType::Unknown)),
+            nullable: false,
+        });
+    }
+
+    // Infer element types
+    let mut element_typed: Option<TypedColumn> = None;
+
+    for elem in &elements {
+        if let Some(typed) = infer_expression_type(elem, ctx) {
+            match &element_typed {
+                None => {
+                    // First element sets the type (skip Null — it's compatible with anything)
+                    if typed.data_type != DataType::Null {
+                        element_typed = Some(typed);
+                    }
+                }
+                Some(existing) => {
+                    if typed.data_type == DataType::Null {
+                        // NULL is compatible with any element type
+                        continue;
+                    }
+                    if typed.data_type != existing.data_type {
+                        // Try promotion
+                        let promoted = promote_types(existing, &typed);
+                        if promoted.data_type == DataType::Unknown {
+                            // Mixed types that can't be promoted — reject
+                            return None;
+                        }
+                        element_typed = Some(promoted);
+                    }
+                }
+            }
+        } else {
+            // Can't infer element type
+            return None;
+        }
+    }
+
+    let elem_type = element_typed.map(|t| t.data_type).unwrap_or(DataType::Null);
+    Some(TypedColumn {
+        data_type: DataType::Array(Box::new(elem_type)),
+        nullable: false, // The array itself is not nullable; elements may be
+    })
+}
+
+/// Infer the type of an array subscript (arr[i]).
+/// Returns the element type of the array.
+fn infer_array_subscript_type(expr: &smelt_parser::Expr, ctx: &TypeContext) -> Option<TypedColumn> {
+    // The expr contains both the base expression and the ARRAY_SUBSCRIPT node as children.
+    // We need to find the base expression (which should be a column ref or other expr
+    // that evaluates to an array type) and extract the element type.
+
+    // Find the first child Expr that is NOT inside the ARRAY_SUBSCRIPT
+    let base_exprs: Vec<_> = expr
+        .syntax()
+        .children()
+        .filter_map(smelt_parser::Expr::cast)
+        .collect();
+
+    // The first Expr child should be the base (e.g., the column reference)
+    if let Some(base_expr) = base_exprs.first() {
+        if let Some(base_type) = infer_expression_type(base_expr, ctx) {
+            if let DataType::Array(inner) = base_type.data_type {
+                return Some(TypedColumn {
+                    data_type: *inner,
+                    nullable: true, // Array element access can always be NULL (out of bounds)
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Infer the type of an array slice (arr[start:end]).
+/// Returns the same array type as the base.
+fn infer_array_slice_type(expr: &smelt_parser::Expr, ctx: &TypeContext) -> Option<TypedColumn> {
+    // Similar to subscript — find the base expression
+    let base_exprs: Vec<_> = expr
+        .syntax()
+        .children()
+        .filter_map(smelt_parser::Expr::cast)
+        .collect();
+
+    if let Some(base_expr) = base_exprs.first() {
+        if let Some(base_type) = infer_expression_type(base_expr, ctx) {
+            if let DataType::Array(_) = &base_type.data_type {
+                return Some(TypedColumn {
+                    data_type: base_type.data_type,
+                    nullable: true, // Slice result could be NULL
+                });
+            }
+        }
+    }
+
+    None
 }
 
 /// Infer the type of a literal value
@@ -2580,6 +2705,93 @@ mod tests {
                 precision: 18,
                 scale: 4
             }
+        );
+    }
+
+    #[test]
+    fn test_array_literal_integer() {
+        let types = infer_sql("SELECT ARRAY[1, 2, 3]");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::SmallInt))
+        );
+        assert!(!types[0].nullable, "array literal should be non-nullable");
+    }
+
+    #[test]
+    fn test_array_literal_string() {
+        let types = infer_sql("SELECT ARRAY['a', 'b', 'c']");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Text))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_empty() {
+        let types = infer_sql("SELECT ARRAY[]");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Unknown))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_with_null() {
+        // ARRAY[1, NULL, 3] — NULL is compatible, element type is SmallInt
+        let types = infer_sql("SELECT ARRAY[1, NULL, 3]");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::SmallInt))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_numeric_promotion() {
+        // ARRAY[1, 2.5] — SmallInt + Decimal should promote
+        let types = infer_sql("SELECT ARRAY[1, 100000]");
+        // 1 is SmallInt, 100000 is Integer → promoted to Integer
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Integer))
+        );
+    }
+
+    #[test]
+    fn test_array_literal_mixed_types_rejected() {
+        // ARRAY[1, 'hello'] — Integer + Text can't be promoted → should fail inference
+        let types = infer_sql("SELECT ARRAY[1, 'hello']");
+        // Mixed types return Unknown since the array literal inference returns None
+        assert_eq!(types[0].data_type, DataType::Unknown);
+    }
+
+    #[test]
+    fn test_array_subscript_from_column() {
+        // With a column of Array(Integer) type, subscript should return Integer
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "arr",
+            TypedColumn::not_null(DataType::Array(Box::new(DataType::Integer))),
+        );
+        let types = infer_sql_with_ctx("SELECT arr[1]", &ctx);
+        assert_eq!(types[0].data_type, DataType::Integer);
+        assert!(types[0].nullable, "array element access should be nullable");
+    }
+
+    #[test]
+    fn test_array_slice_from_column() {
+        // Slice should return the same array type
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "arr",
+            TypedColumn::not_null(DataType::Array(Box::new(DataType::Integer))),
+        );
+        let types = infer_sql_with_ctx("SELECT arr[1:3]", &ctx);
+        assert_eq!(
+            types[0].data_type,
+            DataType::Array(Box::new(DataType::Integer))
         );
     }
 }
