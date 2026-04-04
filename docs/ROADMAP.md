@@ -6,7 +6,35 @@ The **What's Next** section below is the prioritized work queue. Component secti
 
 ## What's Next
 
-### ~~1. Code Quality & Hardening~~ ✅ (March 28, 2026)
+The items below are the current priority queue. See completed items in [Recently Completed](#recently-completed) below.
+
+### 1. Metrics DSL
+
+Layer 1 of smelt's two-layer DSL: declarative metric definitions with semantic metadata (decomposability, temporal behavior). Resolves `smelt.metric()` calls.
+
+### 2. `smelt validate` — Pre-run Validation
+
+Static validation pass that catches issues before execution: schema compatibility across models, incremental config consistency, backend capability checks.
+
+### 3. PostgreSQL Backend
+
+Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
+
+### 4. Orchestrator Integration
+
+Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
+
+---
+
+## Recently Completed
+
+### ~~LSP Goto-Definition & Column Diagnostics~~ ✅ (April 3-4, 2026)
+
+Major LSP expansion: goto-definition now covers sources, CTEs, columns, and qualified references. Undeclared column reference diagnostics added. Python model LSP integration with real `ProjectContext`. Multiple stability fixes.
+
+See [LSP & Editor Support](#lsp--editor-support) below for full details.
+
+### ~~Code Quality & Hardening~~ ✅ (March 28, 2026)
 
 All four sub-items completed:
 - ✅ Snapshot tests: 30 `insta` tests for `smelt-dialect` covering all dialect rewrite paths
@@ -16,11 +44,11 @@ All four sub-items completed:
 
 See [Code Quality & Hardening](#code-quality--hardening) below for details.
 
-### ~~1. Data Testing Framework — `smelt test`~~ ✅ (March 27, 2026)
+### ~~Data Testing Framework — `smelt test`~~ ✅ (March 27, 2026)
 
 Fully implemented. See [Data Testing Framework](#data-testing-framework) below for details.
 
-### ~~1. Data Catalog — `smelt docs generate`~~ ✅ (March 29, 2026)
+### ~~Data Catalog — `smelt docs generate`~~ ✅ (March 29, 2026)
 
 Static data catalog / data dictionary generation. Outputs Markdown (default) or JSON.
 
@@ -33,7 +61,7 @@ Static data catalog / data dictionary generation. Outputs Markdown (default) or 
 
 See [plan](plans/20260329-docs-generate.md) for details.
 
-### ~~1. Schema Diff — `smelt diff`~~ ✅ (March 29, 2026)
+### ~~Schema Diff — `smelt diff`~~ ✅ (March 29, 2026)
 
 Offline schema change detection. Compares inferred model schemas (from SQL parsing/type inference) against deployed schemas (`.smelt/schemas/`) without requiring a database connection.
 
@@ -45,7 +73,7 @@ Offline schema change detection. Compares inferred model schemas (from SQL parsi
 - ✅ Removed model detection (deployed schema exists but model deleted from code)
 - ✅ Per-model target resolution (works with multi-backend projects)
 
-### ~~1. Schema Evolution~~ ✅ (March 29, 2026)
+### ~~Schema Evolution~~ ✅ (March 30, 2026)
 
 Efficient schema migrations using ALTER TABLE + DEFAULT values instead of full table refresh.
 
@@ -55,7 +83,7 @@ Efficient schema migrations using ALTER TABLE + DEFAULT values instead of full t
 - ✅ Nullable-to-NOT-NULL with default — `UPDATE ... WHERE IS NULL` + `ALTER SET NOT NULL`
 - ✅ `smelt diff` shows migration plan with defaults (ALTER with DEFAULT instead of full refresh)
 
-### ~~1. Spark / Databricks Backend~~ 🔄 (March 28, 2026)
+### ~~Spark / Databricks Backend~~ ✅ (March 28, 2026)
 
 Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are now functional, connecting to Spark through PySpark's SparkSession.
 
@@ -126,17 +154,21 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 ## Language & Parser
 
-**Current state**: Full SQL parser with error recovery (Rowan CST), covering SELECT, FROM, JOIN (all types), WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, CTEs, window functions, set operations, subqueries, QUALIFY, PIVOT/UNPIVOT, lambda expressions, array/struct/JSON literals, and all standard operators.
+**Current state**: Full SQL parser with error recovery (Rowan CST), covering SELECT, FROM, JOIN (all types), WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, CTEs, window functions, set operations, subqueries, QUALIFY, lambda expressions, array/struct/JSON literals, and all standard operators.
 
 - smelt extensions: `smelt.ref()`, `smelt.metric()`, `smelt.source()` with `=>` named parameters
 - Trailing commas in SELECT/GROUP BY
 - YAML frontmatter for model configuration
 - Python model support via `@model` decorator (subprocess + optional PyO3)
 - Multi-dialect superset: PostgreSQL base with DuckDB and Spark features
+- PIVOT/UNPIVOT: rejected with diagnostic error (not yet supported, March 31, 2026)
+- Parser structural assertion tests and AST accessor bug fixes (April 3, 2026)
+- Fixed bare-token problem and implicit alias detection (April 3, 2026)
 
 **Next steps**:
 - Metrics DSL (Layer 1 — declarative metric definitions, `smelt.metric()` resolution)
 - `smelt.param()` for parameterized models
+- PIVOT/UNPIVOT support (currently rejected with diagnostic)
 
 ## Type System
 
@@ -196,15 +228,28 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 **Current state**: Full LSP server (`smelt-lsp`) with Salsa incremental compilation:
 
-- Diagnostics: parse errors, undefined refs, type errors (with accurate positions)
-- Go-to-definition for `smelt.ref()` and `smelt.source()`
+- Diagnostics: parse errors, undefined refs, type errors, undeclared column references (with accurate positions)
+- Go-to-definition for `smelt.ref()`, `smelt.source()`, CTEs, columns, and qualified references (e.g., `t.column`)
+- CTE wildcard tracing (`SELECT *` through CTE chains)
 - Hover with type information and model schemas
 - Completions: model names, column names, table alias columns
-- Python model awareness (valid ref targets, execution error diagnostics)
+- Python model awareness: real `ProjectContext` passed to Python models in LSP, valid ref targets, execution error diagnostics
+- `sources.yml` live reload (changes update LSP without restart)
+- Salsa cycle recovery prevents LSP crashes from circular model references
 - VSCode extension with syntax highlighting and auto-activation
+- CI verification: example workspaces checked for zero LSP diagnostics
+
+**Recent** (April 3-4, 2026):
+- ✅ Expanded goto-definition to sources, CTEs, columns, and qualified references
+- ✅ CTE wildcard tracing for `SELECT *` column resolution
+- ✅ Diagnostics for undeclared column references
+- ✅ Python model LSP integration: real `ProjectContext` enables cross-boundary type inference
+- ✅ Fixed LSP crash from Salsa cycle detection during memo validation
+- ✅ Fixed `sources.yml` changes not updating LSP until reload
+- ✅ Fixed 35 LSP diagnostics across example workspaces + CI verification gate
+- ✅ Fixed Python model `E2BIG` error on large projects and PyO3 `dict_items` extraction
 
 **Next steps**:
-- LSP Python model integration: execute Python models and register their generated SQL in the Salsa DB so type inference and diagnostics work across Python→SQL model boundaries (currently only CLI commands do this; the LSP doesn't run Python discovery)
 - Dialect-specific informational hints ("QUALIFY will be rewritten for PostgreSQL")
 - Optimizer opportunity suggestions as code actions
 - Rename refactoring across models
@@ -254,11 +299,16 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 ## Ecosystem
 
-**Recent** (March 25-28, 2026):
+**Recent** (March 25 – April 4, 2026):
 - ✅ Documentation site for smeltsql.com (MkDocs Material, 15+ pages covering all features)
 - ✅ Frontmatter validation with `deny_unknown_fields` (catches typos like `materialized:` vs `materialization:`)
 - ✅ Multi-model file discovery with `ModelId` (`--- name: model_name ---` delimiters)
 - ✅ Testing documentation: guide, CLI reference, and project structure docs
+- ✅ ACE-FCA workflow: slash commands, tutorial, and artifact directories for structured development (March 31, 2026)
+- ✅ SQL dialect analysis report: confirmed multi-dialect superset approach is sound (March 30-31, 2026)
+- ✅ System DuckDB as default build mode — faster builds, no bundled C++ compilation (April 3, 2026)
+- ✅ CI verification: example workspaces checked for zero LSP diagnostics (April 3, 2026)
+- ✅ CI release builds fixed for bundled-duckdb feature (April 4, 2026)
 
 **Next steps**:
 - Pre-built binaries via GitHub Releases (dev-release.yml workflow exists)
@@ -273,8 +323,6 @@ Items here are interesting design problems without committed timelines.
 - **External models in the graph**: Non-smelt models (e.g., PySpark jobs, legacy pipelines) as first-class DAG participants. User-annotated output schema and temporal behavior (partition column, granularity). Configurable execution: smelt-triggered (command/webhook) or externally-managed. Enables gradual migration and mixed-technology pipelines. Smelt's backbuild range computation would account for these models' declared temporal mappings. Declaration format needs design work.
 - **Virtual environments / plan-apply workflow**: Compare schemas across dev/prod without materializing; require approval before execution. Interesting state management problem — smelt's logical/physical graph split could enable lightweight virtual environments.
 - **OpenLineage / column-level lineage**: Export model and column-level lineage in OpenLineage format for catalog integration (DataHub, Amundsen, Atlan). Internal lineage tracking partially exists — interesting graph analysis problem.
-- **Metrics DSL**: Declarative metric definitions with semantic metadata (decomposability, temporal behavior)
-- **Schema evolution**: Efficient migrations when model definitions change (ALTER TABLE + selective backfill)
 - **Substrait integration**: Portable plan representation, DataFusion interop
 - **Reusable SQL patterns**: dbt solves SQL reuse with Jinja macros, which smelt deliberately avoids. The problem is real — common patterns like date spine generation, surrogate key hashing, and standard metric calculations get copy-pasted across models. No clear solution yet. Possible directions: parameterized SQL includes, a lightweight macro system that doesn't compromise the parser, leveraging Python models as generators, or something entirely different. Open design problem.
 - **Learning from history**: Use run statistics to suggest optimizations

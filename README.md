@@ -51,15 +51,19 @@ smelt run --dry-run --verbose
 
 ## Current Status
 
-**Phase 1 Complete (December 2025)**: YAML frontmatter metadata support
-- ✅ Single-model files with frontmatter
-- ✅ Multi-model files with section delimiters
-- ✅ SQL-first configuration precedence
-- ✅ Full backward compatibility
+**Active development** — see [docs/ROADMAP.md](docs/ROADMAP.md) for full details.
 
-**Phases 1-9 Complete (December 2024)**: Parser, LSP, CLI with multi-backend support (DuckDB + Spark stub), and basic incremental materialization.
+**CLI** (April 2026): Full pipeline — `smelt run`, `backbuild`, `test`, `explain`, `diff`, `docs generate`, `status`, `history`. Two-stage graph architecture (LogicalGraph → PhysicalGraph) with planner transformations.
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for implementation status.
+**Backends**: DuckDB (full), Spark/Databricks via PySpark/PyO3 (full), per-model backend routing, cross-engine data exchange via Parquet.
+
+**LSP** (April 2026): Diagnostics (parse errors, undefined refs, type errors, undeclared columns), goto-definition (refs, sources, CTEs, columns), hover types, completions, Python model awareness. VSCode extension included.
+
+**Type System**: Full inference with property-based testing against DuckDB and Spark. Cross-model schema propagation, NULL tracking, row polymorphism.
+
+**Data Testing**: CTE isolation, whole-model, singular, property-based, and column-level data quality tests (`not_null`, `unique`, `accepted_values`, `min`, `max`).
+
+**Incremental**: DELETE+INSERT, MERGE, APPEND, INSERT OVERWRITE. Temporal dependency inference, batch safety analysis, DAG-aware backfill, schema evolution with ALTER TABLE.
 
 ## Documentation
 
