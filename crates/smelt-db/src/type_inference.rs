@@ -1084,12 +1084,86 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             nullable: true,
         }),
 
-        // Arithmetic operators - promote to widest numeric type
-        "+" | "*" | "/" => {
+        // Addition — handles numeric promotion and temporal arithmetic
+        "+" => {
             let left = infer_binary_operand(binary, 0, ctx);
             let right = infer_binary_operand(binary, 1, ctx);
+            let lt = left.as_ref().map(|t| &t.data_type);
+            let rt = right.as_ref().map(|t| &t.data_type);
 
-            // Promote to widest numeric type: Double > Float > Decimal > BigInt > Integer > SmallInt
+            // Temporal arithmetic for +
+            match (lt, rt) {
+                // DATE + INTERVAL → Timestamp, INTERVAL + DATE → Timestamp
+                (Some(DataType::Date), Some(DataType::Interval))
+                | (Some(DataType::Interval), Some(DataType::Date)) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Timestamp {
+                            with_timezone: false,
+                        },
+                        nullable: true,
+                    });
+                }
+                // TIMESTAMP + INTERVAL → Timestamp, INTERVAL + TIMESTAMP → Timestamp
+                (Some(DataType::Timestamp { with_timezone }), Some(DataType::Interval))
+                | (Some(DataType::Interval), Some(DataType::Timestamp { with_timezone })) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Timestamp {
+                            with_timezone: *with_timezone,
+                        },
+                        nullable: true,
+                    });
+                }
+                // TIME + INTERVAL → Time, INTERVAL + TIME → Time
+                (Some(DataType::Time), Some(DataType::Interval))
+                | (Some(DataType::Interval), Some(DataType::Time)) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Time,
+                        nullable: true,
+                    });
+                }
+                // INTERVAL + INTERVAL → Interval
+                (Some(DataType::Interval), Some(DataType::Interval)) => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Interval,
+                        nullable: true,
+                    });
+                }
+                _ => {}
+            }
+
+            // Numeric promotion
+            Some(promote_numeric_operands(
+                left.map(|t| t.data_type),
+                right.map(|t| t.data_type),
+            )?)
+        }
+
+        // Multiplication and division — handles numeric promotion and INTERVAL * numeric
+        "*" | "/" => {
+            let left = infer_binary_operand(binary, 0, ctx);
+            let right = infer_binary_operand(binary, 1, ctx);
+            let lt = left.as_ref().map(|t| &t.data_type);
+            let rt = right.as_ref().map(|t| &t.data_type);
+
+            // INTERVAL * numeric → Interval, numeric * INTERVAL → Interval
+            // INTERVAL / numeric → Interval
+            match (lt, rt) {
+                (Some(DataType::Interval), Some(r)) if r.is_numeric() => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Interval,
+                        nullable: true,
+                    });
+                }
+                (Some(l), Some(DataType::Interval)) if l.is_numeric() => {
+                    return Some(TypedColumn {
+                        data_type: DataType::Interval,
+                        nullable: true,
+                    });
+                }
+                _ => {}
+            }
+
+            // Numeric promotion
             Some(promote_numeric_operands(
                 left.map(|t| t.data_type),
                 right.map(|t| t.data_type),
@@ -1126,8 +1200,68 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
                 // Binary minus: a - b
                 let left = infer_binary_operand(binary, 0, ctx);
                 let right = infer_binary_operand(binary, 1, ctx);
+                let lt = left.as_ref().map(|t| &t.data_type);
+                let rt = right.as_ref().map(|t| &t.data_type);
 
-                // Promote to widest numeric type: Double > Float > Decimal > BigInt > Integer > SmallInt
+                // Temporal arithmetic for -
+                match (lt, rt) {
+                    // DATE - DATE → Interval
+                    (Some(DataType::Date), Some(DataType::Date)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
+                            nullable: true,
+                        });
+                    }
+                    // TIMESTAMP - TIMESTAMP → Interval
+                    (Some(DataType::Timestamp { .. }), Some(DataType::Timestamp { .. })) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
+                            nullable: true,
+                        });
+                    }
+                    // TIME - TIME → Interval
+                    (Some(DataType::Time), Some(DataType::Time)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
+                            nullable: true,
+                        });
+                    }
+                    // DATE - INTERVAL → Timestamp
+                    (Some(DataType::Date), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Timestamp {
+                                with_timezone: false,
+                            },
+                            nullable: true,
+                        });
+                    }
+                    // TIMESTAMP - INTERVAL → Timestamp
+                    (Some(DataType::Timestamp { with_timezone }), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Timestamp {
+                                with_timezone: *with_timezone,
+                            },
+                            nullable: true,
+                        });
+                    }
+                    // TIME - INTERVAL → Time
+                    (Some(DataType::Time), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Time,
+                            nullable: true,
+                        });
+                    }
+                    // INTERVAL - INTERVAL → Interval
+                    (Some(DataType::Interval), Some(DataType::Interval)) => {
+                        return Some(TypedColumn {
+                            data_type: DataType::Interval,
+                            nullable: true,
+                        });
+                    }
+                    _ => {}
+                }
+
+                // Numeric promotion
                 Some(promote_numeric_operands(
                     left.map(|t| t.data_type),
                     right.map(|t| t.data_type),
@@ -2125,5 +2259,125 @@ mod tests {
             !types[0].nullable,
             "IFNULL with non-nullable first arg should be non-nullable"
         );
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_date_interval() {
+        // DATE + INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS DATE) + INTERVAL '1' DAY");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // DATE - INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS DATE) - INTERVAL '1' DAY");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // DATE - DATE → Interval
+        let types = infer_sql("SELECT CAST('2024-01-01' AS DATE) - CAST('2024-01-02' AS DATE)");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_timestamp_interval() {
+        // TIMESTAMP + INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS TIMESTAMP) + INTERVAL '1' HOUR");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // TIMESTAMP - INTERVAL → Timestamp
+        let types = infer_sql("SELECT CAST('2024-01-01' AS TIMESTAMP) - INTERVAL '1' HOUR");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // TIMESTAMP - TIMESTAMP → Interval
+        let types =
+            infer_sql("SELECT CAST('2024-01-01' AS TIMESTAMP) - CAST('2024-01-02' AS TIMESTAMP)");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_interval_ops() {
+        // INTERVAL + INTERVAL → Interval
+        let types = infer_sql("SELECT INTERVAL '1' DAY + INTERVAL '2' HOUR");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // INTERVAL - INTERVAL → Interval
+        let types = infer_sql("SELECT INTERVAL '1' DAY - INTERVAL '2' HOUR");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // INTERVAL * numeric → Interval
+        let types = infer_sql("SELECT INTERVAL '1' DAY * 3");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // numeric * INTERVAL → Interval
+        let types = infer_sql("SELECT 3 * INTERVAL '1' DAY");
+        assert_eq!(types[0].data_type, DataType::Interval);
+
+        // INTERVAL / numeric → Interval
+        let types = infer_sql("SELECT INTERVAL '6' HOUR / 2");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_time() {
+        // TIME + INTERVAL → Time
+        let types = infer_sql("SELECT CAST('12:00:00' AS TIME) + INTERVAL '1' HOUR");
+        assert_eq!(types[0].data_type, DataType::Time);
+
+        // TIME - INTERVAL → Time
+        let types = infer_sql("SELECT CAST('12:00:00' AS TIME) - INTERVAL '1' HOUR");
+        assert_eq!(types[0].data_type, DataType::Time);
+
+        // TIME - TIME → Interval
+        let types = infer_sql("SELECT CAST('12:00:00' AS TIME) - CAST('10:00:00' AS TIME)");
+        assert_eq!(types[0].data_type, DataType::Interval);
+    }
+
+    #[test]
+    fn test_temporal_arithmetic_with_columns() {
+        // Test with typed columns from context
+        let mut ctx = TypeContext::new();
+        ctx.add_cte_column("t", "d", TypedColumn::not_null(DataType::Date));
+        ctx.add_cte_column(
+            "t",
+            "ts",
+            TypedColumn::not_null(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        );
+        ctx.add_cte_column("t", "i", TypedColumn::not_null(DataType::Interval));
+
+        // Column DATE + INTERVAL → Timestamp
+        let types = infer_sql_with_ctx(
+            "WITH t AS (SELECT 1 AS d) SELECT d + INTERVAL '1' DAY FROM t",
+            &ctx,
+        );
+        assert_eq!(
+            types[0].data_type,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        );
+
+        // Column TIMESTAMP - Column TIMESTAMP → Interval
+        let types = infer_sql_with_ctx("WITH t AS (SELECT 1 AS ts) SELECT ts - ts FROM t", &ctx);
+        assert_eq!(types[0].data_type, DataType::Interval);
     }
 }

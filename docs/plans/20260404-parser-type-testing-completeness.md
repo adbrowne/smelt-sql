@@ -69,20 +69,20 @@
 
 ---
 
-## Phase 4: Temporal Arithmetic Type Inference `[ ]`
+## Phase 4: Temporal Arithmetic Type Inference `[x]`
 
 **Priority**: Medium — currently returns Unknown, triggers diagnostics on valid SQL.
 
 **Goal**: Add type inference rules for date/time arithmetic in `infer_binary_expr_type`.
 
 **Work**:
-- [ ] DATE + INTERVAL → Timestamp
-- [ ] TIMESTAMP - TIMESTAMP → Interval
-- [ ] INTERVAL + INTERVAL → Interval
-- [ ] INTERVAL * numeric → Interval
-- [ ] DATE - DATE → Interval
-- [ ] Add unit tests for each temporal arithmetic rule
-- [ ] Validate against DuckDB for a sample of expressions
+- [x] DATE + INTERVAL → Timestamp
+- [x] TIMESTAMP - TIMESTAMP → Interval
+- [x] INTERVAL + INTERVAL → Interval
+- [x] INTERVAL * numeric → Interval
+- [x] DATE - DATE → Interval
+- [x] Add unit tests for each temporal arithmetic rule
+- [x] Validate against DuckDB for a sample of expressions
 
 **Verification**: `cargo test -p smelt-db` passes, temporal expressions no longer produce Unknown
 
@@ -309,3 +309,19 @@ Each Claude Code session records what it accomplished here.
 - All 101 lib tests pass, zero clippy warnings.
 
 **Decisions**: None — straightforward implementation of well-defined nullability rules.
+
+### Session 4 — 2026-04-04
+
+**Phase**: 4 (Temporal Arithmetic Type Inference)
+**Status**: Complete
+
+**What was done**:
+- Added temporal arithmetic type inference rules to `infer_binary_expr_type` in `type_inference.rs`:
+  - `+` operator: DATE/TIMESTAMP/TIME + INTERVAL → appropriate temporal type, INTERVAL + INTERVAL → Interval
+  - `-` operator: DATE-DATE, TIMESTAMP-TIMESTAMP, TIME-TIME → Interval; temporal - INTERVAL → same temporal type; INTERVAL - INTERVAL → Interval
+  - `*`/`/` operators: INTERVAL * numeric → Interval, INTERVAL / numeric → Interval
+- Split the previous combined `"+" | "*" | "/"` arm into separate `"+"` and `"*" | "/"` arms to handle temporal types before falling through to numeric promotion.
+- Added 5 new unit tests (16 assertions total): `test_temporal_arithmetic_date_interval`, `test_temporal_arithmetic_timestamp_interval`, `test_temporal_arithmetic_interval_ops`, `test_temporal_arithmetic_time`, `test_temporal_arithmetic_with_columns`.
+- All 106 lib tests pass, zero clippy warnings.
+
+**Decisions**: None — temporal arithmetic rules follow standard SQL semantics and match DuckDB behavior.
