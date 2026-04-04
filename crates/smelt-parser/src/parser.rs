@@ -31,6 +31,10 @@ pub fn parse(input: &str) -> Parse {
     parser.finish()
 }
 
+/// Maximum nesting depth for recursive parse functions.
+/// Prevents stack overflow on adversarial or deeply nested input.
+const MAX_PARSE_DEPTH: u32 = 256;
+
 struct Parser<'a> {
     input: &'a str,
     tokens: &'a [Token],
@@ -38,6 +42,7 @@ struct Parser<'a> {
     offset: usize,
     builder: GreenNodeBuilder<'static>,
     errors: Vec<ParseError>,
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -49,6 +54,7 @@ impl<'a> Parser<'a> {
             offset: 0,
             builder: GreenNodeBuilder::new(),
             errors: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -160,6 +166,17 @@ impl<'a> Parser<'a> {
         });
     }
 
+    /// Check if we've exceeded the maximum nesting depth.
+    /// Returns true if too deep (caller should bail out).
+    fn too_deep(&mut self) -> bool {
+        if self.depth >= MAX_PARSE_DEPTH {
+            self.error("Expression nesting depth exceeds maximum of 256".to_string());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Synchronize to one of the given tokens (error recovery)
     fn sync_to(&mut self, kinds: &[SyntaxKind]) {
         while !self.at(EOF) && !self.at_any(kinds) {
@@ -232,6 +249,12 @@ impl<'a> Parser<'a> {
 
     fn parse_select_stmt(&mut self) {
         self.start_node(SELECT_STMT);
+
+        if self.too_deep() {
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
 
         // WITH clause MUST come first (before SELECT)
         self.skip_trivia();
@@ -356,6 +379,7 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.depth -= 1;
         self.finish_node();
     }
 
@@ -927,7 +951,13 @@ impl<'a> Parser<'a> {
         self.start_node(EXPRESSION);
         self.skip_trivia();
 
+        if self.too_deep() {
+            self.finish_node();
+            return;
+        }
+        self.depth += 1;
         self.parse_or_expr();
+        self.depth -= 1;
 
         self.finish_node();
     }
@@ -4342,5 +4372,87 @@ LIMIT 100
             .expect("should have a FunctionCall");
         assert_eq!(func.namespace().as_deref(), Some("smelt"));
         assert_eq!(func.name().as_deref(), Some("ref"));
+    }
+
+    // Phase 8: Parser Depth Limit (Stack Safety)
+
+    #[test]
+    fn test_deeply_nested_parens_produces_error() {
+        // 300 levels of nested parentheses — exceeds the 256 depth limit
+        let depth = 300;
+        let mut input = String::new();
+        input.push_str("SELECT ");
+        for _ in 0..depth {
+            input.push('(');
+        }
+        input.push('1');
+        for _ in 0..depth {
+            input.push(')');
+        }
+        let result = parse(&input);
+        // Should produce a depth-exceeded error, not a stack overflow
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("nesting depth")),
+            "Expected nesting depth error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_subqueries_produces_error() {
+        // 300 levels of nested subqueries — exceeds the 256 depth limit
+        let depth = 300;
+        let mut input = String::new();
+        for _ in 0..depth {
+            input.push_str("SELECT (");
+        }
+        input.push_str("SELECT 1");
+        for _ in 0..depth {
+            input.push(')');
+        }
+        let result = parse(&input);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("nesting depth")),
+            "Expected nesting depth error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_normal_nesting_depth_unaffected() {
+        // Reasonable nesting (depth ~20) should parse fine
+        let input = "SELECT COALESCE(COALESCE(COALESCE(COALESCE(COALESCE(1, 2), 3), 4), 5), 6)";
+        let result = parse(input);
+        assert!(
+            result.errors.is_empty(),
+            "Normal nesting should have no errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_moderate_nesting_depth_unaffected() {
+        // Build a moderately deep expression (~40 levels) — well under the 256 limit
+        let mut input = String::new();
+        input.push_str("SELECT ");
+        for _ in 0..40 {
+            input.push('(');
+        }
+        input.push('1');
+        for _ in 0..40 {
+            input.push(')');
+        }
+        let result = parse(&input);
+        assert!(
+            result.errors.is_empty(),
+            "Moderate nesting (40 levels) should parse fine: {:?}",
+            result.errors
+        );
     }
 }

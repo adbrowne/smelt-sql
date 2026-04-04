@@ -139,17 +139,17 @@
 
 ---
 
-## Phase 8: Parser Depth Limit (Stack Safety) `[ ]`
+## Phase 8: Parser Depth Limit (Stack Safety) `[x]`
 
 **Priority**: Medium — prevents stack overflow on adversarial input.
 
 **Goal**: Add depth counter to recursive descent parser, error at depth 256.
 
 **Work**:
-- [ ] Add `depth: u32` parameter threaded through recursive parse functions
-- [ ] Return error node when depth > 256
-- [ ] Add test with deeply nested expression (300+ levels)
-- [ ] Verify normal SQL (depth < 50) is unaffected
+- [x] Add `depth: u32` parameter threaded through recursive parse functions
+- [x] Return error node when depth > 256
+- [x] Add test with deeply nested expression (300+ levels)
+- [x] Verify normal SQL (depth < 50) is unaffected
 
 **Verification**: `cargo test -p smelt-parser` passes, deep nesting test produces error not panic
 
@@ -387,3 +387,23 @@ Each Claude Code session records what it accomplished here.
 - All 46 tests pass, zero clippy warnings.
 
 **Decisions**: None — implementation was already comprehensive, only minor fixes needed.
+
+### Session 8 — 2026-04-04
+
+**Phase**: 8 (Parser Depth Limit — Stack Safety)
+**Status**: Complete
+
+**What was done**:
+- Added `MAX_PARSE_DEPTH` constant (256) and `depth: u32` field to the `Parser` struct.
+- Added `too_deep()` helper method that checks `depth >= MAX_PARSE_DEPTH` and emits an error diagnostic.
+- Guarded two key recursive entry points with depth tracking:
+  - `parse_expression()` — covers all expression recursion (parenthesized exprs, function args, CASE branches, array literals, etc.)
+  - `parse_select_stmt()` — covers statement recursion (subqueries, CTEs, set operations)
+- Added 4 new tests:
+  - `test_deeply_nested_parens_produces_error` — 300 nested parens, verifies error not panic
+  - `test_deeply_nested_subqueries_produces_error` — 300 nested subqueries, verifies error not panic
+  - `test_normal_nesting_depth_unaffected` — COALESCE nesting ~5 levels, no errors
+  - `test_moderate_nesting_depth_unaffected` — 40 nested parens, no errors
+- All 223 parser tests pass, zero clippy warnings.
+
+**Decisions**: Depth tracking at `parse_expression` and `parse_select_stmt` is sufficient because these are the two recursive entry points through which all nesting passes. No need to track `parse_unary_expr` separately since it always goes through `parse_expression` first.
