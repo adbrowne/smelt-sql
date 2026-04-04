@@ -1368,6 +1368,8 @@ fn generate_window_expr(
 fn promote_numeric_type(a: &DataType, b: &DataType) -> DataType {
     if matches!(a, DataType::Double) || matches!(b, DataType::Double) {
         DataType::Double
+    } else if matches!(a, DataType::Float) || matches!(b, DataType::Float) {
+        DataType::Float
     } else if matches!(a, DataType::Decimal { .. }) || matches!(b, DataType::Decimal { .. }) {
         DataType::Decimal {
             precision: 38,

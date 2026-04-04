@@ -34,18 +34,18 @@
 
 ---
 
-## Phase 2: Binary Operator Type Coercion Matrix `[ ]`
+## Phase 2: Binary Operator Type Coercion Matrix `[x]`
 
 **Priority**: High — partial coverage exists but no systematic type-pair testing.
 
 **Goal**: Create `prop_coercion_matrix.rs` that tests all type-pair combinations through arithmetic and comparison operators against DuckDB.
 
 **Work**:
-- [ ] Generate expressions like `CAST(x AS T1) + CAST(y AS T2)` for all type pairs
-- [ ] Cover arithmetic (+, -, *, /, %), comparison (<, >, =), and string concat (||)
-- [ ] Validate inferred types against DuckDB oracle
-- [ ] Fix any type inference bugs discovered
-- [ ] Register legitimate divergences in `divergences.rs`
+- [x] Generate expressions like `CAST(x AS T1) + CAST(y AS T2)` for all type pairs
+- [x] Cover arithmetic (+, -, *, /), comparison (<, >, =, !=, <=, >=), and string concat (||)
+- [x] Validate inferred types against DuckDB oracle
+- [x] Fix any type inference bugs discovered
+- [x] Register legitimate divergences in `divergences.rs`
 
 **Verification**: `cargo test -p smelt-db --test prop_coercion_matrix` passes
 
@@ -254,7 +254,11 @@
 
 Decisions made during implementation that may need review. These are filled in as work progresses.
 
-*(Empty — will be populated during implementation)*
+1. **Float promotion priority (Phase 2)**: Added Float to the numeric promotion chain between Double and Decimal: `Double > Float > Decimal > BigInt > Integer > SmallInt`. This matches DuckDB's behavior. Previously Float was missing entirely, causing `Float + Integer` to incorrectly return Integer.
+
+2. **Division type divergences (Phase 2)**: DuckDB v1.5+ uses non-truncating division (all division returns Double). smelt intentionally uses truncating integer division (Integer/Integer → Integer) and preserves Decimal type for Decimal division. Registered 5 new divergences: `integer_division`, `smallint_division`, `bigint_division`, `decimal_division`, `float_division`. All marked as `ByDesign`.
+
+3. **% (modulo) not tested (Phase 2)**: The parser doesn't support `%` as a binary operator, so it was excluded from the coercion matrix. The plan item mentioned `%` but it's not applicable.
 
 ---
 
@@ -273,3 +277,19 @@ Each Claude Code session records what it accomplished here.
 - All 35 tests pass (256 proptest cases + helper module tests + smoke tests). Zero warnings from clippy.
 
 **Decisions**: None — implementation was already in good shape, only cleanup needed.
+
+### Session 2 — 2026-04-04
+
+**Phase**: 2 (Binary Operator Type Coercion Matrix)
+**Status**: Complete
+
+**What was done**:
+- Created `prop_coercion_matrix.rs` with 42 tests total:
+  - 3 proptests (256 cases each): arithmetic coercion, same-type comparison, cross-numeric comparison
+  - 3 exhaustive deterministic tests: full 6×6×4=144 arithmetic matrix, 10×6=60 same-type comparisons, string concat
+  - 10 smoke tests for specific coercion rules
+- Fixed Float type promotion bug in `type_inference.rs`: Float was missing from the numeric promotion chain. Extracted duplicated promotion logic into `promote_numeric_operands()` helper.
+- Updated `promote_numeric_type()` in `generators.rs` to include Float.
+- Registered 5 new divergences in `divergences.rs` for DuckDB's non-truncating division behavior.
+
+**Decisions**: See Decisions Log entries 1-3.

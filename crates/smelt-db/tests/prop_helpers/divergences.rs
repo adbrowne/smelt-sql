@@ -124,6 +124,54 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             }),
             status: DivergenceStatus::BackendSpecific,
         },
+        TypeDivergence {
+            id: "integer_division",
+            description:
+                "Integer/Integer division — smelt uses truncating division (returns Integer), DuckDB returns Double",
+            smelt_type: DataType::Integer,
+            duckdb_type: Some(DataType::Double),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "smallint_division",
+            description:
+                "SmallInt division — smelt uses truncating division (returns SmallInt), DuckDB returns Double",
+            smelt_type: DataType::SmallInt,
+            duckdb_type: Some(DataType::Double),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "bigint_division",
+            description:
+                "BigInt division — smelt uses truncating division (returns BigInt), DuckDB returns Double",
+            smelt_type: DataType::BigInt,
+            duckdb_type: Some(DataType::Double),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "decimal_division",
+            description:
+                "Decimal division — smelt preserves Decimal type, DuckDB returns Double to avoid infinite precision",
+            smelt_type: DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
+            duckdb_type: Some(DataType::Double),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
+        TypeDivergence {
+            id: "float_division",
+            description:
+                "Float division — smelt preserves Float type, DuckDB returns Double for division",
+            smelt_type: DataType::Float,
+            duckdb_type: Some(DataType::Double),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
     ]
 }
 

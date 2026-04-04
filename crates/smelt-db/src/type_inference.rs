@@ -939,6 +939,50 @@ fn infer_binary_operand(binary: &BinaryExpr, nth: usize, ctx: &TypeContext) -> O
     infer_expression_type(&expr, ctx)
 }
 
+/// Promote two numeric operands to their common widest type.
+/// Priority: Double > Float > Decimal > BigInt > Integer > SmallInt
+fn promote_numeric_operands(
+    left: Option<DataType>,
+    right: Option<DataType>,
+) -> Option<TypedColumn> {
+    match (left, right) {
+        (Some(DataType::Double), _) | (_, Some(DataType::Double)) => Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: true,
+        }),
+        (Some(DataType::Float), _) | (_, Some(DataType::Float)) => Some(TypedColumn {
+            data_type: DataType::Float,
+            nullable: true,
+        }),
+        (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
+            Some(TypedColumn {
+                data_type: DataType::Decimal {
+                    precision: 38,
+                    scale: 10,
+                },
+                nullable: true,
+            })
+        }
+        (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: true,
+        }),
+        (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => Some(TypedColumn {
+            data_type: DataType::Integer,
+            nullable: true,
+        }),
+        (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => Some(TypedColumn {
+            data_type: DataType::SmallInt,
+            nullable: true,
+        }),
+        (Some(l), _) => Some(TypedColumn {
+            data_type: l,
+            nullable: true,
+        }),
+        _ => None,
+    }
+}
+
 /// Infer the result type of a binary expression
 fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let op = binary.operator()?;
@@ -979,41 +1023,11 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             let left = infer_binary_operand(binary, 0, ctx);
             let right = infer_binary_operand(binary, 1, ctx);
 
-            // Promote to widest numeric type
-            match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
-                (Some(DataType::Double), _) | (_, Some(DataType::Double)) => Some(TypedColumn {
-                    data_type: DataType::Double,
-                    nullable: true,
-                }),
-                (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
-                    Some(TypedColumn {
-                        data_type: DataType::Decimal {
-                            precision: 38,
-                            scale: 10,
-                        },
-                        nullable: true,
-                    })
-                }
-                (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
-                    data_type: DataType::BigInt,
-                    nullable: true,
-                }),
-                (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => Some(TypedColumn {
-                    data_type: DataType::Integer,
-                    nullable: true,
-                }),
-                (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => {
-                    Some(TypedColumn {
-                        data_type: DataType::SmallInt,
-                        nullable: true,
-                    })
-                }
-                (Some(l), _) => Some(TypedColumn {
-                    data_type: l,
-                    nullable: true,
-                }),
-                _ => None,
-            }
+            // Promote to widest numeric type: Double > Float > Decimal > BigInt > Integer > SmallInt
+            Some(promote_numeric_operands(
+                left.map(|t| t.data_type),
+                right.map(|t| t.data_type),
+            )?)
         }
 
         // Minus can be binary (a - b) or unary (-a)
@@ -1047,47 +1061,11 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
                 let left = infer_binary_operand(binary, 0, ctx);
                 let right = infer_binary_operand(binary, 1, ctx);
 
-                // Promote to widest numeric type
-                match (left.map(|t| t.data_type), right.map(|t| t.data_type)) {
-                    (Some(DataType::Double), _) | (_, Some(DataType::Double)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::Double,
-                            nullable: true,
-                        })
-                    }
-                    (Some(DataType::Decimal { .. }), _) | (_, Some(DataType::Decimal { .. })) => {
-                        Some(TypedColumn {
-                            data_type: DataType::Decimal {
-                                precision: 38,
-                                scale: 10,
-                            },
-                            nullable: true,
-                        })
-                    }
-                    (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::BigInt,
-                            nullable: true,
-                        })
-                    }
-                    (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::Integer,
-                            nullable: true,
-                        })
-                    }
-                    (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => {
-                        Some(TypedColumn {
-                            data_type: DataType::SmallInt,
-                            nullable: true,
-                        })
-                    }
-                    (Some(l), _) => Some(TypedColumn {
-                        data_type: l,
-                        nullable: true,
-                    }),
-                    _ => None,
-                }
+                // Promote to widest numeric type: Double > Float > Decimal > BigInt > Integer > SmallInt
+                Some(promote_numeric_operands(
+                    left.map(|t| t.data_type),
+                    right.map(|t| t.data_type),
+                )?)
             }
         }
 
