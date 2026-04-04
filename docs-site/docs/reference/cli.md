@@ -357,6 +357,60 @@ smelt diff --json || echo "Schema changes detected!"
 
 ---
 
+## smelt docs generate
+
+Generate a static data catalog from your project's model metadata. Exports model schemas, column lineage, descriptions, tags, and dependency information as browsable documentation.
+
+**Usage:**
+
+```
+smelt docs generate [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--project-dir` | | path | `.` | Path to smelt project root |
+| `--format` | | string | `markdown` | Output format: `markdown` or `json` |
+| `--output` | `-o` | path | `target/docs` | Output directory |
+| `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. |
+
+**Output formats:**
+
+**Markdown** (default) generates a directory with:
+
+- `index.md` — project overview with model table and tag index
+- `models/<name>.md` — per-model page with columns, lineage, and configuration
+
+**JSON** generates a single `catalog.json` with all metadata in a structured format.
+
+**What's included per model:**
+
+- Name, description, owner, tags, materialization
+- Columns with inferred types, nullability, descriptions, and column-level tests
+- Column lineage (source tracking: from which upstream model or external table)
+- Upstream and downstream dependencies
+- Incremental configuration (if applicable)
+
+**Examples:**
+
+```bash
+# Generate markdown docs
+smelt docs generate
+
+# Generate JSON catalog
+smelt docs generate --format json
+
+# Generate docs for specific models
+smelt docs generate --select tag:marts
+
+# Custom output directory
+smelt docs generate --output docs/catalog
+```
+
+---
+
 ## smelt table
 
 Show column names and types for a model. The schema is inferred by the smelt type checker without executing the model.
@@ -523,6 +577,8 @@ smelt explain [OPTIONS]
 | `--project-dir` | | path | `.` | Path to smelt project root |
 | `--json` | | bool | `false` | Output as JSON (required for machine consumption) |
 | `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. |
+
+The output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
 **Examples:**
 

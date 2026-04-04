@@ -238,11 +238,12 @@ The default arm emits tokens verbatim, preserving whitespace and comments. Addin
 
 The LSP (`smelt-lsp`) is a thin async shell (tower-lsp) over sync Salsa queries. It provides:
 
-- Parse error diagnostics with accurate positions
-- Undefined ref diagnostics
-- Go-to-definition for `smelt.ref()`
-- Hover with type information
-- Column completions (including table alias completions)
-- Model name completions in `smelt.ref()`
+- **Parse error diagnostics** with accurate positions
+- **Undefined ref diagnostics** for `smelt.ref()` and `smelt.source()`
+- **Undeclared column diagnostics** for references to columns not in upstream schemas or `sources.yml`
+- **Go-to-definition** for `smelt.ref()`, `smelt.source()`, CTE names, table aliases, and column references (traces through `SELECT *` wildcards)
+- **Hover** with type information
+- **Column completions** including table alias completions
+- **Model name completions** in `smelt.ref()`
 
 The LSP depends on `smelt-dialect` for dialect-specific informational hints (e.g., "QUALIFY will be rewritten to a subquery for PostgreSQL") without linking to any backend binary.

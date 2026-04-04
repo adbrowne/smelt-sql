@@ -149,6 +149,64 @@ smelt build
 smelt build --target spark
 ```
 
+## Spark requirements
+
+The Spark backend communicates via PySpark over Spark Connect. You need:
+
+- **Python** with PySpark installed (`pip install pyspark`)
+- **Spark Connect server** running on the configured URL
+- For **Databricks**: use `pip install databricks-connect` instead of `pyspark`
+- For **EMR/Dataproc**: ensure Spark Connect is enabled on the cluster
+
+smelt uses PyO3 to call PySpark from Rust. Data is exchanged via Arrow (zero-copy), so there is no serialization overhead for query results.
+
+## Cross-engine data exchange
+
+When models on different backends reference each other, smelt automatically handles data transfer via Parquet files.
+
+**How it works:**
+
+1. A Spark model writes its output as Parquet files in the warehouse directory
+2. A DuckDB model references the Spark model with `smelt.ref('spark_model')`
+3. smelt resolves the cross-engine reference and emits a `read_parquet()` call pointing to the Spark model's output files
+4. DuckDB natively reads the Parquet files -- no explicit copy step
+
+**Example:**
+
+```yaml
+# smelt.yml
+targets:
+  local:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+  spark:
+    type: spark
+    connect_url: sc://localhost:15002
+    schema: analytics
+
+models:
+  # Runs on Spark
+  heavy_transform:
+    target: spark
+    materialization: table
+
+  # Runs on DuckDB, reads from Spark output
+  reporting_summary:
+    materialization: table
+```
+
+```sql
+-- models/reporting_summary.sql
+-- This ref resolves to read_parquet('warehouse/analytics/heavy_transform/**/*.parquet')
+SELECT category, SUM(amount) as total
+FROM smelt.ref('heavy_transform')
+GROUP BY 1
+```
+
+!!! note
+    Cross-engine exchange currently uses the local filesystem. Cloud storage (S3, GCS, ADLS) is not yet supported.
+
 ## Cross-engine SQL compilation
 
 smelt compiles SQL to the target's dialect automatically. You write standard SQL with `smelt.ref()` and `smelt.source()`, and smelt translates function calls, types, and syntax to match the target backend.

@@ -17,6 +17,8 @@ my-project/
 │   └── test_cohort_sizes.sql
 ├── seeds/               # CSV files loaded as tables
 │   └── raw/             # Subdirectories map to schemas
+├── .smelt/              # Deployed schema state (gitignored)
+│   └── schemas/         # Last-deployed column schemas per model
 └── target/              # Generated artifacts (gitignored)
     └── dev.duckdb       # DuckDB database file
 ```
@@ -174,6 +176,9 @@ The smelt repository includes complete example projects you can use as reference
 
 [**examples/retail_analytics/**](https://github.com/adbrowne/smelt-sql/tree/main/examples/retail_analytics)
 :   A TPC-DS-based retail analytics pipeline with 25 models organized in staging, intermediate, and marts layers. A good reference for larger project structure.
+
+[**examples/multi_engine/**](https://github.com/adbrowne/smelt-sql/tree/main/examples/multi_engine)
+:   A multi-backend project demonstrating Spark and DuckDB models in the same pipeline with cross-engine Parquet data exchange.
 
 To try an example locally:
 
