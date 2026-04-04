@@ -1325,8 +1325,8 @@ fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<Type
             )?)
         }
 
-        // Multiplication and division — handles numeric promotion and INTERVAL * numeric
-        "*" | "/" => {
+        // Multiplication, division, and modulo — handles numeric promotion and INTERVAL * numeric
+        "*" | "/" | "%" => {
             let left = infer_binary_operand(binary, 0, ctx);
             let right = infer_binary_operand(binary, 1, ctx);
             let lt = left.as_ref().map(|t| &t.data_type);
@@ -2949,5 +2949,24 @@ mod tests {
             ("b".to_string(), DataType::Text),
         ]);
         assert_eq!(dt.to_sql(), "STRUCT(a INTEGER, b TEXT)");
+    }
+
+    #[test]
+    fn test_modulo_operator() {
+        // Integer % Integer → Integer
+        let types = infer_sql("SELECT 10 % 3");
+        assert_eq!(types[0].data_type, DataType::SmallInt);
+
+        // CAST to explicit types
+        let types = infer_sql("SELECT CAST(10 AS INTEGER) % CAST(3 AS INTEGER)");
+        assert_eq!(types[0].data_type, DataType::Integer);
+
+        // BigInt % Integer → BigInt (promotion)
+        let types = infer_sql("SELECT CAST(10 AS BIGINT) % CAST(3 AS INTEGER)");
+        assert_eq!(types[0].data_type, DataType::BigInt);
+
+        // Double % Double → Double
+        let types = infer_sql("SELECT CAST(10.5 AS DOUBLE) % CAST(3.0 AS DOUBLE)");
+        assert_eq!(types[0].data_type, DataType::Double);
     }
 }

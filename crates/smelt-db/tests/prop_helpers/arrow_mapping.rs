@@ -47,9 +47,17 @@ pub fn arrow_to_smelt(arrow: &ArrowType) -> DataType {
             DataType::Array(Box::new(arrow_to_smelt(field.data_type())))
         }
 
+        ArrowType::Struct(fields) => {
+            let mapped_fields: Vec<(String, DataType)> = fields
+                .iter()
+                .map(|f| (f.name().clone(), arrow_to_smelt(f.data_type())))
+                .collect();
+            DataType::Struct(mapped_fields)
+        }
+
         ArrowType::Null => DataType::Null,
 
-        // Fallback for types we don't map (structs, maps, unions, etc.)
+        // Fallback for types we don't map (maps, unions, etc.)
         _ => DataType::Unknown,
     }
 }

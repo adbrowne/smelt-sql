@@ -179,13 +179,14 @@ Addition is commutative — `INTERVAL + DATE` produces the same type as `DATE + 
 | `TIME - INTERVAL` | Time |
 | `INTERVAL - INTERVAL` | Interval |
 
-### Multiplication and Division
+### Multiplication, Division, and Modulo
 
 | Expression | Result Type |
 |-----------|-------------|
 | `INTERVAL * numeric` | Interval |
 | `numeric * INTERVAL` | Interval |
 | `INTERVAL / numeric` | Interval |
+| `numeric % numeric` | Numeric promotion (same as `*`) |
 
 All temporal arithmetic results are nullable.
 

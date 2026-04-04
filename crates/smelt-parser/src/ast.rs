@@ -874,6 +874,7 @@ impl BinaryExpr {
                     MINUS => return Some("-".to_string()),
                     STAR | MULTIPLY => return Some("*".to_string()),
                     DIVIDE => return Some("/".to_string()),
+                    PERCENT => return Some("%".to_string()),
                     EQ => return Some("=".to_string()),
                     NE => return Some("<>".to_string()),
                     LT => return Some("<".to_string()),

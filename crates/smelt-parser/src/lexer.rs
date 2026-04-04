@@ -88,6 +88,10 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 MINUS
             }
+            '%' => {
+                self.advance();
+                PERCENT
+            }
             '/' if self.peek_char() == Some('*') => self.consume_block_comment(),
             '/' => {
                 self.advance();

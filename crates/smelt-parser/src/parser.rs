@@ -1176,7 +1176,7 @@ impl<'a> Parser<'a> {
         self.parse_unary_expr();
 
         self.skip_trivia();
-        while self.at_any(&[STAR, DIVIDE]) {
+        while self.at_any(&[STAR, DIVIDE, PERCENT]) {
             self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
@@ -2547,6 +2547,43 @@ mod tests {
         assert!(bin.left().is_some(), "should have left operand");
         assert!(bin.right().is_some(), "should have right operand");
         assert!(!bin.is_unary());
+    }
+
+    #[test]
+    fn test_modulo_operator() {
+        let input = "SELECT a % b FROM t";
+        let parse = parse(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+        let bin = parse
+            .syntax()
+            .descendants()
+            .find_map(BinaryExpr::cast)
+            .expect("should have a BinaryExpr");
+        assert_eq!(bin.operator().as_deref(), Some("%"));
+        assert!(bin.left().is_some(), "should have left operand");
+        assert!(bin.right().is_some(), "should have right operand");
+    }
+
+    #[test]
+    fn test_modulo_precedence() {
+        // % should have same precedence as * and /
+        let input = "SELECT a + b % c FROM t";
+        let parse = parse(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+        // The outer binary should be +, with b%c on the right
+        let bins: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter_map(BinaryExpr::cast)
+            .collect();
+        // Should have two binary exprs: a + (b % c)
+        assert_eq!(bins.len(), 2);
+        // Outer is +
+        assert_eq!(bins[0].operator().as_deref(), Some("+"));
+        // Inner is %
+        assert_eq!(bins[1].operator().as_deref(), Some("%"));
     }
 
     #[test]

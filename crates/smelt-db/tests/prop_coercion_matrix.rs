@@ -77,11 +77,18 @@ enum ArithOp {
     Sub,
     Mul,
     Div,
+    Mod,
 }
 
 impl ArithOp {
     fn all() -> &'static [ArithOp] {
-        &[ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div]
+        &[
+            ArithOp::Add,
+            ArithOp::Sub,
+            ArithOp::Mul,
+            ArithOp::Div,
+            ArithOp::Mod,
+        ]
     }
 
     fn symbol(self) -> &'static str {
@@ -90,6 +97,7 @@ impl ArithOp {
             ArithOp::Sub => "-",
             ArithOp::Mul => "*",
             ArithOp::Div => "/",
+            ArithOp::Mod => "%",
         }
     }
 }
@@ -365,6 +373,7 @@ fn arith_op_strategy() -> impl Strategy<Value = ArithOp> {
         Just(ArithOp::Sub),
         Just(ArithOp::Mul),
         Just(ArithOp::Div),
+        Just(ArithOp::Mod),
     ]
 }
 

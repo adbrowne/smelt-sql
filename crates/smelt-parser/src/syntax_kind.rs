@@ -113,6 +113,7 @@ pub enum SyntaxKind {
     MINUS,        // -
     MULTIPLY,     // * (same as STAR, but in expression context)
     DIVIDE,       // /
+    PERCENT,      // %
     ARROW,        // => (named parameter)
     DOUBLE_COLON, // :: (PostgreSQL cast operator)
     CONCAT,       // || (string concatenation)
