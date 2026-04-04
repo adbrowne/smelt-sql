@@ -106,17 +106,17 @@
 
 ---
 
-## Phase 6: CTE Type Proptest Generators `[ ]`
+## Phase 6: CTE Type Proptest Generators `[x]`
 
 **Priority**: Medium — CTEs tested by unit tests but no combinatorial coverage.
 
 **Goal**: Create `prop_cte_types.rs` generating multi-CTE queries with cross-CTE column references.
 
 **Work**:
-- [ ] Generate queries with 1-3 CTEs referencing each other's columns
-- [ ] Include type transformations across CTE boundaries
-- [ ] Validate type inference of final SELECT against DuckDB
-- [ ] Handle recursive CTE type inference (non-recursive term only, per research decision)
+- [x] Generate queries with 1-3 CTEs referencing each other's columns
+- [x] Include type transformations across CTE boundaries
+- [x] Validate type inference of final SELECT against DuckDB
+- [x] Handle recursive CTE type inference (non-recursive term only, per research decision)
 
 **Verification**: `cargo test -p smelt-db --test prop_cte_types` passes
 
@@ -264,6 +264,8 @@ Decisions made during implementation that may need review. These are filled in a
 
 5. **INTERSECT/EXCEPT type inference (Phase 5)**: Added `has_set_operation()` and `set_operation_select()` AST methods that handle all three set operations (UNION, INTERSECT, EXCEPT). Updated `infer_select_column_types()` to use these generic methods instead of the UNION-specific ones. All set operations use the same type promotion logic.
 
+6. **`build_subquery_context()` made public (Phase 6)**: Made `build_subquery_context()` public so that proptest files can properly resolve CTE columns when parsing full SQL with WITH clauses. Without this, tests using `TypeContext::new()` + `infer_select_column_types()` would not see CTE-defined columns (they'd all be Unknown). This is consistent with the "pure function" architecture — tests call the same context-building function that the production code uses.
+
 ---
 
 ## Session Log
@@ -353,3 +355,19 @@ Each Claude Code session records what it accomplished here.
 - All 113 lib tests + 42 proptest tests pass, zero clippy warnings.
 
 **Decisions**: See Decisions Log entries 4-5.
+
+### Session 6 — 2026-04-04
+
+**Phase**: 6 (CTE Type Proptest Generators)
+**Status**: Complete
+
+**What was done**:
+- Created `prop_cte_types.rs` with 43 tests total:
+  - 4 proptests (256 cases each): single-CTE passthrough, two-CTE with CAST transforms, two-CTE with type-specific transforms (ArithmeticIdentity, StringFunc), three-CTE chain with cascading transforms
+  - 3 exhaustive deterministic tests: all 10 base types through single CTE, 10×10 two-CTE CAST matrix, 10×10 branching CTE (cte3 references both cte1 and cte2 via CROSS JOIN)
+  - 10 smoke tests: integer passthrough, multi-column, type widening chain, 3-CTE chain, aggregation in CTE, function transform, COALESCE, branching CROSS JOIN, CASE expression, recursive CTE with column list
+- Made `build_subquery_context()` public in `type_inference.rs` so tests can properly resolve CTE columns from WITH clauses. Previously tests using `TypeContext::new()` couldn't see CTE-defined columns, causing all CTE column references to infer as Unknown.
+- TypeTransform enum covers: Identity, Cast(target), ArithmeticIdentity (numeric only), StringFunc (varchar only), Coalesce, CaseExpr
+- All 43 tests pass, zero clippy warnings.
+
+**Decisions**: See Decisions Log entry 6.

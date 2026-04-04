@@ -417,7 +417,7 @@ fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedCo
 ///
 /// This creates a new context that inherits from the parent context
 /// and adds any CTEs defined in the subquery's WITH clause.
-fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
+pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
     let mut ctx = parent_ctx.clone();
 
     // Process any WITH clause in this subquery
