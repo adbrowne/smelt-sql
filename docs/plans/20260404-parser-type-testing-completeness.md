@@ -5,6 +5,10 @@
 **Branch**: `parser-type-testing-completeness`
 **PR**: https://github.com/adbrowne/smelt-sql/pull/101
 
+## Design Principle
+
+**Prefer well-defined behaviour and strictness.** smelt should catch errors at compile time, not runtime. When making decisions about type inference, coercion, nullability, or error handling, choose the stricter option — reject ambiguous or unsafe constructs with a clear diagnostic rather than silently accepting them and risking runtime failures. This applies throughout: mixed-type arrays should be rejected, not coerced; nullable precision should be tracked accurately so downstream consumers can rely on it; type mismatches in UNION branches should be flagged, not silently widened.
+
 ## Status Key
 
 - `[ ]` — Not started
