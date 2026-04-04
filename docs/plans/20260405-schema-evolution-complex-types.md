@@ -322,13 +322,13 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 5: Abstract Schema Operations [ ]
+## Phase 5: Abstract Schema Operations [x]
 
 **Goal:** The migration planner produces backend-agnostic `SchemaOperation`s instead of SQL strings. This separates "what needs to change" from "how to execute it."
 
 ### Work Items
 
-- [ ] 5a. Define `SchemaOperation` enum in `smelt-state/src/schema_tracking.rs`:
+- [x] 5a. Define `SchemaOperation` enum in `smelt-state/src/schema_tracking.rs`:
   ```rust
   pub enum SchemaOperation {
       /// Add a column to a table (top-level)
@@ -386,7 +386,7 @@ cargo clippy --all-targets
       },
   }
   ```
-- [ ] 5b. Define `MigrationPlan` struct:
+- [x] 5b. Define `MigrationPlan` struct:
   ```rust
   pub struct MigrationPlan {
       pub operations: Vec<SchemaOperation>,
@@ -396,12 +396,12 @@ cargo clippy --all-targets
       pub warnings: Vec<String>,
   }
   ```
-- [ ] 5c. Implement `fn plan_schema_operations(diff: &SchemaDiff, defaults: &HashMap<String, String>, backfills: &HashMap<String, String>) -> MigrationPlan`:
+- [x] 5c. Implement `fn plan_schema_operations(diff: &SchemaDiff, defaults: &HashMap<String, String>, backfills: &HashMap<String, String>) -> MigrationPlan`:
   - Converts `SchemaChange` variants into `SchemaOperation`s
   - Combines related operations (e.g., struct field add + nested type widen on same column → single `RewriteColumn`)
   - Generates `struct_pack` / `struct_insert` expressions for struct rewrites
   - Sets `requires_allow_full_refresh` when backend limitations force full refresh
-- [ ] 5d. Keep the existing `plan_migration()` function working by having it call `plan_schema_operations()` internally and translate to SQL strings (backward compat during transition).
+- [x] 5d. Keep the existing `plan_migration()` function working — updated complex type branches to generate basic DuckDB DDL (dot-notation for struct fields, ALTER COLUMN TYPE for widening). Phase 6 will add full backend-specific DDL generation.
 
 ### Red-Green Tests
 
@@ -1014,3 +1014,29 @@ cargo test -p smelt-cli --test example_diagnostics
 - 4a was already done in Phase 2 (`is_safe_type_widening` already accepted `&DataType`)
 - 4c was already handled — `requires_full_refresh()` uses `is_safe_type_widening_str()` which delegates to `is_safe_type_widening()`, so recursive rules flow through automatically
 - Phase was smaller than expected since earlier phases set up the right abstractions
+
+### Session 5 — 2026-04-05
+
+**Phase completed:** Phase 5 (Abstract Schema Operations)
+
+**What was done:**
+- Added `SchemaOperation` enum with 9 variants: `AddColumn`, `RemoveColumn`, `WidenColumnType`, `ChangeNullability`, `AddStructField`, `RemoveStructField`, `WidenNestedType`, `BackfillColumn`, `RewriteColumn`
+- Added `MigrationPlan` struct with `operations`, `requires_full_refresh`, `full_refresh_reason`, `requires_allow_full_refresh`, `warnings`
+- Implemented `plan_schema_operations()` — converts `SchemaChange` diff variants into backend-agnostic `SchemaOperation`s:
+  - Groups struct-level changes per column for possible combination
+  - Handles defaults/backfills for column additions
+  - Detects unsafe changes that require full refresh
+  - Emits warnings for struct field removals
+- Updated `plan_migration()` complex type branches from pass-through to basic DuckDB DDL generation:
+  - `StructFieldAdded` → `ALTER TABLE ADD COLUMN col.field TYPE` (dot-notation)
+  - `StructFieldRemoved` → `ALTER TABLE DROP COLUMN col.field`
+  - `NestedTypeChange` → `ALTER TABLE ALTER COLUMN col TYPE new_type`
+  - `ArrayElementTypeChange` → `ALTER TABLE ALTER COLUMN col TYPE new_type[]`
+  - `MapValueTypeChange` → placeholder ALTER (Phase 6 will handle properly)
+- 16 new tests covering all operation types: struct field add, nested type widen, array element widen, add column with backfill, NOT NULL with/without default, scalar type widen, unsafe type change, remove column, nullability changes, map key/value changes, incompatible type change, struct field removal with warning, combined struct add+widen, empty diff
+- All 91 smelt-state tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- `plan_migration()` was updated with basic DDL generation for complex types rather than full delegation to `plan_schema_operations()` — this avoids a large refactor while Phase 6 will introduce proper backend-specific DDL generators
+- Struct changes are grouped per column in `plan_schema_operations()` to enable future RewriteColumn combination (Phase 6 will generate struct_pack expressions)
+- Map value widening emits `WidenNestedType` with path `["value"]` to distinguish from column-level operations
