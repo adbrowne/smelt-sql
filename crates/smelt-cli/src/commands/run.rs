@@ -513,6 +513,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                             schema,
                             &inferred_columns,
                             args.allow_column_removal,
+                            args.allow_full_refresh,
                             args.dry_run,
                             &column_defaults,
                             &backfill_exprs,

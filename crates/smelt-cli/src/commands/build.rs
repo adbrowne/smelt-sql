@@ -31,6 +31,7 @@ pub async fn build(args: BuildArgs) -> Result<()> {
         per_partition: false,
         auto: false,
         allow_column_removal: false,
+        allow_full_refresh: false,
     };
     super::run::run(run_args).await
 }

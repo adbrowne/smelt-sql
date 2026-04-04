@@ -503,13 +503,13 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 7: Table Format Config and Backend Capabilities [ ]
+## Phase 7: Table Format Config and Backend Capabilities [x]
 
 **Goal:** Spark targets distinguish between Delta and Parquet table formats. `BackendCapabilities` reflects what each format supports for schema evolution.
 
 ### Work Items
 
-- [ ] 7a. Add `format` field to `Target` in `smelt-core/src/config.rs`:
+- [x] 7a. Add `format` field to `Target` in `smelt-core/src/config.rs`:
   ```rust
   pub struct Target {
       // ... existing fields ...
@@ -527,7 +527,7 @@ cargo clippy --all-targets
       Parquet,
   }
   ```
-- [ ] 7b. Add per-model format override in `ModelMetadata`:
+- [x] 7b. Add per-model format override in `ModelMetadata`:
   ```rust
   pub struct ModelMetadata {
       // ... existing fields ...
@@ -536,7 +536,7 @@ cargo clippy --all-targets
       pub format: Option<TableFormat>,
   }
   ```
-- [ ] 7c. Add schema evolution capabilities to `BackendCapabilities`:
+- [x] 7c. Add schema evolution capabilities to `BackendCapabilities`:
   ```rust
   pub struct BackendCapabilities {
       // ... existing fields ...
@@ -547,11 +547,11 @@ cargo clippy --all-targets
       pub supports_column_mapping: bool,            // ID-based column mapping (Delta)
   }
   ```
-- [ ] 7d. Set capabilities per backend+format:
+- [x] 7d. Set capabilities per backend+format:
   - **DuckDB**: all struct/array DDL = true, merge_schema_write = false, column_mapping = false
   - **Spark+Delta**: struct_field_ddl = true, alter_column_using = false, nested_array_ddl = false, merge_schema_write = true, column_mapping = true
   - **Spark+Parquet**: struct_field_ddl = true (metastore only), alter_column_using = false, nested_array_ddl = false, merge_schema_write = true, column_mapping = false
-- [ ] 7e. Add `--allow-full-refresh` CLI flag to `smelt run` command.
+- [x] 7e. Add `--allow-full-refresh` CLI flag to `smelt run` command.
 
 ### Red-Green Tests
 
@@ -1066,3 +1066,31 @@ cargo test -p smelt-cli --test example_diagnostics
 - `WidenNestedType` uses DuckDB dot-notation (`ALTER COLUMN col.field TYPE new_type`) rather than struct_pack USING expressions for individual field widenings. struct_pack is reserved for `RewriteColumn` operations that transform the entire struct.
 - Map value widening reconstructs the full `MAP(VARCHAR, new_value_type)` type for ALTER COLUMN TYPE. The key type defaults to VARCHAR since the `WidenNestedType` operation doesn't carry the full map type.
 - `build_struct_pack_expr()` returns `Option<String>` (None for non-struct types) rather than panicking.
+
+### Session 7 — 2026-04-05
+
+**Phase completed:** Phase 7 (Table Format Config and Backend Capabilities)
+
+**What was done:**
+- Added `TableFormat` enum (`Delta`, `Parquet`) to `smelt-core/src/config.rs` with `#[derive(Default)]` (defaults to Delta)
+- Added `format: Option<TableFormat>` field to `Target` struct with custom deserializer (case-insensitive "delta"/"parquet")
+- Added `Target::table_format()` helper — returns `None` for DuckDB, defaults to `Delta` for Spark when unspecified
+- Added `format: Option<TableFormat>` field to `ModelMetadata` for per-model format override
+- Added 5 new schema evolution capability fields to `BackendCapabilities`:
+  - `supports_struct_field_ddl` — DuckDB: true, Spark+Delta: true, Spark+Parquet: true
+  - `supports_alter_column_using` — DuckDB: true, Spark: false, PostgreSQL: true
+  - `supports_nested_array_ddl` — DuckDB: true, Spark: false
+  - `supports_merge_schema_write` — DuckDB: false, Spark: true
+  - `supports_column_mapping` — DuckDB: false, Spark+Delta: true, Spark+Parquet: false
+- Added `spark_delta()` and `spark_parquet()` constructors to `BackendCapabilities` (existing `spark()` now aliases `spark_delta()`)
+- Added `--allow-full-refresh` CLI flag to `smelt run` (threaded to `check_and_migrate()` as `_allow_full_refresh` — Phase 10 will wire it up)
+- Updated all 10 `Target` struct literal constructions across 8 files to include `format: None`
+- 5 new tests for config parsing (delta, parquet, default, duckdb, invalid format rejection)
+- 2 new tests for model metadata format override
+- 5 new tests for backend capability assertions (duckdb, spark_delta, spark_parquet, spark_default, postgresql)
+- All tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- `smelt-dialect` does NOT depend on `smelt-core` — no `spark_for_format()` convenience method on `BackendCapabilities`. Callers select the right constructor based on `TableFormat`.
+- `spark()` aliases `spark_delta()` for backward compatibility — existing code that calls `BackendCapabilities::spark()` gets Delta capabilities automatically.
+- Spark+Parquet disables `supports_merge` (no Delta = no MERGE statement) in addition to schema evolution differences.

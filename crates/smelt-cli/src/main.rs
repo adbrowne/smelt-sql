@@ -117,6 +117,10 @@ struct RunArgs {
     /// Allow column removal during schema evolution (otherwise blocked for safety)
     #[arg(long = "allow-column-removal")]
     allow_column_removal: bool,
+
+    /// Allow full table refresh when schema evolution requires it (e.g., unsupported type change on Spark+Parquet)
+    #[arg(long = "allow-full-refresh")]
+    allow_full_refresh: bool,
 }
 
 #[derive(Parser)]

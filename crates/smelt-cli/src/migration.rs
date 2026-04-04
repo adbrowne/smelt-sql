@@ -92,6 +92,7 @@ pub async fn check_and_migrate(
     schema: &str,
     inferred_columns: &[DeployedColumn],
     allow_column_removal: bool,
+    _allow_full_refresh: bool,
     dry_run: bool,
     column_defaults: &HashMap<String, String>,
     backfill_exprs: &HashMap<String, String>,

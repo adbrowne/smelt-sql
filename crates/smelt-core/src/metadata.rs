@@ -188,6 +188,10 @@ pub struct ModelMetadata {
     /// Schema evolution configuration (opt out with strategy: full_refresh)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_evolution: Option<SchemaEvolutionConfig>,
+
+    /// Override table format for this model (e.g., parquet for a specific model on a Delta target)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::config::TableFormat>,
 }
 
 /// Complete file metadata (single or multi-model)
@@ -783,6 +787,30 @@ SELECT * FROM users"#;
                     metadata.schema_evolution.unwrap().strategy,
                     SchemaEvolutionStrategy::FullRefresh
                 );
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_format_override() {
+        let source = "---\nname: my_model\nmaterialization: table\nformat: parquet\n---\nSELECT 1";
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.format, Some(crate::config::TableFormat::Parquet));
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_without_format_is_none() {
+        let source = "---\nname: my_model\nmaterialization: table\n---\nSELECT 1";
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.format, None);
             }
             _ => panic!("Expected Single variant"),
         }
