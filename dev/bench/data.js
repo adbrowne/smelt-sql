@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775336254280,
+  "lastUpdate": 1775336256493,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13994,6 +13994,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.215192781034776,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "effc917553c472aff0dd115831aa9ecc205699e3",
+          "message": "Rename rpi-plan from plan to rpi-plan to avoid conflict with native plan command",
+          "timestamp": "2026-04-05T06:56:12+10:00",
+          "tree_id": "ef2f7b801c042c735b9c15e3e08c3e9f1276c447",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/effc917553c472aff0dd115831aa9ecc205699e3"
+        },
+        "date": 1775336255811,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.787161851817828,
             "unit": "MB/s"
           }
         ]
