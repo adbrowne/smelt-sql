@@ -100,23 +100,23 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 2: Recursive Type Normalization [ ]
+## Phase 2: Recursive Type Normalization [x]
 
 **Goal:** `normalize_type()` handles complex types structurally, not as opaque strings. This prevents spurious schema change detections from alias differences inside nested types.
 
 ### Work Items
 
-- [ ] 2a. Add `pub fn normalize(dt: &DataType) -> DataType` to `smelt-types` that recursively normalizes a `DataType`:
+- [x] 2a. Add `pub fn normalize(dt: &DataType) -> DataType` to `smelt-types` that recursively normalizes a `DataType`:
   - Scalar aliases already handled by `parse_type()` (INT→INTEGER, etc.)
   - `Text` → `Varchar { max_length: None }` (canonical form for comparison)
   - Recurse into Array element, Struct fields, Map key/value
-- [ ] 2b. Refactor `normalize_type()` in `schema_tracking.rs` to:
+- [x] 2b. Refactor `normalize_type()` in `schema_tracking.rs` to:
   1. Parse the SQL string via `parse_type()`
   2. Call `normalize()` on the result
-  3. Return the normalized `DataType` (change return type from `String` to `DataType`)
+  3. Return the normalized `DataType` (change return type from `String` to `NormalizedType`)
   4. Fall back to uppercase string comparison for unparseable types (forward compat)
-- [ ] 2c. Update `diff_schemas()` to compare normalized `DataType` values instead of strings
-- [ ] 2d. Update `is_safe_type_widening()` to accept `&DataType` instead of `&str`
+- [x] 2c. Update `diff_schemas()` to compare normalized `DataType` values instead of strings
+- [x] 2d. Update `is_safe_type_widening()` to accept `&DataType` instead of `&str`
 
 ### Red-Green Tests
 
@@ -952,3 +952,25 @@ cargo test -p smelt-cli --test example_diagnostics
 - All 39 smelt-types tests pass, 39 smelt-db tests pass (including property tests), clippy clean
 
 **Decisions:** None beyond what was already in the plan.
+
+### Session 2 — 2026-04-05
+
+**Phase completed:** Phase 2 (Recursive Type Normalization)
+
+**What was done:**
+- Added `DataType::normalize()` method to `smelt-types` — recursively normalizes `Text` → `Varchar { max_length: None }` through Array, Struct, Map
+- Added `smelt-types` as a dependency of `smelt-state`
+- Refactored `normalize_type()` in `schema_tracking.rs`:
+  - Now parses SQL strings via `parse_type()` + `normalize()` for structural comparison
+  - Returns `NormalizedType` enum (Parsed/Unparsed) for forward-compatible fallback
+  - Added `normalized_types_equal()` helper for comparing normalized types
+- Updated `diff_schemas()` to use structural DataType comparison instead of string comparison
+- Rewrote `is_safe_type_widening()` to accept `&DataType` values with pattern matching on type variants
+- Added `is_safe_type_widening_str()` convenience wrapper for callers with string types
+- Updated all internal callers of the old string-based widening check
+- 13 new tests: 6 for normalize() in smelt-types, 7 for complex type normalization in smelt-state
+- All 45 smelt-types tests pass, 47 smelt-state tests pass, clippy clean
+
+**Decisions:**
+- `VARCHAR` and `TEXT` now normalize to the same type (`Varchar { max_length: None }`), so `VARCHAR → TEXT` is no longer a "widening" — it's the same type. Updated existing test accordingly.
+- `normalize_type()` returns `NormalizedType` enum (not raw `DataType`) to handle unparseable types gracefully via uppercase string fallback.

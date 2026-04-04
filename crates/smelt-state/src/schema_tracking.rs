@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use smelt_types::{parse_type, DataType};
 use std::collections::HashMap;
 
 /// Persisted schema for a deployed model.
@@ -65,7 +66,7 @@ impl SchemaDiff {
             // Removing columns is allowed with flag, doesn't require refresh
             SchemaChange::RemoveColumn { .. } => false,
             // Type changes: check if it's a safe widening
-            SchemaChange::ChangeType { from, to, .. } => !is_safe_type_widening(from, to),
+            SchemaChange::ChangeType { from, to, .. } => !is_safe_type_widening_str(from, to),
             // Making nullable -> NOT NULL requires full refresh
             SchemaChange::ChangeNullability {
                 to_nullable: false, ..
@@ -148,10 +149,10 @@ pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) ->
     // Check for type/nullability changes on existing columns
     for col in inferred {
         if let Some(deployed_col) = deployed_map.get(col.name.as_str()) {
-            let from_type = normalize_type(&deployed_col.data_type);
-            let to_type = normalize_type(&col.data_type);
+            let from_normalized = normalize_type(&deployed_col.data_type);
+            let to_normalized = normalize_type(&col.data_type);
 
-            if from_type != to_type {
+            if !normalized_types_equal(&from_normalized, &to_normalized) {
                 changes.push(SchemaChange::ChangeType {
                     name: col.name.clone(),
                     from: deployed_col.data_type.clone(),
@@ -172,98 +173,94 @@ pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) ->
     SchemaDiff { changes }
 }
 
-/// Normalize type strings for comparison (case-insensitive, canonicalize aliases).
+/// Result of attempting to parse and normalize a type string.
 ///
-/// Maps common SQL type aliases to their canonical forms so that
-/// e.g. `INT` vs `INTEGER` or `BOOL` vs `BOOLEAN` don't trigger spurious
-/// schema change detections.
-fn normalize_type(type_str: &str) -> String {
-    let upper = type_str.to_uppercase().trim().to_string();
-    match upper.as_str() {
-        "INT" | "INT4" | "SIGNED" => "INTEGER".to_string(),
-        "INT2" | "SHORT" => "SMALLINT".to_string(),
-        "INT8" | "LONG" | "INT64" => "BIGINT".to_string(),
-        "BOOL" => "BOOLEAN".to_string(),
-        "FLOAT4" | "REAL" => "FLOAT".to_string(),
-        "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => "DOUBLE".to_string(),
-        "STRING" => "VARCHAR".to_string(),
-        "TEXT" => "VARCHAR".to_string(),
-        _ => upper,
+/// If parsing succeeds, we get a normalized `DataType` for structural comparison.
+/// If parsing fails, we fall back to uppercase string comparison (forward compat).
+enum NormalizedType {
+    Parsed(DataType),
+    Unparsed(String),
+}
+
+/// Parse and normalize a SQL type string for comparison.
+///
+/// Tries to parse the string into a `DataType` via `parse_type()`, then
+/// normalizes aliases (e.g., Text → Varchar). Falls back to uppercase string
+/// comparison for types that can't be parsed (forward compatibility).
+fn normalize_type(type_str: &str) -> NormalizedType {
+    match parse_type(type_str) {
+        Ok(dt) => NormalizedType::Parsed(dt.normalize()),
+        Err(_) => NormalizedType::Unparsed(type_str.to_uppercase().trim().to_string()),
+    }
+}
+
+/// Compare two normalized types for equality.
+fn normalized_types_equal(a: &NormalizedType, b: &NormalizedType) -> bool {
+    match (a, b) {
+        (NormalizedType::Parsed(da), NormalizedType::Parsed(db)) => da == db,
+        (NormalizedType::Unparsed(sa), NormalizedType::Unparsed(sb)) => sa == sb,
+        // One parsed, one didn't — they're different
+        _ => false,
     }
 }
 
 /// Check if a type change is a safe widening (no data loss).
-fn is_safe_type_widening(from: &str, to: &str) -> bool {
-    let from_upper = from.to_uppercase();
-    let to_upper = to.to_uppercase();
-
-    matches!(
-        (from_upper.as_str(), to_upper.as_str()),
+///
+/// Accepts `DataType` values for structural comparison. For Phase 2, this handles
+/// scalar types only. Phase 4 will add recursive rules for Array/Map/Struct.
+fn is_safe_type_widening(from: &DataType, to: &DataType) -> bool {
+    match (from, to) {
         // Integer widenings
-        ("SMALLINT", "INTEGER")
-            | ("SMALLINT", "BIGINT")
-            | ("INTEGER", "BIGINT")
-            // Float widenings
-            | ("FLOAT", "DOUBLE")
-            // String widenings (VARCHAR to TEXT, smaller to larger VARCHAR)
-            | ("VARCHAR", "TEXT")
-            | ("CHAR", "VARCHAR")
-            | ("CHAR", "TEXT")
-    ) || is_varchar_widening(&from_upper, &to_upper)
-        || is_decimal_widening(&from_upper, &to_upper)
-}
+        (DataType::SmallInt, DataType::Integer) => true,
+        (DataType::SmallInt, DataType::BigInt) => true,
+        (DataType::Integer, DataType::BigInt) => true,
 
-/// Check if a VARCHAR(N) -> VARCHAR(M) where M > N.
-fn is_varchar_widening(from: &str, to: &str) -> bool {
-    let from_len = parse_varchar_length(from);
-    let to_len = parse_varchar_length(to);
+        // Float widenings
+        (DataType::Float, DataType::Double) => true,
 
-    match (from_len, to_len) {
-        // VARCHAR(N) -> VARCHAR (unbounded) is always safe
-        (Some(_), None) if to.starts_with("VARCHAR") => true,
-        // VARCHAR(N) -> VARCHAR(M) where M > N
-        (Some(n), Some(m)) => m > n,
+        // String widenings
+        (DataType::Varchar { .. } | DataType::Text, DataType::Text) => true,
+        (DataType::Char { .. }, DataType::Varchar { .. } | DataType::Text) => true,
+        (
+            DataType::Varchar {
+                max_length: Some(_),
+            },
+            DataType::Varchar { max_length: None },
+        ) => true,
+        (
+            DataType::Varchar {
+                max_length: Some(from_len),
+            },
+            DataType::Varchar {
+                max_length: Some(to_len),
+            },
+        ) => to_len > from_len,
+
+        // Decimal widenings: precision and scale must not decrease
+        (
+            DataType::Decimal {
+                precision: p1,
+                scale: s1,
+            },
+            DataType::Decimal {
+                precision: p2,
+                scale: s2,
+            },
+        ) => p2 >= p1 && s2 >= s1 && (p2 > p1 || s2 > s1),
+
         _ => false,
     }
 }
 
-fn parse_varchar_length(type_str: &str) -> Option<u32> {
-    let s = type_str.trim();
-    if let Some(inner) = s.strip_prefix("VARCHAR(").and_then(|s| s.strip_suffix(')')) {
-        inner.trim().parse().ok()
-    } else {
-        None
-    }
-}
-
-/// Check if DECIMAL(P1,S1) -> DECIMAL(P2,S2) where P2>=P1 and S2>=S1.
-fn is_decimal_widening(from: &str, to: &str) -> bool {
-    let from_params = parse_decimal_params(from);
-    let to_params = parse_decimal_params(to);
-
-    match (from_params, to_params) {
-        (Some((p1, s1)), Some((p2, s2))) => p2 >= p1 && s2 >= s1,
+/// Parse a type string and check if it's a safe widening.
+///
+/// This is a convenience wrapper for callers that have type strings
+/// (e.g., from `SchemaChange::ChangeType`). Falls back to `false`
+/// if either type fails to parse.
+fn is_safe_type_widening_str(from: &str, to: &str) -> bool {
+    match (parse_type(from), parse_type(to)) {
+        (Ok(from_dt), Ok(to_dt)) => is_safe_type_widening(&from_dt.normalize(), &to_dt.normalize()),
         _ => false,
-    }
-}
-
-fn parse_decimal_params(type_str: &str) -> Option<(u8, u8)> {
-    let s = type_str.trim();
-    let inner = s
-        .strip_prefix("DECIMAL(")
-        .and_then(|s| s.strip_suffix(')'))?;
-    let parts: Vec<&str> = inner.split(',').collect();
-    match parts.len() {
-        1 => {
-            let p = parts[0].trim().parse().ok()?;
-            Some((p, 0))
-        }
-        2 => {
-            let p = parts[0].trim().parse().ok()?;
-            let s = parts[1].trim().parse().ok()?;
-            Some((p, s))
-        }
-        _ => None,
     }
 }
 
@@ -333,7 +330,7 @@ pub fn plan_migration(
                 }
             }
             SchemaChange::ChangeType { name, from, to, .. } => {
-                if !is_safe_type_widening(from, to) {
+                if !is_safe_type_widening_str(from, to) {
                     Some(format!(
                         "unsafe type change on '{}': {} -> {}",
                         name, from, to
@@ -559,22 +556,24 @@ mod tests {
 
     #[test]
     fn test_safe_type_widening() {
-        assert!(is_safe_type_widening("INTEGER", "BIGINT"));
-        assert!(is_safe_type_widening("SMALLINT", "INTEGER"));
-        assert!(is_safe_type_widening("FLOAT", "DOUBLE"));
-        assert!(is_safe_type_widening("VARCHAR", "TEXT"));
-        assert!(is_safe_type_widening("VARCHAR(50)", "VARCHAR(100)"));
-        assert!(is_safe_type_widening("VARCHAR(50)", "VARCHAR"));
-        assert!(is_safe_type_widening("DECIMAL(10,2)", "DECIMAL(12,2)"));
-        assert!(is_safe_type_widening("DECIMAL(10,2)", "DECIMAL(10,4)"));
+        assert!(is_safe_type_widening_str("INTEGER", "BIGINT"));
+        assert!(is_safe_type_widening_str("SMALLINT", "INTEGER"));
+        assert!(is_safe_type_widening_str("FLOAT", "DOUBLE"));
+        // VARCHAR and TEXT now normalize to the same type, so diff_schemas won't
+        // produce a ChangeType for them. Test Varchar(N) → Text widening instead.
+        assert!(is_safe_type_widening_str("VARCHAR(50)", "TEXT"));
+        assert!(is_safe_type_widening_str("VARCHAR(50)", "VARCHAR(100)"));
+        assert!(is_safe_type_widening_str("VARCHAR(50)", "VARCHAR"));
+        assert!(is_safe_type_widening_str("DECIMAL(10,2)", "DECIMAL(12,2)"));
+        assert!(is_safe_type_widening_str("DECIMAL(10,2)", "DECIMAL(10,4)"));
     }
 
     #[test]
     fn test_unsafe_type_change() {
-        assert!(!is_safe_type_widening("BIGINT", "INTEGER")); // narrowing
-        assert!(!is_safe_type_widening("VARCHAR(100)", "VARCHAR(50)")); // narrowing
-        assert!(!is_safe_type_widening("INTEGER", "VARCHAR")); // incompatible
-        assert!(!is_safe_type_widening("DECIMAL(12,2)", "DECIMAL(10,2)")); // narrowing
+        assert!(!is_safe_type_widening_str("BIGINT", "INTEGER")); // narrowing
+        assert!(!is_safe_type_widening_str("VARCHAR(100)", "VARCHAR(50)")); // narrowing
+        assert!(!is_safe_type_widening_str("INTEGER", "VARCHAR")); // incompatible
+        assert!(!is_safe_type_widening_str("DECIMAL(12,2)", "DECIMAL(10,2)")); // narrowing
     }
 
     #[test]
@@ -941,6 +940,174 @@ mod tests {
             }
             other => panic!("Expected AlterTable, got {:?}", other),
         }
+    }
+
+    // === Phase 2: Complex type normalization in diff_schemas ===
+
+    #[test]
+    fn test_complex_type_alias_normalization_struct() {
+        // STRUCT(a INT, b BOOL) vs STRUCT(a INTEGER, b BOOLEAN) — aliases, no real change
+        let deployed = vec![col("meta", "STRUCT(a INT, b BOOL)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER, b BOOLEAN)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "STRUCT(a INT, b BOOL) vs STRUCT(a INTEGER, b BOOLEAN) should not trigger a change"
+        );
+    }
+
+    #[test]
+    fn test_complex_type_alias_normalization_array() {
+        // INT[] vs INTEGER[] — alias, no real change
+        let deployed = vec![col("tags", "INT[]", true)];
+        let inferred = vec![col("tags", "INTEGER[]", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "INT[] vs INTEGER[] should not trigger a change"
+        );
+    }
+
+    #[test]
+    fn test_complex_type_alias_normalization_map() {
+        // MAP(STRING, INT) vs MAP(VARCHAR, INTEGER) — aliases
+        let deployed = vec![col("lookup", "MAP(STRING, INT)", true)];
+        let inferred = vec![col("lookup", "MAP(VARCHAR, INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "MAP(STRING, INT) vs MAP(VARCHAR, INTEGER) should not trigger a change"
+        );
+    }
+
+    #[test]
+    fn test_complex_type_alias_normalization_text_varchar() {
+        // STRUCT(a TEXT) vs STRUCT(a VARCHAR) — Text/Varchar normalization
+        let deployed = vec![col("meta", "STRUCT(a TEXT)", true)];
+        let inferred = vec![col("meta", "STRUCT(a VARCHAR)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "STRUCT(a TEXT) vs STRUCT(a VARCHAR) should not trigger a change"
+        );
+    }
+
+    #[test]
+    fn test_complex_type_alias_normalization_nested_struct() {
+        // STRUCT(a STRUCT(x INT8)) vs STRUCT(a STRUCT(x BIGINT)) — nested alias
+        let deployed = vec![col("data", "STRUCT(a STRUCT(x INT8))", true)];
+        let inferred = vec![col("data", "STRUCT(a STRUCT(x BIGINT))", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.is_empty(),
+            "STRUCT(a STRUCT(x INT8)) vs STRUCT(a STRUCT(x BIGINT)) should not trigger a change"
+        );
+    }
+
+    #[test]
+    fn test_complex_type_real_change_detected() {
+        // STRUCT(a INTEGER) vs STRUCT(a BIGINT) — real widening, should detect change
+        let deployed = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let inferred = vec![col("meta", "STRUCT(a BIGINT)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(
+            diff.changes.len(),
+            1,
+            "STRUCT(a INTEGER) vs STRUCT(a BIGINT) should detect change"
+        );
+        assert!(matches!(&diff.changes[0], SchemaChange::ChangeType { .. }));
+    }
+
+    #[test]
+    fn test_complex_type_array_widening_detected() {
+        // INTEGER[] vs BIGINT[] — real change (widening)
+        let deployed = vec![col("scores", "INTEGER[]", true)];
+        let inferred = vec![col("scores", "BIGINT[]", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(
+            diff.changes.len(),
+            1,
+            "INTEGER[] vs BIGINT[] should detect change"
+        );
+    }
+
+    #[test]
+    fn test_is_safe_type_widening_with_datatype() {
+        // Basic scalar widenings
+        assert!(is_safe_type_widening(
+            &DataType::SmallInt,
+            &DataType::Integer
+        ));
+        assert!(is_safe_type_widening(
+            &DataType::SmallInt,
+            &DataType::BigInt
+        ));
+        assert!(is_safe_type_widening(&DataType::Integer, &DataType::BigInt));
+        assert!(is_safe_type_widening(&DataType::Float, &DataType::Double));
+
+        // String widenings
+        assert!(is_safe_type_widening(
+            &DataType::Varchar { max_length: None },
+            &DataType::Text
+        ));
+        assert!(is_safe_type_widening(
+            &DataType::Char { length: 10 },
+            &DataType::Varchar { max_length: None }
+        ));
+        assert!(is_safe_type_widening(
+            &DataType::Varchar {
+                max_length: Some(50)
+            },
+            &DataType::Varchar {
+                max_length: Some(100)
+            }
+        ));
+        assert!(is_safe_type_widening(
+            &DataType::Varchar {
+                max_length: Some(50)
+            },
+            &DataType::Varchar { max_length: None }
+        ));
+
+        // Decimal widenings
+        assert!(is_safe_type_widening(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2
+            },
+            &DataType::Decimal {
+                precision: 12,
+                scale: 2
+            }
+        ));
+        assert!(is_safe_type_widening(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2
+            },
+            &DataType::Decimal {
+                precision: 10,
+                scale: 4
+            }
+        ));
+
+        // Unsafe
+        assert!(!is_safe_type_widening(
+            &DataType::BigInt,
+            &DataType::Integer
+        )); // narrowing
+        assert!(!is_safe_type_widening(
+            &DataType::Varchar {
+                max_length: Some(100)
+            },
+            &DataType::Varchar {
+                max_length: Some(50)
+            }
+        )); // narrowing
+        assert!(!is_safe_type_widening(
+            &DataType::Integer,
+            &DataType::Varchar { max_length: None }
+        )); // incompatible
     }
 
     #[test]
