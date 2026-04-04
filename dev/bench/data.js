@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775260904668,
+  "lastUpdate": 1775262476911,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -10057,6 +10057,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.390634,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0986e451ac008d411673b39f8e5bf18fe71980a9",
+          "message": "Update docs site with March 21 – April 4 feature additions\n\n- CLI: add smelt docs generate command reference\n- Targets: add Spark requirements, cross-engine Parquet exchange section\n- Editor: add expanded goto-definition (sources, CTEs, columns) and diagnostics docs\n- Web UI: replace stub with full feature docs (model detail, run planner, execution, file watching)\n- Architecture: update LSP section with new capabilities\n- Project structure: add .smelt/schemas/ dir, multi_engine example\n- CLI: note logical/physical graph output in smelt explain\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-04T11:26:05+11:00",
+          "tree_id": "e0b7dc6491f767ed55c2cfd25b088f1bbfcd33a9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0986e451ac008d411673b39f8e5bf18fe71980a9"
+        },
+        "date": 1775262476042,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.47046,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.146750999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6133179999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.371396,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002835,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 39.264658,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.032641,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014698,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.01069,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.328207,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.530137,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.96156,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.21545,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.457036,
             "unit": "ms"
           }
         ]
