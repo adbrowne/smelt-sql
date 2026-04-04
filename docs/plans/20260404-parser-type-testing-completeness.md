@@ -122,18 +122,18 @@
 
 ---
 
-## Phase 7: Window Function Proptest Generators `[ ]`
+## Phase 7: Window Function Proptest Generators `[x]`
 
 **Priority**: Medium — window functions tested by unit tests, partially by existing proptests.
 
 **Goal**: Create `prop_window_types.rs` with varied window specs.
 
 **Work**:
-- [ ] Generate window functions with PARTITION BY, ORDER BY variations
-- [ ] Cover ROWS/RANGE/GROUPS frame types
-- [ ] Include aggregate functions (SUM, AVG, COUNT) as window functions
-- [ ] Include ranking functions (ROW_NUMBER, RANK, DENSE_RANK, NTILE)
-- [ ] Validate return types against DuckDB
+- [x] Generate window functions with PARTITION BY, ORDER BY variations
+- [x] Cover ROWS/RANGE/GROUPS frame types
+- [x] Include aggregate functions (SUM, AVG, COUNT) as window functions
+- [x] Include ranking functions (ROW_NUMBER, RANK, DENSE_RANK, NTILE)
+- [x] Validate return types against DuckDB
 
 **Verification**: `cargo test -p smelt-db --test prop_window_types` passes
 
@@ -371,3 +371,19 @@ Each Claude Code session records what it accomplished here.
 - All 43 tests pass, zero clippy warnings.
 
 **Decisions**: See Decisions Log entry 6.
+
+### Session 7 — 2026-04-04
+
+**Phase**: 7 (Window Function Proptest Generators)
+**Status**: Complete
+
+**What was done**:
+- `prop_window_types.rs` was already written with comprehensive coverage (46 tests total):
+  - 4 proptests (256 cases each): general window func types, ranking functions, value functions (LAG/LEAD/etc.), aggregate-as-window functions
+  - 3 exhaustive deterministic tests: all 16 window funcs × 6 types, all frame specs × aggregate windows, all OVER clause variations
+  - 13 smoke tests: ROW_NUMBER/RANK/DENSE_RANK/NTILE→BigInt, CUME_DIST/PERCENT_RANK→Double, LAG preserves VARCHAR, LEAD preserves TIMESTAMP, FIRST_VALUE preserves DATE, AVG→Double, COUNT→BigInt, SUM with frame spec, full PARTITION BY+ORDER BY+frame
+- Fixed compilation error: `DataType::Varchar { length: None }` → `DataType::Varchar { max_length: None }` (field was renamed)
+- Removed unused `to_smelt_type()` method to eliminate dead_code warning
+- All 46 tests pass, zero clippy warnings.
+
+**Decisions**: None — implementation was already comprehensive, only minor fixes needed.
