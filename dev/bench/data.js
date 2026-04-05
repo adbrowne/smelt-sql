@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775425441112,
+  "lastUpdate": 1775425442910,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14609,6 +14609,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.06612079923909,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "73b52ee143984d6d19ddafb9b63736672c896c53",
+          "message": "Merge pull request #103 from adbrowne/lsp-refactorings\n\nAdd LSP refactorings plan, research, and execution script",
+          "timestamp": "2026-04-06T07:42:40+10:00",
+          "tree_id": "300efd0a4c66f7c7d096d4443aa5f0f6e77ab5d7",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/73b52ee143984d6d19ddafb9b63736672c896c53"
+        },
+        "date": 1775425442222,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.581014446657356,
             "unit": "MB/s"
           }
         ]
