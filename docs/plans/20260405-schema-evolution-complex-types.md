@@ -819,26 +819,29 @@ cargo test  # full suite
 
 ---
 
-## Phase 12: Spark DDL Tests (Unit) [ ]
+## Phase 12: Spark DDL Tests (Unit) [x]
 
 **Goal:** Unit tests for Spark DDL generation covering Delta and Parquet paths. These don't require a running Spark cluster.
 
 ### Work Items
 
-- [ ] 12a. Add unit tests for `generate_spark_ddl()` in `smelt-backend-spark/src/tests.rs`:
+- [x] 12a. Add unit tests for `generate_spark_ddl()` in `smelt-state/src/ddl_spark.rs`:
   - Delta: struct field add/remove DDL
   - Delta: table rewrite SQL generation for nested type widening
   - Parquet: struct field add DDL (metastore)
   - Parquet: FullRefreshRequired for unsupported operations
   - Parquet: MergeSchemaWrite for nullable array-of-struct field add
-- [ ] 12b. Test `TableRewrite` SQL generation:
+  - Additional: AddColumn with DEFAULT, NOT NULL, ChangeNullability paths, widening chain, backfill+add combo
+- [x] 12b. Test `TableRewrite` SQL generation:
   - Generates correct `CREATE TABLE tmp AS SELECT ... FROM original`
-  - Includes type casts for widened fields
+  - Includes type casts for widened fields (struct cast, complex select)
   - Generates DROP + RENAME sequence
-- [ ] 12c. Test error messages for `FullRefreshRequired`:
+  - Verifies RewriteColumn select_expr format (AS column, EXCEPT)
+- [x] 12c. Test error messages for `FullRefreshRequired`:
   - Clear description of what's unsupported
   - Suggests remediation (e.g., switch to Delta format)
   - Mentions `--allow-full-refresh` flag
+  - Fixed 3 messages missing remediation suggestions (AddColumn NOT NULL, BackfillColumn, ChangeNullability on Parquet)
 
 ### Verification
 
@@ -1176,3 +1179,24 @@ cargo test -p smelt-cli --test example_diagnostics
 **Decisions:**
 - For DuckDB, any complex type change on an array or map column uses `ALTER COLUMN TYPE` on the full column instead of dot-notation operations. DuckDB only supports dot-notation for direct struct columns, not for struct elements inside arrays/maps.
 - Multiple changes on the same column (e.g., field add + type widen) are deduplicated into a single `ALTER COLUMN TYPE` statement since DuckDB handles all compatible changes in one type cast.
+
+### Session 12 — 2026-04-05
+
+**Phase completed:** Phase 12 (Spark DDL Tests — Unit)
+
+**What was done:**
+- Added 18 new unit tests to `smelt-state/src/ddl_spark.rs` (total now 48):
+  - **12a edge cases:** `AddColumn` with DEFAULT clause, `AddColumn` NOT NULL, `ChangeNullability` set NOT NULL with/without default (Delta and Parquet), SMALLINT widening chain, backfill+add column combo
+  - **12b table rewrite:** `generate_table_rewrite_sql()` with struct casts, complex SELECT expressions, `RewriteColumn` select_expr format verification (AS column, EXCEPT), `WidenColumnType` table rewrite CAST format
+  - **12c error messages:** 7 tests verifying all `FullRefreshRequired` messages include remediation suggestions (mention Delta format and/or `--allow-full-refresh`)
+- **Bug fixes (RED→GREEN):**
+  - Fixed `AddColumn` DEFAULT clause placement: was `ADD COLUMNS (col TYPE) DEFAULT expr`, now correctly `ADD COLUMNS (col TYPE DEFAULT expr)` (inside parentheses)
+  - Improved 4 error messages that were missing remediation suggestions:
+    - `AddColumn` NOT NULL on Parquet: added "Consider using Delta format or --allow-full-refresh"
+    - `BackfillColumn` on Parquet: added "Consider using Delta format or --allow-full-refresh"
+    - `ChangeNullability` SET NOT NULL on Parquet: added "Consider using Delta format or --allow-full-refresh"
+    - `ChangeNullability` SET NOT NULL without default: added "Provide a default or use --allow-full-refresh"
+- All 48 ddl_spark tests pass, all workspace tests pass (excluding pre-existing python_models failures), clippy clean, fmt clean
+
+**Decisions:**
+- Tests live in `smelt-state/src/ddl_spark.rs` (where the code is), not in `smelt-backend-spark/src/tests.rs` as the plan originally envisioned. The Spark backend crate handles connectivity/execution; DDL generation is in smelt-state.

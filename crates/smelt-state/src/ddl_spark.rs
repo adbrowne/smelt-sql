@@ -133,23 +133,21 @@ fn classify_operation(
         } => {
             if !nullable && format == SparkTableFormat::Parquet {
                 return OpStrategy::FullRefresh(format!(
-                    "Cannot add NOT NULL column '{}' to Parquet table without full refresh",
+                    "Cannot add NOT NULL column '{}' to Parquet table without full refresh. \
+                     Consider using Delta format or --allow-full-refresh",
                     name
                 ));
             }
             let type_sql = to_spark_type_sql(data_type);
-            let mut stmt = format!("ALTER TABLE {{TABLE}} ADD COLUMNS ({} {})", name, type_sql);
-            if !nullable {
-                stmt = format!(
-                    "ALTER TABLE {{TABLE}} ADD COLUMNS ({} {} NOT NULL)",
-                    name, type_sql
-                );
+            let mut col_spec = format!("{} {}", name, type_sql);
+            if !*nullable {
+                col_spec.push_str(" NOT NULL");
             }
             if let Some(default) = default_expr {
                 // Spark supports DEFAULT in ALTER TABLE ADD COLUMNS (Delta)
-                stmt.push_str(&std::format!(" DEFAULT {}", default));
+                col_spec.push_str(&std::format!(" DEFAULT {}", default));
             }
-            OpStrategy::Ddl(stmt)
+            OpStrategy::Ddl(format!("ALTER TABLE {{TABLE}} ADD COLUMNS ({})", col_spec))
         }
         SchemaOperation::RemoveColumn { name } => {
             if !caps.supports_column_mapping {
@@ -213,12 +211,14 @@ fn classify_operation(
                         ));
                     }
                     return OpStrategy::FullRefresh(format!(
-                        "Cannot set column '{}' to NOT NULL on Parquet table",
+                        "Cannot set column '{}' to NOT NULL on Parquet table. \
+                         Consider using Delta format or --allow-full-refresh",
                         name
                     ));
                 }
                 OpStrategy::FullRefresh(format!(
-                    "Cannot set column '{}' to NOT NULL without a default expression",
+                    "Cannot set column '{}' to NOT NULL without a default expression. \
+                     Provide a default or use --allow-full-refresh",
                     name
                 ))
             }
@@ -298,7 +298,8 @@ fn classify_operation(
             // UPDATE works on Delta; Parquet doesn't support UPDATE
             if format == SparkTableFormat::Parquet {
                 OpStrategy::FullRefresh(format!(
-                    "Cannot UPDATE Parquet table to backfill column '{}'",
+                    "Cannot UPDATE Parquet table to backfill column '{}'. \
+                     Consider using Delta format or --allow-full-refresh",
                     name
                 ))
             } else {
@@ -1090,6 +1091,516 @@ mod tests {
                 assert_eq!(columns_to_add[0].0, "items.element.score");
             }
             other => panic!("Expected MergeSchemaWrite, got {:?}", other),
+        }
+    }
+
+    // ── 12a: Additional edge case tests ────────────────────────────────
+
+    #[test]
+    fn test_delta_add_column_with_default() {
+        let ops = vec![SchemaOperation::AddColumn {
+            name: "status".into(),
+            data_type: DataType::Varchar { max_length: None },
+            nullable: true,
+            default_expr: Some("'pending'".into()),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        assert_eq!(
+            result,
+            MigrationExecution::Statements(vec![
+                "ALTER TABLE cat.db.t ADD COLUMNS (status STRING DEFAULT 'pending')".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_delta_add_column_not_null() {
+        let ops = vec![SchemaOperation::AddColumn {
+            name: "required_col".into(),
+            data_type: DataType::Integer,
+            nullable: false,
+            default_expr: None,
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        assert_eq!(
+            result,
+            MigrationExecution::Statements(vec![
+                "ALTER TABLE cat.db.t ADD COLUMNS (required_col INTEGER NOT NULL)".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_delta_change_nullability_set_not_null_with_default() {
+        let ops = vec![SchemaOperation::ChangeNullability {
+            name: "status".into(),
+            to_nullable: false,
+            default_expr: Some("'unknown'".into()),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        // Delta with column mapping: UPDATE to fill NULLs
+        assert_eq!(
+            result,
+            MigrationExecution::Statements(vec![
+                "UPDATE cat.db.t SET status = 'unknown' WHERE status IS NULL".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_delta_change_nullability_set_not_null_without_default_full_refresh() {
+        let ops = vec![SchemaOperation::ChangeNullability {
+            name: "status".into(),
+            to_nullable: false,
+            default_expr: None,
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("NOT NULL"),
+                    "Expected mention of NOT NULL, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parquet_change_nullability_set_not_null_full_refresh() {
+        let ops = vec![SchemaOperation::ChangeNullability {
+            name: "status".into(),
+            to_nullable: false,
+            default_expr: Some("'unknown'".into()),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(reason.contains("NOT NULL") || reason.contains("Parquet"));
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_delta_smallint_widening_chain() {
+        // SMALLINT → INTEGER (safe widening)
+        let ops = vec![SchemaOperation::WidenColumnType {
+            name: "val".into(),
+            from: DataType::SmallInt,
+            to: DataType::Integer,
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        assert_eq!(
+            result,
+            MigrationExecution::Statements(vec![
+                "ALTER TABLE cat.db.t ALTER COLUMN val TYPE INTEGER".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_delta_backfill_then_add_column() {
+        // Multiple operations: add column + backfill
+        let ops = vec![
+            SchemaOperation::AddColumn {
+                name: "category".into(),
+                data_type: DataType::Varchar { max_length: None },
+                nullable: true,
+                default_expr: None,
+            },
+            SchemaOperation::BackfillColumn {
+                name: "category".into(),
+                expression: "CASE WHEN amount > 100 THEN 'high' ELSE 'low' END".into(),
+            },
+        ];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        match result {
+            MigrationExecution::Statements(stmts) => {
+                assert_eq!(stmts.len(), 2);
+                assert!(stmts[0].contains("ADD COLUMNS (category STRING)"));
+                assert!(stmts[1].contains("UPDATE cat.db.t SET category = CASE"));
+            }
+            other => panic!("Expected Statements, got {:?}", other),
+        }
+    }
+
+    // ── 12b: TableRewrite SQL generation tests ───────────────────────────
+
+    #[test]
+    fn test_table_rewrite_sql_with_struct_cast() {
+        let stmts = generate_table_rewrite_sql(
+            "cat",
+            "db",
+            "users",
+            "CAST(meta.a AS BIGINT) AS a, meta.b, name",
+        );
+        assert_eq!(stmts.len(), 3);
+        assert_eq!(
+            stmts[0],
+            "CREATE TABLE cat.db.users_smelt_tmp AS SELECT \
+             CAST(meta.a AS BIGINT) AS a, meta.b, name FROM cat.db.users"
+        );
+        assert_eq!(stmts[1], "DROP TABLE cat.db.users");
+        assert_eq!(
+            stmts[2],
+            "ALTER TABLE cat.db.users_smelt_tmp RENAME TO cat.db.users"
+        );
+    }
+
+    #[test]
+    fn test_table_rewrite_sql_preserves_complex_select() {
+        let stmts = generate_table_rewrite_sql(
+            "unity_catalog",
+            "analytics",
+            "events",
+            "named_struct('a', CAST(data.a AS BIGINT), 'b', data.b, 'c', NULL) AS data, * EXCEPT(data)",
+        );
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].contains("named_struct('a', CAST(data.a AS BIGINT)"));
+        assert!(stmts[0].contains("FROM unity_catalog.analytics.events"));
+        assert_eq!(stmts[1], "DROP TABLE unity_catalog.analytics.events");
+        assert!(stmts[2].contains("RENAME TO unity_catalog.analytics.events"));
+    }
+
+    #[test]
+    fn test_delta_rewrite_column_select_expr_format() {
+        // Verify the TableRewrite select_expr has the correct format:
+        // <using_expr> AS <column>, * EXCEPT(<column>)
+        let ops = vec![SchemaOperation::RewriteColumn {
+            column: "meta".into(),
+            target_type: DataType::Struct(vec![
+                ("a".into(), DataType::BigInt),
+                ("b".into(), DataType::Varchar { max_length: None }),
+            ]),
+            using_expr: "named_struct('a', CAST(meta.a AS BIGINT), 'b', meta.b)".into(),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        match result {
+            MigrationExecution::TableRewrite { select_expr } => {
+                // Should be: <expr> AS meta, * EXCEPT(meta)
+                assert!(
+                    select_expr.contains("AS meta"),
+                    "Expected 'AS meta' in: {}",
+                    select_expr
+                );
+                assert!(
+                    select_expr.contains("EXCEPT(meta)"),
+                    "Expected 'EXCEPT(meta)' in: {}",
+                    select_expr
+                );
+            }
+            other => panic!("Expected TableRewrite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_delta_widen_column_type_table_rewrite_format() {
+        // Unsafe widening (VARCHAR → INTEGER) → table rewrite with CAST
+        let ops = vec![SchemaOperation::WidenColumnType {
+            name: "amount".into(),
+            from: DataType::Varchar { max_length: None },
+            to: DataType::Integer,
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Delta,
+            &delta_caps(),
+        );
+        match result {
+            MigrationExecution::TableRewrite { select_expr } => {
+                assert!(
+                    select_expr.contains("CAST(amount AS INTEGER)"),
+                    "Expected CAST expression in: {}",
+                    select_expr
+                );
+                assert!(
+                    select_expr.contains("AS amount"),
+                    "Expected 'AS amount' in: {}",
+                    select_expr
+                );
+            }
+            other => panic!("Expected TableRewrite, got {:?}", other),
+        }
+    }
+
+    // ── 12c: Error message quality tests ─────────────────────────────────
+
+    #[test]
+    fn test_error_message_parquet_remove_column_suggests_remediation() {
+        let ops = vec![SchemaOperation::RemoveColumn {
+            name: "old_col".into(),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("Delta"),
+                    "Should suggest Delta format, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("old_col"),
+                    "Should mention the column name, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_message_parquet_widen_type_suggests_remediation() {
+        let ops = vec![SchemaOperation::WidenColumnType {
+            name: "data".into(),
+            from: DataType::Varchar { max_length: None },
+            to: DataType::Integer,
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("Delta"),
+                    "Should suggest Delta format, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_message_parquet_nested_widen_suggests_remediation() {
+        let ops = vec![SchemaOperation::WidenNestedType {
+            column: "meta".into(),
+            path: vec!["a".into()],
+            from: DataType::Integer,
+            to: DataType::BigInt,
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("Delta"),
+                    "Should suggest Delta format, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_message_parquet_remove_struct_field_suggests_remediation() {
+        let ops = vec![SchemaOperation::RemoveStructField {
+            column: "meta".into(),
+            path: vec![],
+            field_name: "old_field".into(),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("Delta"),
+                    "Should suggest Delta format, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_message_parquet_rewrite_column_suggests_remediation() {
+        let ops = vec![SchemaOperation::RewriteColumn {
+            column: "meta".into(),
+            target_type: DataType::Struct(vec![("a".into(), DataType::BigInt)]),
+            using_expr: "struct(meta.a)".into(),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("Delta"),
+                    "Should suggest Delta format, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_message_parquet_add_not_null_suggests_remediation() {
+        let ops = vec![SchemaOperation::AddColumn {
+            name: "required".into(),
+            data_type: DataType::Integer,
+            nullable: false,
+            default_expr: Some("0".into()),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_message_parquet_backfill_suggests_remediation() {
+        let ops = vec![SchemaOperation::BackfillColumn {
+            name: "status".into(),
+            expression: "'active'".into(),
+        }];
+        let result = generate_spark_ddl(
+            "cat",
+            "db",
+            "t",
+            &ops,
+            SparkTableFormat::Parquet,
+            &parquet_caps(),
+        );
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => {
+                assert!(
+                    reason.contains("--allow-full-refresh"),
+                    "Should mention --allow-full-refresh flag, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
         }
     }
 
