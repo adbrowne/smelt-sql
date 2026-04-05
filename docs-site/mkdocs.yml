@@ -54,6 +54,7 @@ nav:
     - Sources: guide/sources.md
     - Materializations: guide/materializations.md
     - Incremental Models: guide/incremental-models.md
+    - Schema Evolution: guide/schema-evolution.md
     - Seeds: guide/seeds.md
     - Model Selection: guide/model-selection.md
     - Python Models: guide/python-models.md

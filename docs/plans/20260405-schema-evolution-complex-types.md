@@ -852,37 +852,40 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 13: User-Facing Documentation [ ]
+## Phase 13: User-Facing Documentation [x]
 
 **Goal:** Comprehensive schema evolution documentation on smeltsql.com.
 
 ### Work Items
 
-- [ ] 13a. Create `docs-site/docs/guide/schema-evolution.md`:
+- [x] 13a. Create `docs-site/docs/guide/schema-evolution.md`:
   - Overview: what schema evolution is, why it matters
   - How smelt detects schema changes (structural comparison)
   - Safe vs unsafe changes (with examples)
   - Configuration: `default:`, `backfill:`, `schema_evolution:` in frontmatter
   - The `--allow-full-refresh` flag
   - Examples for every supported change type
-- [ ] 13b. Create complex type examples section:
+- [x] 13b. Create complex type examples section:
   - Adding a field to a struct column
   - Widening a type inside a struct
   - Adding a field to an array-of-structs
   - Map value evolution
   - Specifying defaults for complex types
   - Multi-step evolution (add + widen in one change)
-- [ ] 13c. Create backend capability matrix page or section:
+- [x] 13c. Create backend capability matrix page or section:
   - Table: operation x backend (DuckDB, Spark+Delta, Spark+Parquet)
   - What happens for each unsupported operation
   - Recommendations (when to use Delta vs Parquet)
-- [ ] 13d. Update `docs-site/docs/guide/incremental-models.md`:
+- [x] 13d. Update `docs-site/docs/guide/incremental-models.md`:
   - Link to schema evolution page
   - Mention `--allow-full-refresh` flag
-- [ ] 13e. Update `docs-site/docs/reference/project-configuration.md`:
-  - Document `format: delta|parquet` in target config
+- [x] 13e. Update `docs-site/docs/reference/smelt-yml.md`:
+  - Document `format: delta|parquet` in Spark target config
   - Document per-model `format:` override
-- [ ] 13f. Add schema evolution to `docs-site/mkdocs.yml` navigation.
+  - Document `schema_evolution` configuration section
+  - Document `columns` with `default` and `backfill` fields
+- [x] 13f. Add schema evolution to `docs-site/mkdocs.yml` navigation.
+- [x] 13g. Update `docs-site/docs/reference/cli.md` with `--allow-full-refresh` flag.
 
 ### Verification
 
@@ -1200,3 +1203,38 @@ cargo test -p smelt-cli --test example_diagnostics
 
 **Decisions:**
 - Tests live in `smelt-state/src/ddl_spark.rs` (where the code is), not in `smelt-backend-spark/src/tests.rs` as the plan originally envisioned. The Spark backend crate handles connectivity/execution; DDL generation is in smelt-state.
+
+### Session 13 — 2026-04-05
+
+**Phase completed:** Phase 13 (User-Facing Documentation)
+
+**What was done:**
+- Created `docs-site/docs/guide/schema-evolution.md` — comprehensive guide covering:
+  - Overview of how schema evolution works (4-step pipeline: compare → classify → plan → execute)
+  - Configuration section (frontmatter + smelt.yml, `schema_evolution.strategy`, per-column `default` and `backfill`)
+  - Safe vs unsafe change tables with clear categorization
+  - Complex type examples with tabbed DuckDB/Spark+Delta/Spark+Parquet code blocks:
+    - Adding struct fields, widening types in structs, array-of-struct field additions, map value evolution, complex type defaults, multi-step evolution
+  - Backend capability matrix (12 operations x 3 backends)
+  - Recommendations section (DuckDB most complete, Delta for production Spark, Parquet limitations)
+  - Table format configuration example
+  - `--allow-full-refresh` flag documentation with example error message
+- Updated `docs-site/docs/guide/incremental-models.md`:
+  - Added "Schema evolution" section before "Further reading" with link and summary
+  - Added schema evolution to "Further reading" links
+- Updated `docs-site/docs/reference/smelt-yml.md`:
+  - Added `format` field to Spark target table + example
+  - Added `schema_evolution`, `format`, and `columns` to Model Fields table
+  - Added "Schema Evolution Configuration" section with `strategy` field table and column fields table (`default`, `backfill`)
+- Updated `docs-site/docs/reference/cli.md`:
+  - Added `--allow-full-refresh` flag to `smelt run` flags table with description and link
+- Updated `docs-site/mkdocs.yml`:
+  - Added "Schema Evolution" entry after "Incremental Models" in Guide nav section
+- mkdocs.yml YAML validated; all referenced files exist; no pip/mkdocs available on system so `mkdocs build --strict` could not run (not a blocker)
+- Cargo fmt clean, clippy clean (warnings are pre-existing), all tests pass (excluding pre-existing python_models failures)
+
+**Decisions:**
+- 13e targeted `smelt-yml.md` (not `project-configuration.md` which doesn't exist) — the plan's filename was incorrect
+- Combined 13a/13b/13c into a single `schema-evolution.md` file since the backend matrix fits naturally as a section within the guide rather than a separate page
+- Used MkDocs Material content tabs (`=== "DuckDB"` etc.) for backend-specific code examples to keep the page scannable
+- Added 13g (CLI reference update) as an extra work item since `--allow-full-refresh` wasn't documented there
