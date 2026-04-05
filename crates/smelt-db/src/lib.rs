@@ -28,6 +28,7 @@ pub mod code_actions;
 pub mod references;
 pub mod schema;
 pub mod type_inference;
+pub mod yaml_edits;
 
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,

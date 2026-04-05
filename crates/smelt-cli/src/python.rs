@@ -107,7 +107,7 @@ fn run_python_model(
     use pyo3::prelude::*;
     use pyo3::types::PyTracebackMethods;
 
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         smelt_core::python_models::ensure_sdk_on_path(py, python_sdk_path)
             .map_err(|e| anyhow!("Failed to set up Python SDK path: {}", e))?;
 

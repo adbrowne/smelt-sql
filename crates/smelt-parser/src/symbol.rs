@@ -144,6 +144,22 @@ pub fn symbol_at_cursor(file: &AstFile, _text: &str, offset: usize) -> Option<Sy
     None
 }
 
+/// Validate that a string is a valid SQL identifier.
+///
+/// Must be non-empty, start with a letter or underscore, and contain only
+/// alphanumeric characters and underscores.
+pub fn is_valid_sql_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Convert an LSP-style (line, character) position to a byte offset in the text.
 pub fn position_to_offset(text: &str, line: u32, character: u32) -> usize {
     let mut offset = 0usize;
@@ -163,4 +179,27 @@ pub fn position_to_offset(text: &str, line: u32, character: u32) -> usize {
         offset += ch.len_utf8();
     }
     offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_sql_identifier_valid() {
+        assert!(is_valid_sql_identifier("foo_bar"));
+        assert!(is_valid_sql_identifier("_x1"));
+        assert!(is_valid_sql_identifier("CTE1"));
+        assert!(is_valid_sql_identifier("a"));
+        assert!(is_valid_sql_identifier("_"));
+    }
+
+    #[test]
+    fn test_is_valid_sql_identifier_invalid() {
+        assert!(!is_valid_sql_identifier(""));
+        assert!(!is_valid_sql_identifier("1abc"));
+        assert!(!is_valid_sql_identifier("a-b"));
+        assert!(!is_valid_sql_identifier("has space"));
+        assert!(!is_valid_sql_identifier("a.b"));
+    }
 }

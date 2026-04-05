@@ -13,6 +13,7 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
+    yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
     Database, Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
     DiagnosticSeverity as DbSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking,
 };
@@ -20,6 +21,7 @@ use smelt_db::{
 mod python_scan;
 use python_scan::PythonModelCache;
 use smelt_parser::ast::File as AstFile;
+use smelt_parser::is_valid_sql_identifier;
 use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 use smelt_types::TypedColumn;
 
@@ -41,21 +43,6 @@ impl InitErrors {
     fn total_count(&self) -> usize {
         self.workspace_errors.len() + self.source_errors.len() + self.model_errors.len()
     }
-}
-
-/// Validate that a string is a valid SQL identifier.
-/// Must be non-empty, start with a letter or underscore, and contain only
-/// alphanumeric characters and underscores.
-fn is_valid_sql_identifier(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Format a TypedColumn for display in hover/completion
@@ -180,78 +167,6 @@ fn find_source_column_line(
 
     // Fall back to table line
     find_source_table_line(sources_path, source_name, table_name)
-}
-
-/// Find the YAML line for a source table key and produce the rename edit.
-/// Returns (line_number, old_line, new_line) or None if not found.
-fn find_source_table_yaml_rename(
-    yaml_content: &str,
-    source_name: &str,
-    old_table_name: &str,
-    new_table_name: &str,
-) -> Option<(u32, String, String)> {
-    let mut in_source = false;
-    let mut in_tables = false;
-    for (i, line) in yaml_content.lines().enumerate() {
-        let trimmed = line.trim();
-
-        // Detect source name section (e.g., "  raw:")
-        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
-            in_source = true;
-            in_tables = false;
-            continue;
-        }
-
-        if in_source {
-            if trimmed == "tables:" {
-                in_tables = true;
-                continue;
-            }
-
-            // A new top-level key resets context
-            if !trimmed.is_empty()
-                && !trimmed.starts_with('-')
-                && !trimmed.starts_with('#')
-                && !line.starts_with(' ')
-            {
-                in_source = false;
-                in_tables = false;
-                continue;
-            }
-        }
-
-        if in_source && in_tables && trimmed.starts_with(&format!("{}:", old_table_name)) {
-            let old_line = line.to_string();
-            let new_line = line.replace(
-                &format!("{}:", old_table_name),
-                &format!("{}:", new_table_name),
-            );
-            return Some((i as u32, old_line, new_line));
-        }
-    }
-    None
-}
-
-/// Find a column name entry in sources.yml and produce the rename edit.
-/// Scans for `- name: old_column_name` entries.
-/// Returns (line_number, old_line, new_line) or None if not found.
-fn find_source_column_yaml_rename(
-    yaml_content: &str,
-    old_column_name: &str,
-    new_column_name: &str,
-) -> Option<(u32, String, String)> {
-    for (i, line) in yaml_content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed == format!("- name: {}", old_column_name) {
-            let old_line = line.to_string();
-            let new_line = line.replace(
-                &format!("- name: {}", old_column_name),
-                &format!("- name: {}", new_column_name),
-            );
-            return Some((i as u32, old_line, new_line));
-        }
-    }
-    None
 }
 
 /// A resolved column definition location for goto-definition
@@ -2241,36 +2156,180 @@ impl LanguageServer for Backend {
             })
             .collect();
 
+        // Read sources.yml for YAML-editing code actions
+        let project_root = db.file_project_root(effective_path.clone());
+        let sources_yml_content = (*db.project_sources_yaml(project_root.clone())).clone();
+        let sources_yml_path = project_root.join("sources.yml");
+
         let mut actions = Vec::new();
+
+        // Diagnostic-based code actions
         for diag in &matching {
-            let suggestions = smelt_db::code_actions::generate_code_actions(diag, &text);
-            for suggestion in suggestions {
-                let range = Range {
-                    start: Position::new(
-                        suggestion.range.start.line + line_offset,
-                        suggestion.range.start.column,
-                    ),
-                    end: Position::new(
-                        suggestion.range.end.line + line_offset,
-                        suggestion.range.end.column,
-                    ),
-                };
-                let edit = TextEdit {
-                    range,
-                    new_text: suggestion.new_text,
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit]);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: suggestion.title,
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }));
+            use smelt_db::code_actions::CodeActionKind as CAK;
+
+            let action_kinds = smelt_db::code_actions::generate_all_code_actions(
+                diag,
+                &text,
+                &sources_yml_content,
+            );
+            for kind in action_kinds {
+                match kind {
+                    CAK::TextEdit(suggestion) => {
+                        let range = Range {
+                            start: Position::new(
+                                suggestion.range.start.line + line_offset,
+                                suggestion.range.start.column,
+                            ),
+                            end: Position::new(
+                                suggestion.range.end.line + line_offset,
+                                suggestion.range.end.column,
+                            ),
+                        };
+                        let edit = TextEdit {
+                            range,
+                            new_text: suggestion.new_text,
+                        };
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(uri.clone(), vec![edit]);
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                    CAK::CreateModel(suggestion) => {
+                        // Build the new model file path in the same directory as the current file
+                        let model_dir = effective_path.parent().unwrap_or(project_root.as_ref());
+                        let new_file_path =
+                            model_dir.join(format!("{}.sql", suggestion.model_name));
+                        let new_file_uri =
+                            Url::from_file_path(&new_file_path).unwrap_or_else(|_| uri.clone());
+
+                        let document_changes = vec![
+                            DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                                uri: new_file_uri.clone(),
+                                options: None,
+                                annotation_id: None,
+                            })),
+                            DocumentChangeOperation::Edit(TextDocumentEdit {
+                                text_document: OptionalVersionedTextDocumentIdentifier {
+                                    uri: new_file_uri,
+                                    version: None,
+                                },
+                                edits: vec![OneOf::Left(TextEdit {
+                                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                                    new_text: suggestion.skeleton_sql,
+                                })],
+                            }),
+                        ];
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                document_changes: Some(DocumentChanges::Operations(
+                                    document_changes,
+                                )),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                    CAK::YamlEdit(suggestion) => {
+                        let yaml_uri =
+                            Url::from_file_path(&sources_yml_path).unwrap_or_else(|_| uri.clone());
+                        // Insert new lines after the specified line
+                        let insert_line = (suggestion.insert_after_line + 1) as u32;
+                        let new_text = suggestion.new_lines.join("\n") + "\n";
+                        let edit = TextEdit {
+                            range: Range::new(
+                                Position::new(insert_line, 0),
+                                Position::new(insert_line, 0),
+                            ),
+                            new_text,
+                        };
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(yaml_uri, vec![edit]);
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                }
             }
+        }
+
+        // Cursor-based CTE refactorings
+        if let Some(result) = smelt_db::code_actions::find_extract_cte_suggestion(
+            &text,
+            adj_start_line,
+            request_range.start.character,
+        ) {
+            let edits: Vec<TextEdit> = result
+                .edits
+                .iter()
+                .map(|e| TextEdit {
+                    range: Range {
+                        start: Position::new(
+                            e.range.start.line + line_offset,
+                            e.range.start.column,
+                        ),
+                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
+                    },
+                    new_text: e.new_text.clone(),
+                })
+                .collect();
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), edits);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: result.title,
+                kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }));
+        }
+
+        if let Some(result) = smelt_db::code_actions::find_inline_cte_suggestion(
+            &text,
+            adj_start_line,
+            request_range.start.character,
+        ) {
+            let edits: Vec<TextEdit> = result
+                .edits
+                .iter()
+                .map(|e| TextEdit {
+                    range: Range {
+                        start: Position::new(
+                            e.range.start.line + line_offset,
+                            e.range.start.column,
+                        ),
+                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
+                    },
+                    new_text: e.new_text.clone(),
+                })
+                .collect();
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), edits);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: result.title,
+                kind: Some(CodeActionKind::REFACTOR_INLINE),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }));
         }
 
         if actions.is_empty() {

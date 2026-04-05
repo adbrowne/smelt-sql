@@ -6,7 +6,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use smelt_db::{Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking};
+use smelt_db::{
+    yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
+    Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking,
+};
+use smelt_parser::is_valid_sql_identifier;
 use tempfile::TempDir;
 
 /// Result of a model rename operation
@@ -40,6 +44,15 @@ struct RenameSourceResult {
     sql_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
     /// YAML edit: (line_number, old_line_text, new_line_text)
     yaml_edit: Option<(u32, String, String)>,
+}
+
+/// Unified code action representation for handler-level testing.
+/// Captures the title and kind (quickfix, refactor.extract, refactor.inline) that the
+/// LSP handler would return, without depending on LSP protocol types.
+#[derive(Debug, Clone)]
+struct HandlerCodeAction {
+    title: String,
+    kind: String,
 }
 
 /// Test workspace that simulates a smelt project
@@ -114,6 +127,72 @@ impl TestWorkspace {
     /// Get the path for a model
     fn model_path(&self, name: &str) -> PathBuf {
         self.models_dir.join(format!("{}.sql", name))
+    }
+
+    /// Simulate the full code_action handler: diagnostic-based actions via generate_all_code_actions
+    /// plus cursor-based CTE refactorings (extract/inline). Returns a unified representation.
+    fn handler_code_actions_at(&self, model: &str, line: u32, col: u32) -> Vec<HandlerCodeAction> {
+        use smelt_db::code_actions::{
+            find_extract_cte_suggestion, find_inline_cte_suggestion, CodeActionKind,
+        };
+
+        let path = self.model_path(model);
+        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
+        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+
+        let text = self.db.file_text(path);
+        let sources_yml_content = (*self.db.project_sources_yaml(self.project_root())).clone();
+
+        // Filter diagnostics to those overlapping the cursor position
+        let matching: Vec<_> = all_diags
+            .into_iter()
+            .filter(|d| {
+                let r = &d.range;
+                (r.start.line < line || (r.start.line == line && r.start.column <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+
+        // Diagnostic-based actions
+        for diag in &matching {
+            for kind in
+                smelt_db::code_actions::generate_all_code_actions(diag, &text, &sources_yml_content)
+            {
+                let action = match kind {
+                    CodeActionKind::TextEdit(s) => HandlerCodeAction {
+                        title: s.title,
+                        kind: "quickfix".to_string(),
+                    },
+                    CodeActionKind::CreateModel(s) => HandlerCodeAction {
+                        title: s.title,
+                        kind: "quickfix".to_string(),
+                    },
+                    CodeActionKind::YamlEdit(s) => HandlerCodeAction {
+                        title: s.title,
+                        kind: "quickfix".to_string(),
+                    },
+                };
+                actions.push(action);
+            }
+        }
+
+        // Cursor-based CTE refactorings
+        if let Some(result) = find_extract_cte_suggestion(&text, line, col) {
+            actions.push(HandlerCodeAction {
+                title: result.title,
+                kind: "refactor.extract".to_string(),
+            });
+        }
+        if let Some(result) = find_inline_cte_suggestion(&text, line, col) {
+            actions.push(HandlerCodeAction {
+                title: result.title,
+                kind: "refactor.inline".to_string(),
+            });
+        }
+
+        actions
     }
 
     /// Get code actions at a position in a model.
@@ -737,81 +816,6 @@ impl TestWorkspace {
         let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
         find_source_column_yaml_rename(&sources_yml, old_column_name, new_column_name)
     }
-}
-
-/// Find a column name in sources.yml and produce the rename edit.
-/// Scans for `- name: old_column_name` entries and returns (line_number, old_line, new_line).
-fn find_source_column_yaml_rename(
-    yaml_content: &str,
-    old_column_name: &str,
-    new_column_name: &str,
-) -> Option<(u32, String, String)> {
-    for (i, line) in yaml_content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed == format!("- name: {}", old_column_name) {
-            let old_line = line.to_string();
-            let new_line = line.replace(
-                &format!("- name: {}", old_column_name),
-                &format!("- name: {}", new_column_name),
-            );
-            return Some((i as u32, old_line, new_line));
-        }
-    }
-    None
-}
-
-/// Find the YAML line for a source table key and produce the rename edit.
-/// Returns (line_number, old_line, new_line) or None if not found.
-fn find_source_table_yaml_rename(
-    yaml_content: &str,
-    source_name: &str,
-    old_table_name: &str,
-    new_table_name: &str,
-) -> Option<(u32, String, String)> {
-    let mut in_source = false;
-    let mut in_tables = false;
-    for (i, line) in yaml_content.lines().enumerate() {
-        let trimmed = line.trim();
-
-        // Detect source name section (e.g., "  raw:")
-        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
-            in_source = true;
-            in_tables = false;
-            continue;
-        }
-
-        if in_source {
-            // Detect tables section
-            if trimmed == "tables:" {
-                in_tables = true;
-                continue;
-            }
-
-            // A new top-level key resets context
-            if !trimmed.is_empty()
-                && !trimmed.starts_with('-')
-                && !trimmed.starts_with('#')
-                && !line.starts_with(' ')
-            {
-                in_source = false;
-                in_tables = false;
-                continue;
-            }
-        }
-
-        if in_source && in_tables {
-            // Look for the table name as a YAML key (e.g., "      users:")
-            if trimmed.starts_with(&format!("{}:", old_table_name)) {
-                let old_line = line.to_string();
-                let new_line = line.replace(
-                    &format!("{}:", old_table_name),
-                    &format!("{}:", new_table_name),
-                );
-                return Some((i as u32, old_line, new_line));
-            }
-        }
-    }
-    None
 }
 
 // =============================================================================
@@ -2908,6 +2912,140 @@ mod code_actions_create_add {
             );
         }
     }
+
+    // ===== Phase 13: Handler-level code action tests =====
+
+    #[test]
+    fn test_handler_code_action_create_model() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("downstream", "SELECT * FROM smelt.ref('nonexistent')");
+
+        // Cursor inside the ref call (on 'nonexistent')
+        let actions = ws.handler_code_actions_at("downstream", 0, 30);
+
+        let create_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("Create") && a.kind == "quickfix")
+            .collect();
+        assert!(
+            !create_actions.is_empty(),
+            "Handler should return 'Create model' quickfix for undefined ref, got: {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn test_handler_code_action_yaml_add_source() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "stg_orders",
+            "SELECT * FROM smelt.source('raw.missing_table')",
+        );
+
+        // Cursor inside the source call
+        let actions = ws.handler_code_actions_at("stg_orders", 0, 32);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("Add table") && a.kind == "quickfix")
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Handler should return 'Add table' quickfix for undefined source, got: {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn test_handler_code_action_yaml_add_column() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "model_col",
+            "SELECT users.nonexistent_col FROM smelt.source('raw.users') AS users",
+        );
+
+        // Cursor on 'users.nonexistent_col' — need to find the right position
+        // 'users.nonexistent_col' starts at col 7
+        let actions = ws.handler_code_actions_at("model_col", 0, 13);
+
+        let col_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("Add column") && a.kind == "quickfix")
+            .collect();
+        assert!(
+            !col_actions.is_empty(),
+            "Handler should return 'Add column' quickfix for undeclared column, got: {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn test_handler_code_action_extract_cte() {
+        let mut ws = TestWorkspace::new();
+        // Model with a subquery in FROM
+        ws.add_model(
+            "subq_model",
+            "SELECT t.id FROM (SELECT id FROM smelt.ref('upstream')) t",
+        );
+        // Also add upstream so the ref is valid
+        ws.add_model("upstream", "SELECT 1 AS id");
+
+        // Cursor inside the subquery — col 18 is inside "(SELECT id FROM ...)"
+        let actions = ws.handler_code_actions_at("subq_model", 0, 22);
+
+        let extract_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.kind == "refactor.extract" && a.title.contains("Extract"))
+            .collect();
+        assert!(
+            !extract_actions.is_empty(),
+            "Handler should return 'Extract CTE' refactoring for subquery, got: {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn test_handler_code_action_inline_cte() {
+        let mut ws = TestWorkspace::new();
+        // Model with a CTE used exactly once
+        ws.add_model(
+            "cte_model",
+            "WITH sub AS (SELECT 1 AS id)\nSELECT sub.id FROM sub",
+        );
+
+        // Cursor on the CTE definition name 'sub' (line 0, col 5)
+        let actions = ws.handler_code_actions_at("cte_model", 0, 5);
+
+        let inline_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.kind == "refactor.inline" && a.title.contains("Inline"))
+            .collect();
+        assert!(
+            !inline_actions.is_empty(),
+            "Handler should return 'Inline CTE' refactoring for single-use CTE, got: {:?}",
+            actions
+        );
+    }
 }
 
 // =============================================================================
@@ -3681,19 +3819,4 @@ fn test_inline_cte_rejects_multiple_references() {
         result.is_none(),
         "should not inline CTE used more than once"
     );
-}
-
-/// Validate that a string is a valid SQL identifier.
-/// Must be non-empty, start with a letter or underscore, and contain only
-/// alphanumeric characters and underscores.
-fn is_valid_sql_identifier(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

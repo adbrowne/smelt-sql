@@ -19,9 +19,9 @@ datafusion = "43"
 # DuckDB for testing and execution
 duckdb = { version = "1.4.4" }
 # Arrow for data interchange - must match duckdb's arrow version
-arrow = "57"
+arrow = "58"
 # Parquet for data storage
-parquet = "57"
+parquet = "58"
 # Parallel processing
 rayon = "1.10"
 # Error handling
@@ -58,6 +58,6 @@ serde_yaml = "0.9"
 # Ordered map (preserves insertion order)
 indexmap = { version = "2", features = ["serde"] }
 # Python embedding (abi3-py39 = stable ABI, works with any Python 3.9+)
-pyo3 = { version = "0.26", features = ["auto-initialize", "abi3-py39"] }
+pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py39"] }
 # Property-based testing
 proptest = "1.4"
