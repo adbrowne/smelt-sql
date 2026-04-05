@@ -505,6 +505,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         let (column_defaults, backfill_exprs) =
                             migration::extract_evolution_maps(model.metadata.as_deref());
 
+                        // Determine table format: per-model override > target default
+                        let target_config = registry.target_config(&phys_node.target);
+                        let table_format = model
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.format.as_ref())
+                            .cloned()
+                            .or_else(|| target_config.table_format());
+                        let ddl_backend = migration::ddl_backend_for_dialect(
+                            backend.dialect(),
+                            table_format,
+                            None,
+                        );
+
                         match migration::check_and_migrate(
                             backend,
                             &file_store,
@@ -517,6 +531,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                             args.dry_run,
                             &column_defaults,
                             &backfill_exprs,
+                            Some(&ddl_backend),
                         )
                         .await
                         {
@@ -554,8 +569,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
                             }
                             Ok(migration::SchemaEvolutionResult::TableRewrite { description }) => {
                                 info!("Schema change requires table rewrite: {}", description);
-                                // Phase 10 will implement table rewrite execution.
-                                // For now, fall back to full refresh.
+                                // Table rewrite (e.g., Spark nested type widening) —
+                                // fall back to full refresh for now.
                                 force_full_refresh = true;
                             }
                             Err(e) => {

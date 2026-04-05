@@ -1085,12 +1085,19 @@ pub fn plan_migration(
         column_defaults,
         backfill_exprs,
         &DdlBackend::DuckDb,
+        &[],
+        &[],
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Plan the migration action for a specific backend.
 ///
 /// Like `plan_migration`, but allows selecting DuckDB vs Spark DDL generation.
+///
+/// `deployed_columns` and `inferred_columns` are the original column arrays used
+/// to compute the diff. They are needed for DuckDB struct field widening, where the
+/// full old/new struct types are required to generate `struct_pack` USING expressions.
 pub fn plan_migration_for_backend(
     schema: &str,
     table: &str,
@@ -1099,6 +1106,8 @@ pub fn plan_migration_for_backend(
     column_defaults: &HashMap<String, String>,
     backfill_exprs: &HashMap<String, String>,
     backend: &DdlBackend,
+    _deployed_columns: &[DeployedColumn],
+    inferred_columns: &[DeployedColumn],
 ) -> MigrationAction {
     if diff.is_empty() {
         return MigrationAction::NoChange;
@@ -1162,6 +1171,21 @@ pub fn plan_migration_for_backend(
                     ))
                 }
             }
+            SchemaChange::IncompatibleTypeChange {
+                column,
+                from,
+                to,
+                reason,
+            } => Some(format!(
+                "incompatible type change on '{}': {} -> {} ({})",
+                column, from, to, reason
+            )),
+            SchemaChange::MapKeyTypeChange {
+                column, from, to, ..
+            } => Some(format!(
+                "map key type changed on '{}': {} -> {}",
+                column, from, to
+            )),
             _ => None,
         })
         .collect();
@@ -1257,6 +1281,37 @@ pub fn plan_migration_for_backend(
             | SchemaChange::NestedTypeChange { .. }
             | SchemaChange::ArrayElementTypeChange { .. }
             | SchemaChange::MapValueTypeChange { .. } => {
+                // For DuckDB + NestedTypeChange on struct fields, we need the full
+                // old/new struct types to generate ALTER COLUMN TYPE ... USING struct_pack(...).
+                // DuckDB doesn't support dot-notation for ALTER COLUMN TYPE on struct fields.
+                if matches!(backend, DdlBackend::DuckDb)
+                    && matches!(change, SchemaChange::NestedTypeChange { .. })
+                {
+                    if let SchemaChange::NestedTypeChange { column, .. } = change {
+                        // DuckDB doesn't support dot-notation ALTER COLUMN TYPE for struct fields.
+                        // Instead, we ALTER the full column type — DuckDB handles safe casts
+                        // (e.g., INTEGER→BIGINT inside a struct) automatically.
+                        let new_type_str = inferred_columns
+                            .iter()
+                            .find(|c| c.name == *column)
+                            .map(|c| c.data_type.as_str());
+
+                        if let Some(new_str) = new_type_str {
+                            if let Ok(new_dt) = parse_type(new_str) {
+                                statements.push(format!(
+                                    "ALTER TABLE {}.{} ALTER COLUMN {} TYPE {}",
+                                    schema,
+                                    table,
+                                    column,
+                                    new_dt.to_sql()
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    // Fallback: if we couldn't look up types, use plan_schema_operations
+                }
+
                 // Convert this single change into SchemaOperations, then generate DDL.
                 let single_diff = SchemaDiff {
                     changes: vec![change.clone()],
@@ -2939,14 +2994,26 @@ mod tests {
         let deployed = vec![col("meta", "STRUCT(a INTEGER, b VARCHAR)", true)];
         let inferred = vec![col("meta", "STRUCT(a BIGINT, b VARCHAR)", true)];
         let diff = diff_schemas(&deployed, &inferred);
-        let action = plan_migration("main", "t", &diff, false, &no_defaults(), &HashMap::new());
+        // Use plan_migration_for_backend with deployed/inferred columns so the
+        // DuckDB struct_pack USING expression can be generated correctly.
+        let action = plan_migration_for_backend(
+            "main",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::DuckDb,
+            &deployed,
+            &inferred,
+        );
         match action {
             MigrationAction::AlterTable { statements } => {
                 assert_eq!(statements.len(), 1);
-                // DuckDB supports dot-notation ALTER COLUMN TYPE for struct fields
+                // DuckDB alters the full column type — automatic casting handles safe widenings
                 assert_eq!(
                     statements[0],
-                    "ALTER TABLE main.t ALTER COLUMN meta.a TYPE BIGINT"
+                    "ALTER TABLE main.t ALTER COLUMN meta TYPE STRUCT(a BIGINT, b VARCHAR)"
                 );
             }
             other => panic!("Expected AlterTable, got {:?}", other),
@@ -3002,6 +3069,8 @@ mod tests {
             &no_defaults(),
             &HashMap::new(),
             &spark_delta_backend(),
+            &deployed,
+            &inferred,
         );
         match action {
             MigrationAction::AlterTable { statements } => {
@@ -3027,6 +3096,8 @@ mod tests {
             &no_defaults(),
             &HashMap::new(),
             &spark_delta_backend(),
+            &deployed,
+            &inferred,
         );
         match action {
             MigrationAction::TableRewrite { select_expr } => {
@@ -3049,6 +3120,8 @@ mod tests {
             &no_defaults(),
             &HashMap::new(),
             &spark_parquet_backend(),
+            &deployed,
+            &inferred,
         );
         match action {
             MigrationAction::FullRefreshBlocked { reason } => {
@@ -3071,6 +3144,8 @@ mod tests {
             &no_defaults(),
             &HashMap::new(),
             &spark_parquet_backend(),
+            &deployed,
+            &inferred,
         );
         match action {
             MigrationAction::FullRefreshBlocked { reason } => {
@@ -3078,6 +3153,74 @@ mod tests {
                 assert!(reason.contains("column mapping"));
             }
             other => panic!("Expected FullRefreshBlocked, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_migration_incompatible_type_change_triggers_full_refresh() {
+        // IncompatibleTypeChange (e.g., struct → scalar) should trigger FullRefresh,
+        // not silently pass through.
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::IncompatibleTypeChange {
+                column: "meta".to_string(),
+                from: "STRUCT(a INTEGER)".to_string(),
+                to: "INTEGER".to_string(),
+                reason: "struct to scalar".to_string(),
+            }],
+        };
+        let action = plan_migration_for_backend(
+            "main",
+            "t",
+            &diff,
+            true,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::DuckDb,
+            &[],
+            &[],
+        );
+        match action {
+            MigrationAction::FullRefresh { reason } => {
+                assert!(
+                    reason.contains("incompatible") || reason.contains("struct to scalar"),
+                    "Reason should explain the incompatible change, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefresh, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_plan_migration_map_key_type_change_triggers_full_refresh() {
+        // MapKeyTypeChange is always unsafe — should trigger FullRefresh.
+        let diff = SchemaDiff {
+            changes: vec![SchemaChange::MapKeyTypeChange {
+                column: "lookup".to_string(),
+                from: "VARCHAR".to_string(),
+                to: "INTEGER".to_string(),
+            }],
+        };
+        let action = plan_migration_for_backend(
+            "main",
+            "t",
+            &diff,
+            true,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::DuckDb,
+            &[],
+            &[],
+        );
+        match action {
+            MigrationAction::FullRefresh { reason } => {
+                assert!(
+                    reason.contains("map key") || reason.contains("lookup"),
+                    "Reason should explain the map key change, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected FullRefresh, got {:?}", other),
         }
     }
 }

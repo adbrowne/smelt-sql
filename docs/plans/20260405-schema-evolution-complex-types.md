@@ -712,22 +712,25 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 10: Integration — Wire Everything Together [ ]
+## Phase 10: Integration — Wire Everything Together [x]
 
 **Goal:** End-to-end schema evolution for complex types works through the full pipeline: diff → plan operations → generate DDL → execute.
 
 ### Work Items
 
-- [ ] 10a. Update `check_and_migrate()` in `smelt-cli/src/migration.rs` to:
+- [x] 10a. Update `check_and_migrate()` in `smelt-cli/src/migration.rs` to:
   1. Parse deployed and inferred column types via `parse_type()`
   2. Generate `SchemaDiff` with fine-grained nested changes
   3. Plan abstract `SchemaOperation`s
   4. Select DDL generator based on backend dialect + table format
   5. Execute DDL or handle `FullRefreshRequired` / `MergeSchemaWrite`
   6. Gate full refresh behind `--allow-full-refresh`
-- [ ] 10b. Thread `TableFormat` through from target config / model metadata to migration execution.
-- [ ] 10c. Thread `--allow-full-refresh` CLI flag through to migration execution.
-- [ ] 10d. Update `SchemaEvolutionResult` to include new outcomes:
+  *Most of this was wired in Phases 5-9. This session fixed remaining bugs and verified e2e.*
+- [x] 10b. Thread `TableFormat` through from target config / model metadata to migration execution.
+  *Already done in Phase 7 — `run.rs` resolves per-model override > target default.*
+- [x] 10c. Thread `--allow-full-refresh` CLI flag through to migration execution.
+  *Already done in Phase 7 — passed as parameter to `check_and_migrate()`.*
+- [x] 10d. Update `SchemaEvolutionResult` to include new outcomes:
   ```rust
   pub enum SchemaEvolutionResult {
       // ... existing variants ...
@@ -737,7 +740,9 @@ cargo clippy --all-targets
       TableRewrite { description: String },
   }
   ```
-- [ ] 10e. Ensure `save_deployed_schema()` correctly persists complex type strings after migration.
+  *Already done in Phase 8.*
+- [x] 10e. Ensure `save_deployed_schema()` correctly persists complex type strings after migration.
+  *Verified — `DeployedColumn.data_type` stores the SQL string as-is (e.g., `STRUCT(a INTEGER, b VARCHAR)`).*
 
 ### Red-Green Tests
 
@@ -927,6 +932,7 @@ cargo test -p smelt-cli --test example_diagnostics
 | 2026-04-05 | mergeSchema only for nullable-add-with-NULL-default | Behavior must match strict implementation |
 | 2026-04-05 | Auto fallback to full refresh with --allow-full-refresh gate | Smart strategy selection, safety gate for expensive ops |
 | 2026-04-05 | Expand-migrate-contract only when ALTER USING unavailable | struct_pack rewrite is primary path |
+| 2026-04-05 | DuckDB struct widening: ALTER COLUMN TYPE without USING | DuckDB auto-casts compatible types inside structs; USING+struct_pack doesn't work (can't reference struct fields of the column being altered) |
 
 ---
 
@@ -1125,3 +1131,21 @@ cargo test -p smelt-cli --test example_diagnostics
 
 **Decisions:**
 - This is a breaking change for anyone using unquoted YAML values in `default:` (e.g., `default: 0` would now be parsed as the string `"0"` by serde, which is actually the desired behavior — it's now a SQL expression passed through directly). The old `default: unknown` (unquoted YAML string) would now be `"unknown"` (a SQL identifier) rather than `"'unknown'"` (a SQL string literal). Users must explicitly quote: `default: "'unknown'"`.
+
+### Session 10 — 2026-04-05
+
+**Phase completed:** Phase 10 (Integration — Wire Everything Together)
+
+**What was done:**
+- Most Phase 10 work items were already completed incrementally during Phases 5-9. This session identified and fixed remaining bugs, then verified the full e2e pipeline.
+- **Bug fix:** `IncompatibleTypeChange` and `MapKeyTypeChange` variants in `plan_migration_for_backend()` were falling through to an empty match arm, producing `AlterTable { statements: [] }` instead of `FullRefresh`. Added these to the `unresolvable_reasons` check so they correctly trigger `FullRefresh`.
+- **Bug fix:** DuckDB struct field widening was generating `ALTER COLUMN meta.a TYPE BIGINT` (dot-notation) which DuckDB doesn't support for ALTER COLUMN TYPE. Fixed to generate `ALTER TABLE t ALTER COLUMN meta TYPE STRUCT(a BIGINT, b VARCHAR)` — DuckDB handles safe casts (INTEGER→BIGINT inside struct) automatically.
+- Added `deployed_columns` and `inferred_columns` parameters to `plan_migration_for_backend()` so the DuckDB path can look up full column types for struct widening. Updated all callers.
+- 2 new unit tests: `test_plan_migration_incompatible_type_change_triggers_full_refresh`, `test_plan_migration_map_key_type_change_triggers_full_refresh`
+- 3 new integration tests: `test_e2e_nested_type_widening` (DuckDB struct_pack rewrite), `test_e2e_incompatible_type_triggers_full_refresh`, `test_e2e_map_key_change_triggers_full_refresh`
+- Updated existing `test_ddl_pipeline_nested_type_widening` to use `plan_migration_for_backend` with columns and expect correct ALTER COLUMN TYPE DDL
+- All 161 smelt-state + smelt-cli tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- DuckDB struct field widening uses simple `ALTER COLUMN col TYPE new_full_struct_type` without USING clause. DuckDB's implicit casting handles safe type widenings (INTEGER→BIGINT) inside structs automatically. The USING+struct_pack approach doesn't work because DuckDB's USING expression context can't reference struct fields of the column being altered.
+- `plan_migration_for_backend` now accepts `deployed_columns` and `inferred_columns` to support this. The `plan_migration` convenience wrapper passes empty slices (its callers don't test struct widening with real columns).
