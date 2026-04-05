@@ -3,7 +3,7 @@
 //! These functions are used by the LSP server and integration tests.
 //! They follow the pure function rule: no Salsa/LSP dependencies.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticData};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticData, Range};
 
 /// A suggested code action with title and replacement text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,4 +386,148 @@ fn generate_add_column_action(diagnostic: &Diagnostic, sources_yml: &str) -> Vec
     } else {
         vec![]
     }
+}
+
+/// A text edit: replace a range with new text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEditSuggestion {
+    pub range: Range,
+    pub new_text: String,
+}
+
+/// Result of an "Extract CTE" refactoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractCteResult {
+    /// Human-readable title (e.g., "Extract to CTE 'sub'")
+    pub title: String,
+    /// The name chosen for the new CTE
+    pub cte_name: String,
+    /// The text edits to apply (ordered: CTE insertion first, then subquery replacement)
+    pub edits: Vec<TextEditSuggestion>,
+}
+
+/// Find an extractable subquery at the given cursor position and generate the refactoring edits.
+///
+/// Returns `None` if the cursor is not inside a subquery within a FROM or JOIN clause.
+pub fn find_extract_cte_suggestion(
+    file_text: &str,
+    line: u32,
+    col: u32,
+) -> Option<ExtractCteResult> {
+    use rowan::TextSize;
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let parse = smelt_parser::parse(file_text);
+    let root = parse.syntax();
+    let offset = smelt_parser::symbol::position_to_offset(file_text, line, col);
+    let offset = TextSize::from(offset as u32);
+
+    // Find the deepest SUBQUERY node at this offset
+    let subquery_node = root
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SUBQUERY)
+        .filter(|n| n.text_range().contains(offset))
+        .last()?; // deepest (most specific)
+
+    // Verify the subquery is inside a TABLE_REF (FROM or JOIN context)
+    let table_ref_node = subquery_node
+        .ancestors()
+        .find(|n| n.kind() == SyntaxKind::TABLE_REF)?;
+
+    // Verify the TABLE_REF is inside a FROM_CLAUSE or JOIN_CLAUSE
+    let _from_or_join = table_ref_node
+        .ancestors()
+        .find(|n| n.kind() == SyntaxKind::FROM_CLAUSE || n.kind() == SyntaxKind::JOIN_CLAUSE)?;
+
+    // Get the subquery body text (the content of the SUBQUERY node, including parens)
+    let subquery_text = subquery_node.text().to_string();
+    // The subquery node contains `(SELECT ...)` — extract just the SELECT body
+    let body = subquery_text
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(&subquery_text)
+        .trim();
+
+    // Find the SELECT statement to check for existing WITH clause
+    let select_stmt_node = root
+        .children()
+        .find(|n| n.kind() == SyntaxKind::SELECT_STMT)?;
+    let select_stmt = smelt_parser::ast::SelectStmt::cast(select_stmt_node.clone())?;
+
+    // Collect existing CTE names to generate a unique name
+    let existing_ctes: Vec<String> = select_stmt
+        .with_clause()
+        .map(|wc| wc.ctes().filter_map(|c| c.name()).collect())
+        .unwrap_or_default();
+
+    let cte_name = generate_unique_cte_name(&existing_ctes);
+
+    // Get the alias from the table_ref if present
+    let table_ref = smelt_parser::ast::TableRef::cast(table_ref_node.clone())?;
+    let alias = table_ref.alias();
+
+    // The replacement for the TABLE_REF: just the CTE name (with original alias if different)
+    let replacement = if let Some(ref a) = alias {
+        if a == &cte_name {
+            cte_name.clone()
+        } else {
+            format!("{} {}", cte_name, a)
+        }
+    } else {
+        cte_name.clone()
+    };
+
+    let table_ref_range =
+        smelt_parser::ast::text_range_to_range(file_text, table_ref_node.text_range());
+
+    let mut edits = Vec::new();
+
+    if let Some(with_clause) = select_stmt.with_clause() {
+        // Append to existing WITH clause: insert ", cte_name AS (body)" after the last CTE
+        let last_cte = with_clause.ctes().last()?;
+        let last_cte_end =
+            smelt_parser::ast::text_range_to_range(file_text, last_cte.syntax().text_range());
+        // Insert after the last CTE
+        edits.push(TextEditSuggestion {
+            range: Range {
+                start: last_cte_end.end,
+                end: last_cte_end.end,
+            },
+            new_text: format!(",\n{} AS ({})", cte_name, body),
+        });
+    } else {
+        // Create new WITH clause at the start of the SELECT statement
+        let select_start =
+            smelt_parser::ast::text_range_to_range(file_text, select_stmt_node.text_range());
+        edits.push(TextEditSuggestion {
+            range: Range {
+                start: select_start.start,
+                end: select_start.start,
+            },
+            new_text: format!("WITH {} AS ({})\n", cte_name, body),
+        });
+    }
+
+    // Replace the TABLE_REF (subquery + alias) with the CTE name
+    edits.push(TextEditSuggestion {
+        range: table_ref_range,
+        new_text: replacement,
+    });
+
+    Some(ExtractCteResult {
+        title: format!("Extract to CTE '{}'", cte_name),
+        cte_name,
+        edits,
+    })
+}
+
+/// Generate a unique CTE name that doesn't conflict with existing ones.
+fn generate_unique_cte_name(existing: &[String]) -> String {
+    for i in 1.. {
+        let name = format!("cte_{}", i);
+        if !existing.iter().any(|n| n == &name) {
+            return name;
+        }
+    }
+    unreachable!()
 }

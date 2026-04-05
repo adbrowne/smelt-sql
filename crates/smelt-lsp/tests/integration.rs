@@ -3448,6 +3448,150 @@ SELECT user_id FROM cte3",
     }
 }
 
+// ===== Phase 9: Extract CTE Refactoring =====
+
+#[test]
+fn test_extract_cte_from_subquery_in_from() {
+    // Subquery in FROM should be extracted into a CTE + reference
+    let sql = "SELECT t.id FROM (SELECT id FROM users) t";
+    //                           ^ cursor inside subquery (line 0, col 20)
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 0, 20);
+    assert!(result.is_some(), "should find extractable subquery in FROM");
+    let result = result.unwrap();
+    assert!(!result.cte_name.is_empty(), "should generate a CTE name");
+    assert!(
+        result.edits.len() >= 2,
+        "should have at least 2 edits (CTE insertion + subquery replacement)"
+    );
+    // After applying edits, the result should have a WITH clause and a reference
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        applied.contains("WITH"),
+        "result should contain WITH clause"
+    );
+    assert!(
+        applied.contains("AS (SELECT id FROM users)"),
+        "CTE body should contain the subquery"
+    );
+    // The subquery in FROM should be replaced with just the CTE name
+    assert!(
+        !applied.contains("FROM (SELECT"),
+        "subquery should be replaced with CTE name"
+    );
+}
+
+#[test]
+fn test_extract_cte_from_subquery_in_join() {
+    // Subquery in JOIN should be extracted into a CTE + reference
+    let sql = "SELECT a.id FROM users a INNER JOIN (SELECT id FROM orders) b ON a.id = b.id";
+    //                                               ^ cursor inside subquery (line 0, col 40)
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 0, 40);
+    assert!(result.is_some(), "should find extractable subquery in JOIN");
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        applied.contains("WITH"),
+        "result should contain WITH clause"
+    );
+    assert!(
+        applied.contains("AS (SELECT id FROM orders)"),
+        "CTE body should contain the subquery"
+    );
+    assert!(
+        !applied.contains("JOIN (SELECT"),
+        "subquery in JOIN should be replaced"
+    );
+}
+
+#[test]
+fn test_extract_cte_appends_to_existing_with() {
+    // File already has CTEs, new one should be appended
+    let sql =
+        "WITH existing AS (SELECT 1 AS x)\nSELECT e.x FROM existing e CROSS JOIN (SELECT 2 AS y) f";
+    //                                                                             ^ cursor at line 1, col 42
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 1, 42);
+    assert!(
+        result.is_some(),
+        "should find extractable subquery with existing WITH"
+    );
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    // Should have comma-separated CTEs, not two WITH clauses
+    let with_count = applied.matches("WITH").count();
+    assert_eq!(
+        with_count, 1,
+        "should have exactly one WITH clause, got: {}",
+        applied
+    );
+    assert!(
+        applied.contains("existing AS"),
+        "should preserve existing CTE"
+    );
+    assert!(
+        applied.contains("AS (SELECT 2 AS y)"),
+        "should append new CTE"
+    );
+}
+
+#[test]
+fn test_extract_cte_creates_with_clause() {
+    // File has no CTEs, WITH clause should be created
+    let sql = "SELECT t.id FROM (SELECT id FROM users) t WHERE t.id > 0";
+    //                            ^ cursor at line 0, col 20
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 0, 20);
+    assert!(result.is_some(), "should find extractable subquery");
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        applied.starts_with("WITH"),
+        "should create WITH clause at the start"
+    );
+    // The WHERE clause should be preserved
+    assert!(applied.contains("WHERE"), "should preserve WHERE clause");
+}
+
+/// Apply text edits to a string, processing from end to start to maintain positions.
+fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggestion]) -> String {
+    // Convert to byte offsets and sort by position (end to start)
+    let mut edits_with_offsets: Vec<_> = edits
+        .iter()
+        .map(|edit| {
+            let start =
+                position_to_byte_offset(text, edit.range.start.line, edit.range.start.column);
+            let end = position_to_byte_offset(text, edit.range.end.line, edit.range.end.column);
+            (start, end, &edit.new_text)
+        })
+        .collect();
+    edits_with_offsets.sort_by(|a, b| b.0.cmp(&a.0)); // reverse order
+
+    let mut result = text.to_string();
+    for (start, end, new_text) in edits_with_offsets {
+        result.replace_range(start..end, new_text);
+    }
+    result
+}
+
+/// Convert (line, col) to byte offset in text.
+fn position_to_byte_offset(text: &str, line: u32, col: u32) -> usize {
+    let mut current_line = 0u32;
+    let mut current_col = 0u32;
+    for (i, ch) in text.char_indices() {
+        if current_line == line && current_col == col {
+            return i;
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_col = 0;
+        } else {
+            current_col += 1;
+        }
+    }
+    if current_line == line && current_col == col {
+        return text.len();
+    }
+    text.len()
+}
+
 /// Validate that a string is a valid SQL identifier.
 /// Must be non-empty, start with a letter or underscore, and contain only
 /// alphanumeric characters and underscores.
