@@ -168,6 +168,11 @@ pub fn ensure_sdk_on_path(py: Python<'_>, sdk_path: &Path) -> PyResult<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Python's global `_registered_models` dict is shared across tests, so we
+    /// must serialize all tests that touch `run_python_model_file`.
+    static PYTHON_LOCK: Mutex<()> = Mutex::new(());
 
     fn find_test_sdk() -> Option<PathBuf> {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -182,6 +187,7 @@ mod tests {
 
     #[test]
     fn test_run_simple_model() {
+        let _lock = PYTHON_LOCK.lock().unwrap();
         let sdk_path = match find_test_sdk() {
             Some(p) => p,
             None => return, // skip if SDK not found
@@ -212,6 +218,7 @@ def simple_model(project):
 
     #[test]
     fn test_run_model_with_find_models() {
+        let _lock = PYTHON_LOCK.lock().unwrap();
         let sdk_path = match find_test_sdk() {
             Some(p) => p,
             None => return,
@@ -249,6 +256,7 @@ def query_model(project):
 
     #[test]
     fn test_run_multiple_models_one_file() {
+        let _lock = PYTHON_LOCK.lock().unwrap();
         let sdk_path = match find_test_sdk() {
             Some(p) => p,
             None => return,
@@ -283,6 +291,7 @@ def model_b(project):
 
     #[test]
     fn test_non_string_return_errors() {
+        let _lock = PYTHON_LOCK.lock().unwrap();
         let sdk_path = match find_test_sdk() {
             Some(p) => p,
             None => return,
