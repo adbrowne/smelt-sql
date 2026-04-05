@@ -1363,6 +1363,28 @@ impl RefCall {
             .map(|t| t.text_range())
     }
 
+    /// Get the text range of the string content inside quotes (excluding the quote characters)
+    pub fn content_range(&self) -> Option<TextRange> {
+        self.0
+             .0
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == STRING)
+            .map(|t| {
+                let range = t.text_range();
+                let text = t.text();
+                // STRING tokens include quotes — trim them
+                if text.len() >= 2 && (text.starts_with('\'') || text.starts_with('"')) {
+                    TextRange::new(
+                        range.start() + rowan::TextSize::from(1),
+                        range.end() - rowan::TextSize::from(1),
+                    )
+                } else {
+                    range
+                }
+            })
+    }
+
     /// Get all named parameters from this ref call
     pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
         self.0.named_params()
@@ -1420,7 +1442,7 @@ impl SourceCall {
         self.0 .0.text_range()
     }
 
-    /// Get the text range of just the qualified name string
+    /// Get the text range of just the qualified name string (including quotes)
     pub fn name_range(&self) -> Option<TextRange> {
         self.0
              .0
@@ -1428,6 +1450,41 @@ impl SourceCall {
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == STRING)
             .map(|t| t.text_range())
+    }
+
+    /// Get the text range of just the table name portion inside the quoted string
+    /// For `source('raw.users')`, returns the range covering `users`
+    pub fn table_name_range(&self) -> Option<TextRange> {
+        self.0
+             .0
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == STRING)
+            .and_then(|t| {
+                let range = t.text_range();
+                let text = t.text();
+                // Strip outer quotes to get the qualified name
+                let inner = text
+                    .trim_start_matches('\'')
+                    .trim_start_matches('"')
+                    .trim_end_matches('\'')
+                    .trim_end_matches('"');
+                // Find the dot position in the inner text
+                if let Some(dot_pos) = inner.find('.') {
+                    // Table name starts after the dot, plus 1 for the opening quote
+                    let quote_offset = if text.starts_with('\'') || text.starts_with('"') {
+                        1u32
+                    } else {
+                        0
+                    };
+                    let table_start =
+                        range.start() + rowan::TextSize::from(quote_offset + dot_pos as u32 + 1);
+                    let table_end = range.end() - rowan::TextSize::from(quote_offset);
+                    Some(TextRange::new(table_start, table_end))
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -2078,6 +2135,15 @@ impl Cte {
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == IDENT)
             .map(|t| t.text().to_string())
+    }
+
+    /// Get the text range of just the CTE name identifier
+    pub fn name_range(&self) -> Option<TextRange> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text_range())
     }
 
     /// Get the query (SELECT statement)

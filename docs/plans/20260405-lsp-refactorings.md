@@ -66,38 +66,40 @@
 
 ---
 
-## Phase 1: Symbol Resolution Extraction `[ ]`
+## Phase 1: Symbol Resolution Extraction `[x]`
 
 **Priority**: High — shared by references, rename, and code actions.
 
 **Goal**: Extract cursor-to-symbol resolution from `goto_definition` into a reusable `symbol_at_cursor` pure function. Add AST range helpers for rename edits.
 
 **Red tests (write first)**:
-- [ ] `test_symbol_at_cursor_ref_call` — cursor inside `ref('model')` returns `SymbolAtCursor::RefCall { name: "model" }`
-- [ ] `test_symbol_at_cursor_source_call` — cursor inside `source('raw.users')` returns `SourceCall`
-- [ ] `test_symbol_at_cursor_cte_reference` — cursor on CTE name in FROM returns `CteReference`
-- [ ] `test_symbol_at_cursor_cte_definition` — cursor on CTE name in WITH clause returns `CteDefinition`
-- [ ] `test_symbol_at_cursor_column_ref` — cursor on `t.user_id` returns `ColumnRef { qualifier: "t", name: "user_id" }`
-- [ ] `test_cte_name_range` — `Cte::name_range()` returns correct TextRange for CTE identifier
-- [ ] `test_ref_content_range` — `RefCall::content_range()` returns range inside quotes (excluding quotes)
+- [x] `test_symbol_at_cursor_ref_call` — cursor inside `ref('model')` returns `SymbolAtCursor::RefCall { name: "model" }`
+- [x] `test_symbol_at_cursor_source_call` — cursor inside `source('raw.users')` returns `SourceCall`
+- [x] `test_symbol_at_cursor_cte_reference` — cursor on CTE name in FROM returns `CteReference`
+- [x] `test_symbol_at_cursor_cte_definition` — cursor on CTE name in WITH clause returns `CteDefinition`
+- [x] `test_symbol_at_cursor_column_ref` — cursor on `t.user_id` returns `ColumnRef { qualifier: "t", name: "user_id" }`
+- [x] `test_cte_name_range` — `Cte::name_range()` returns correct TextRange for CTE identifier
+- [x] `test_ref_content_range` — `RefCall::content_range()` returns range inside quotes (excluding quotes)
 
 **Green implementation**:
-- [ ] Create `SymbolAtCursor` enum and `fn symbol_at_cursor(file, text, offset)` pure function in `crates/smelt-lsp/src/main.rs`
-- [ ] Add `Cte::name_range() -> Option<TextRange>` to `crates/smelt-parser/src/ast.rs`
-- [ ] Add `RefCall::content_range() -> Option<TextRange>` to ast.rs (string content inside quotes)
-- [ ] Add `SourceCall::table_name_range() -> Option<TextRange>` to ast.rs
-- [ ] Refactor `goto_definition` to use `symbol_at_cursor` (behavior must not change)
+- [x] Create `SymbolAtCursor` enum and `fn symbol_at_cursor(file, text, offset)` pure function in `crates/smelt-parser/src/symbol.rs`
+- [x] Add `Cte::name_range() -> Option<TextRange>` to `crates/smelt-parser/src/ast.rs`
+- [x] Add `RefCall::content_range() -> Option<TextRange>` to ast.rs (string content inside quotes)
+- [x] Add `SourceCall::table_name_range() -> Option<TextRange>` to ast.rs
+- [x] Refactor `goto_definition` to use `symbol_at_cursor` (behavior must not change)
 
-**Files to modify**:
-- `crates/smelt-lsp/src/main.rs` — symbol_at_cursor, refactor goto_definition
-- `crates/smelt-parser/src/ast.rs` — name_range, content_range, table_name_range
-- `crates/smelt-lsp/tests/integration.rs` — red tests for symbol resolution
+**Files modified**:
+- `crates/smelt-parser/src/symbol.rs` — NEW: SymbolAtCursor enum, symbol_at_cursor pure function, position_to_offset helper
+- `crates/smelt-parser/src/lib.rs` — register symbol module
+- `crates/smelt-parser/src/ast.rs` — Cte::name_range(), RefCall::content_range(), SourceCall::table_name_range()
+- `crates/smelt-lsp/src/main.rs` — refactored goto_definition to use symbol_at_cursor
+- `crates/smelt-lsp/tests/integration.rs` — 8 new tests (5 symbol_at_cursor + 3 range helpers)
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass)
-- [ ] `cargo test -p smelt-cli --test example_diagnostics`
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (clean for smelt-parser, smelt-db, smelt-lsp)
+- [x] `cargo test` (432 tests pass: 241 parser + 129 db + 62 lsp integration)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb arrow type mismatch
 - [ ] Manual: goto-definition still works in VSCode (no regression)
 
 ---
@@ -444,6 +446,8 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 
 4. **Test workspace helpers use simple types**: Used `Vec<String>`, `Vec<(PathBuf, (u32, u32))>`, `Vec<(PathBuf, String)>` instead of LSP types in test helpers, keeping the test harness decoupled from LSP protocol types.
 
+5. **`symbol_at_cursor` lives in smelt-parser, not smelt-lsp**: The plan originally placed this in `main.rs`, but smelt-lsp is a binary crate — integration tests can't import from it. Since `symbol_at_cursor` is a pure function on AST data with no Salsa/LSP dependencies, smelt-parser is the natural home. This also makes it available to future crates (smelt-check, smelt-cli).
+
 ---
 
 ## Session Log
@@ -464,3 +468,19 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 - Wrote 4 red→green tests for diagnostic codes and data
 
 **Blockers**: `cargo test -p smelt-cli --test example_diagnostics` cannot run due to pre-existing `smelt-backend-duckdb` arrow type mismatch (unrelated to this work).
+
+### Session 2 — 2026-04-05
+
+**Phase**: 1 (Symbol Resolution Extraction)
+**Status**: Complete
+
+**What was done**:
+- Created `crates/smelt-parser/src/symbol.rs` with `SymbolAtCursor` enum (5 variants: RefCall, SourceCall, CteReference, CteDefinition, ColumnRef) and `symbol_at_cursor()` pure function
+- Added `position_to_offset()` helper to convert (line, col) to byte offset
+- Added AST range helpers: `Cte::name_range()`, `RefCall::content_range()`, `SourceCall::table_name_range()`
+- Refactored `goto_definition` in main.rs to use `symbol_at_cursor` — replaced manual range-checking loops with clean match on SymbolAtCursor variants
+- Wrote 8 tests (5 symbol_at_cursor + 3 range helpers), all pass
+
+**Decisions**:
+- Placed `SymbolAtCursor` and `symbol_at_cursor()` in `smelt-parser` (not smelt-lsp/main.rs as originally planned) because smelt-lsp is a binary crate and the function is a pure function on AST data. This makes it testable from integration tests and follows the pure function rule.
+- Kept `_text` parameter in `symbol_at_cursor()` signature for future use (e.g., CTE qualifier resolution) even though it's currently unused.

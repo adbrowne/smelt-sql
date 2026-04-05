@@ -20,6 +20,7 @@ use smelt_db::{
 mod python_scan;
 use python_scan::PythonModelCache;
 use smelt_parser::ast::File as AstFile;
+use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 use smelt_types::TypedColumn;
 
 /// Tracks errors that occurred during workspace initialization
@@ -1701,25 +1702,8 @@ impl LanguageServer for Backend {
         let syntax = parse.syntax();
 
         // Convert cursor position to offset
-        let cursor_offset = {
-            let mut offset = 0usize;
-            let mut line = 0u32;
-            let mut col = 0u32;
-
-            for ch in text.chars() {
-                if line == effective_position.line && col == effective_position.character {
-                    break;
-                }
-                if ch == '\n' {
-                    line += 1;
-                    col = 0;
-                } else {
-                    col += 1;
-                }
-                offset += ch.len_utf8();
-            }
-            offset
-        };
+        let cursor_offset =
+            position_to_offset(&text, effective_position.line, effective_position.character);
 
         // Resolve goto-definition target while holding the db lock and AST.
         // We collect the result as plain data (no Rowan nodes) so we can drop
@@ -1738,168 +1722,143 @@ impl LanguageServer for Backend {
         }
 
         let target = if let Some(file) = AstFile::cast(syntax) {
-            let mut result = None;
-
-            // Check RefCall at cursor position
-            for ref_call in file.refs() {
-                let range = ref_call.range();
-                let start: usize = range.start().into();
-                let end: usize = range.end().into();
-
-                if cursor_offset >= start && cursor_offset <= end {
-                    if let Some(ref_name) = ref_call.model_name() {
-                        if let Some(target_path) = db.resolve_ref(ref_name) {
-                            result = Some(GotoTarget::RefModel(target_path));
-                        }
-                    }
-                    break;
+            match symbol_at_cursor(&file, &text, cursor_offset) {
+                Some(SymbolAtCursor::RefCall { name }) => {
+                    db.resolve_ref(name).map(GotoTarget::RefModel)
                 }
-            }
-
-            // Check SourceCall at cursor position
-            if result.is_none() {
-                for source_call in file.sources() {
-                    let range = source_call.range();
-                    let start: usize = range.start().into();
-                    let end: usize = range.end().into();
-
-                    if cursor_offset >= start && cursor_offset <= end {
-                        if let (Some(source_name), Some(table_name)) =
-                            (source_call.source_name(), source_call.table_name())
-                        {
-                            let project_root = db.file_project_root(effective_path.clone());
-                            if db
-                                .resolve_source(
-                                    project_root.clone(),
-                                    source_name.clone(),
-                                    table_name.clone(),
-                                )
-                                .is_some()
-                            {
-                                let sources_path = project_root.join("sources.yml");
-                                if sources_path.exists() {
-                                    result = Some(GotoTarget::SourceFile {
-                                        sources_path,
-                                        source_name,
-                                        table_name,
-                                    });
-                                }
-                            }
+                Some(SymbolAtCursor::SourceCall {
+                    source_name,
+                    table_name,
+                }) => {
+                    let project_root = db.file_project_root(effective_path.clone());
+                    if db
+                        .resolve_source(
+                            project_root.clone(),
+                            source_name.clone(),
+                            table_name.clone(),
+                        )
+                        .is_some()
+                    {
+                        let sources_path = project_root.join("sources.yml");
+                        if sources_path.exists() {
+                            Some(GotoTarget::SourceFile {
+                                sources_path,
+                                source_name,
+                                table_name,
+                            })
+                        } else {
+                            None
                         }
-                        break;
+                    } else {
+                        None
                     }
                 }
-            }
-
-            // Check CTE references in FROM/JOIN clauses
-            if result.is_none() {
-                if let Some(select_stmt) = file.select_stmt() {
-                    // Collect CTE names and their definition ranges (converted to LSP Range)
-                    let mut cte_defs: HashMap<String, Range> = HashMap::new();
-                    if let Some(with_clause) = select_stmt.with_clause() {
-                        for cte in with_clause.ctes() {
-                            if let Some(name) = cte.name() {
-                                let pr = smelt_parser::ast::text_range_to_range(
-                                    &text,
-                                    cte.syntax().text_range(),
-                                );
-                                cte_defs.insert(
-                                    name,
-                                    Range {
+                Some(SymbolAtCursor::CteReference { name }) => {
+                    // Jump to CTE definition
+                    let mut result = None;
+                    if let Some(select_stmt) = file.select_stmt() {
+                        if let Some(with_clause) = select_stmt.with_clause() {
+                            for cte in with_clause.ctes() {
+                                if cte.name().as_deref() == Some(name.as_str()) {
+                                    let pr = smelt_parser::ast::text_range_to_range(
+                                        &text,
+                                        cte.syntax().text_range(),
+                                    );
+                                    result = Some(GotoTarget::SameFile(Range {
                                         start: Position::new(pr.start.line, pr.start.column),
                                         end: Position::new(pr.end.line, pr.end.column),
-                                    },
-                                );
+                                    }));
+                                    break;
+                                }
                             }
                         }
                     }
-
-                    if !cte_defs.is_empty() {
-                        // Check FROM clause table refs
-                        let table_refs_to_check: Vec<_> =
-                            if let Some(from_clause) = select_stmt.from_clause() {
-                                from_clause
-                                    .table_refs()
-                                    .chain(from_clause.joins().filter_map(|j| j.table_ref()))
-                                    .collect()
-                            } else {
-                                vec![]
-                            };
-
-                        for table_ref in table_refs_to_check {
-                            // Only check plain identifiers (not function calls or subqueries)
-                            if table_ref.function_call().is_some() || table_ref.subquery().is_some()
-                            {
-                                continue;
+                    result
+                }
+                Some(SymbolAtCursor::CteDefinition { .. }) => {
+                    // Already at definition site — no-op
+                    None
+                }
+                Some(SymbolAtCursor::ColumnRef { qualifier, name }) => {
+                    // Check if cursor is on the qualifier token — if so, jump to
+                    // the CTE or table alias definition rather than doing column resolution
+                    let cursor_on_qualifier = qualifier.is_some() && {
+                        // Find the tightest Expr at cursor and check if cursor is on first IDENT
+                        let mut best_expr: Option<smelt_parser::ast::Expr> = None;
+                        let mut best_len = usize::MAX;
+                        for node in file.syntax().descendants() {
+                            if let Some(expr) = smelt_parser::ast::Expr::cast(node) {
+                                let range = expr.text_range();
+                                let start: usize = range.start().into();
+                                let end: usize = range.end().into();
+                                let len = end - start;
+                                if cursor_offset >= start && cursor_offset <= end && len <= best_len
+                                {
+                                    best_len = len;
+                                    best_expr = Some(expr);
+                                }
                             }
-                            let tr_range = table_ref.syntax().text_range();
-                            let tr_start: usize = tr_range.start().into();
-                            let tr_end: usize = tr_range.end().into();
+                        }
+                        best_expr
+                            .map(|expr| {
+                                use smelt_parser::SyntaxKind::{DOT, IDENT};
+                                expr.syntax()
+                                    .children_with_tokens()
+                                    .filter_map(|e| e.into_token())
+                                    .find(|t| t.kind() == IDENT || t.kind() == DOT)
+                                    .map(|first_ident| {
+                                        let start: usize = first_ident.text_range().start().into();
+                                        let end: usize = first_ident.text_range().end().into();
+                                        first_ident.kind() == IDENT
+                                            && cursor_offset >= start
+                                            && cursor_offset <= end
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                    };
 
-                            if cursor_offset >= tr_start && cursor_offset <= tr_end {
-                                if let Some(ident) = table_ref.identifier() {
-                                    if let Some(lsp_range) = cte_defs.get(&ident) {
-                                        result = Some(GotoTarget::SameFile(*lsp_range));
+                    if cursor_on_qualifier {
+                        let qualifier_str = qualifier.as_deref().unwrap();
+                        let mut result = None;
+
+                        // Check if qualifier is a CTE name
+                        if let Some(select_stmt) = file.select_stmt() {
+                            if let Some(with_clause) = select_stmt.with_clause() {
+                                for cte in with_clause.ctes() {
+                                    if cte.name().as_deref() == Some(qualifier_str) {
+                                        let pr = smelt_parser::ast::text_range_to_range(
+                                            &text,
+                                            cte.syntax().text_range(),
+                                        );
+                                        result = Some(GotoTarget::SameFile(Range {
+                                            start: Position::new(pr.start.line, pr.start.column),
+                                            end: Position::new(pr.end.line, pr.end.column),
+                                        }));
+                                        break;
                                     }
                                 }
-                                break;
                             }
                         }
-                    }
-                }
-            }
 
-            // Check column references at cursor position
-            if result.is_none() {
-                // Walk syntax descendants to find the tightest expression containing cursor
-                let mut best_expr: Option<smelt_parser::ast::Expr> = None;
-                let mut best_len = usize::MAX;
-
-                for node in file.syntax().descendants() {
-                    if let Some(expr) = smelt_parser::ast::Expr::cast(node) {
-                        let range = expr.text_range();
-                        let start: usize = range.start().into();
-                        let end: usize = range.end().into();
-                        let len = end - start;
-
-                        if cursor_offset >= start && cursor_offset <= end && len <= best_len {
-                            best_len = len;
-                            best_expr = Some(expr);
-                        }
-                    }
-                }
-
-                if let Some(expr) = best_expr {
-                    if let Some(col_ref) = expr.as_column_ref() {
-                        // Check if cursor is on the qualifier token — if so, jump to
-                        // the CTE or table alias definition rather than doing column resolution
-                        let cursor_on_qualifier = col_ref.qualifier().is_some() && {
-                            use smelt_parser::SyntaxKind::{DOT, IDENT};
-                            expr.syntax()
-                                .children_with_tokens()
-                                .filter_map(|e| e.into_token())
-                                .find(|t| t.kind() == IDENT || t.kind() == DOT)
-                                .map(|first_ident| {
-                                    let start: usize = first_ident.text_range().start().into();
-                                    let end: usize = first_ident.text_range().end().into();
-                                    first_ident.kind() == IDENT
-                                        && cursor_offset >= start
-                                        && cursor_offset <= end
-                                })
-                                .unwrap_or(false)
-                        };
-
-                        if cursor_on_qualifier {
-                            let qualifier = col_ref.qualifier().unwrap();
-
-                            // Check if qualifier is a CTE name
+                        // Check if qualifier is a table alias in FROM/JOIN
+                        if result.is_none() {
                             if let Some(select_stmt) = file.select_stmt() {
-                                if let Some(with_clause) = select_stmt.with_clause() {
-                                    for cte in with_clause.ctes() {
-                                        if cte.name().as_deref() == Some(qualifier) {
+                                if let Some(from_clause) = select_stmt.from_clause() {
+                                    let table_refs: Vec<_> = from_clause
+                                        .table_refs()
+                                        .chain(from_clause.joins().filter_map(|j| j.table_ref()))
+                                        .collect();
+
+                                    for table_ref in table_refs {
+                                        let matches = table_ref.alias().as_deref()
+                                            == Some(qualifier_str)
+                                            || table_ref.identifier().as_deref()
+                                                == Some(qualifier_str);
+                                        if matches {
                                             let pr = smelt_parser::ast::text_range_to_range(
                                                 &text,
-                                                cte.syntax().text_range(),
+                                                table_ref.syntax().text_range(),
                                             );
                                             result = Some(GotoTarget::SameFile(Range {
                                                 start: Position::new(
@@ -1913,57 +1872,24 @@ impl LanguageServer for Backend {
                                     }
                                 }
                             }
-
-                            // Check if qualifier is a table alias in FROM/JOIN
-                            if result.is_none() {
-                                if let Some(select_stmt) = file.select_stmt() {
-                                    if let Some(from_clause) = select_stmt.from_clause() {
-                                        let table_refs: Vec<_> = from_clause
-                                            .table_refs()
-                                            .chain(
-                                                from_clause.joins().filter_map(|j| j.table_ref()),
-                                            )
-                                            .collect();
-
-                                        for table_ref in table_refs {
-                                            let matches = table_ref.alias().as_deref()
-                                                == Some(qualifier)
-                                                || table_ref.identifier().as_deref()
-                                                    == Some(qualifier);
-                                            if matches {
-                                                let pr = smelt_parser::ast::text_range_to_range(
-                                                    &text,
-                                                    table_ref.syntax().text_range(),
-                                                );
-                                                result = Some(GotoTarget::SameFile(Range {
-                                                    start: Position::new(
-                                                        pr.start.line,
-                                                        pr.start.column,
-                                                    ),
-                                                    end: Position::new(pr.end.line, pr.end.column),
-                                                }));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        }
+                        result
+                    } else {
+                        let defs = resolve_column_definitions(
+                            &db,
+                            &effective_path,
+                            qualifier.as_deref(),
+                            &name,
+                        );
+                        if !defs.is_empty() {
+                            Some(GotoTarget::ColumnDefs(defs))
                         } else {
-                            let defs = resolve_column_definitions(
-                                &db,
-                                &effective_path,
-                                col_ref.qualifier(),
-                                col_ref.name(),
-                            );
-                            if !defs.is_empty() {
-                                result = Some(GotoTarget::ColumnDefs(defs));
-                            }
+                            None
                         }
                     }
                 }
+                None => None,
             }
-
-            result
         } else {
             None
         };

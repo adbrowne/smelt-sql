@@ -1485,3 +1485,148 @@ sources:
         assert!(col_ref.qualifier().is_none());
     }
 }
+
+// =============================================================================
+// Symbol At Cursor Tests (Phase 1)
+// =============================================================================
+
+mod symbol_at_cursor {
+    use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+    /// Helper: parse text and call symbol_at_cursor at (line, col)
+    fn resolve(sql: &str, line: u32, col: u32) -> Option<SymbolAtCursor> {
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let offset = position_to_offset(sql, line, col);
+        symbol_at_cursor(&file, sql, offset)
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_ref_call() {
+        let sql = "SELECT * FROM smelt.ref('users')";
+        // Cursor inside the ref call (on 'users')
+        let sym = resolve(sql, 0, 25);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::RefCall {
+                name: "users".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_source_call() {
+        let sql = "SELECT * FROM smelt.source('raw.users')";
+        // Cursor inside the source call
+        let sym = resolve(sql, 0, 30);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::SourceCall {
+                source_name: "raw".to_string(),
+                table_name: "users".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_cte_reference() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        // Cursor on "cte1" in FROM clause (line 1, col 14)
+        let sym = resolve(sql, 1, 14);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::CteReference {
+                name: "cte1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_cte_definition() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        // Cursor on "cte1" in WITH clause (line 0, col 5)
+        let sym = resolve(sql, 0, 5);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::CteDefinition {
+                name: "cte1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_column_ref() {
+        let sql = "SELECT t.user_id FROM orders t";
+        // Cursor on "user_id" part of "t.user_id" (col 9)
+        let sym = resolve(sql, 0, 9);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::ColumnRef {
+                qualifier: Some("t".to_string()),
+                name: "user_id".to_string(),
+            })
+        );
+    }
+}
+
+// =============================================================================
+// AST Range Helper Tests (Phase 1)
+// =============================================================================
+
+mod ast_range_helpers {
+    #[test]
+    fn test_cte_name_range() {
+        let sql = "WITH my_cte AS (SELECT 1 as id)\nSELECT * FROM my_cte";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let select_stmt = file.select_stmt().unwrap();
+        let with_clause = select_stmt.with_clause().unwrap();
+        let cte = with_clause.ctes().next().unwrap();
+
+        let name_range = cte.name_range();
+        assert!(name_range.is_some(), "CTE should have a name range");
+        let range = name_range.unwrap();
+        let name_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        assert_eq!(name_text, "my_cte");
+    }
+
+    #[test]
+    fn test_ref_content_range() {
+        let sql = "SELECT * FROM smelt.ref('my_model')";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let ref_call = file.refs().next().unwrap();
+
+        let content_range = ref_call.content_range();
+        assert!(
+            content_range.is_some(),
+            "RefCall should have a content range"
+        );
+        let range = content_range.unwrap();
+        let content_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        assert_eq!(
+            content_text, "my_model",
+            "content_range should exclude quotes"
+        );
+    }
+
+    #[test]
+    fn test_source_table_name_range() {
+        let sql = "SELECT * FROM smelt.source('raw.users')";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let source_call = file.sources().next().unwrap();
+
+        let table_range = source_call.table_name_range();
+        assert!(
+            table_range.is_some(),
+            "SourceCall should have a table_name_range"
+        );
+        let range = table_range.unwrap();
+        let table_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        assert_eq!(
+            table_text, "users",
+            "table_name_range should cover just the table name"
+        );
+    }
+}
