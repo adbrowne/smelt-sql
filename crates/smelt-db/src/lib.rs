@@ -395,6 +395,8 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
             severity: DiagnosticSeverity::Error,
             message: error.message.clone(),
             range,
+            code: Some(DiagnosticCode::ParseError),
+            data: None,
         });
     }
 
@@ -413,6 +415,8 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                     start: Position { line: 0, column: 0 },
                     end: Position { line: 0, column: 0 },
                 },
+                code: Some(DiagnosticCode::InvalidModel),
+                data: None,
             });
         }
         return Arc::new(diagnostics);
@@ -426,6 +430,10 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Undefined model reference: '{}'", ref_loc.name),
                 range: ref_loc.range,
+                code: Some(DiagnosticCode::UndefinedModelRef),
+                data: Some(DiagnosticData::UndefinedRef {
+                    model_name: ref_loc.name.clone(),
+                }),
             });
         }
     }
@@ -445,6 +453,11 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Undefined source: '{}'", source_loc.qualified_name),
                 range: source_loc.range,
+                code: Some(DiagnosticCode::UndefinedSource),
+                data: Some(DiagnosticData::UndefinedSource {
+                    source_name: source_loc.source_name.clone(),
+                    table_name: source_loc.table_name.clone(),
+                }),
             });
         }
     }
@@ -459,6 +472,8 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                     start: Position { line: 0, column: 0 },
                     end: Position { line: 0, column: 0 },
                 },
+                code: Some(DiagnosticCode::YamlParseError),
+                data: None,
             });
         }
 
@@ -478,6 +493,8 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                         start: Position { line: 0, column: 0 },
                         end: Position { line: 0, column: 0 },
                     },
+                    code: Some(DiagnosticCode::SourceTypeError),
+                    data: None,
                 });
             }
         }
@@ -505,6 +522,8 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                             qualified_name
                         ),
                         range,
+                        code: Some(DiagnosticCode::MalformedSource),
+                        data: None,
                     });
                 }
             }
@@ -542,6 +561,8 @@ fn file_diagnostics(db: &dyn Semantic, path: PathBuf) -> Arc<Vec<Diagnostic>> {
                                                 start: Position { line: 0, column: 0 },
                                                 end: Position { line: 0, column: 0 },
                                             },
+                                            code: Some(DiagnosticCode::AmbiguousColumn),
+                                            data: None,
                                         });
                                     }
                                 }
@@ -595,6 +616,8 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<
                         type_text
                     ),
                     range: default_range,
+                    code: Some(DiagnosticCode::UnknownCastType),
+                    data: None,
                 });
             }
         }
@@ -619,6 +642,8 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, diagnostics: &mut Vec<
                         name
                     ),
                     range: default_range,
+                    code: Some(DiagnosticCode::UnrecognizedFunction),
+                    data: None,
                 });
             }
         }
@@ -647,6 +672,8 @@ fn check_unsupported_constructs(
                 kind_name
             ),
             range,
+            code: Some(DiagnosticCode::UnsupportedConstruct),
+            data: None,
         });
     }
 }
@@ -686,12 +713,59 @@ pub type Position = smelt_parser::ast::Position;
 /// Range in a file (start, end)
 pub type Range = smelt_parser::ast::Range;
 
+/// Diagnostic codes for pattern-matching in code actions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticCode {
+    ParseError,
+    InvalidModel,
+    UndefinedModelRef,
+    UndefinedSource,
+    CannotInferType,
+    UndeclaredColumn,
+    TypeMismatch,
+    CircularDependency,
+    UnsupportedConstruct,
+    YamlParseError,
+    SourceTypeError,
+    MalformedSource,
+    AmbiguousColumn,
+    UnknownCastType,
+    UnrecognizedFunction,
+}
+
+/// Structured metadata attached to diagnostics for code actions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticData {
+    UndefinedRef {
+        model_name: String,
+    },
+    UndefinedSource {
+        source_name: String,
+        table_name: String,
+    },
+    CannotInferType {
+        column_name: String,
+    },
+    UndeclaredColumn {
+        qualifier: Option<String>,
+        column_name: String,
+    },
+    TypeMismatch {
+        column_name: String,
+        ref_name: String,
+        actual_type: String,
+        expected_type: String,
+    },
+}
+
 /// Represents a diagnostic (error, warning, info)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
     pub range: Range,
+    pub code: Option<DiagnosticCode>,
+    pub data: Option<DiagnosticData>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1525,6 +1599,10 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
                         col.name
                     ),
                     range,
+                    code: Some(DiagnosticCode::CannotInferType),
+                    data: Some(DiagnosticData::CannotInferType {
+                        column_name: col.name.clone(),
+                    }),
                 });
             }
             None => {
@@ -1536,6 +1614,10 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
                         col.name
                     ),
                     range,
+                    code: Some(DiagnosticCode::CannotInferType),
+                    data: Some(DiagnosticData::CannotInferType {
+                        column_name: col.name.clone(),
+                    }),
                 });
             }
             _ => {} // Type successfully inferred
@@ -1549,12 +1631,17 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
         if let Some(select_stmt) = file.select_stmt() {
             let ctx = db.type_context(path.clone());
             let undeclared = type_inference::check_undeclared_columns(&select_stmt, &ctx);
-            for (message, text_range) in undeclared {
-                let range = smelt_parser::ast::text_range_to_range(&text, text_range);
+            for info in undeclared {
+                let range = smelt_parser::ast::text_range_to_range(&text, info.range);
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Error,
-                    message,
+                    message: info.message,
                     range,
+                    code: Some(DiagnosticCode::UndeclaredColumn),
+                    data: Some(DiagnosticData::UndeclaredColumn {
+                        qualifier: info.qualifier,
+                        column_name: info.column_name,
+                    }),
                 });
             }
         }
@@ -1587,6 +1674,13 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
                                     col_name, constraint.ref_name, actual.data_type, expected.data_type
                                 ),
                                 range,
+                                code: Some(DiagnosticCode::TypeMismatch),
+                                data: Some(DiagnosticData::TypeMismatch {
+                                    column_name: col_name.clone(),
+                                    ref_name: constraint.ref_name.clone(),
+                                    actual_type: actual.data_type.to_string(),
+                                    expected_type: expected.data_type.to_string(),
+                                }),
                             });
                         }
                     }
@@ -1614,6 +1708,8 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
                         ref_loc.name
                     ),
                     range: ref_loc.range,
+                    code: Some(DiagnosticCode::CircularDependency),
+                    data: None,
                 });
             }
         }

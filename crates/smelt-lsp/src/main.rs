@@ -13,8 +13,8 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
-    Database, Diagnostic as DbDiagnostic, DiagnosticSeverity as DbSeverity, Inputs, Schema,
-    Semantic, Syntax, TypeChecking,
+    Database, Diagnostic as DbDiagnostic, DiagnosticCode as DbCode, DiagnosticData as DbData,
+    DiagnosticSeverity as DbSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking,
 };
 
 mod python_scan;
@@ -662,6 +662,62 @@ impl Backend {
 
     /// Convert our database diagnostic to LSP diagnostic
     fn to_lsp_diagnostic(&self, diag: &DbDiagnostic) -> lsp_types::Diagnostic {
+        let code = diag.code.map(|c| {
+            let code_str = match c {
+                DbCode::ParseError => "parse-error",
+                DbCode::InvalidModel => "invalid-model",
+                DbCode::UndefinedModelRef => "undefined-model-ref",
+                DbCode::UndefinedSource => "undefined-source",
+                DbCode::CannotInferType => "cannot-infer-type",
+                DbCode::UndeclaredColumn => "undeclared-column",
+                DbCode::TypeMismatch => "type-mismatch",
+                DbCode::CircularDependency => "circular-dependency",
+                DbCode::UnsupportedConstruct => "unsupported-construct",
+                DbCode::YamlParseError => "yaml-parse-error",
+                DbCode::SourceTypeError => "source-type-error",
+                DbCode::MalformedSource => "malformed-source",
+                DbCode::AmbiguousColumn => "ambiguous-column",
+                DbCode::UnknownCastType => "unknown-cast-type",
+                DbCode::UnrecognizedFunction => "unrecognized-function",
+            };
+            NumberOrString::String(code_str.to_string())
+        });
+
+        let data = diag.data.as_ref().map(|d| match d {
+            DbData::UndefinedRef { model_name } => {
+                serde_json::json!({ "kind": "undefined-ref", "modelName": model_name })
+            }
+            DbData::UndefinedSource {
+                source_name,
+                table_name,
+            } => {
+                serde_json::json!({ "kind": "undefined-source", "sourceName": source_name, "tableName": table_name })
+            }
+            DbData::CannotInferType { column_name } => {
+                serde_json::json!({ "kind": "cannot-infer-type", "columnName": column_name })
+            }
+            DbData::UndeclaredColumn {
+                qualifier,
+                column_name,
+            } => {
+                serde_json::json!({ "kind": "undeclared-column", "qualifier": qualifier, "columnName": column_name })
+            }
+            DbData::TypeMismatch {
+                column_name,
+                ref_name,
+                actual_type,
+                expected_type,
+            } => {
+                serde_json::json!({
+                    "kind": "type-mismatch",
+                    "columnName": column_name,
+                    "refName": ref_name,
+                    "actualType": actual_type,
+                    "expectedType": expected_type
+                })
+            }
+        });
+
         lsp_types::Diagnostic {
             range: Range {
                 start: Position {
@@ -680,6 +736,8 @@ impl Backend {
             }),
             message: diag.message.clone(),
             source: Some("smelt".to_string()),
+            code,
+            data,
             ..Default::default()
         }
     }
@@ -1376,6 +1434,12 @@ impl LanguageServer for Backend {
                     ]),
                     ..Default::default()
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
             ..Default::default()

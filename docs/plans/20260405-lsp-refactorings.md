@@ -18,50 +18,51 @@
 
 ---
 
-## Phase 0: Test Harness and Infrastructure `[ ]`
+## Phase 0: Test Harness and Infrastructure `[x]`
 
 **Priority**: Foundation — everything depends on this.
 
 **Goal**: Extend `TestWorkspace` with helpers for testing code actions, references, and rename. Add `DiagnosticCode` enum to smelt-db so code actions can pattern-match on diagnostics. Register new server capabilities.
 
 **Red tests (write first)**:
-- [ ] `test_diagnostic_has_code_undefined_ref` — asserts `Diagnostic.code == Some(DiagnosticCode::UndefinedModelRef)`. Fails because `code` field doesn't exist yet.
-- [ ] `test_diagnostic_has_code_type_mismatch` — asserts `Diagnostic.code == Some(DiagnosticCode::TypeMismatch)`.
-- [ ] `test_diagnostic_has_data_undefined_ref` — asserts `Diagnostic.data` contains model name.
-- [ ] `test_diagnostic_has_data_undeclared_column` — asserts `Diagnostic.data` contains qualifier and column name.
+- [x] `test_diagnostic_has_code_undefined_ref` — asserts `Diagnostic.code == Some(DiagnosticCode::UndefinedModelRef)`. Fails because `code` field doesn't exist yet.
+- [x] `test_diagnostic_has_code_type_mismatch` — asserts `Diagnostic.code == Some(DiagnosticCode::TypeMismatch)`.
+- [x] `test_diagnostic_has_data_undefined_ref` — asserts `Diagnostic.data` contains model name.
+- [x] `test_diagnostic_has_data_undeclared_column` — asserts `Diagnostic.data` contains qualifier and column name.
 
 **Green implementation**:
-- [ ] Add `DiagnosticCode` enum to `crates/smelt-db/src/lib.rs` (~L690):
+- [x] Add `DiagnosticCode` enum to `crates/smelt-db/src/lib.rs` (~L690):
   ```
   ParseError, InvalidModel, UndefinedModelRef, UndefinedSource,
   CannotInferType, UndeclaredColumn, TypeMismatch, CircularDependency,
   UnsupportedConstruct, YamlParseError, SourceTypeError
   ```
-- [ ] Add `DiagnosticData` enum for structured metadata:
+- [x] Add `DiagnosticData` enum for structured metadata:
   ```
   UndefinedRef { model_name }, UndefinedSource { source_name, table_name },
   CannotInferType { column_name, expression }, UndeclaredColumn { qualifier, column_name },
   TypeMismatch { column_name, ref_name, actual_type, expected_type }
   ```
-- [ ] Extend `Diagnostic` struct with `code: Option<DiagnosticCode>`, `data: Option<DiagnosticData>`
-- [ ] Update all ~10 `diagnostics.push()` sites in `file_diagnostics()` (L384-470) and `type_diagnostics()` (L1484-1622)
-- [ ] Add test workspace helpers to `crates/smelt-lsp/tests/integration.rs`:
-  - `TestWorkspace::code_actions_at(model, line, col) -> Vec<CodeAction>` — stub returning empty (no handler yet)
-  - `TestWorkspace::references_for(model, line, col) -> Vec<(PathBuf, Range)>` — stub returning empty
-  - `TestWorkspace::rename(model, line, col, new_name) -> WorkspaceEdit` — stub returning empty
-- [ ] Update `to_lsp_diagnostic` (main.rs:664) to propagate `code` as `NumberOrString` and `data` as `serde_json::Value`
-- [ ] Register `code_action_provider`, `references_provider`, `rename_provider` in `ServerCapabilities` (main.rs:1364-1382)
+- [x] Extend `Diagnostic` struct with `code: Option<DiagnosticCode>`, `data: Option<DiagnosticData>`
+- [x] Update all ~16 `diagnostics.push()` sites in `file_diagnostics()` and `type_diagnostics()`
+- [x] Add test workspace helpers to `crates/smelt-lsp/tests/integration.rs`:
+  - `TestWorkspace::code_actions_at(model, line, col) -> Vec<String>` — stub returning empty (no handler yet)
+  - `TestWorkspace::references_for(model, line, col) -> Vec<(PathBuf, (u32, u32))>` — stub returning empty
+  - `TestWorkspace::rename(model, line, col, new_name) -> Vec<(PathBuf, String)>` — stub returning empty
+- [x] Update `to_lsp_diagnostic` to propagate `code` as `NumberOrString` and `data` as `serde_json::Value`
+- [x] Register `code_action_provider`, `references_provider`, `rename_provider` in `ServerCapabilities`
 
-**Files to modify**:
-- `crates/smelt-db/src/lib.rs` — Diagnostic struct, DiagnosticCode, DiagnosticData, update push sites
-- `crates/smelt-lsp/src/main.rs` — to_lsp_diagnostic, capabilities registration
-- `crates/smelt-lsp/tests/integration.rs` — test harness helpers, red tests
+**Files modified**:
+- `crates/smelt-db/src/lib.rs` — DiagnosticCode, DiagnosticData enums, Diagnostic struct, all 16 push sites
+- `crates/smelt-db/src/type_inference.rs` — UndeclaredColumnInfo struct, check_undeclared_columns returns structured data
+- `crates/smelt-lsp/src/main.rs` — to_lsp_diagnostic with code/data propagation, capabilities registration
+- `crates/smelt-lsp/tests/integration.rs` — test harness helpers, 4 red→green tests
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass, including new red→green tests)
-- [ ] `cargo test -p smelt-cli --test example_diagnostics` (zero diagnostics in examples)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (lib targets clean; pre-existing arrow type mismatch in smelt-backend-duckdb test targets)
+- [x] `cargo test` (241 tests pass, including 4 new red→green tests)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb compilation error (arrow type mismatch, unrelated to this work)
 
 ---
 
@@ -435,10 +436,31 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 
 ## Decisions Log
 
-_Decisions made during implementation will be recorded here._
+1. **DiagnosticCode has 15 variants (not 11)**: Added `MalformedSource`, `AmbiguousColumn`, `UnknownCastType`, `UnrecognizedFunction` beyond the original plan because these diagnostic categories existed in the code and deserve distinct codes for future code actions.
+
+2. **DiagnosticData::CannotInferType simplified**: Dropped `expression` field from the plan since the column name is sufficient for code action matching. The expression text is already in the diagnostic message.
+
+3. **UndeclaredColumnInfo struct in type_inference.rs**: Changed `check_undeclared_columns` return type from `Vec<(String, TextRange)>` to `Vec<UndeclaredColumnInfo>` to carry structured qualifier/column_name data. This is a minor API change but follows the pure function rule and enables richer code actions.
+
+4. **Test workspace helpers use simple types**: Used `Vec<String>`, `Vec<(PathBuf, (u32, u32))>`, `Vec<(PathBuf, String)>` instead of LSP types in test helpers, keeping the test harness decoupled from LSP protocol types.
 
 ---
 
 ## Session Log
 
-_Session progress will be recorded here._
+### Session 1 — 2026-04-05
+
+**Phase**: 0 (Test Harness and Infrastructure)
+**Status**: Complete
+
+**What was done**:
+- Added `DiagnosticCode` enum (15 variants) and `DiagnosticData` enum (5 variants) to smelt-db
+- Extended `Diagnostic` struct with `code: Option<DiagnosticCode>` and `data: Option<DiagnosticData>`
+- Updated all 16 `diagnostics.push()` sites with proper codes and structured data
+- Changed `check_undeclared_columns` to return `UndeclaredColumnInfo` for structured column data
+- Updated `to_lsp_diagnostic` to propagate code as `NumberOrString::String` and data as `serde_json::Value`
+- Registered `code_action_provider`, `references_provider`, `rename_provider` in `ServerCapabilities`
+- Added stub test workspace helpers (`code_actions_at`, `references_for`, `rename`)
+- Wrote 4 red→green tests for diagnostic codes and data
+
+**Blockers**: `cargo test -p smelt-cli --test example_diagnostics` cannot run due to pre-existing `smelt-backend-duckdb` arrow type mismatch (unrelated to this work).

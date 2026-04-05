@@ -82,6 +82,33 @@ impl TestWorkspace {
     fn model_path(&self, name: &str) -> PathBuf {
         self.models_dir.join(format!("{}.sql", name))
     }
+
+    /// Get code actions at a position in a model (stub — returns empty until handler is implemented)
+    #[allow(dead_code)]
+    fn code_actions_at(&self, _model: &str, _line: u32, _col: u32) -> Vec<String> {
+        // Stub: will be wired to code action handler in Phase 3
+        vec![]
+    }
+
+    /// Find all references to a symbol at a position (stub — returns empty until handler is implemented)
+    #[allow(dead_code)]
+    fn references_for(&self, _model: &str, _line: u32, _col: u32) -> Vec<(PathBuf, (u32, u32))> {
+        // Stub: will be wired to reference queries in Phase 2
+        vec![]
+    }
+
+    /// Rename a symbol at a position (stub — returns empty until handler is implemented)
+    #[allow(dead_code)]
+    fn rename(
+        &self,
+        _model: &str,
+        _line: u32,
+        _col: u32,
+        _new_name: &str,
+    ) -> Vec<(PathBuf, String)> {
+        // Stub: will be wired to rename handler in Phase 5
+        vec![]
+    }
 }
 
 // =============================================================================
@@ -196,6 +223,120 @@ sources:
         assert_eq!(diags.len(), 2, "Expected 2 undefined ref diagnostics");
         assert!(diags.iter().any(|d| d.message.contains("missing1")));
         assert!(diags.iter().any(|d| d.message.contains("missing2")));
+    }
+
+    #[test]
+    fn test_diagnostic_has_code_undefined_ref() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("broken", "SELECT * FROM smelt.ref('nonexistent')");
+
+        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].code,
+            Some(smelt_db::DiagnosticCode::UndefinedModelRef),
+            "Undefined ref diagnostic should have UndefinedModelRef code"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_has_code_type_mismatch() {
+        use smelt_db::DiagnosticCode;
+
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model(
+            "stg_users",
+            "SELECT id, name FROM smelt.source('raw.users')",
+        );
+        // SUM(name) expects numeric but name is VARCHAR — triggers cross-model type mismatch
+        ws.add_model(
+            "bad_sum",
+            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+        );
+
+        // type_diagnostics checks cross-model type mismatches
+        let diags = ws.db.type_diagnostics(ws.model_path("bad_sum"));
+
+        let type_mismatch = diags
+            .iter()
+            .find(|d| d.code == Some(DiagnosticCode::TypeMismatch));
+        assert!(
+            type_mismatch.is_some(),
+            "Expected a TypeMismatch diagnostic, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_has_data_undefined_ref() {
+        use smelt_db::DiagnosticData;
+
+        let mut ws = TestWorkspace::new();
+        ws.add_model("broken", "SELECT * FROM smelt.ref('my_model')");
+
+        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].data,
+            Some(DiagnosticData::UndefinedRef {
+                model_name: "my_model".to_string(),
+            }),
+            "Undefined ref diagnostic should have UndefinedRef data with model name"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_has_data_undeclared_column() {
+        use smelt_db::DiagnosticData;
+
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT nonexistent_col FROM smelt.source('raw.users')",
+        );
+
+        // Undeclared column checks are in type_diagnostics
+        let diags = ws.db.type_diagnostics(ws.model_path("model"));
+
+        let undeclared = diags
+            .iter()
+            .find(|d| matches!(&d.data, Some(DiagnosticData::UndeclaredColumn { .. })));
+        assert!(
+            undeclared.is_some(),
+            "Expected an UndeclaredColumn diagnostic data, got: {:?}",
+            diags
+        );
+        if let Some(DiagnosticData::UndeclaredColumn { column_name, .. }) =
+            &undeclared.unwrap().data
+        {
+            assert_eq!(column_name, "nonexistent_col");
+        }
     }
 }
 
