@@ -28,6 +28,12 @@ Dagster/Airflow plugin API. `smelt explain --json` already provides the graph st
 
 ## Recently Completed
 
+### ~~LSP Refactorings & Code Actions~~ ✅ (April 5-6, 2026)
+
+Full refactoring support in the LSP: rename (CTEs, models, sources, columns with cross-file lineage tracing), code actions (CAST fixes, create model, add source/column, extract CTE, inline CTE), and find-references. All implemented as pure functions in smelt-db with thin LSP wrappers. Also fixed arrow 57→58 version mismatch and extracted duplicated functions to shared crates.
+
+See [plan](plans/20260405-lsp-refactorings.md) for details.
+
 ### ~~LSP Goto-Definition & Column Diagnostics~~ ✅ (April 3-4, 2026)
 
 Major LSP expansion: goto-definition now covers sources, CTEs, columns, and qualified references. Undeclared column reference diagnostics added. Python model LSP integration with real `ProjectContext`. Multiple stability fixes.
@@ -181,7 +187,8 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - JSON operator type inference
 
 **Next steps**:
-- LSP quick-fixes for type errors (CAST suggestions, COALESCE for NULLs)
+- ~~LSP quick-fixes for type errors (CAST suggestions)~~ ✅ (April 5, 2026) — see [LSP Refactorings](#lsp-refactorings--code-actions--april-5-6-2026)
+- LSP quick-fixes for COALESCE suggestions on NULLs
 - Stricter boundary type checking (explicit input/output schemas)
 - *See also*: snapshot tests for type inference output ([Code Quality & Hardening](#code-quality--hardening)), type-system-leveraged data testing ([Data Testing Framework](#data-testing-framework))
 
@@ -236,6 +243,9 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - Python model awareness: real `ProjectContext` passed to Python models in LSP, valid ref targets, execution error diagnostics
 - `sources.yml` live reload (changes update LSP without restart)
 - Salsa cycle recovery prevents LSP crashes from circular model references
+- Find references for models, sources, and CTEs
+- Rename: CTEs (single-file), models (cross-file with file rename), sources (cross-file + YAML), columns (full lineage tracing)
+- Code actions: CAST quick-fixes, create model, add source/column to YAML, extract CTE, inline CTE
 - VSCode extension with syntax highlighting and auto-activation
 - CI verification: example workspaces checked for zero LSP diagnostics
 
@@ -252,7 +262,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 **Next steps**:
 - Dialect-specific informational hints ("QUALIFY will be rewritten for PostgreSQL")
 - Optimizer opportunity suggestions as code actions
-- Rename refactoring across models
+- Code action: extract to model (promote subquery/CTE to a new smelt model)
 
 ## CLI & Execution
 

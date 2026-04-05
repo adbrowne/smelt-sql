@@ -522,17 +522,17 @@
 
 ---
 
-## Phase 14: Update ROADMAP.md `[ ]`
+## Phase 14: Update ROADMAP.md `[x]`
 
 **Priority**: Low — documentation update.
 
 **Goal**: Update `docs/ROADMAP.md` to reflect the completed LSP refactorings work. Move "Rename refactoring across models" from Next Steps to Recently Completed. Add code actions and CTE refactoring to the LSP current state.
 
 **Red tests (write first)**:
-- [ ] No tests — documentation-only phase.
+- [x] No tests — documentation-only phase.
 
 **Green implementation**:
-- [ ] Add a new entry to the "Recently Completed" section (after the existing "LSP Goto-Definition" entry):
+- [x] Add a new entry to the "Recently Completed" section (after the existing "LSP Goto-Definition" entry):
   ```
   ### ~~LSP Refactorings & Code Actions~~ ✅ (April 5-6, 2026)
 
@@ -540,19 +540,19 @@
 
   See [plan](plans/20260405-lsp-refactorings.md) for details.
   ```
-- [ ] Update the "LSP & Editor Support" section's "Current state" bullets to add:
+- [x] Update the "LSP & Editor Support" section's "Current state" bullets to add:
   - Find references for models, sources, and CTEs
   - Rename: CTEs (single-file), models (cross-file with file rename), sources (cross-file + YAML), columns (full lineage tracing)
   - Code actions: CAST quick-fixes, create model, add source/column to YAML, extract CTE, inline CTE
-- [ ] Remove "Rename refactoring across models" from the "Next steps" list
-- [ ] Optionally add new next steps: "Dialect-specific refactoring hints", "Code action: extract to model"
+- [x] Remove "Rename refactoring across models" from the "Next steps" list
+- [x] Optionally add new next steps: "Dialect-specific refactoring hints", "Code action: extract to model"
 
 **Files modified**:
 - `docs/ROADMAP.md` — Recently Completed entry, LSP section updates, Next Steps cleanup
 
 **Verification**:
-- [ ] Review the ROADMAP for accuracy and consistency
-- [ ] No code changes — no cargo checks needed
+- [x] Review the ROADMAP for accuracy and consistency
+- [x] No code changes — no cargo checks needed
 
 ---
 
@@ -911,3 +911,18 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 **Decisions**:
 - Tests use a `handler_code_actions_at()` helper that mirrors the handler's logic (calling `generate_all_code_actions` + CTE refactorings) rather than testing the async LSP handler directly. This is consistent with the existing testing pattern where integration tests exercise pure functions and db queries directly, with the LSP handler being a thin async wrapper.
 - The `HandlerCodeAction` struct captures just `title` and `kind` (as strings), keeping tests decoupled from LSP protocol types while verifying the handler would produce the correct action categories.
+
+### Session 15 — 2026-04-06
+
+**Phase**: 14 (Update ROADMAP.md)
+**Status**: Complete
+
+**What was done**:
+- Added "LSP Refactorings & Code Actions" entry to Recently Completed section in ROADMAP.md
+- Updated LSP & Editor Support current state with 3 new capability bullets: find references, rename (4 symbol types), code actions (6 action types)
+- Replaced "Rename refactoring across models" next step (now complete) with "Code action: extract to model"
+- Updated Type System next steps: marked CAST quick-fixes as complete, separated COALESCE suggestions as remaining work
+- Reviewed ROADMAP for accuracy and consistency
+
+**Decisions**:
+- None — straightforward documentation update following the plan.
