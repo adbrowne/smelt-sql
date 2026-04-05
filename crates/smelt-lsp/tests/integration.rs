@@ -20,6 +20,15 @@ struct RenameModelResult {
     conflict: bool,
 }
 
+/// Result of a source table rename operation
+#[derive(Default)]
+struct RenameSourceResult {
+    /// Text edits in SQL files: (file_path, start_line, start_col, end_line, end_col)
+    sql_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+    /// YAML edit: (line_number, old_line_text, new_line_text)
+    yaml_edit: Option<(u32, String, String)>,
+}
+
 /// Test workspace that simulates a smelt project
 struct TestWorkspace {
     #[allow(dead_code)]
@@ -262,6 +271,23 @@ impl TestWorkspace {
                 }
                 None
             }
+            Some(SymbolAtCursor::SourceCall {
+                source_name,
+                table_name,
+            }) => {
+                // For source calls, return the table_name_range (just the table part)
+                for source_call in file.sources() {
+                    if source_call.source_name().as_deref() == Some(source_name.as_str())
+                        && source_call.table_name().as_deref() == Some(table_name.as_str())
+                    {
+                        if let Some(tn_range) = source_call.table_name_range() {
+                            let r = smelt_parser::ast::text_range_to_range(&text, tn_range);
+                            return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -388,6 +414,143 @@ impl TestWorkspace {
             })
             .collect()
     }
+
+    /// Rename a source table across the project.
+    /// Returns a RenameSourceResult with SQL text edits and an optional YAML edit.
+    fn rename_source(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+        new_table_name: &str,
+    ) -> RenameSourceResult {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path);
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return RenameSourceResult::default(),
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let (source_name, old_table_name) = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::SourceCall {
+                source_name,
+                table_name,
+            }) => (source_name, table_name),
+            _ => return RenameSourceResult::default(),
+        };
+
+        let qualified = format!("{}.{}", source_name, old_table_name);
+
+        // Find all source() call sites across the project
+        let all_file_sources: Vec<_> = self
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*self.db.model_sources(p.clone())).clone()))
+            .collect();
+        let source_locations =
+            smelt_db::references::find_source_references(&qualified, &all_file_sources);
+
+        // For each source location, get the table_name_range (inside quotes, after the dot)
+        let mut sql_edits = Vec::new();
+        for (ref_path, _) in &source_locations {
+            let ref_text = self.db.file_text(ref_path.clone());
+            let ref_parse = self.db.parse_file(ref_path.clone());
+            let ref_syntax = ref_parse.syntax();
+            if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
+                for source_call in ref_file.sources() {
+                    if source_call.source_name().as_deref() == Some(&source_name)
+                        && source_call.table_name().as_deref() == Some(&old_table_name)
+                    {
+                        if let Some(tn_range) = source_call.table_name_range() {
+                            let r = smelt_parser::ast::text_range_to_range(&ref_text, tn_range);
+                            sql_edits.push((
+                                ref_path.clone(),
+                                r.start.line,
+                                r.start.column,
+                                r.end.line,
+                                r.end.column,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find and update the YAML entry
+        let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
+        let yaml_edit = find_source_table_yaml_rename(
+            &sources_yml,
+            &source_name,
+            &old_table_name,
+            new_table_name,
+        );
+
+        RenameSourceResult {
+            sql_edits,
+            yaml_edit,
+        }
+    }
+}
+
+/// Find the YAML line for a source table key and produce the rename edit.
+/// Returns (line_number, old_line, new_line) or None if not found.
+fn find_source_table_yaml_rename(
+    yaml_content: &str,
+    source_name: &str,
+    old_table_name: &str,
+    new_table_name: &str,
+) -> Option<(u32, String, String)> {
+    let mut in_source = false;
+    let mut in_tables = false;
+    for (i, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect source name section (e.g., "  raw:")
+        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
+            in_source = true;
+            in_tables = false;
+            continue;
+        }
+
+        if in_source {
+            // Detect tables section
+            if trimmed == "tables:" {
+                in_tables = true;
+                continue;
+            }
+
+            // A new top-level key resets context
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !trimmed.starts_with('#')
+                && !line.starts_with(' ')
+            {
+                in_source = false;
+                in_tables = false;
+                continue;
+            }
+        }
+
+        if in_source && in_tables {
+            // Look for the table name as a YAML key (e.g., "      users:")
+            if trimmed.starts_with(&format!("{}:", old_table_name)) {
+                let old_line = line.to_string();
+                let new_line = line.replace(
+                    &format!("{}:", old_table_name),
+                    &format!("{}:", new_table_name),
+                );
+                return Some((i as u32, old_line, new_line));
+            }
+        }
+    }
+    None
 }
 
 // =============================================================================
@@ -2719,6 +2882,116 @@ mod rename_model {
         assert!(
             result.conflict,
             "should reject rename to existing model name"
+        );
+    }
+}
+
+// =============================================================================
+// Rename Source Tests
+// =============================================================================
+
+mod rename_source {
+    use super::*;
+
+    #[test]
+    fn test_prepare_rename_source_from_call() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
+        );
+        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+
+        // Cursor on 'users' inside source('raw.users') — find col for 'users'
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.prepare_rename("staging", 0, users_start);
+        assert!(
+            result.is_some(),
+            "prepare_rename should return a range for source() table name"
+        );
+        let (sl, sc, el, ec) = result.unwrap();
+        assert_eq!(sl, 0);
+        assert_eq!(el, 0);
+        assert_eq!(ec - sc, 5, "range should span 'users' (5 chars)");
+    }
+
+    #[test]
+    fn test_rename_source_table_updates_all_calls() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
+        );
+        ws.add_model("staging_a", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("staging_b", "SELECT id FROM smelt.source('raw.users')");
+
+        // Cursor on 'users' in staging_a
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.rename_source("staging_a", 0, users_start, "customers");
+
+        // Both files should get text edits
+        assert_eq!(
+            result.sql_edits.len(),
+            2,
+            "should have edits for both files referencing raw.users"
+        );
+    }
+
+    #[test]
+    fn test_rename_source_table_updates_yaml() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
+        );
+        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.rename_source("staging", 0, users_start, "customers");
+
+        // YAML should have a rename edit
+        assert!(
+            result.yaml_edit.is_some(),
+            "should produce a YAML edit for the table key"
+        );
+        let (line_num, old_line, new_line) = result.yaml_edit.unwrap();
+        assert!(
+            old_line.contains("users:"),
+            "old line should contain 'users:'"
+        );
+        assert!(
+            new_line.contains("customers:"),
+            "new line should contain 'customers:'"
+        );
+        // Line 5 is "      users:" (0-indexed)
+        assert_eq!(line_num, 5, "YAML table key should be on line 5");
+    }
+
+    #[test]
+    fn test_rename_source_table_yaml_preserves_columns() {
+        let yaml = "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n          - name: email\n            type: VARCHAR\n";
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(yaml);
+        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.rename_source("staging", 0, users_start, "customers");
+
+        // The YAML edit should only change the table key line, not touch columns
+        assert!(result.yaml_edit.is_some());
+        let (_, old_line, new_line) = result.yaml_edit.unwrap();
+        // Only the table key line changes
+        assert!(old_line.contains("users:"));
+        assert!(new_line.contains("customers:"));
+        // Verify columns are NOT in the edit (only the key line changes)
+        assert!(
+            !old_line.contains("columns"),
+            "edit should not include column lines"
+        );
+        assert!(
+            !new_line.contains("columns"),
+            "edit should not include column lines"
         );
     }
 }

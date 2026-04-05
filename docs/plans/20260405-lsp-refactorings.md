@@ -276,32 +276,35 @@
 
 ---
 
-## Phase 7: Rename Source Table (Cross-File + YAML) `[ ]`
+## Phase 7: Rename Source Table (Cross-File + YAML) `[x]`
 
 **Priority**: Medium — completes the rename story for non-column symbols.
 
 **Goal**: Rename a source table by updating all `source('src.old_table')` calls and the sources.yml entry.
 
 **Red tests (write first)**:
-- [ ] `test_prepare_rename_source_from_call` — cursor inside `source('raw.users')` returns valid range
-- [ ] `test_rename_source_table_updates_all_calls` — 2 models using `source('raw.old')` both get updated
-- [ ] `test_rename_source_table_updates_yaml` — sources.yml table key is renamed
-- [ ] `test_rename_source_table_yaml_preserves_columns` — columns under the renamed table are preserved
+- [x] `test_prepare_rename_source_from_call` — cursor inside `source('raw.users')` returns valid range
+- [x] `test_rename_source_table_updates_all_calls` — 2 models using `source('raw.old')` both get updated
+- [x] `test_rename_source_table_updates_yaml` — sources.yml table key is renamed
+- [x] `test_rename_source_table_yaml_preserves_columns` — columns under the renamed table are preserved
 
 **Green implementation**:
-- [ ] In `textDocument/rename`: for `SourceCall` symbol, use `db.source_references(qualified_name)` from Phase 2
-- [ ] For each source site: `TextEdit` replacing table name in the source() call string
-- [ ] Find table key in sources.yml via line scanning, produce `TextEdit` for YAML rename
-- [ ] Return `WorkspaceEdit` with edits across all files + sources.yml
+- [x] In `textDocument/rename`: for `SourceCall` symbol, use `find_source_references()` from Phase 2
+- [x] For each source site: `TextEdit` replacing table name in the source() call string (via `table_name_range()`)
+- [x] Find table key in sources.yml via `find_source_table_yaml_rename()` line scanning, produce `TextEdit` for YAML rename
+- [x] Return `WorkspaceEdit` with edits across all files + sources.yml using `DocumentChanges`
+- [x] Extended `prepareRename` handler for SourceCall (returns `table_name_range`)
 
-**Files to modify**:
-- `crates/smelt-lsp/src/main.rs` — rename handler for source tables
-- `crates/smelt-lsp/tests/integration.rs` — red tests
+**Files modified**:
+- `crates/smelt-lsp/src/main.rs` — `find_source_table_yaml_rename()` function, prepareRename handler for SourceCall, rename handler with Source variant in RenameKind enum, DocumentChanges output for Source rename
+- `crates/smelt-lsp/tests/integration.rs` — `RenameSourceResult` struct, `rename_source()` helper, `find_source_table_yaml_rename()` pure function, prepare_rename extended for SourceCall, 4 red→green tests
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (clean for smelt-parser, smelt-db, smelt-lsp)
+- [x] `cargo test` (464 tests pass: 241 parser + 129 db + 94 lsp integration)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb arrow type mismatch
+- [ ] Manual: F2 on `source('raw.table')` in VSCode renames table across files + YAML
 
 ---
 
@@ -601,3 +604,28 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 - Used `RenameKind` enum (Cte/Model) inside the rename handler to keep the two rename paths cleanly separated. This avoids complex conditional logic and makes it easy to add future rename kinds (source, column).
 - Model rename resolves the model file path by looking in the same directory as the effective_path (the file containing the ref call). This works because all models in a project share the same models directory.
 - Test helpers implement rename logic using pure functions directly (consistent with existing pattern), not through an LSP server. The LSP handler wiring is tested indirectly through the same pure function code paths.
+
+### Session 8 — 2026-04-05
+
+**Phase**: 7 (Rename Source Table — Cross-File + YAML)
+**Status**: Complete
+
+**What was done**:
+- Extended `prepareRename` handler in main.rs for `SourceCall` symbols — returns `table_name_range()` (just the table part after the dot, inside quotes)
+- Extended `RenameKind` enum with `Source` variant carrying sql_edits, yaml_edit, and sources_yml_path
+- Implemented `SourceCall` rename handler in main.rs:
+  - Uses `find_source_references()` from Phase 2 to find all `source('src.table')` call sites
+  - For each site, resolves `SourceCall::table_name_range()` to get the text range of just the table name
+  - Calls `find_source_table_yaml_rename()` to locate the YAML table key line
+  - Groups SQL `TextEdit`s by file and adds YAML line replacement as a `TextDocumentEdit`
+  - Returns `DocumentChanges::Operations` (same pattern as model rename)
+- Added `find_source_table_yaml_rename()` function in main.rs (parallel to existing `find_source_table_line`) — YAML line scanner that finds the table key and produces old_line/new_line pair
+- Added `RenameSourceResult` struct and `rename_source()` test helper with pure function implementations
+- Extended `prepare_rename()` helper to handle `SourceCall` symbols
+- Wrote 4 tests, all pass
+
+**Decisions**:
+- Added `Source` variant to the existing `RenameKind` enum (Cte/Model/Source), maintaining the clean separation between rename kinds established in Phase 6.
+- `find_source_table_yaml_rename()` returns (line_number, old_line, new_line) tuple — the LSP handler uses old_line.len() to compute the replacement range. This avoids needing to track column positions within the YAML line.
+- The YAML edit replaces the entire line containing the table key (e.g., `"      users:"` → `"      customers:"`). This preserves indentation and any trailing content on the same line.
+- Pure function `find_source_table_yaml_rename` duplicated in both main.rs and integration.rs. Could be extracted to smelt-db in the future, but kept local for now since smelt-lsp is a binary crate and the function is simple.

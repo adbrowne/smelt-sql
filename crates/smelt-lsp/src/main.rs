@@ -182,6 +182,59 @@ fn find_source_column_line(
     find_source_table_line(sources_path, source_name, table_name)
 }
 
+/// Find the YAML line for a source table key and produce the rename edit.
+/// Returns (line_number, old_line, new_line) or None if not found.
+fn find_source_table_yaml_rename(
+    yaml_content: &str,
+    source_name: &str,
+    old_table_name: &str,
+    new_table_name: &str,
+) -> Option<(u32, String, String)> {
+    let mut in_source = false;
+    let mut in_tables = false;
+    for (i, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect source name section (e.g., "  raw:")
+        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
+            in_source = true;
+            in_tables = false;
+            continue;
+        }
+
+        if in_source {
+            if trimmed == "tables:" {
+                in_tables = true;
+                continue;
+            }
+
+            // A new top-level key resets context
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !trimmed.starts_with('#')
+                && !line.starts_with(' ')
+            {
+                in_source = false;
+                in_tables = false;
+                continue;
+            }
+        }
+
+        if in_source
+            && in_tables
+            && trimmed.starts_with(&format!("{}:", old_table_name))
+        {
+            let old_line = line.to_string();
+            let new_line = line.replace(
+                &format!("{}:", old_table_name),
+                &format!("{}:", new_table_name),
+            );
+            return Some((i as u32, old_line, new_line));
+        }
+    }
+    None
+}
+
 /// A resolved column definition location for goto-definition
 #[derive(Debug, Clone)]
 struct ColumnDefLocation {
@@ -2285,6 +2338,26 @@ impl LanguageServer for Backend {
                     }
                     found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
                 }
+                Some(SymbolAtCursor::SourceCall {
+                    source_name,
+                    table_name,
+                }) => {
+                    // For source calls, return the table_name_range (just the table part)
+                    let mut found_range = None;
+                    for source_call in file.sources() {
+                        if source_call.source_name().as_deref() == Some(source_name.as_str())
+                            && source_call.table_name().as_deref() == Some(table_name.as_str())
+                        {
+                            if let Some(tn_range) = source_call.table_name_range() {
+                                let r = smelt_parser::ast::text_range_to_range(&text, tn_range);
+                                found_range =
+                                    Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                                break;
+                            }
+                        }
+                    }
+                    found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, table_name))
+                }
                 _ => None,
             }
         } else {
@@ -2354,6 +2427,14 @@ impl LanguageServer for Backend {
                 edits: Vec<(PathBuf, u32, u32, u32, u32)>,
                 /// old .sql file path (if it exists in the project)
                 old_model_path: Option<PathBuf>,
+            },
+            Source {
+                /// (file_path, start_line, start_col, end_line, end_col) for SQL edits
+                sql_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+                /// YAML line edit: (line_number, old_line, new_line)
+                yaml_edit: Option<(u32, String, String)>,
+                /// Path to sources.yml
+                sources_yml_path: PathBuf,
             },
         }
 
@@ -2438,6 +2519,70 @@ impl LanguageServer for Backend {
                         old_model_path: old_path,
                     })
                 }
+                Some(SymbolAtCursor::SourceCall {
+                    source_name,
+                    table_name,
+                }) => {
+                    let qualified = format!("{}.{}", source_name, table_name);
+
+                    // Collect all source() call sites across the project
+                    let all_files = db.all_files();
+                    let all_file_sources: Vec<_> = all_files
+                        .iter()
+                        .map(|p| (p.clone(), (*db.model_sources(p.clone())).clone()))
+                        .collect();
+                    let source_locations =
+                        smelt_db::references::find_source_references(&qualified, &all_file_sources);
+
+                    // For each source location, get the table_name_range
+                    let mut sql_edits = Vec::new();
+                    for (ref_path, _) in &source_locations {
+                        let ref_text = db.file_text(ref_path.clone());
+                        let ref_parse = db.parse_file(ref_path.clone());
+                        let ref_syntax = ref_parse.syntax();
+                        if let Some(ref_file) = AstFile::cast(ref_syntax) {
+                            for source_call in ref_file.sources() {
+                                if source_call.source_name().as_deref()
+                                    == Some(source_name.as_str())
+                                    && source_call.table_name().as_deref()
+                                        == Some(table_name.as_str())
+                                {
+                                    if let Some(tn_range) = source_call.table_name_range() {
+                                        let r = smelt_parser::ast::text_range_to_range(
+                                            &ref_text, tn_range,
+                                        );
+                                        sql_edits.push((
+                                            ref_path.clone(),
+                                            r.start.line,
+                                            r.start.column,
+                                            r.end.line,
+                                            r.end.column,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Find the YAML table key line for rename
+                    let project_root = db.file_project_root(effective_path.clone());
+                    let sources_yml_content =
+                        (*db.project_sources_yaml(project_root.clone())).clone();
+                    let sources_yml_path = project_root.join("sources.yml");
+
+                    let yaml_edit = find_source_table_yaml_rename(
+                        &sources_yml_content,
+                        &source_name,
+                        &table_name,
+                        &new_name,
+                    );
+
+                    Some(RenameKind::Source {
+                        sql_edits,
+                        yaml_edit,
+                        sources_yml_path,
+                    })
+                }
                 _ => None,
             }
         } else {
@@ -2519,6 +2664,68 @@ impl LanguageServer for Backend {
                             annotation_id: None,
                         },
                     )));
+                }
+
+                Ok(Some(WorkspaceEdit {
+                    document_changes: Some(DocumentChanges::Operations(document_changes)),
+                    ..Default::default()
+                }))
+            }
+            Some(RenameKind::Source {
+                sql_edits,
+                yaml_edit,
+                sources_yml_path,
+            }) => {
+                if sql_edits.is_empty() && yaml_edit.is_none() {
+                    return Ok(None);
+                }
+
+                let mut document_changes: Vec<DocumentChangeOperation> = Vec::new();
+
+                // Group SQL text edits by file path
+                let mut edits_by_file: HashMap<PathBuf, Vec<TextEdit>> = HashMap::new();
+                for (file_path, sl, sc, el, ec) in sql_edits {
+                    edits_by_file.entry(file_path).or_default().push(TextEdit {
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                        new_text: new_name.clone(),
+                    });
+                }
+
+                for (file_path, file_edits) in edits_by_file {
+                    let file_uri = Url::from_file_path(&file_path).unwrap_or_else(|_| uri.clone());
+                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier {
+                            uri: file_uri,
+                            version: None,
+                        },
+                        edits: file_edits.into_iter().map(OneOf::Left).collect(),
+                    }));
+                }
+
+                // Add YAML edit for the table key rename
+                if let Some((line_num, _old_line, new_line)) = yaml_edit {
+                    let yaml_uri =
+                        Url::from_file_path(&sources_yml_path).unwrap_or_else(|_| uri.clone());
+                    // Replace the entire line containing the old table key
+                    // We need to figure out the line length. Since we have the old line,
+                    // we use it to compute the end column.
+                    let old_line_len = _old_line.len() as u32;
+                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier {
+                            uri: yaml_uri,
+                            version: None,
+                        },
+                        edits: vec![OneOf::Left(TextEdit {
+                            range: Range {
+                                start: Position::new(line_num, 0),
+                                end: Position::new(line_num, old_line_len),
+                            },
+                            new_text: new_line,
+                        })],
+                    }));
                 }
 
                 Ok(Some(WorkspaceEdit {
