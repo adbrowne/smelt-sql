@@ -3592,6 +3592,97 @@ fn position_to_byte_offset(text: &str, line: u32, col: u32) -> usize {
     text.len()
 }
 
+// ===== Phase 10: Inline CTE Refactoring =====
+
+#[test]
+fn test_inline_cte_single_reference() {
+    // CTE used once in FROM should be inlined as a subquery
+    let sql = "WITH sub AS (SELECT id FROM users)\nSELECT sub.id FROM sub";
+    //         ^ cursor on CTE definition name (line 0, col 5)
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 0, 5);
+    assert!(result.is_some(), "should find inlinable CTE used once");
+    let result = result.unwrap();
+    assert_eq!(result.cte_name, "sub");
+    let applied = apply_text_edits(sql, &result.edits);
+    // The WITH clause should be removed entirely
+    assert!(
+        !applied.contains("WITH"),
+        "WITH clause should be removed after inlining last CTE"
+    );
+    // The CTE reference should be replaced with a subquery
+    assert!(
+        applied.contains("(SELECT id FROM users)"),
+        "reference should be replaced with subquery, got: {}",
+        applied
+    );
+}
+
+#[test]
+fn test_inline_cte_removes_with_clause() {
+    // When the last CTE is inlined, the entire WITH keyword should be removed
+    let sql = "WITH only_cte AS (SELECT 1 AS x)\nSELECT only_cte.x FROM only_cte";
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 0, 5);
+    assert!(result.is_some(), "should inline single CTE");
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        !applied.contains("WITH"),
+        "WITH clause should be removed when last CTE is inlined, got: {}",
+        applied
+    );
+    // Should be a valid SELECT statement
+    assert!(
+        applied.contains("SELECT"),
+        "result should still contain SELECT"
+    );
+}
+
+#[test]
+fn test_inline_cte_keeps_other_ctes() {
+    // Only the selected CTE is removed, others remain
+    let sql =
+        "WITH a AS (SELECT 1 AS x),\nb AS (SELECT 2 AS y)\nSELECT a.x, b.y FROM a CROSS JOIN b";
+    //                                      ^ cursor on CTE 'b' (line 1, col 0)
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 1, 0);
+    assert!(result.is_some(), "should find inlinable CTE 'b'");
+    let result = result.unwrap();
+    assert_eq!(result.cte_name, "b");
+    let applied = apply_text_edits(sql, &result.edits);
+    // WITH clause should still exist (CTE 'a' remains)
+    assert!(
+        applied.contains("WITH"),
+        "WITH clause should remain for other CTEs, got: {}",
+        applied
+    );
+    assert!(
+        applied.contains("a AS"),
+        "CTE 'a' should be preserved, got: {}",
+        applied
+    );
+    // CTE 'b' should be inlined
+    assert!(
+        !applied.contains("b AS"),
+        "CTE 'b' should be removed from WITH, got: {}",
+        applied
+    );
+    assert!(
+        applied.contains("(SELECT 2 AS y)"),
+        "CTE 'b' body should be inlined as subquery, got: {}",
+        applied
+    );
+}
+
+#[test]
+fn test_inline_cte_rejects_multiple_references() {
+    // CTE used 3 times should not be inlinable
+    let sql = "WITH sub AS (SELECT id FROM users)\nSELECT s1.id FROM sub s1 CROSS JOIN sub s2 CROSS JOIN sub s3";
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 0, 5);
+    assert!(
+        result.is_none(),
+        "should not inline CTE used more than once"
+    );
+}
+
 /// Validate that a string is a valid SQL identifier.
 /// Must be non-empty, start with a letter or underscore, and contain only
 /// alphanumeric characters and underscores.

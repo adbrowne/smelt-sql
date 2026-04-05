@@ -406,6 +406,202 @@ pub struct ExtractCteResult {
     pub edits: Vec<TextEditSuggestion>,
 }
 
+/// Result of an "Inline CTE" refactoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineCteResult {
+    /// Human-readable title (e.g., "Inline CTE 'sub'")
+    pub title: String,
+    /// The name of the CTE being inlined
+    pub cte_name: String,
+    /// The text edits to apply (ordered: reference replacement first, then CTE removal)
+    pub edits: Vec<TextEditSuggestion>,
+}
+
+/// Find a CTE at the given cursor position that can be inlined, and generate the refactoring edits.
+///
+/// A CTE can be inlined if it is used exactly once in the query body.
+/// The CTE's body replaces its single reference as a subquery, and the CTE definition is removed.
+/// If the CTE is used 0 times, offers "Remove unused CTE" instead.
+/// If the CTE is used >1 times, returns None (no action).
+pub fn find_inline_cte_suggestion(file_text: &str, line: u32, col: u32) -> Option<InlineCteResult> {
+    use rowan::TextSize;
+    use smelt_parser::ast;
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let parse = smelt_parser::parse(file_text);
+    let root = parse.syntax();
+    let offset = smelt_parser::symbol::position_to_offset(file_text, line, col);
+    let offset = TextSize::from(offset as u32);
+
+    // Find the SELECT statement and its WITH clause
+    let select_stmt_node = root
+        .children()
+        .find(|n| n.kind() == SyntaxKind::SELECT_STMT)?;
+    let select_stmt = ast::SelectStmt::cast(select_stmt_node.clone())?;
+    let with_clause = select_stmt.with_clause()?;
+
+    // Find the CTE at the cursor position
+    let target_cte = with_clause
+        .ctes()
+        .find(|cte| cte.syntax().text_range().contains(offset))?;
+    let cte_name = target_cte.name()?;
+
+    // Get the CTE body text from the SUBQUERY node in the CTE syntax tree
+    // In a CTE, the SUBQUERY node contains just the SELECT (no parens — parens are siblings)
+    let subquery_node = target_cte
+        .syntax()
+        .children()
+        .find(|n| n.kind() == SyntaxKind::SUBQUERY)?;
+    let body = subquery_node.text().to_string().trim().to_string();
+
+    // Count FROM/JOIN table references to this CTE (not qualifier uses like cte.col)
+    let mut from_join_refs: Vec<rowan::TextRange> = Vec::new();
+
+    // Find the main query's FROM clause (outside the WITH clause)
+    if let Some(from_clause) = select_stmt.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if table_ref.function_call().is_some() || table_ref.subquery().is_some() {
+                continue;
+            }
+            if table_ref.identifier().as_deref() == Some(cte_name.as_str()) {
+                // Get the full TABLE_REF range (includes alias if any)
+                from_join_refs.push(table_ref.syntax().text_range());
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(table_ref) = join.table_ref() {
+                if table_ref.function_call().is_some() || table_ref.subquery().is_some() {
+                    continue;
+                }
+                if table_ref.identifier().as_deref() == Some(cte_name.as_str()) {
+                    from_join_refs.push(table_ref.syntax().text_range());
+                }
+            }
+        }
+    }
+
+    if from_join_refs.len() > 1 {
+        return None; // Too many FROM/JOIN references — can't inline safely
+    }
+
+    let mut edits = Vec::new();
+    let all_ctes: Vec<_> = with_clause.ctes().collect();
+    let is_only_cte = all_ctes.len() == 1;
+
+    if from_join_refs.len() == 1 {
+        // Replace the single FROM/JOIN reference with `(body) alias` as a subquery
+        // Use the CTE name as the alias so qualifiers like `cte.col` still work
+        let ref_range = ast::text_range_to_range(file_text, from_join_refs[0]);
+        edits.push(TextEditSuggestion {
+            range: ref_range,
+            new_text: format!("({}) {}", body, cte_name),
+        });
+    }
+    // For 0 usages we just remove the CTE (no reference replacement needed)
+
+    // Remove the CTE from the WITH clause
+    if is_only_cte {
+        // Remove the entire WITH clause including trailing whitespace/newline
+        let wc_range = with_clause.syntax().text_range();
+        let wc_end = wc_range.end();
+        // Consume whitespace between WITH clause and SELECT
+        let mut end = wc_end;
+        for token in select_stmt_node.children_with_tokens() {
+            if let Some(t) = token.as_token() {
+                if t.text_range().start() >= wc_end {
+                    if t.kind() == SyntaxKind::WHITESPACE {
+                        end = t.text_range().end();
+                    }
+                    break;
+                }
+            }
+        }
+        let removal_range = rowan::TextRange::new(wc_range.start(), end);
+        edits.push(TextEditSuggestion {
+            range: ast::text_range_to_range(file_text, removal_range),
+            new_text: String::new(),
+        });
+    } else {
+        // Remove just this CTE from the WITH clause, keeping others
+        let cte_removal_range = compute_cte_removal_range(file_text, &target_cte, &all_ctes);
+        edits.push(TextEditSuggestion {
+            range: cte_removal_range,
+            new_text: String::new(),
+        });
+    }
+
+    let title = if from_join_refs.is_empty() {
+        format!("Remove unused CTE '{}'", cte_name)
+    } else {
+        format!("Inline CTE '{}'", cte_name)
+    };
+
+    Some(InlineCteResult {
+        title,
+        cte_name,
+        edits,
+    })
+}
+
+/// Compute the range to remove for a single CTE within a multi-CTE WITH clause.
+/// Handles the comma separator (removes trailing comma if last CTE, leading comma if not).
+fn compute_cte_removal_range(
+    file_text: &str,
+    target_cte: &smelt_parser::ast::Cte,
+    all_ctes: &[smelt_parser::ast::Cte],
+) -> Range {
+    use smelt_parser::ast::text_range_to_range;
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let target_range = target_cte.syntax().text_range();
+    let is_last = all_ctes.last().map(|c| c.syntax().text_range()) == Some(target_range);
+
+    if is_last {
+        // Last CTE: remove the comma before it + whitespace + the CTE itself
+        let parent = target_cte.syntax().parent().unwrap();
+        let mut comma_start = target_range.start();
+        let tokens_before: Vec<_> = parent
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.text_range().end() <= target_range.start())
+            .collect();
+        for t in tokens_before.iter().rev() {
+            if t.kind() == SyntaxKind::COMMA {
+                comma_start = t.text_range().start();
+                break;
+            } else if t.kind() == SyntaxKind::WHITESPACE {
+                comma_start = t.text_range().start();
+            } else {
+                break;
+            }
+        }
+        let removal_range = rowan::TextRange::new(comma_start, target_range.end());
+        text_range_to_range(file_text, removal_range)
+    } else {
+        // Not last CTE: remove the CTE + comma after it + whitespace
+        let parent = target_cte.syntax().parent().unwrap();
+        let mut end = target_range.end();
+        let mut past_cte = false;
+        for token in parent.children_with_tokens() {
+            if let Some(t) = token.as_token() {
+                if t.text_range().start() >= target_range.end() {
+                    past_cte = true;
+                }
+                if past_cte {
+                    if t.kind() == SyntaxKind::COMMA || t.kind() == SyntaxKind::WHITESPACE {
+                        end = t.text_range().end();
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        let removal_range = rowan::TextRange::new(target_range.start(), end);
+        text_range_to_range(file_text, removal_range)
+    }
+}
+
 /// Find an extractable subquery at the given cursor position and generate the refactoring edits.
 ///
 /// Returns `None` if the cursor is not inside a subquery within a FROM or JOIN clause.

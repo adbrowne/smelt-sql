@@ -2119,6 +2119,10 @@ impl WithClause {
         }
     }
 
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
     /// Check if this is a RECURSIVE CTE
     pub fn is_recursive(&self) -> bool {
         self.0
