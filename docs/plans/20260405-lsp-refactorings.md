@@ -446,39 +446,39 @@
 
 ---
 
-## Phase 12: Extract Duplicated Functions to Shared Crates `[ ]`
+## Phase 12: Extract Duplicated Functions to Shared Crates `[x]`
 
 **Priority**: Medium — code hygiene. Three pure functions are duplicated between `main.rs` and `integration.rs`.
 
 **Goal**: Move `is_valid_sql_identifier` to `smelt-parser`, move `find_source_table_yaml_rename` and `find_source_column_yaml_rename` to `smelt-db`. Remove duplicates from `main.rs` and `integration.rs`. Add unit tests in the new locations.
 
 **Red tests (write first)**:
-- [ ] `test_is_valid_sql_identifier_valid` — in `smelt-parser`: asserts `is_valid_sql_identifier("foo_bar")` is true, `is_valid_sql_identifier("_x1")` is true
-- [ ] `test_is_valid_sql_identifier_invalid` — in `smelt-parser`: asserts `is_valid_sql_identifier("")` is false, `is_valid_sql_identifier("1abc")` is false, `is_valid_sql_identifier("a-b")` is false
-- [ ] `test_find_source_table_yaml_rename_found` — in `smelt-db`: given YAML content with `raw:` section and `users:` table, calling `find_source_table_yaml_rename(yaml, "raw", "users", "customers")` returns `Some((line, old, new))` with correct line number and replacement
-- [ ] `test_find_source_table_yaml_rename_not_found` — returns `None` for nonexistent table
-- [ ] `test_find_source_column_yaml_rename_found` — in `smelt-db`: given YAML with `- name: user_id`, returns `Some((line, old, new))` with correct replacement
-- [ ] `test_find_source_column_yaml_rename_not_found` — returns `None` for nonexistent column
+- [x] `test_is_valid_sql_identifier_valid` — in `smelt-parser`: asserts `is_valid_sql_identifier("foo_bar")` is true, `is_valid_sql_identifier("_x1")` is true
+- [x] `test_is_valid_sql_identifier_invalid` — in `smelt-parser`: asserts `is_valid_sql_identifier("")` is false, `is_valid_sql_identifier("1abc")` is false, `is_valid_sql_identifier("a-b")` is false
+- [x] `test_find_source_table_yaml_rename_found` — in `smelt-db`: given YAML content with `raw:` section and `users:` table, calling `find_source_table_yaml_rename(yaml, "raw", "users", "customers")` returns `Some((line, old, new))` with correct line number and replacement
+- [x] `test_find_source_table_yaml_rename_not_found` — returns `None` for nonexistent table
+- [x] `test_find_source_column_yaml_rename_found` — in `smelt-db`: given YAML with `- name: user_id`, returns `Some((line, old, new))` with correct replacement
+- [x] `test_find_source_column_yaml_rename_not_found` — returns `None` for nonexistent column
 
 **Green implementation**:
-- [ ] Add `pub fn is_valid_sql_identifier(name: &str) -> bool` to `crates/smelt-parser/src/symbol.rs` (alongside `position_to_offset` — both are string/cursor utilities). Add `pub use symbol::is_valid_sql_identifier` to `crates/smelt-parser/src/lib.rs`.
-- [ ] Add `pub fn find_source_table_yaml_rename(...)` and `pub fn find_source_column_yaml_rename(...)` to a new file `crates/smelt-db/src/yaml_edits.rs`. Register the module in `crates/smelt-db/src/lib.rs` as `pub mod yaml_edits`. These are pure functions (YAML line scanners, no Salsa deps), fitting the existing pattern.
-- [ ] In `crates/smelt-lsp/src/main.rs`: remove the three private `fn` definitions (~lines 49-59, ~187-233, ~238-255). Replace with `use smelt_parser::is_valid_sql_identifier;` and `use smelt_db::yaml_edits::{find_source_table_yaml_rename, find_source_column_yaml_rename};`.
-- [ ] In `crates/smelt-lsp/tests/integration.rs`: remove the three duplicated definitions (~lines 744-761, ~765-815, ~3689-3699). Replace with the same imports. Note: `smelt-lsp` already depends on both `smelt-parser` and `smelt-db`.
+- [x] Add `pub fn is_valid_sql_identifier(name: &str) -> bool` to `crates/smelt-parser/src/symbol.rs` (alongside `position_to_offset` — both are string/cursor utilities). Add `pub use symbol::is_valid_sql_identifier` to `crates/smelt-parser/src/lib.rs`.
+- [x] Add `pub fn find_source_table_yaml_rename(...)` and `pub fn find_source_column_yaml_rename(...)` to a new file `crates/smelt-db/src/yaml_edits.rs`. Register the module in `crates/smelt-db/src/lib.rs` as `pub mod yaml_edits`. These are pure functions (YAML line scanners, no Salsa deps), fitting the existing pattern.
+- [x] In `crates/smelt-lsp/src/main.rs`: remove the three private `fn` definitions (~lines 49-59, ~187-233, ~238-255). Replace with `use smelt_parser::is_valid_sql_identifier;` and `use smelt_db::yaml_edits::{find_source_table_yaml_rename, find_source_column_yaml_rename};`.
+- [x] In `crates/smelt-lsp/tests/integration.rs`: remove the three duplicated definitions (~lines 744-761, ~765-815, ~3689-3699). Replace with the same imports. Note: `smelt-lsp` already depends on both `smelt-parser` and `smelt-db`.
 
 **Files modified**:
-- `crates/smelt-parser/src/symbol.rs` — add `is_valid_sql_identifier`
+- `crates/smelt-parser/src/symbol.rs` — add `is_valid_sql_identifier` with tests
 - `crates/smelt-parser/src/lib.rs` — re-export `is_valid_sql_identifier`
-- `crates/smelt-db/src/yaml_edits.rs` — NEW: `find_source_table_yaml_rename`, `find_source_column_yaml_rename`
+- `crates/smelt-db/src/yaml_edits.rs` — NEW: `find_source_table_yaml_rename`, `find_source_column_yaml_rename` with tests
 - `crates/smelt-db/src/lib.rs` — register `yaml_edits` module
 - `crates/smelt-lsp/src/main.rs` — remove 3 functions, add imports
 - `crates/smelt-lsp/tests/integration.rs` — remove 3 functions, add imports
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all existing tests pass — no behavior change, only code movement)
-- [ ] `cargo test -p smelt-cli --test example_diagnostics` (still passes from Phase 11)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --all-targets` (all targets clean)
+- [x] `cargo test` (485 tests pass: 243 parser + 133 db + 109 lsp integration — no behavior change, only code movement + 6 new unit tests)
+- [x] `cargo test -p smelt-cli --test example_diagnostics` (5/5 pass)
 
 ---
 
@@ -874,3 +874,20 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 **Decisions**:
 - Upgraded pyo3 from 0.26 to 0.28 (not just arrow/parquet). This was required because `smelt-backend-spark` uses `arrow` with the `pyarrow` feature, which in arrow 58 pulls in `arrow-pyarrow` depending on pyo3 0.28. Cargo's `links` restriction prevents two pyo3 versions in the same dependency graph.
 - 3 pre-existing Python test failures (GIL state sharing between parallel tests) are unrelated to this change — they pass with `--test-threads=1` both before and after the upgrade.
+
+### Session 13 — 2026-04-06
+
+**Phase**: 12 (Extract Duplicated Functions to Shared Crates)
+**Status**: Complete
+
+**What was done**:
+- Moved `is_valid_sql_identifier()` to `crates/smelt-parser/src/symbol.rs` with `pub use` re-export from `crates/smelt-parser/src/lib.rs`
+- Created `crates/smelt-db/src/yaml_edits.rs` with `find_source_table_yaml_rename()` and `find_source_column_yaml_rename()` pure functions
+- Registered `pub mod yaml_edits` in `crates/smelt-db/src/lib.rs`
+- Removed 3 duplicate function definitions from `crates/smelt-lsp/src/main.rs`, replaced with imports from smelt-parser and smelt-db
+- Removed 3 duplicate function definitions from `crates/smelt-lsp/tests/integration.rs`, replaced with same imports
+- Added 6 new unit tests: 2 for `is_valid_sql_identifier` in smelt-parser, 4 for yaml functions in smelt-db
+- All 485 tests pass (243 parser + 133 db + 109 lsp), no behavior change
+
+**Decisions**:
+- None — this was a straightforward code movement refactoring following the plan exactly.

@@ -6,7 +6,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use smelt_db::{Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking};
+use smelt_db::{
+    yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
+    Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking,
+};
+use smelt_parser::is_valid_sql_identifier;
 use tempfile::TempDir;
 
 /// Result of a model rename operation
@@ -737,81 +741,6 @@ impl TestWorkspace {
         let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
         find_source_column_yaml_rename(&sources_yml, old_column_name, new_column_name)
     }
-}
-
-/// Find a column name in sources.yml and produce the rename edit.
-/// Scans for `- name: old_column_name` entries and returns (line_number, old_line, new_line).
-fn find_source_column_yaml_rename(
-    yaml_content: &str,
-    old_column_name: &str,
-    new_column_name: &str,
-) -> Option<(u32, String, String)> {
-    for (i, line) in yaml_content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed == format!("- name: {}", old_column_name) {
-            let old_line = line.to_string();
-            let new_line = line.replace(
-                &format!("- name: {}", old_column_name),
-                &format!("- name: {}", new_column_name),
-            );
-            return Some((i as u32, old_line, new_line));
-        }
-    }
-    None
-}
-
-/// Find the YAML line for a source table key and produce the rename edit.
-/// Returns (line_number, old_line, new_line) or None if not found.
-fn find_source_table_yaml_rename(
-    yaml_content: &str,
-    source_name: &str,
-    old_table_name: &str,
-    new_table_name: &str,
-) -> Option<(u32, String, String)> {
-    let mut in_source = false;
-    let mut in_tables = false;
-    for (i, line) in yaml_content.lines().enumerate() {
-        let trimmed = line.trim();
-
-        // Detect source name section (e.g., "  raw:")
-        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
-            in_source = true;
-            in_tables = false;
-            continue;
-        }
-
-        if in_source {
-            // Detect tables section
-            if trimmed == "tables:" {
-                in_tables = true;
-                continue;
-            }
-
-            // A new top-level key resets context
-            if !trimmed.is_empty()
-                && !trimmed.starts_with('-')
-                && !trimmed.starts_with('#')
-                && !line.starts_with(' ')
-            {
-                in_source = false;
-                in_tables = false;
-                continue;
-            }
-        }
-
-        if in_source && in_tables {
-            // Look for the table name as a YAML key (e.g., "      users:")
-            if trimmed.starts_with(&format!("{}:", old_table_name)) {
-                let old_line = line.to_string();
-                let new_line = line.replace(
-                    &format!("{}:", old_table_name),
-                    &format!("{}:", new_table_name),
-                );
-                return Some((i as u32, old_line, new_line));
-            }
-        }
-    }
-    None
 }
 
 // =============================================================================
@@ -3681,19 +3610,4 @@ fn test_inline_cte_rejects_multiple_references() {
         result.is_none(),
         "should not inline CTE used more than once"
     );
-}
-
-/// Validate that a string is a valid SQL identifier.
-/// Must be non-empty, start with a letter or underscore, and contain only
-/// alphanumeric characters and underscores.
-fn is_valid_sql_identifier(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
