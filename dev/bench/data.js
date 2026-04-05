@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775368948140,
+  "lastUpdate": 1775368949178,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14117,6 +14117,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.787161851817828,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "662a5a2a7497f28a894f6fdb1c63e4fcb8239b6d",
+          "message": "Add mkdocs setup with uv for docs-site\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-05T16:00:54+10:00",
+          "tree_id": "ae710f16472507d83b52ab1f8029556e3b3dfefd",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/662a5a2a7497f28a894f6fdb1c63e4fcb8239b6d"
+        },
+        "date": 1775368948898,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.129713680188324,
             "unit": "MB/s"
           }
         ]
