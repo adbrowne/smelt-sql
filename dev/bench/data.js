@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775370706017,
+  "lastUpdate": 1775370707235,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14240,6 +14240,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.129713680188324,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "14d919288a559c3ec9730ed22a302d6bd017bff3",
+          "message": "Schema Evolution for Complex Types (Struct, Array, Map)\n\nPhase 8: Spark backend DDL generation from abstract SchemaOperations",
+          "timestamp": "2026-04-05T16:30:16+10:00",
+          "tree_id": "3c9627efdfd193fb2ef7abe4046bb90efa4a3f07",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/14d919288a559c3ec9730ed22a302d6bd017bff3"
+        },
+        "date": 1775370706843,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.32017431939971,
             "unit": "MB/s"
           }
         ]
