@@ -200,7 +200,7 @@ def simple_model(project):
         )
         .unwrap();
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             ensure_sdk_on_path(py, &sdk_path).unwrap();
             let results = run_python_model_file(py, &model_path, r#"{"models": []}"#).unwrap();
             assert_eq!(results.len(), 1);
@@ -235,7 +235,7 @@ def query_model(project):
         let context =
             r#"{"models": [{"name": "foo", "tags": ["src"]}, {"name": "bar", "tags": []}]}"#;
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             ensure_sdk_on_path(py, &sdk_path).unwrap();
             let results = run_python_model_file(py, &model_path, context).unwrap();
             assert_eq!(results.len(), 1);
@@ -271,7 +271,7 @@ def model_b(project):
         )
         .unwrap();
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             ensure_sdk_on_path(py, &sdk_path).unwrap();
             let results = run_python_model_file(py, &model_path, r#"{"models": []}"#).unwrap();
             assert_eq!(results.len(), 2);
@@ -301,7 +301,7 @@ def bad_model(project):
         )
         .unwrap();
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             ensure_sdk_on_path(py, &sdk_path).unwrap();
             let result = run_python_model_file(py, &model_path, r#"{"models": []}"#);
             assert!(result.is_err());

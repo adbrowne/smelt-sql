@@ -415,31 +415,34 @@
 
 ---
 
-## Phase 11: Fix Arrow Version Mismatch `[ ]`
+## Phase 11: Fix Arrow Version Mismatch `[x]`
 
 **Priority**: Critical — unblocks `cargo test -p smelt-cli --test example_diagnostics` which has been broken since before Phase 0.
 
 **Goal**: Align workspace `arrow`/`parquet` versions with `duckdb v1.10501.0`'s transitive dependency on `arrow v58`. Fix any breaking API changes from arrow 57 to 58.
 
 **Red tests (write first)**:
-- [ ] No new tests needed — this is a dependency fix. The "red" state is that `cargo test -p smelt-cli --test example_diagnostics` fails to compile due to `Vec<arrow::array::RecordBatch>` vs `duckdb::arrow::array::RecordBatch` type mismatch at lines 97 and 207 of `crates/smelt-backend-duckdb/src/lib.rs`.
+- [x] No new tests needed — this is a dependency fix. The "red" state is that `cargo test -p smelt-cli --test example_diagnostics` fails to compile due to `Vec<arrow::array::RecordBatch>` vs `duckdb::arrow::array::RecordBatch` type mismatch at lines 97 and 207 of `crates/smelt-backend-duckdb/src/lib.rs`.
 
 **Green implementation**:
-- [ ] Update `Cargo.toml` workspace dependencies: `arrow = "57"` to `arrow = "58"`, `parquet = "57"` to `parquet = "58"` (lines 22-24)
-- [ ] Run `cargo check --all-targets` and fix any breaking API changes from arrow 57 to 58 across all crates that depend on arrow: `smelt-backend-duckdb`, `smelt-backend-spark`, `smelt-backend`, `smelt-cli`, `smelt-datagen`, `smelt-db`
-- [ ] Verify `crates/smelt-backend-duckdb/src/lib.rs` lines 97 and 207 now compile (the `result.collect()` calls should produce the correct `Vec<arrow::array::RecordBatch>` type once versions align)
+- [x] Update `Cargo.toml` workspace dependencies: `arrow = "57"` to `arrow = "58"`, `parquet = "57"` to `parquet = "58"` (lines 22-24)
+- [x] Update `Cargo.toml` workspace dependencies: `pyo3 = "0.26"` to `pyo3 = "0.28"` (arrow 58's `pyarrow` feature requires pyo3 0.28)
+- [x] Fix pyo3 0.28 breaking change: `Python::with_gil` renamed to `Python::attach` in 3 files (smelt-core, smelt-cli, smelt-planner)
+- [x] Run `cargo check --all-targets` — clean compilation, no type mismatches
+- [x] Verify `crates/smelt-backend-duckdb/src/lib.rs` lines 97 and 207 compile (auto-fixed by version alignment, no code changes needed)
 
 **Files modified**:
-- `Cargo.toml` — workspace deps: arrow 57→58, parquet 57→58
-- `crates/smelt-backend-duckdb/src/lib.rs` — should auto-fix once versions align (no code changes expected)
-- Possibly other crates if arrow 58 has breaking API changes
+- `Cargo.toml` — workspace deps: arrow 57→58, parquet 57→58, pyo3 0.26→0.28
+- `crates/smelt-core/src/python_models.rs` — `Python::with_gil` → `Python::attach` (4 occurrences)
+- `crates/smelt-cli/src/python.rs` — `Python::with_gil` → `Python::attach` (1 occurrence)
+- `crates/smelt-planner/src/python_bridge.rs` — `Python::with_gil` → `Python::attach` (3 occurrences)
 
 **Verification**:
-- [ ] `cargo check --all-targets` (clean compilation, no type mismatches)
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets` (all targets, including test targets that were previously broken)
-- [ ] `cargo test` (all existing tests pass)
-- [ ] `cargo test -p smelt-cli --test example_diagnostics` (MUST pass — this is the primary success criterion)
+- [x] `cargo check --all-targets` (clean compilation, no type mismatches)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --all-targets` (all targets clean, including test targets that were previously broken)
+- [x] `cargo test` (all existing tests pass; 3 pre-existing Python GIL test isolation failures unrelated to this change)
+- [x] `cargo test -p smelt-cli --test example_diagnostics` (5/5 pass — primary success criterion met)
 
 ---
 
@@ -854,3 +857,20 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 - Count only FROM/JOIN table references for inlinability, not qualifier references. A CTE used as `cte.col` in SELECT and once in FROM is still inlinable — the inlined subquery gets the CTE name as alias, preserving qualifier references.
 - Added `WithClause::syntax()` to smelt-parser since it was missing (unlike `Cte::syntax()` which already existed). Needed to access the WITH clause range for removal edits.
 - The SUBQUERY node inside a CTE does not include parentheses (they are sibling tokens LPAREN/RPAREN), unlike subqueries in FROM clauses. The body extraction uses `subquery_node.text()` directly without stripping parens.
+
+### Session 12 — 2026-04-06
+
+**Phase**: 11 (Fix Arrow Version Mismatch)
+**Status**: Complete
+
+**What was done**:
+- Updated workspace dependencies: `arrow` 57→58, `parquet` 57→58 to align with duckdb's transitive arrow dependency
+- Updated `pyo3` 0.26→0.28 to resolve pyo3 version conflict (arrow 58's `pyarrow` feature requires pyo3 0.28 via `arrow-pyarrow`, conflicting with workspace pyo3 0.26)
+- Fixed pyo3 0.28 breaking change: `Python::with_gil()` renamed to `Python::attach()` in 3 files (8 call sites total): smelt-core/python_models.rs, smelt-cli/python.rs, smelt-planner/python_bridge.rs
+- No code changes needed in smelt-backend-duckdb — arrow version alignment automatically resolved the `RecordBatch` type mismatch
+- All 5 example_diagnostics tests now pass (previously blocked by compilation error since before Phase 0)
+- `cargo clippy --all-targets` now clean (previously only `--lib` targets were checked)
+
+**Decisions**:
+- Upgraded pyo3 from 0.26 to 0.28 (not just arrow/parquet). This was required because `smelt-backend-spark` uses `arrow` with the `pyarrow` feature, which in arrow 58 pulls in `arrow-pyarrow` depending on pyo3 0.28. Cargo's `links` restriction prevents two pyo3 versions in the same dependency graph.
+- 3 pre-existing Python test failures (GIL state sharing between parallel tests) are unrelated to this change — they pass with `--test-threads=1` both before and after the upgrade.

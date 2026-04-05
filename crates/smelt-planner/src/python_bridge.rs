@@ -191,7 +191,7 @@ pub fn run_python_rules(models: &[&ModelInfo]) -> (Vec<Transformation>, Vec<Stri
     let mut transformations = Vec::new();
     let mut errors = Vec::new();
 
-    let result: Result<Vec<PythonRuleResult>, String> = Python::with_gil(|py| {
+    let result: Result<Vec<PythonRuleResult>, String> = Python::attach(|py| {
         let rules = discover_python_rules(py)
             .map_err(|e| format!("Failed to discover Python rules: {}", e))?;
 
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn test_discover_rules_without_packages() {
         // With no packages installed, should return empty
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let rules = discover_python_rules(py).unwrap();
             // May or may not find rules depending on environment,
             // but should not error.
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_model_info_roundtrip() {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Ensure smelt_sdk is importable — skip test if not installed
             if py.import("smelt_sdk").is_err() {
                 return;
