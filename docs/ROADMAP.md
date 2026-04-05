@@ -12,9 +12,11 @@ The items below are the current priority queue. See completed items in [Recently
 
 Layer 1 of smelt's two-layer DSL: declarative metric definitions with semantic metadata (decomposability, temporal behavior). Resolves `smelt.metric()` calls.
 
-### 2. `smelt validate` — Pre-run Validation
+### 2. `smelt check` — LLM-Optimised Diagnostic CLI
 
-Static validation pass that catches issues before execution: schema compatibility across models, incremental config consistency, backend capability checks.
+Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
+
+See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
 ### 3. PostgreSQL Backend
 
@@ -301,7 +303,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ~~`smelt test`~~ ✅ (March 27, 2026) — see [Data Testing Framework](#data-testing-framework)
 - ~~`smelt docs generate`~~ ✅ (March 29, 2026) — see [What's Next](#1-data-catalog--smelt-docs-generate)
 - ~~`smelt diff`~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-diff--smelt-diff)
-- `smelt validate` — pre-run validation
+- `smelt check` — LLM-optimised diagnostic CLI ([design doc](plans/20260405-smelt-check.md))
 - ~~Schema evolution with efficient migrations~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-evolution)
 
 ## UI Dashboard ✅ Phases 1-4 (March 24-25, 2026)
