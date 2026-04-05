@@ -114,6 +114,42 @@ impl TestWorkspace {
         actions
     }
 
+    /// Get all code action kinds (text edits, create model, YAML edits) at a position.
+    /// Uses generate_all_code_actions which handles UndefinedModelRef, UndefinedSource, etc.
+    fn all_code_actions_at(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+    ) -> Vec<smelt_db::code_actions::CodeActionKind> {
+        let path = self.model_path(model);
+        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
+        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+
+        let text = self.db.file_text(path);
+        let sources_yml_content = (*self.db.project_sources_yaml(self.project_root())).clone();
+
+        // Filter diagnostics to those overlapping the cursor position
+        let matching: Vec<_> = all_diags
+            .into_iter()
+            .filter(|d| {
+                let r = &d.range;
+                (r.start.line < line || (r.start.line == line && r.start.column <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+        for diag in &matching {
+            actions.extend(smelt_db::code_actions::generate_all_code_actions(
+                diag,
+                &text,
+                &sources_yml_content,
+            ));
+        }
+        actions
+    }
+
     /// Find all references to a symbol at a position.
     /// Uses symbol_at_cursor + pure reference functions from smelt-db.
     #[allow(dead_code)]
@@ -2033,5 +2069,254 @@ sources:
             "Expected no code actions on valid code, got: {:?}",
             actions
         );
+    }
+}
+
+// =============================================================================
+// Phase 4: Quick-Fix Code Actions — Create Model, Add Source/Column
+// =============================================================================
+
+mod code_actions_create_add {
+    use super::*;
+    use smelt_db::code_actions::CodeActionKind;
+
+    #[test]
+    fn test_code_action_create_missing_model() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("downstream", "SELECT * FROM smelt.ref('missing_model')");
+
+        // Diagnostic covers the ref name range: 'missing_model' is at col 24..39
+        // Cursor on the ref name content
+        let actions = ws.all_code_actions_at("downstream", 0, 30);
+
+        let create_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::CreateModel(_)))
+            .collect();
+        assert!(
+            !create_actions.is_empty(),
+            "Expected CreateModel code action for undefined ref, got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::CreateModel(suggestion) = &create_actions[0] {
+            assert_eq!(suggestion.model_name, "missing_model");
+            assert!(
+                suggestion.title.contains("missing_model"),
+                "Title should mention model name: '{}'",
+                suggestion.title
+            );
+            assert!(
+                suggestion.skeleton_sql.contains("SELECT"),
+                "Skeleton SQL should contain SELECT: '{}'",
+                suggestion.skeleton_sql
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_action_add_source_to_yaml() {
+        let mut ws = TestWorkspace::new();
+        // Source 'raw' exists but table 'orders' doesn't
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model("stg_orders", "SELECT * FROM smelt.source('raw.orders')");
+
+        // Diagnostic covers the source ref range — cursor inside the quoted part
+        let actions = ws.all_code_actions_at("stg_orders", 0, 32);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit code action to add table 'orders', got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            assert!(
+                suggestion.title.contains("orders"),
+                "Title should mention table name: '{}'",
+                suggestion.title
+            );
+            // The new lines should include the table key
+            let joined = suggestion.new_lines.join("\n");
+            assert!(
+                joined.contains("orders:"),
+                "New lines should contain 'orders:': '{}'",
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_action_add_source_new_section() {
+        let mut ws = TestWorkspace::new();
+        // No 'analytics' source exists — need full source block
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "stg_events",
+            "SELECT * FROM smelt.source('analytics.events')",
+        );
+
+        // Cursor inside the quoted source reference
+        let actions = ws.all_code_actions_at("stg_events", 0, 35);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit code action to add source 'analytics', got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            let joined = suggestion.new_lines.join("\n");
+            assert!(
+                joined.contains("analytics:"),
+                "Should include source name: '{}'",
+                joined
+            );
+            assert!(
+                joined.contains("events:"),
+                "Should include table name: '{}'",
+                joined
+            );
+            assert!(
+                joined.contains("tables:"),
+                "Should include tables key: '{}'",
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_action_add_column_to_yaml() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        // Use a qualified column reference (users.email) so UndeclaredColumn
+        // gets qualifier = Some("users")
+        ws.add_model(
+            "stg_users",
+            "SELECT users.email FROM smelt.source('raw.users') AS users",
+        );
+
+        // 'users.email' — the 'email' part triggers UndeclaredColumn with qualifier 'users'
+        // "SELECT users.email FROM ..."
+        //         ^--- col 7
+        let actions = ws.all_code_actions_at("stg_users", 0, 13);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit code action to add column 'email', got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            assert!(
+                suggestion.title.contains("email"),
+                "Title should mention column name: '{}'",
+                suggestion.title
+            );
+            let joined = suggestion.new_lines.join("\n");
+            assert!(
+                joined.contains("- name: email"),
+                "New lines should add the column: '{}'",
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn test_yaml_insertion_preserves_structure() {
+        let mut ws = TestWorkspace::new();
+        let original_yml = r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+      orders:
+        columns:
+          - name: order_id
+            type: INTEGER
+"#;
+        ws.set_sources_yml(original_yml);
+        // Reference a new table 'products' that doesn't exist
+        ws.add_model("stg_products", "SELECT * FROM smelt.source('raw.products')");
+
+        // Cursor inside the quoted source reference
+        let actions = ws.all_code_actions_at("stg_products", 0, 32);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit for new table 'products'"
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            // Verify indentation is consistent (6 spaces for table key)
+            let table_line = suggestion
+                .new_lines
+                .iter()
+                .find(|l| l.contains("products:"))
+                .expect("Should have products: line");
+            let indent = table_line.len() - table_line.trim_start().len();
+            assert_eq!(
+                indent, 6,
+                "Table key should be indented 6 spaces, got {}",
+                indent
+            );
+
+            // Verify the insert point is after existing tables content
+            // (not in the middle of the users or orders block)
+            let line_count = original_yml.lines().count();
+            assert!(
+                suggestion.insert_after_line < line_count,
+                "Insert point {} should be within the file ({}  lines)",
+                suggestion.insert_after_line,
+                line_count
+            );
+        }
     }
 }
