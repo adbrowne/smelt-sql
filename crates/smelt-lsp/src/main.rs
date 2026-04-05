@@ -43,6 +43,21 @@ impl InitErrors {
     }
 }
 
+/// Validate that a string is a valid SQL identifier.
+/// Must be non-empty, start with a letter or underscore, and contain only
+/// alphanumeric characters and underscores.
+fn is_valid_sql_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Format a TypedColumn for display in hover/completion
 fn format_type(typed_col: &TypedColumn) -> String {
     let nullable_suffix = if typed_col.nullable { "?" } else { "" };
@@ -2191,6 +2206,172 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(actions))
         }
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let (effective_path, effective_position) = if let Some((vp, adjusted_line)) =
+            self.resolve_virtual_path(&path, position.line).await
+        {
+            (
+                vp,
+                Position {
+                    line: adjusted_line,
+                    character: position.character,
+                },
+            )
+        } else {
+            (path.clone(), position)
+        };
+
+        let db = self.db.lock().await;
+        let text = db.file_text(effective_path.clone());
+        let parse = db.parse_file(effective_path);
+        let syntax = parse.syntax();
+
+        let result = if let Some(file) = AstFile::cast(syntax) {
+            let offset =
+                position_to_offset(&text, effective_position.line, effective_position.character);
+            match symbol_at_cursor(&file, &text, offset) {
+                Some(SymbolAtCursor::CteDefinition { name })
+                | Some(SymbolAtCursor::CteReference { name }) => {
+                    // Find the CTE definition's name range for prepareRename
+                    let mut found_range = None;
+                    if let Some(select_stmt) = file.select_stmt() {
+                        if let Some(with_clause) = select_stmt.with_clause() {
+                            for cte in with_clause.ctes() {
+                                if cte.name().as_deref() == Some(&name) {
+                                    if let Some(name_range) = cte.name_range() {
+                                        let r = smelt_parser::ast::text_range_to_range(
+                                            &text, name_range,
+                                        );
+                                        found_range = Some((
+                                            r.start.line,
+                                            r.start.column,
+                                            r.end.line,
+                                            r.end.column,
+                                        ));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        drop(db);
+
+        match result {
+            Some((sl, sc, el, ec, placeholder)) => {
+                Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                    range: Range {
+                        start: Position::new(sl, sc),
+                        end: Position::new(el, ec),
+                    },
+                    placeholder,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        // Validate that new_name is a valid SQL identifier
+        if !is_valid_sql_identifier(&new_name) {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "'{}' is not a valid SQL identifier",
+                new_name
+            )));
+        }
+
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let (effective_path, effective_position) = if let Some((vp, adjusted_line)) =
+            self.resolve_virtual_path(&path, position.line).await
+        {
+            (
+                vp,
+                Position {
+                    line: adjusted_line,
+                    character: position.character,
+                },
+            )
+        } else {
+            (path.clone(), position)
+        };
+
+        let db = self.db.lock().await;
+        let text = db.file_text(effective_path.clone());
+        let parse = db.parse_file(effective_path);
+        let syntax = parse.syntax();
+
+        // Collect rename edits as plain data (no AST nodes across await)
+        let edits: Vec<(u32, u32, u32, u32)> = if let Some(file) = AstFile::cast(syntax) {
+            let offset =
+                position_to_offset(&text, effective_position.line, effective_position.character);
+            match symbol_at_cursor(&file, &text, offset) {
+                Some(SymbolAtCursor::CteDefinition { name })
+                | Some(SymbolAtCursor::CteReference { name }) => {
+                    let cte_refs = smelt_db::references::find_cte_references(&file, &text, &name);
+                    cte_refs
+                        .iter()
+                        .map(|text_range| {
+                            let r = smelt_parser::ast::text_range_to_range(&text, *text_range);
+                            (r.start.line, r.start.column, r.end.line, r.end.column)
+                        })
+                        .collect()
+                }
+                _ => vec![],
+            }
+        } else {
+            vec![]
+        };
+        drop(db);
+
+        if edits.is_empty() {
+            return Ok(None);
+        }
+
+        let text_edits: Vec<TextEdit> = edits
+            .into_iter()
+            .map(|(sl, sc, el, ec)| TextEdit {
+                range: Range {
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
+                },
+                new_text: new_name.clone(),
+            })
+            .collect();
+
+        let mut changes = HashMap::new();
+        changes.insert(uri, text_edits);
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

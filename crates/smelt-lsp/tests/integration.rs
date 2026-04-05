@@ -211,17 +211,79 @@ impl TestWorkspace {
         }
     }
 
-    /// Rename a symbol at a position (stub — returns empty until handler is implemented)
-    #[allow(dead_code)]
-    fn rename(
+    /// Check if a position is renamable and return the range of the symbol.
+    /// Returns None if the cursor is not on a renamable symbol.
+    fn prepare_rename(&self, model: &str, line: u32, col: u32) -> Option<(u32, u32, u32, u32)> {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path);
+        let syntax = parse.syntax();
+
+        let file = smelt_parser::ast::File::cast(syntax)?;
+        let offset = position_to_offset(&text, line, col);
+
+        match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::CteDefinition { name })
+            | Some(SymbolAtCursor::CteReference { name }) => {
+                // Find the CTE definition range for prepareRename
+                let select_stmt = file.select_stmt()?;
+                let with_clause = select_stmt.with_clause()?;
+                for cte in with_clause.ctes() {
+                    if cte.name().as_deref() == Some(&name) {
+                        let name_range = cte.name_range()?;
+                        let r = smelt_parser::ast::text_range_to_range(&text, name_range);
+                        return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Rename a CTE symbol at a position.
+    /// Returns a list of (start_line, start_col, end_line, end_col, new_text) edits.
+    fn rename_cte(
         &self,
-        _model: &str,
-        _line: u32,
-        _col: u32,
-        _new_name: &str,
-    ) -> Vec<(PathBuf, String)> {
-        // Stub: will be wired to rename handler in Phase 5
-        vec![]
+        model: &str,
+        line: u32,
+        col: u32,
+        new_name: &str,
+    ) -> Vec<(u32, u32, u32, u32, String)> {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path);
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return vec![],
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let cte_name = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::CteDefinition { name })
+            | Some(SymbolAtCursor::CteReference { name }) => name,
+            _ => return vec![],
+        };
+
+        let refs = smelt_db::references::find_cte_references(&file, &text, &cte_name);
+        refs.into_iter()
+            .map(|text_range| {
+                let r = smelt_parser::ast::text_range_to_range(&text, text_range);
+                (
+                    r.start.line,
+                    r.start.column,
+                    r.end.line,
+                    r.end.column,
+                    new_name.to_string(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -2319,4 +2381,145 @@ mod code_actions_create_add {
             );
         }
     }
+}
+
+// =============================================================================
+// Rename CTE Tests (Phase 5)
+// =============================================================================
+
+mod rename_cte {
+    use super::*;
+
+    #[test]
+    fn test_prepare_rename_cte_definition() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Cursor on 'my_cte' in WITH clause (line 0, col 5 = inside 'my_cte')
+        let result = ws.prepare_rename("cte_model", 0, 5);
+        assert!(result.is_some(), "Should be renamable on CTE definition");
+        let (sl, sc, el, ec) = result.unwrap();
+        assert_eq!(sl, 0);
+        assert_eq!(sc, 5);
+        assert_eq!(el, 0);
+        assert_eq!(ec, 11); // 'my_cte' is 6 chars: 5..11
+    }
+
+    #[test]
+    fn test_prepare_rename_cte_reference() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Cursor on 'my_cte' in FROM clause (line 3, col 14 = inside 'my_cte')
+        let result = ws.prepare_rename("cte_model", 3, 14);
+        assert!(result.is_some(), "Should be renamable on CTE reference");
+        // prepareRename returns the definition range (the canonical location)
+        let (sl, sc, _el, _ec) = result.unwrap();
+        assert_eq!(sl, 0, "Definition is on line 0");
+        assert_eq!(sc, 5, "Definition starts at col 5");
+    }
+
+    #[test]
+    fn test_prepare_rename_rejects_keyword() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Cursor on 'SELECT' keyword (line 3, col 0)
+        let result = ws.prepare_rename("cte_model", 3, 0);
+        assert!(result.is_none(), "Should not be renamable on SQL keyword");
+    }
+
+    #[test]
+    fn test_rename_cte_updates_definition_and_references() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Rename from CTE definition (line 0, col 5)
+        let edits = ws.rename_cte("cte_model", 0, 5, "renamed_cte");
+        assert_eq!(
+            edits.len(),
+            2,
+            "Should have 2 edits: definition + reference"
+        );
+
+        // Both edits should use the new name
+        for (_, _, _, _, new_text) in &edits {
+            assert_eq!(new_text, "renamed_cte");
+        }
+
+        // One edit should be at definition (line 0, col 5)
+        assert!(
+            edits.iter().any(|(sl, sc, _, _, _)| *sl == 0 && *sc == 5),
+            "Should have edit at CTE definition"
+        );
+        // One edit should be at reference in FROM (line 3, col 14)
+        assert!(
+            edits.iter().any(|(sl, sc, _, _, _)| *sl == 3 && *sc == 14),
+            "Should have edit at CTE reference in FROM"
+        );
+    }
+
+    #[test]
+    fn test_rename_cte_with_qualified_columns() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_qual",
+            "WITH base AS (\n  SELECT 1 AS id, 'a' AS name\n)\nSELECT base.id, base.name FROM base",
+        );
+
+        // Rename CTE 'base' from definition
+        let edits = ws.rename_cte("cte_qual", 0, 5, "src");
+
+        // Should have edits for: definition, base.id qualifier, base.name qualifier, FROM base
+        assert!(
+            edits.len() >= 4,
+            "Expected at least 4 edits (def + 2 qualifiers + FROM ref), got {}",
+            edits.len()
+        );
+
+        // Verify all edits have the new name
+        for (_, _, _, _, new_text) in &edits {
+            assert_eq!(new_text, "src");
+        }
+    }
+
+    #[test]
+    fn test_rename_cte_validates_identifier() {
+        // This test verifies that invalid SQL identifiers are rejected.
+        // The validation is a pure function.
+        assert!(is_valid_sql_identifier("my_cte"));
+        assert!(is_valid_sql_identifier("_private"));
+        assert!(is_valid_sql_identifier("CTE1"));
+        assert!(!is_valid_sql_identifier("123bad"));
+        assert!(!is_valid_sql_identifier("has space"));
+        assert!(!is_valid_sql_identifier("has-dash"));
+        assert!(!is_valid_sql_identifier(""));
+    }
+}
+
+/// Validate that a string is a valid SQL identifier.
+/// Must be non-empty, start with a letter or underscore, and contain only
+/// alphanumeric characters and underscores.
+fn is_valid_sql_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

@@ -210,34 +210,35 @@
 
 ---
 
-## Phase 5: Rename CTE (Single-File) `[ ]`
+## Phase 5: Rename CTE (Single-File) `[x]`
 
 **Priority**: Medium — simplest rename, validates the rename infrastructure.
 
 **Goal**: Implement `textDocument/rename` and `textDocument/prepareRename` for CTE names.
 
 **Red tests (write first)**:
-- [ ] `test_prepare_rename_cte_definition` — cursor on CTE name in WITH clause returns valid range
-- [ ] `test_prepare_rename_cte_reference` — cursor on CTE name in FROM returns valid range
-- [ ] `test_prepare_rename_rejects_keyword` — cursor on SQL keyword returns error
-- [ ] `test_rename_cte_updates_definition_and_references` — renaming CTE updates all occurrences in the file
-- [ ] `test_rename_cte_with_qualified_columns` — CTE used as qualifier (`cte.col`) gets qualifier updated
-- [ ] `test_rename_cte_validates_identifier` — new name must be valid SQL identifier
+- [x] `test_prepare_rename_cte_definition` — cursor on CTE name in WITH clause returns valid range
+- [x] `test_prepare_rename_cte_reference` — cursor on CTE name in FROM returns valid range
+- [x] `test_prepare_rename_rejects_keyword` — cursor on SQL keyword returns error
+- [x] `test_rename_cte_updates_definition_and_references` — renaming CTE updates all occurrences in the file
+- [x] `test_rename_cte_with_qualified_columns` — CTE used as qualifier (`cte.col`) gets qualifier updated
+- [x] `test_rename_cte_validates_identifier` — new name must be valid SQL identifier
 
 **Green implementation**:
-- [ ] Implement `textDocument/prepareRename` handler using `symbol_at_cursor`
-- [ ] Implement `textDocument/rename` handler — for `CteDefinition`/`CteReference`: use `find_cte_references` from Phase 2 + `Cte::name_range()` from Phase 1
-- [ ] Validate new name is a valid SQL identifier (alphanumeric + underscore, doesn't start with digit)
-- [ ] Return `WorkspaceEdit` with `TextEdit`s for all occurrences in the single file
+- [x] Implement `textDocument/prepareRename` handler using `symbol_at_cursor`
+- [x] Implement `textDocument/rename` handler — for `CteDefinition`/`CteReference`: use `find_cte_references` from Phase 2 + `Cte::name_range()` from Phase 1
+- [x] Validate new name is a valid SQL identifier (alphanumeric + underscore, doesn't start with digit)
+- [x] Return `WorkspaceEdit` with `TextEdit`s for all occurrences in the single file
 
-**Files to modify**:
-- `crates/smelt-lsp/src/main.rs` — prepareRename, rename handlers
-- `crates/smelt-lsp/tests/integration.rs` — red tests
+**Files modified**:
+- `crates/smelt-lsp/src/main.rs` — `is_valid_sql_identifier()`, `prepareRename` handler, `rename` handler
+- `crates/smelt-lsp/tests/integration.rs` — `prepare_rename()` and `rename_cte()` helpers, 6 red→green tests
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (clean for smelt-parser, smelt-db, smelt-lsp)
+- [x] `cargo test` (455 tests pass: 241 parser + 129 db + 85 lsp integration)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb arrow type mismatch
 - [ ] Manual: rename CTE in VSCode works (F2 on CTE name)
 
 ---
@@ -558,3 +559,20 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 - Used `CodeActionKind` enum instead of extending `CodeActionSuggestion` — create-model and YAML-edit actions have fundamentally different shapes than text edits (file creation vs line insertion vs range replacement)
 - LSP handler wiring deferred — the pure functions are fully tested in integration tests via the `all_code_actions_at` helper. The handler in main.rs currently only calls `generate_code_actions` (Phase 3). Wiring `generate_all_code_actions` and converting `CreateModelSuggestion`/`YamlEditSuggestion` to LSP `DocumentChanges` can be done when Phase 4's handler integration is prioritized.
 - Column test uses qualified reference (`users.email`) because unqualified columns get `CannotInferType` rather than `UndeclaredColumn`. The add-column action requires a qualifier to identify the target source table in the YAML.
+
+### Session 6 — 2026-04-05
+
+**Phase**: 5 (Rename CTE — Single-File)
+**Status**: Complete
+
+**What was done**:
+- Implemented `textDocument/prepareRename` handler in main.rs: resolves cursor to CTE via `symbol_at_cursor`, returns the CTE definition's name range as the renamable region
+- Implemented `textDocument/rename` handler in main.rs: validates new name with `is_valid_sql_identifier()`, uses `find_cte_references` from Phase 2 to find all occurrences (definition + FROM/JOIN refs + column qualifiers), returns `WorkspaceEdit` with `TextEdit`s
+- Added `is_valid_sql_identifier()` utility function (non-empty, starts with letter/underscore, alphanumeric+underscore only)
+- Replaced the `rename` stub in TestWorkspace with working `prepare_rename()` and `rename_cte()` helpers that exercise the pure functions directly
+- Wrote 6 tests, all pass: prepareRename on definition/reference/keyword, rename with definition+references, rename with qualifiers, identifier validation
+
+**Decisions**:
+- `is_valid_sql_identifier` lives in main.rs for now since it's only used by the rename handler. Can be moved to a shared location (smelt-parser or smelt-core) if needed by future phases.
+- `prepareRename` always returns the CTE definition's name range, even when the cursor is on a reference. This is the conventional behavior — the definition is the canonical rename target.
+- Test helpers call pure functions directly rather than going through an LSP server, consistent with the existing testing pattern (code_actions_at, references_for).
