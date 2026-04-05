@@ -65,6 +65,22 @@ pub struct BackendCapabilities {
 
     /// Supports CREATE MATERIALIZED VIEW
     pub supports_materialized_views: bool,
+
+    // --- Schema evolution capabilities ---
+    /// Supports `ALTER TABLE ADD COLUMN s.field` (struct field DDL via dot-notation)
+    pub supports_struct_field_ddl: bool,
+
+    /// Supports `ALTER COLUMN TYPE ... USING expr` (rewrite column in-place)
+    pub supports_alter_column_using: bool,
+
+    /// Supports `ALTER TABLE ADD COLUMN items.element.field` (nested array struct DDL)
+    pub supports_nested_array_ddl: bool,
+
+    /// Supports mergeSchema on write (Spark only)
+    pub supports_merge_schema_write: bool,
+
+    /// Supports ID-based column mapping (Delta only)
+    pub supports_column_mapping: bool,
 }
 
 impl BackendCapabilities {
@@ -82,46 +98,156 @@ impl BackendCapabilities {
             supports_transactional_ddl: true,
             supports_double_colon_cast: true,
             supports_trailing_commas: true,
-            supports_insert_overwrite: false, // Emulated via DELETE+INSERT
-            supports_materialized_views: false, // DuckDB doesn't support materialized views
+            supports_insert_overwrite: false,
+            supports_materialized_views: false,
+            // Schema evolution: DuckDB supports all struct/array DDL
+            supports_struct_field_ddl: true,
+            supports_alter_column_using: true,
+            supports_nested_array_ddl: true,
+            supports_merge_schema_write: false,
+            supports_column_mapping: false,
         }
     }
 
-    /// Capabilities for Spark SQL
+    /// Capabilities for Spark SQL with Delta table format.
     pub fn spark() -> Self {
+        Self::spark_delta()
+    }
+
+    /// Capabilities for Spark SQL with Delta table format.
+    pub fn spark_delta() -> Self {
         Self {
-            supports_qualify: false,                 // Requires subquery rewrite
-            supports_create_or_replace_table: false, // DROP + CREATE
+            supports_qualify: false,
+            supports_create_or_replace_table: false,
             supports_create_or_replace_view: true,
-            supports_merge: true, // Delta Lake only
+            supports_merge: true,
             supports_pivot: true,
-            supports_date_literal: false, // Uses DATE('YYYY-MM-DD') function
+            supports_date_literal: false,
             supports_concat_operator: true,
-            supports_array_literal: false, // Uses ARRAY(a, b, c)
+            supports_array_literal: false,
             supports_transactional_ddl: false,
-            supports_double_colon_cast: false, // Uses CAST(expr AS type)
+            supports_double_colon_cast: false,
             supports_trailing_commas: false,
-            supports_insert_overwrite: true, // Native in Spark/Delta
+            supports_insert_overwrite: true,
             supports_materialized_views: true,
+            // Schema evolution: Delta supports struct field DDL and column mapping
+            supports_struct_field_ddl: true,
+            supports_alter_column_using: false,
+            supports_nested_array_ddl: false,
+            supports_merge_schema_write: true,
+            supports_column_mapping: true,
+        }
+    }
+
+    /// Capabilities for Spark SQL with Parquet table format (no Delta).
+    pub fn spark_parquet() -> Self {
+        Self {
+            supports_qualify: false,
+            supports_create_or_replace_table: false,
+            supports_create_or_replace_view: true,
+            supports_merge: false, // No MERGE without Delta
+            supports_pivot: true,
+            supports_date_literal: false,
+            supports_concat_operator: true,
+            supports_array_literal: false,
+            supports_transactional_ddl: false,
+            supports_double_colon_cast: false,
+            supports_trailing_commas: false,
+            supports_insert_overwrite: true,
+            supports_materialized_views: true,
+            // Schema evolution: Parquet has limited struct DDL (metastore only)
+            supports_struct_field_ddl: true,
+            supports_alter_column_using: false,
+            supports_nested_array_ddl: false,
+            supports_merge_schema_write: true,
+            supports_column_mapping: false,
         }
     }
 
     /// Capabilities for PostgreSQL
     pub fn postgresql() -> Self {
         Self {
-            supports_qualify: false,                 // Requires subquery rewrite
-            supports_create_or_replace_table: false, // DROP + CREATE
+            supports_qualify: false,
+            supports_create_or_replace_table: false,
             supports_create_or_replace_view: true,
-            supports_merge: true,  // PostgreSQL 15+
-            supports_pivot: false, // Requires crosstab extension
+            supports_merge: true,
+            supports_pivot: false,
             supports_date_literal: true,
             supports_concat_operator: true,
-            supports_array_literal: false, // Uses ARRAY[a, b, c]
+            supports_array_literal: false,
             supports_transactional_ddl: true,
             supports_double_colon_cast: true,
             supports_trailing_commas: false,
-            supports_insert_overwrite: false, // Not supported in PostgreSQL
+            supports_insert_overwrite: false,
             supports_materialized_views: true,
+            // Schema evolution: PostgreSQL has limited struct support
+            supports_struct_field_ddl: false,
+            supports_alter_column_using: true,
+            supports_nested_array_ddl: false,
+            supports_merge_schema_write: false,
+            supports_column_mapping: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_duckdb_schema_evolution_capabilities() {
+        let caps = BackendCapabilities::duckdb();
+        assert!(caps.supports_struct_field_ddl);
+        assert!(caps.supports_alter_column_using);
+        assert!(caps.supports_nested_array_ddl);
+        assert!(!caps.supports_merge_schema_write);
+        assert!(!caps.supports_column_mapping);
+    }
+
+    #[test]
+    fn test_spark_delta_schema_evolution_capabilities() {
+        let caps = BackendCapabilities::spark_delta();
+        assert!(caps.supports_struct_field_ddl);
+        assert!(!caps.supports_alter_column_using);
+        assert!(!caps.supports_nested_array_ddl);
+        assert!(caps.supports_merge_schema_write);
+        assert!(caps.supports_column_mapping);
+    }
+
+    #[test]
+    fn test_spark_parquet_schema_evolution_capabilities() {
+        let caps = BackendCapabilities::spark_parquet();
+        assert!(caps.supports_struct_field_ddl);
+        assert!(!caps.supports_alter_column_using);
+        assert!(!caps.supports_nested_array_ddl);
+        assert!(caps.supports_merge_schema_write);
+        assert!(!caps.supports_column_mapping);
+        // Parquet doesn't support MERGE (no Delta)
+        assert!(!caps.supports_merge);
+    }
+
+    #[test]
+    fn test_spark_default_is_delta() {
+        let spark_default = BackendCapabilities::spark();
+        let spark_delta = BackendCapabilities::spark_delta();
+        assert_eq!(
+            spark_default.supports_column_mapping,
+            spark_delta.supports_column_mapping
+        );
+        assert_eq!(
+            spark_default.supports_merge_schema_write,
+            spark_delta.supports_merge_schema_write
+        );
+        assert_eq!(spark_default.supports_merge, spark_delta.supports_merge);
+    }
+
+    #[test]
+    fn test_postgresql_schema_evolution_capabilities() {
+        let caps = BackendCapabilities::postgresql();
+        assert!(!caps.supports_struct_field_ddl);
+        assert!(caps.supports_alter_column_using);
+        assert!(!caps.supports_nested_array_ddl);
+        assert!(!caps.supports_merge_schema_write);
+        assert!(!caps.supports_column_mapping);
     }
 }

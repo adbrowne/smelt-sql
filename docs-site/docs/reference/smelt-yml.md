@@ -54,6 +54,7 @@ targets:
 | `connect_url` | string | yes | Spark Connect URL (e.g., `sc://localhost:15002`) |
 | `catalog` | string | no | Spark catalog name |
 | `schema` | string | yes | Database schema to use |
+| `format` | string | no | Table format: `delta` (default) or `parquet`. Affects schema evolution capabilities. See [Schema Evolution](../guide/schema-evolution.md#backend-capability-matrix). |
 
 ```yaml
 targets:
@@ -62,6 +63,7 @@ targets:
     connect_url: sc://localhost:15002
     catalog: spark_catalog
     schema: main
+    format: delta  # default; can also be "parquet"
 ```
 
 ---
@@ -107,6 +109,9 @@ models:
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
 | `incremental` | object | no | | Incremental materialization configuration (see below) |
+| `schema_evolution` | object | no | | Schema evolution configuration (see [Schema Evolution](#schema-evolution-configuration)) |
+| `format` | string | no | _(from target)_ | Override the table format for this model: `delta` or `parquet`. Only relevant for Spark targets. |
+| `columns` | map | no | `{}` | Per-column metadata: `default`, `backfill`, `description`, `tests` |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -183,6 +188,35 @@ Smelt validates incremental models to ensure they produce the same results wheth
 | `allow_subqueries` | bool | `false` | Allow subqueries which may reference data outside the current partition |
 | `allow_nondeterministic` | bool | `false` | Allow nondeterministic functions (e.g., `RANDOM()`, `NOW()`) |
 | `allow_distinct` | bool | `false` | Allow DISTINCT which may produce different results when data is split across partitions |
+
+### Schema Evolution Configuration
+
+Schema evolution controls how smelt handles changes to an incremental model's output schema. See the [Schema Evolution guide](../guide/schema-evolution.md) for detailed examples.
+
+```yaml
+models:
+  my_model:
+    materialization: table
+    schema_evolution:
+      strategy: alter_and_backfill
+    columns:
+      status:
+        default: "'pending'"
+        backfill: "CASE WHEN status IS NULL THEN 'pending' ELSE status END"
+```
+
+#### Schema Evolution Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `strategy` | string | `alter_and_backfill` | `alter_and_backfill`: use ALTER TABLE when possible. `full_refresh`: always drop and recreate on any schema change. |
+
+#### Column Fields (for schema evolution)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default` | string | | SQL expression for the DEFAULT value when adding a column via ALTER TABLE. Must be a valid SQL expression (e.g., `"0"`, `"'unknown'"`, `"NULL"`, `"STRUCT_PACK(a := 0)"`). |
+| `backfill` | string | | SQL expression for UPDATE backfill after a column is added. Used as: `UPDATE table SET column = <backfill_expr>`. |
 
 ---
 

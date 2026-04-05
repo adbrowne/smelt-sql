@@ -108,6 +108,10 @@ pub struct Target {
     /// Base directory for file-based output (e.g., Spark warehouse for Parquet files).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warehouse: Option<String>,
+    /// Table format for Spark targets: "delta" (default) or "parquet".
+    /// Ignored for DuckDB targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<TableFormat>,
 }
 
 impl Target {
@@ -119,12 +123,52 @@ impl Target {
             _ => BackendType::DuckDB, // Default to DuckDB for backward compatibility
         }
     }
+
+    /// Get the effective table format for this target.
+    ///
+    /// Returns `None` for DuckDB targets (format is not applicable).
+    /// For Spark targets, defaults to `Delta` if not specified.
+    pub fn table_format(&self) -> Option<TableFormat> {
+        match self.backend_type() {
+            BackendType::DuckDB => None,
+            BackendType::Spark => Some(self.format.unwrap_or_default()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType {
     DuckDB,
     Spark,
+}
+
+/// Table format for Spark targets.
+///
+/// DuckDB targets ignore this field. Spark targets use it to determine
+/// schema evolution capabilities (e.g., Delta supports column mapping
+/// while Parquet does not).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum TableFormat {
+    #[default]
+    Delta,
+    Parquet,
+}
+
+impl<'de> Deserialize<'de> for TableFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "delta" => Ok(TableFormat::Delta),
+            "parquet" => Ok(TableFormat::Parquet),
+            _ => Err(serde::de::Error::custom(format!(
+                "Invalid table format: {}. Must be 'delta' or 'parquet'",
+                s
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -853,6 +897,95 @@ models:
         let errors = config.validate_model_configs(&metadata);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].1.contains("target"));
+    }
+
+    #[test]
+    fn test_table_format_deserialization() {
+        // Spark target with explicit delta format
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  spark_dev:
+    type: spark
+    connect_url: sc://host:15002
+    schema: dev
+    format: delta
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_dev").unwrap();
+        assert_eq!(target.format, Some(TableFormat::Delta));
+        assert_eq!(target.table_format(), Some(TableFormat::Delta));
+    }
+
+    #[test]
+    fn test_table_format_parquet() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  spark_parquet:
+    type: spark
+    connect_url: sc://host:15002
+    schema: dev
+    format: parquet
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_parquet").unwrap();
+        assert_eq!(target.format, Some(TableFormat::Parquet));
+        assert_eq!(target.table_format(), Some(TableFormat::Parquet));
+    }
+
+    #[test]
+    fn test_table_format_defaults_to_delta_for_spark() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  spark_default:
+    type: spark
+    connect_url: sc://host:15002
+    schema: dev
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("spark_default").unwrap();
+        assert_eq!(target.format, None);
+        // table_format() defaults to Delta for Spark
+        assert_eq!(target.table_format(), Some(TableFormat::Delta));
+    }
+
+    #[test]
+    fn test_table_format_none_for_duckdb() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let target = config.targets.get("dev").unwrap();
+        assert_eq!(target.table_format(), None);
+    }
+
+    #[test]
+    fn test_table_format_invalid_rejected() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  bad:
+    type: spark
+    connect_url: sc://host:15002
+    schema: dev
+    format: iceberg
+"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid table format"), "Error was: {}", err);
     }
 
     #[test]

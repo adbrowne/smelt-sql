@@ -19,6 +19,10 @@ pub enum TypeParseError {
     InvalidLength { type_name: String, value: String },
     #[error("missing closing parenthesis")]
     MissingCloseParen,
+    #[error("invalid STRUCT: {0}")]
+    InvalidStruct(String),
+    #[error("invalid MAP: {0}")]
+    InvalidMap(String),
 }
 
 /// Parse a SQL type string into a DataType
@@ -45,30 +49,102 @@ pub fn parse_type(type_str: &str) -> Result<DataType, TypeParseError> {
         return Err(TypeParseError::EmptyString);
     }
 
-    // Normalize to uppercase for matching
     let upper = type_str.to_uppercase();
+    parse_type_inner(&upper)
+}
 
-    // Handle parameterized types first (those with parentheses)
+/// Recursive inner parser that handles complex types
+fn parse_type_inner(upper: &str) -> Result<DataType, TypeParseError> {
+    let upper = upper.trim();
+    if upper.is_empty() {
+        return Err(TypeParseError::EmptyString);
+    }
+
+    // Check for [] suffix (array bracket notation) — peel from right
+    if let Some(inner) = upper.strip_suffix("[]") {
+        let inner = inner.trim();
+        let inner_type = parse_type_inner(inner)?;
+        return Ok(DataType::Array(Box::new(inner_type)));
+    }
+
+    // Check for " ARRAY" suffix (SQL standard notation)
+    // Must not match "ARRAY" by itself or "ARRAY(...)"
+    if let Some(inner) = upper.strip_suffix(" ARRAY") {
+        let inner = inner.trim();
+        if !inner.is_empty() {
+            let inner_type = parse_type_inner(inner)?;
+            return Ok(DataType::Array(Box::new(inner_type)));
+        }
+    }
+
+    // Handle STRUCT(...) — must use matching-paren logic
+    if upper.starts_with("STRUCT(") || upper.starts_with("STRUCT (") {
+        let open = upper.find('(').unwrap();
+        let close = find_matching_paren(upper, open).ok_or(TypeParseError::MissingCloseParen)?;
+        // There should be nothing after the closing paren ([] was already handled above)
+        let trailing = upper[close + 1..].trim();
+        if !trailing.is_empty() {
+            return Err(TypeParseError::InvalidStruct(format!(
+                "unexpected trailing characters: {trailing}"
+            )));
+        }
+        let fields_str = &upper[open + 1..close];
+        return parse_struct_fields(fields_str);
+    }
+
+    // Handle MAP(...)
+    if upper.starts_with("MAP(") || upper.starts_with("MAP (") {
+        let open = upper.find('(').unwrap();
+        let close = find_matching_paren(upper, open).ok_or(TypeParseError::MissingCloseParen)?;
+        let trailing = upper[close + 1..].trim();
+        if !trailing.is_empty() {
+            return Err(TypeParseError::InvalidMap(format!(
+                "unexpected trailing characters: {trailing}"
+            )));
+        }
+        let params_str = &upper[open + 1..close];
+        return parse_map_params(params_str);
+    }
+
+    // Handle ARRAY(...) prefix notation (Spark style)
+    if upper.starts_with("ARRAY(") || upper.starts_with("ARRAY (") {
+        let open = upper.find('(').unwrap();
+        let close = find_matching_paren(upper, open).ok_or(TypeParseError::MissingCloseParen)?;
+        let trailing = upper[close + 1..].trim();
+        if !trailing.is_empty() {
+            return Err(TypeParseError::UnknownType(upper.to_string()));
+        }
+        let inner_str = &upper[open + 1..close];
+        let inner_type = parse_type_inner(inner_str)?;
+        return Ok(DataType::Array(Box::new(inner_type)));
+    }
+
+    // Handle parameterized scalar types (VARCHAR(...), DECIMAL(...), etc.)
     if let Some(paren_pos) = upper.find('(') {
-        return parse_parameterized_type(&upper, paren_pos);
+        return parse_parameterized_type(upper, paren_pos);
     }
 
     // Handle multi-word types
     if upper.starts_with("TIMESTAMP") {
-        return parse_timestamp_type(&upper);
+        return parse_timestamp_type(upper);
     }
 
     // Simple types without parameters
-    match upper.as_str() {
+    parse_simple_type(upper)
+}
+
+/// Parse simple (non-parameterized) types
+fn parse_simple_type(upper: &str) -> Result<DataType, TypeParseError> {
+    match upper {
         // Boolean
         "BOOLEAN" | "BOOL" => Ok(DataType::Boolean),
 
         // Integer types
-        "TINYINT" | "INT1" => Ok(DataType::SmallInt), // Map to SmallInt
+        "TINYINT" | "INT1" => Ok(DataType::SmallInt),
         "SMALLINT" | "INT2" => Ok(DataType::SmallInt),
         "INT" | "INTEGER" | "INT4" => Ok(DataType::Integer),
         "BIGINT" | "INT8" | "LONG" => Ok(DataType::BigInt),
-        "HUGEINT" | "INT16" => Ok(DataType::BigInt), // DuckDB's 128-bit int -> BigInt
+        "HUGEINT" | "INT16" => Ok(DataType::BigInt),
 
         // Floating point
         "REAL" | "FLOAT4" | "FLOAT" => Ok(DataType::Float),
@@ -98,8 +174,109 @@ pub fn parse_type(type_str: &str) -> Result<DataType, TypeParseError> {
             scale: 0,
         }),
 
-        _ => Err(TypeParseError::UnknownType(type_str.to_string())),
+        _ => Err(TypeParseError::UnknownType(upper.to_string())),
     }
+}
+
+/// Find the matching closing parenthesis for the opening paren at `open_pos`
+fn find_matching_paren(s: &str, open_pos: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in s[open_pos..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open_pos + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a string by commas at the top level (not inside nested parentheses or brackets)
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    result.push(&s[start..]);
+    result
+}
+
+/// Parse STRUCT field list: "a INTEGER, b VARCHAR" → vec of (name, DataType)
+fn parse_struct_fields(fields_str: &str) -> Result<DataType, TypeParseError> {
+    let fields_str = fields_str.trim();
+    if fields_str.is_empty() {
+        return Err(TypeParseError::InvalidStruct(
+            "empty field list".to_string(),
+        ));
+    }
+
+    let parts = split_top_level_commas(fields_str);
+    let mut fields = Vec::new();
+
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(TypeParseError::InvalidStruct("empty field".to_string()));
+        }
+
+        // Split into name and type: first whitespace-delimited token is the name,
+        // everything after is the type string
+        let first_space = part.find(|c: char| c.is_whitespace());
+        match first_space {
+            Some(pos) => {
+                let name = part[..pos].trim().to_lowercase();
+                let type_str = part[pos..].trim();
+                let dt = parse_type_inner(type_str)?;
+                fields.push((name, dt));
+            }
+            None => {
+                return Err(TypeParseError::InvalidStruct(format!(
+                    "field '{}' is missing a type",
+                    part
+                )));
+            }
+        }
+    }
+
+    Ok(DataType::Struct(fields))
+}
+
+/// Parse MAP parameters: "KEY_TYPE, VALUE_TYPE"
+fn parse_map_params(params_str: &str) -> Result<DataType, TypeParseError> {
+    let params_str = params_str.trim();
+    if params_str.is_empty() {
+        return Err(TypeParseError::InvalidMap(
+            "empty parameter list".to_string(),
+        ));
+    }
+
+    let parts = split_top_level_commas(params_str);
+    if parts.len() != 2 {
+        return Err(TypeParseError::InvalidMap(format!(
+            "expected 2 type parameters, got {}",
+            parts.len()
+        )));
+    }
+
+    let key_type = parse_type_inner(parts[0].trim())?;
+    let value_type = parse_type_inner(parts[1].trim())?;
+
+    Ok(DataType::Map(Box::new(key_type), Box::new(value_type)))
 }
 
 fn parse_parameterized_type(upper: &str, paren_pos: usize) -> Result<DataType, TypeParseError> {
@@ -360,6 +537,302 @@ mod tests {
                 precision: 10,
                 scale: 2
             }
+        );
+    }
+
+    // === Complex type parsing tests ===
+
+    #[test]
+    fn test_parse_array_bracket_notation() {
+        assert_eq!(
+            parse_type("INTEGER[]").unwrap(),
+            DataType::Array(Box::new(DataType::Integer))
+        );
+        assert_eq!(
+            parse_type("VARCHAR[]").unwrap(),
+            DataType::Array(Box::new(DataType::Varchar { max_length: None }))
+        );
+        assert_eq!(
+            parse_type("BOOLEAN[]").unwrap(),
+            DataType::Array(Box::new(DataType::Boolean))
+        );
+    }
+
+    #[test]
+    fn test_parse_array_suffix_notation() {
+        assert_eq!(
+            parse_type("INTEGER ARRAY").unwrap(),
+            DataType::Array(Box::new(DataType::Integer))
+        );
+        assert_eq!(
+            parse_type("VARCHAR ARRAY").unwrap(),
+            DataType::Array(Box::new(DataType::Varchar { max_length: None }))
+        );
+    }
+
+    #[test]
+    fn test_parse_array_prefix_notation() {
+        assert_eq!(
+            parse_type("ARRAY(INTEGER)").unwrap(),
+            DataType::Array(Box::new(DataType::Integer))
+        );
+        assert_eq!(
+            parse_type("ARRAY(VARCHAR)").unwrap(),
+            DataType::Array(Box::new(DataType::Varchar { max_length: None }))
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_arrays() {
+        assert_eq!(
+            parse_type("BIGINT[][]").unwrap(),
+            DataType::Array(Box::new(DataType::Array(Box::new(DataType::BigInt))))
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_simple() {
+        assert_eq!(
+            parse_type("STRUCT(a INTEGER, b VARCHAR)").unwrap(),
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Varchar { max_length: None }),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_aliases() {
+        // INT should resolve to INTEGER, BOOL to BOOLEAN
+        assert_eq!(
+            parse_type("STRUCT(a INT, b BOOL)").unwrap(),
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Boolean),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_with_array_field() {
+        assert_eq!(
+            parse_type("STRUCT(a INTEGER[])").unwrap(),
+            DataType::Struct(vec![(
+                "a".to_string(),
+                DataType::Array(Box::new(DataType::Integer))
+            ),])
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_struct() {
+        assert_eq!(
+            parse_type("STRUCT(a STRUCT(x INTEGER))").unwrap(),
+            DataType::Struct(vec![(
+                "a".to_string(),
+                DataType::Struct(vec![("x".to_string(), DataType::Integer),])
+            ),])
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_array() {
+        // Array of structs
+        assert_eq!(
+            parse_type("STRUCT(a INTEGER, b VARCHAR)[]").unwrap(),
+            DataType::Array(Box::new(DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Varchar { max_length: None }),
+            ])))
+        );
+    }
+
+    #[test]
+    fn test_parse_map_simple() {
+        assert_eq!(
+            parse_type("MAP(VARCHAR, INTEGER)").unwrap(),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer)
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_map_with_complex_value() {
+        assert_eq!(
+            parse_type("MAP(VARCHAR, STRUCT(a INTEGER))").unwrap(),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Struct(
+                    vec![("a".to_string(), DataType::Integer),]
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_with_map_field() {
+        assert_eq!(
+            parse_type("STRUCT(a INTEGER[], b MAP(VARCHAR, INTEGER))").unwrap(),
+            DataType::Struct(vec![
+                (
+                    "a".to_string(),
+                    DataType::Array(Box::new(DataType::Integer))
+                ),
+                (
+                    "b".to_string(),
+                    DataType::Map(
+                        Box::new(DataType::Varchar { max_length: None }),
+                        Box::new(DataType::Integer)
+                    )
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_deeply_nested() {
+        // STRUCT(a STRUCT(x INTEGER, y VARCHAR), b BIGINT)
+        assert_eq!(
+            parse_type("STRUCT(a STRUCT(x INTEGER, y VARCHAR), b BIGINT)").unwrap(),
+            DataType::Struct(vec![
+                (
+                    "a".to_string(),
+                    DataType::Struct(vec![
+                        ("x".to_string(), DataType::Integer),
+                        ("y".to_string(), DataType::Varchar { max_length: None }),
+                    ])
+                ),
+                ("b".to_string(), DataType::BigInt),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_struct_with_decimal_field() {
+        // DECIMAL(10,2) has commas inside parens — must not split on them
+        assert_eq!(
+            parse_type("STRUCT(a DECIMAL(10,2), b INTEGER)").unwrap(),
+            DataType::Struct(vec![
+                (
+                    "a".to_string(),
+                    DataType::Decimal {
+                        precision: 10,
+                        scale: 2
+                    }
+                ),
+                ("b".to_string(), DataType::Integer),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_complex_type_errors() {
+        assert!(parse_type("STRUCT()").is_err());
+        assert!(parse_type("STRUCT(a)").is_err()); // missing type
+        assert!(parse_type("MAP(VARCHAR)").is_err()); // missing value type
+        assert!(parse_type("MAP()").is_err());
+    }
+
+    #[test]
+    fn test_round_trip_all_types() {
+        // Verify: DataType → to_sql() → parse_type() → DataType for all canonical types.
+        // NOTE: DataType::Text is NOT round-trip safe (Text.to_sql() = "TEXT",
+        // parse_type("TEXT") = Varchar). Use normalize() before round-trip testing.
+        let types = vec![
+            DataType::Boolean,
+            DataType::SmallInt,
+            DataType::Integer,
+            DataType::BigInt,
+            DataType::Float,
+            DataType::Double,
+            DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            DataType::Decimal {
+                precision: 18,
+                scale: 0,
+            },
+            DataType::Varchar { max_length: None },
+            DataType::Varchar {
+                max_length: Some(255),
+            },
+            DataType::Char { length: 10 },
+            DataType::Date,
+            DataType::Time,
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+            DataType::Timestamp {
+                with_timezone: true,
+            },
+            DataType::Interval,
+            DataType::Blob,
+            // Complex types
+            DataType::Array(Box::new(DataType::Integer)),
+            DataType::Array(Box::new(DataType::Array(Box::new(DataType::BigInt)))),
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Varchar { max_length: None }),
+            ]),
+            DataType::Struct(vec![(
+                "nested".to_string(),
+                DataType::Struct(vec![("x".to_string(), DataType::BigInt)]),
+            )]),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer),
+            ),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Struct(vec![("a".to_string(), DataType::Integer)])),
+            ),
+            // Array of struct
+            DataType::Array(Box::new(DataType::Struct(vec![
+                ("id".to_string(), DataType::Integer),
+                ("name".to_string(), DataType::Varchar { max_length: None }),
+            ]))),
+        ];
+
+        for dt in &types {
+            let sql = dt.to_sql();
+            let parsed = parse_type(&sql).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to parse to_sql() output '{}' for {:?}: {}",
+                    sql, dt, e
+                )
+            });
+            assert_eq!(
+                dt, &parsed,
+                "Round-trip failed for {:?}: to_sql()='{}', parsed back={:?}",
+                dt, sql, parsed
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_trip_normalized_text() {
+        // Text normalizes to Varchar, which does round-trip
+        let dt = DataType::Text.normalize();
+        let sql = dt.to_sql();
+        let parsed = parse_type(&sql).unwrap();
+        assert_eq!(dt, parsed);
+    }
+
+    #[test]
+    fn test_parse_complex_case_insensitive() {
+        assert_eq!(
+            parse_type("struct(a integer)").unwrap(),
+            DataType::Struct(vec![("a".to_string(), DataType::Integer),])
+        );
+        assert_eq!(
+            parse_type("map(varchar, integer)").unwrap(),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer)
+            )
         );
     }
 }

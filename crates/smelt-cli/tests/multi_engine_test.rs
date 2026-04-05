@@ -27,6 +27,7 @@ fn make_duckdb_target(schema: &str) -> Target {
         connect_url: None,
         catalog: None,
         warehouse: None,
+        format: None,
     }
 }
 
@@ -38,6 +39,7 @@ fn make_spark_target(schema: &str, warehouse: &str) -> Target {
         connect_url: None,
         catalog: None,
         warehouse: Some(warehouse.to_string()),
+        format: None,
     }
 }
 
