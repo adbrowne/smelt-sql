@@ -220,14 +220,33 @@ fn find_source_table_yaml_rename(
             }
         }
 
-        if in_source
-            && in_tables
-            && trimmed.starts_with(&format!("{}:", old_table_name))
-        {
+        if in_source && in_tables && trimmed.starts_with(&format!("{}:", old_table_name)) {
             let old_line = line.to_string();
             let new_line = line.replace(
                 &format!("{}:", old_table_name),
                 &format!("{}:", new_table_name),
+            );
+            return Some((i as u32, old_line, new_line));
+        }
+    }
+    None
+}
+
+/// Find a column name entry in sources.yml and produce the rename edit.
+/// Scans for `- name: old_column_name` entries.
+/// Returns (line_number, old_line, new_line) or None if not found.
+fn find_source_column_yaml_rename(
+    yaml_content: &str,
+    old_column_name: &str,
+    new_column_name: &str,
+) -> Option<(u32, String, String)> {
+    for (i, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == format!("- name: {}", old_column_name) {
+            let old_line = line.to_string();
+            let new_line = line.replace(
+                &format!("- name: {}", old_column_name),
+                &format!("- name: {}", new_column_name),
             );
             return Some((i as u32, old_line, new_line));
         }
@@ -2358,6 +2377,57 @@ impl LanguageServer for Backend {
                     }
                     found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, table_name))
                 }
+                Some(SymbolAtCursor::ColumnRef { qualifier: _, name }) => {
+                    // For column references, find the IDENT token at the cursor
+                    // and return its range
+                    let mut best_range = None;
+                    let mut best_len = usize::MAX;
+                    for node in file.syntax().descendants() {
+                        if let Some(expr) = smelt_parser::ast::Expr::cast(node) {
+                            let range = expr.text_range();
+                            let start: usize = range.start().into();
+                            let end: usize = range.end().into();
+                            let len = end - start;
+                            if offset >= start && offset <= end && len <= best_len {
+                                if let Some(col_ref) = expr.as_column_ref() {
+                                    if col_ref.name() == name {
+                                        // Get the name IDENT token range
+                                        let tokens: Vec<_> = expr
+                                            .syntax()
+                                            .children_with_tokens()
+                                            .filter_map(|e| e.into_token())
+                                            .filter(|t| {
+                                                t.kind() == smelt_parser::SyntaxKind::IDENT
+                                                    || t.kind() == smelt_parser::SyntaxKind::DOT
+                                            })
+                                            .collect();
+                                        let name_token = if tokens.len() >= 3 {
+                                            Some(&tokens[2]) // qualified: table.column
+                                        } else if tokens.len() == 1 {
+                                            Some(&tokens[0]) // unqualified
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(tok) = name_token {
+                                            let r = smelt_parser::ast::text_range_to_range(
+                                                &text,
+                                                tok.text_range(),
+                                            );
+                                            best_range = Some((
+                                                r.start.line,
+                                                r.start.column,
+                                                r.end.line,
+                                                r.end.column,
+                                            ));
+                                            best_len = len;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    best_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
+                }
                 _ => None,
             }
         } else {
@@ -2432,6 +2502,16 @@ impl LanguageServer for Backend {
                 /// (file_path, start_line, start_col, end_line, end_col) for SQL edits
                 sql_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
                 /// YAML line edit: (line_number, old_line, new_line)
+                yaml_edit: Option<(u32, String, String)>,
+                /// Path to sources.yml
+                sources_yml_path: PathBuf,
+            },
+            Column {
+                /// Local edits in the current file: (start_line, start_col, end_line, end_col)
+                local_edits: Vec<(u32, u32, u32, u32)>,
+                /// Cross-file edits: (file_path, start_line, start_col, end_line, end_col)
+                cross_file_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+                /// YAML column rename edit
                 yaml_edit: Option<(u32, String, String)>,
                 /// Path to sources.yml
                 sources_yml_path: PathBuf,
@@ -2583,6 +2663,185 @@ impl LanguageServer for Backend {
                         sources_yml_path,
                     })
                 }
+                Some(SymbolAtCursor::ColumnRef {
+                    qualifier,
+                    name: column_name,
+                }) => {
+                    // Find all column references in the current file
+                    let local_refs = smelt_db::references::find_column_references_in_file(
+                        &file,
+                        &column_name,
+                        qualifier.as_deref(),
+                    );
+                    let mut local_edits: Vec<(u32, u32, u32, u32)> = local_refs
+                        .iter()
+                        .map(|r| {
+                            let range = smelt_parser::ast::text_range_to_range(&text, r.name_range);
+                            (
+                                range.start.line,
+                                range.start.column,
+                                range.end.line,
+                                range.end.column,
+                            )
+                        })
+                        .collect();
+
+                    // Include column definition in SELECT list
+                    if let Some(def_range) =
+                        smelt_db::references::find_column_definition_in_select(&file, &column_name)
+                    {
+                        let range = smelt_parser::ast::text_range_to_range(&text, def_range);
+                        let edit = (
+                            range.start.line,
+                            range.start.column,
+                            range.end.line,
+                            range.end.column,
+                        );
+                        if !local_edits.contains(&edit) {
+                            local_edits.push(edit);
+                        }
+                    }
+                    local_edits.sort();
+                    local_edits.dedup();
+
+                    // Cross-file tracing
+                    let mut cross_file_edits = Vec::new();
+                    let all_files = db.all_files();
+                    let schema = db.model_schema(effective_path.clone());
+
+                    // Upstream tracing via ColumnSource::FromModel
+                    if let Some(col) = schema.columns.iter().find(|c| c.name == column_name) {
+                        if let smelt_db::schema::ColumnSource::FromModel {
+                            model_name,
+                            column_name: ref upstream_col,
+                        } = &col.source
+                        {
+                            if upstream_col == &column_name {
+                                for upstream_path in all_files.iter() {
+                                    let up_name = upstream_path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    if up_name == model_name {
+                                        let up_text = db.file_text(upstream_path.clone());
+                                        let up_parse = db.parse_file(upstream_path.clone());
+                                        let up_syntax = up_parse.syntax();
+                                        if let Some(up_file) = AstFile::cast(up_syntax) {
+                                            if let Some(def_range) =
+                                                smelt_db::references::find_column_definition_in_select(
+                                                    &up_file,
+                                                    &column_name,
+                                                )
+                                            {
+                                                let r = smelt_parser::ast::text_range_to_range(
+                                                    &up_text, def_range,
+                                                );
+                                                cross_file_edits.push((
+                                                    upstream_path.clone(),
+                                                    r.start.line,
+                                                    r.start.column,
+                                                    r.end.line,
+                                                    r.end.column,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Downstream tracing via BFS through model graph
+                    let current_model_name = effective_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mut models_exposing: Vec<String> = vec![current_model_name.clone()];
+                    let mut visited = std::collections::HashSet::new();
+                    visited.insert(current_model_name);
+                    let mut depth = 0;
+
+                    while depth < 10 {
+                        let mut next_batch = Vec::new();
+                        for exposing in &models_exposing {
+                            for down_path in all_files.iter() {
+                                if *down_path == effective_path {
+                                    continue;
+                                }
+                                let down_name = down_path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if visited.contains(&down_name) {
+                                    continue;
+                                }
+                                let down_model_refs = db.model_refs(down_path.clone());
+                                if !down_model_refs.iter().any(|r| r.name == *exposing) {
+                                    continue;
+                                }
+                                let down_text = db.file_text(down_path.clone());
+                                let down_parse = db.parse_file(down_path.clone());
+                                let down_syntax = down_parse.syntax();
+                                if let Some(down_file) = AstFile::cast(down_syntax) {
+                                    let col_refs =
+                                        smelt_db::references::find_column_references_in_file(
+                                            &down_file,
+                                            &column_name,
+                                            None,
+                                        );
+                                    for col_ref in &col_refs {
+                                        let r = smelt_parser::ast::text_range_to_range(
+                                            &down_text,
+                                            col_ref.name_range,
+                                        );
+                                        cross_file_edits.push((
+                                            down_path.clone(),
+                                            r.start.line,
+                                            r.start.column,
+                                            r.end.line,
+                                            r.end.column,
+                                        ));
+                                    }
+                                    // Check for SELECT * passthrough
+                                    let down_schema = db.model_schema(down_path.clone());
+                                    if down_schema
+                                        .row_extensions
+                                        .iter()
+                                        .any(|ext| ext.ref_name == *exposing)
+                                    {
+                                        next_batch.push(down_name.clone());
+                                    }
+                                    visited.insert(down_name);
+                                }
+                            }
+                        }
+                        if next_batch.is_empty() {
+                            break;
+                        }
+                        models_exposing = next_batch;
+                        depth += 1;
+                    }
+
+                    // Source column YAML rename
+                    let project_root = db.file_project_root(effective_path.clone());
+                    let sources_yml_content =
+                        (*db.project_sources_yaml(project_root.clone())).clone();
+                    let sources_yml_path = project_root.join("sources.yml");
+                    let yaml_edit = find_source_column_yaml_rename(
+                        &sources_yml_content,
+                        &column_name,
+                        &new_name,
+                    );
+
+                    Some(RenameKind::Column {
+                        local_edits,
+                        cross_file_edits,
+                        yaml_edit,
+                        sources_yml_path,
+                    })
+                }
                 _ => None,
             }
         } else {
@@ -2712,6 +2971,88 @@ impl LanguageServer for Backend {
                     // Replace the entire line containing the old table key
                     // We need to figure out the line length. Since we have the old line,
                     // we use it to compute the end column.
+                    let old_line_len = _old_line.len() as u32;
+                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier {
+                            uri: yaml_uri,
+                            version: None,
+                        },
+                        edits: vec![OneOf::Left(TextEdit {
+                            range: Range {
+                                start: Position::new(line_num, 0),
+                                end: Position::new(line_num, old_line_len),
+                            },
+                            new_text: new_line,
+                        })],
+                    }));
+                }
+
+                Ok(Some(WorkspaceEdit {
+                    document_changes: Some(DocumentChanges::Operations(document_changes)),
+                    ..Default::default()
+                }))
+            }
+            Some(RenameKind::Column {
+                local_edits,
+                cross_file_edits,
+                yaml_edit,
+                sources_yml_path,
+            }) => {
+                if local_edits.is_empty() && cross_file_edits.is_empty() {
+                    return Ok(None);
+                }
+
+                let mut document_changes: Vec<DocumentChangeOperation> = Vec::new();
+
+                // Local edits in the current file
+                if !local_edits.is_empty() {
+                    let local_text_edits: Vec<OneOf<TextEdit, AnnotatedTextEdit>> = local_edits
+                        .into_iter()
+                        .map(|(sl, sc, el, ec)| {
+                            OneOf::Left(TextEdit {
+                                range: Range {
+                                    start: Position::new(sl, sc),
+                                    end: Position::new(el, ec),
+                                },
+                                new_text: new_name.clone(),
+                            })
+                        })
+                        .collect();
+                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier {
+                            uri: uri.clone(),
+                            version: None,
+                        },
+                        edits: local_text_edits,
+                    }));
+                }
+
+                // Cross-file edits
+                let mut edits_by_file: HashMap<PathBuf, Vec<TextEdit>> = HashMap::new();
+                for (file_path, sl, sc, el, ec) in cross_file_edits {
+                    edits_by_file.entry(file_path).or_default().push(TextEdit {
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                        new_text: new_name.clone(),
+                    });
+                }
+                for (file_path, file_edits) in edits_by_file {
+                    let file_uri = Url::from_file_path(&file_path).unwrap_or_else(|_| uri.clone());
+                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier {
+                            uri: file_uri,
+                            version: None,
+                        },
+                        edits: file_edits.into_iter().map(OneOf::Left).collect(),
+                    }));
+                }
+
+                // YAML column rename
+                if let Some((line_num, _old_line, new_line)) = yaml_edit {
+                    let yaml_uri =
+                        Url::from_file_path(&sources_yml_path).unwrap_or_else(|_| uri.clone());
                     let old_line_len = _old_line.len() as u32;
                     document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                         text_document: OptionalVersionedTextDocumentIdentifier {

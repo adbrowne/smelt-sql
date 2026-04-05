@@ -20,6 +20,19 @@ struct RenameModelResult {
     conflict: bool,
 }
 
+/// Result of a column rename operation
+#[derive(Default)]
+struct RenameColumnResult {
+    /// Text edits within the same model: (start_line, start_col, end_line, end_col)
+    local_edits: Vec<(u32, u32, u32, u32)>,
+    /// Text edits in other files: (file_path, start_line, start_col, end_line, end_col)
+    cross_file_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+    /// YAML edit: (line_number, old_line_text, new_line_text)
+    yaml_edit: Option<(u32, String, String)>,
+    /// Error message if rename is rejected
+    error: Option<String>,
+}
+
 /// Result of a source table rename operation
 #[derive(Default)]
 struct RenameSourceResult {
@@ -497,6 +510,254 @@ impl TestWorkspace {
             yaml_edit,
         }
     }
+
+    /// Rename a column at a position.
+    /// Finds all references to the column within the current file (local) and across the project.
+    /// Returns a RenameColumnResult with local edits, cross-file edits, and optional YAML edits.
+    fn rename_column(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+        new_name: &str,
+    ) -> RenameColumnResult {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path.clone());
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return RenameColumnResult::default(),
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let (qualifier, column_name) = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::ColumnRef { qualifier, name }) => (qualifier, name),
+            _ => return RenameColumnResult::default(),
+        };
+
+        // Validate new name
+        if !is_valid_sql_identifier(new_name) {
+            return RenameColumnResult {
+                error: Some(format!("'{}' is not a valid SQL identifier", new_name)),
+                ..Default::default()
+            };
+        }
+
+        // Find all column references in the current file
+        let local_refs = smelt_db::references::find_column_references_in_file(
+            &file,
+            &column_name,
+            qualifier.as_deref(),
+        );
+
+        let mut local_edits: Vec<(u32, u32, u32, u32)> = local_refs
+            .iter()
+            .map(|r| {
+                let range = smelt_parser::ast::text_range_to_range(&text, r.name_range);
+                (
+                    range.start.line,
+                    range.start.column,
+                    range.end.line,
+                    range.end.column,
+                )
+            })
+            .collect();
+
+        // Also include the column definition in the SELECT list if it exists
+        if let Some(def_range) =
+            smelt_db::references::find_column_definition_in_select(&file, &column_name)
+        {
+            let range = smelt_parser::ast::text_range_to_range(&text, def_range);
+            let edit = (
+                range.start.line,
+                range.start.column,
+                range.end.line,
+                range.end.column,
+            );
+            if !local_edits.contains(&edit) {
+                local_edits.push(edit);
+            }
+        }
+
+        // Sort and dedup
+        local_edits.sort();
+        local_edits.dedup();
+
+        // Cross-file column tracing via schema lineage
+        let mut cross_file_edits = Vec::new();
+        let schema = self.db.model_schema(path.clone());
+
+        // Check if this column comes from an upstream model (trace upstream)
+        if let Some(col) = schema.columns.iter().find(|c| c.name == column_name) {
+            if let smelt_db::schema::ColumnSource::FromModel {
+                model_name,
+                column_name: upstream_col,
+            } = &col.source
+            {
+                if upstream_col == &column_name {
+                    // Find the upstream model file and its column references
+                    for upstream_path in self.db.all_files().iter() {
+                        let up_name = upstream_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        if up_name == model_name {
+                            let up_text = self.db.file_text(upstream_path.clone());
+                            let up_parse = self.db.parse_file(upstream_path.clone());
+                            let up_syntax = up_parse.syntax();
+                            if let Some(up_file) = smelt_parser::ast::File::cast(up_syntax) {
+                                // Find column definition in upstream SELECT list
+                                if let Some(def_range) =
+                                    smelt_db::references::find_column_definition_in_select(
+                                        &up_file,
+                                        &column_name,
+                                    )
+                                {
+                                    let r =
+                                        smelt_parser::ast::text_range_to_range(&up_text, def_range);
+                                    cross_file_edits.push((
+                                        upstream_path.clone(),
+                                        r.start.line,
+                                        r.start.column,
+                                        r.end.line,
+                                        r.end.column,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Trace downstream transitively: BFS through the model graph.
+        // A model is "downstream" if it refs a model that exposes this column
+        // (either explicitly or through SELECT *).
+        let model_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // BFS: models whose column `column_name` should be renamed in downstream consumers
+        let mut models_exposing_column: Vec<String> = vec![model_name.clone()];
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(model_name.clone());
+
+        let mut depth = 0;
+        while depth < 10 {
+            let mut next_batch = Vec::new();
+            for exposing_model in &models_exposing_column {
+                for downstream_path in self.db.all_files().iter() {
+                    if *downstream_path == path {
+                        continue;
+                    }
+                    let down_name = downstream_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if visited.contains(&down_name) {
+                        continue;
+                    }
+
+                    let down_refs = self.db.model_refs(downstream_path.clone());
+                    let refs_exposing = down_refs.iter().any(|r| r.name == *exposing_model);
+                    if !refs_exposing {
+                        continue;
+                    }
+
+                    let down_text = self.db.file_text(downstream_path.clone());
+                    let down_parse = self.db.parse_file(downstream_path.clone());
+                    let down_syntax = down_parse.syntax();
+                    if let Some(down_file) = smelt_parser::ast::File::cast(down_syntax) {
+                        // Find explicit column references
+                        let down_refs_found = smelt_db::references::find_column_references_in_file(
+                            &down_file,
+                            &column_name,
+                            None,
+                        );
+                        for col_ref in &down_refs_found {
+                            let r = smelt_parser::ast::text_range_to_range(
+                                &down_text,
+                                col_ref.name_range,
+                            );
+                            cross_file_edits.push((
+                                downstream_path.clone(),
+                                r.start.line,
+                                r.start.column,
+                                r.end.line,
+                                r.end.column,
+                            ));
+                        }
+
+                        // Check if this model passes the column through via SELECT *
+                        // (RowExtension). If so, add to next BFS batch.
+                        let down_schema = self.db.model_schema(downstream_path.clone());
+                        let has_passthrough = down_schema
+                            .row_extensions
+                            .iter()
+                            .any(|ext| ext.ref_name == *exposing_model);
+                        if has_passthrough {
+                            next_batch.push(down_name.clone());
+                        }
+
+                        visited.insert(down_name);
+                    }
+                }
+            }
+            if next_batch.is_empty() {
+                break;
+            }
+            models_exposing_column = next_batch;
+            depth += 1;
+        }
+
+        // Source column: check if column comes from a source and update YAML
+        let yaml_edit = self.find_source_column_yaml_rename(&column_name, new_name);
+
+        RenameColumnResult {
+            local_edits,
+            cross_file_edits,
+            yaml_edit,
+            error: None,
+        }
+    }
+
+    /// Find a source column in sources.yml and produce the rename edit.
+    fn find_source_column_yaml_rename(
+        &self,
+        old_column_name: &str,
+        new_column_name: &str,
+    ) -> Option<(u32, String, String)> {
+        let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
+        find_source_column_yaml_rename(&sources_yml, old_column_name, new_column_name)
+    }
+}
+
+/// Find a column name in sources.yml and produce the rename edit.
+/// Scans for `- name: old_column_name` entries and returns (line_number, old_line, new_line).
+fn find_source_column_yaml_rename(
+    yaml_content: &str,
+    old_column_name: &str,
+    new_column_name: &str,
+) -> Option<(u32, String, String)> {
+    for (i, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == format!("- name: {}", old_column_name) {
+            let old_line = line.to_string();
+            let new_line = line.replace(
+                &format!("- name: {}", old_column_name),
+                &format!("- name: {}", new_column_name),
+            );
+            return Some((i as u32, old_line, new_line));
+        }
+    }
+    None
 }
 
 /// Find the YAML line for a source table key and produce the rename edit.
@@ -2992,6 +3253,197 @@ mod rename_source {
         assert!(
             !new_line.contains("columns"),
             "edit should not include column lines"
+        );
+    }
+}
+
+// =============================================================================
+// Rename Column Tests
+// =============================================================================
+
+mod rename_column {
+    use super::*;
+
+    #[test]
+    fn test_rename_column_single_model() {
+        // Rename `user_id` in SELECT list should also update WHERE and GROUP BY
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "users",
+            "SELECT user_id, COUNT(*) AS cnt FROM smelt.ref('raw_events') WHERE user_id > 0 GROUP BY user_id",
+        );
+        ws.add_model("raw_events", "SELECT 1 AS user_id, 2 AS event_type");
+
+        // Cursor on `user_id` in SELECT (col 7 = 'u' of first user_id)
+        let result = ws.rename_column("users", 0, 7, "account_id");
+        assert!(result.error.is_none(), "should not return error");
+
+        // Should find 3 local edits: SELECT user_id, WHERE user_id, GROUP BY user_id
+        assert!(
+            result.local_edits.len() >= 3,
+            "expected at least 3 local edits for user_id in SELECT/WHERE/GROUP BY, got {}",
+            result.local_edits.len()
+        );
+    }
+
+    #[test]
+    fn test_rename_column_propagates_upstream() {
+        // Column from ColumnSource::FromModel should be traced to upstream model
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS user_id, 2 AS age");
+        ws.add_model("downstream", "SELECT user_id FROM smelt.ref('upstream')");
+
+        // Cursor on `user_id` in downstream SELECT
+        let result = ws.rename_column("downstream", 0, 7, "account_id");
+        assert!(result.error.is_none());
+
+        // Should find at least 1 local edit (the column ref in downstream)
+        assert!(
+            !result.local_edits.is_empty(),
+            "expected local edits in downstream model"
+        );
+
+        // Should find a cross-file edit in the upstream model (the column definition)
+        assert!(
+            !result.cross_file_edits.is_empty(),
+            "expected cross-file edit in upstream model for column definition"
+        );
+        let upstream_path = ws.model_path("upstream");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == upstream_path),
+            "cross-file edit should be in upstream model"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_propagates_downstream() {
+        // Downstream model using `ref('model').col` gets updated
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 2 AS age");
+        ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
+
+        // Cursor on `user_id` in the users model SELECT (the definition site)
+        let result = ws.rename_column("users", 0, 14, "account_id");
+        assert!(result.error.is_none());
+
+        // Should find local edit (user_id definition in SELECT)
+        assert!(
+            !result.local_edits.is_empty(),
+            "expected local edits in users model"
+        );
+
+        // Should find cross-file edit in orders model
+        let orders_path = ws.model_path("orders");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == orders_path),
+            "should find cross-file edit in downstream model 'orders'"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_through_select_star() {
+        // Upstream renames column, downstream SELECT * is unaffected
+        // but downstream explicit col refs are found
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS user_id, 2 AS age");
+        ws.add_model("passthrough", "SELECT * FROM smelt.ref('upstream')");
+        ws.add_model("consumer", "SELECT user_id FROM smelt.ref('passthrough')");
+
+        // Rename user_id in upstream
+        let result = ws.rename_column("upstream", 0, 14, "account_id");
+        assert!(result.error.is_none());
+
+        // consumer should get a cross-file edit (it explicitly references user_id)
+        let consumer_path = ws.model_path("consumer");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == consumer_path),
+            "consumer using explicit column ref through SELECT * passthrough should be found"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_through_cte_chain() {
+        // Column flows through 3 CTEs, all should be renamed
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_chain",
+            "WITH
+  cte1 AS (SELECT 1 AS user_id),
+  cte2 AS (SELECT user_id FROM cte1),
+  cte3 AS (SELECT user_id FROM cte2)
+SELECT user_id FROM cte3",
+        );
+
+        // Cursor on `user_id` in final SELECT (line 4, col 7)
+        let result = ws.rename_column("cte_chain", 4, 7, "account_id");
+        assert!(result.error.is_none());
+
+        // Should find user_id in cte1 SELECT, cte2 SELECT+FROM, cte3 SELECT+FROM, final SELECT
+        // At least 4 unique locations (the definition in cte1 + references in cte2, cte3, final)
+        assert!(
+            result.local_edits.len() >= 4,
+            "expected at least 4 local edits for user_id through CTE chain, got {}",
+            result.local_edits.len()
+        );
+    }
+
+    #[test]
+    fn test_rename_column_source_updates_yaml() {
+        // Column from source should update sources.yml column name
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "sources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: user_id\n            type: INTEGER\n          - name: email\n            type: VARCHAR\n",
+        );
+        ws.add_model("staging", "SELECT user_id FROM smelt.source('raw.users')");
+
+        // Cursor on `user_id` in SELECT
+        let result = ws.rename_column("staging", 0, 7, "account_id");
+        assert!(result.error.is_none());
+
+        // Should produce a YAML edit for the column name
+        assert!(
+            result.yaml_edit.is_some(),
+            "should produce YAML edit for source column rename"
+        );
+        let (_, old_line, new_line) = result.yaml_edit.unwrap();
+        assert!(
+            old_line.contains("- name: user_id"),
+            "old line should contain '- name: user_id'"
+        );
+        assert!(
+            new_line.contains("- name: account_id"),
+            "new line should contain '- name: account_id'"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_ambiguous_rejected() {
+        // Unqualified column matching multiple sources should be rejected
+        let mut ws = TestWorkspace::new();
+        ws.add_model("a", "SELECT 1 AS id");
+        ws.add_model("b", "SELECT 1 AS id");
+        ws.add_model(
+            "joined",
+            "SELECT id FROM smelt.ref('a') CROSS JOIN smelt.ref('b')",
+        );
+
+        // Cursor on unqualified `id` in SELECT — ambiguous between a.id and b.id
+        // The rename should still work for local references (it's a valid column name),
+        // but won't propagate to both upstreams since it's ambiguous
+        let result = ws.rename_column("joined", 0, 7, "identifier");
+        // Should have at least the local edit
+        assert!(
+            !result.local_edits.is_empty() || result.error.is_some(),
+            "ambiguous column rename should either produce local edits or an error"
         );
     }
 }

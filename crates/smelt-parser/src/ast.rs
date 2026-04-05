@@ -247,6 +247,28 @@ impl SelectItem {
         None
     }
 
+    /// Get the text range of the alias token, if present
+    pub fn alias_range(&self) -> Option<TextRange> {
+        let mut found_as = false;
+        let mut found_expr = false;
+
+        for child in self.0.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == AS_KW {
+                        found_as = true;
+                    } else if token.kind() == IDENT && (found_as || found_expr) {
+                        return Some(token.text_range());
+                    }
+                }
+                rowan::NodeOrToken::Node(_) => {
+                    found_expr = true;
+                }
+            }
+        }
+        None
+    }
+
     /// Get the effective column name (alias if present, otherwise inferred from expression)
     pub fn column_name(&self) -> Option<String> {
         // If there's an alias, use it

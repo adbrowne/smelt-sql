@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use rowan::TextRange;
 use smelt_parser::ast::{File as AstFile, Range};
-use smelt_parser::SyntaxKind::IDENT;
+use smelt_parser::SyntaxKind::{DOT, IDENT};
 
 use crate::{RefLocation, SourceLocation};
 
@@ -139,4 +139,102 @@ pub fn find_cte_references(file: &AstFile, _text: &str, cte_name: &str) -> Vec<T
     }
 
     results
+}
+
+/// A column reference found in a file, with the text range of the column name IDENT token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnRefLocation {
+    /// The text range of the column name IDENT token
+    pub name_range: TextRange,
+    /// The text range of the qualifier IDENT token, if present (e.g., "t" in "t.user_id")
+    pub qualifier_range: Option<TextRange>,
+    /// The qualifier string, if present
+    pub qualifier: Option<String>,
+}
+
+/// Find all references to a column name within a single file.
+///
+/// Scans all IDENT tokens in the file's descendant expressions.
+/// For qualified references (e.g., `t.user_id`), the qualifier must match if provided.
+/// For unqualified references, matches any occurrence of the column name.
+///
+/// Returns `ColumnRefLocation` for each matching column reference.
+pub fn find_column_references_in_file(
+    file: &AstFile,
+    column_name: &str,
+    qualifier_filter: Option<&str>,
+) -> Vec<ColumnRefLocation> {
+    let mut results = Vec::new();
+
+    for node in file.syntax().descendants() {
+        if let Some(expr) = smelt_parser::ast::Expr::cast(node) {
+            if let Some(col_ref) = expr.as_column_ref() {
+                if col_ref.name() != column_name {
+                    continue;
+                }
+
+                // Apply qualifier filter if provided
+                if let Some(filter) = qualifier_filter {
+                    if col_ref.qualifier() != Some(filter) {
+                        continue;
+                    }
+                }
+
+                // Find the column name IDENT token (the last IDENT after a DOT, or the only IDENT)
+                let tokens: Vec<_> = expr
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+                    .collect();
+
+                let (name_range, qualifier_range) = if tokens.len() >= 3
+                    && tokens[0].kind() == IDENT
+                    && tokens[1].kind() == DOT
+                    && tokens[2].kind() == IDENT
+                {
+                    // Qualified: table.column
+                    (tokens[2].text_range(), Some(tokens[0].text_range()))
+                } else if tokens.len() == 1 && tokens[0].kind() == IDENT {
+                    // Unqualified: column
+                    (tokens[0].text_range(), None)
+                } else {
+                    continue;
+                };
+
+                results.push(ColumnRefLocation {
+                    name_range,
+                    qualifier_range,
+                    qualifier: qualifier_range.map(|_| col_ref.qualifier().unwrap().to_string()),
+                });
+            }
+        }
+    }
+
+    results
+}
+
+/// Find the column definition site in a SELECT list.
+///
+/// Returns the TextRange of the column name or alias in the SELECT list
+/// where a column with the given name is defined.
+pub fn find_column_definition_in_select(file: &AstFile, column_name: &str) -> Option<TextRange> {
+    let select_stmt = file.select_stmt()?;
+    let select_list = select_stmt.select_list()?;
+
+    for item in select_list.items() {
+        if item.column_name().as_deref() == Some(column_name) {
+            // If there's an alias, return the alias range
+            if let Some(alias_range) = item.alias_range() {
+                return Some(alias_range);
+            }
+            // Otherwise if it's a simple column ref, return its range
+            if let Some(expr) = item.expression() {
+                if expr.as_column_ref().is_some() {
+                    return Some(expr.text_range());
+                }
+            }
+        }
+    }
+    None
 }
