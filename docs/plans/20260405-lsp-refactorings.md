@@ -415,6 +415,144 @@
 
 ---
 
+## Phase 11: Fix Arrow Version Mismatch `[ ]`
+
+**Priority**: Critical — unblocks `cargo test -p smelt-cli --test example_diagnostics` which has been broken since before Phase 0.
+
+**Goal**: Align workspace `arrow`/`parquet` versions with `duckdb v1.10501.0`'s transitive dependency on `arrow v58`. Fix any breaking API changes from arrow 57 to 58.
+
+**Red tests (write first)**:
+- [ ] No new tests needed — this is a dependency fix. The "red" state is that `cargo test -p smelt-cli --test example_diagnostics` fails to compile due to `Vec<arrow::array::RecordBatch>` vs `duckdb::arrow::array::RecordBatch` type mismatch at lines 97 and 207 of `crates/smelt-backend-duckdb/src/lib.rs`.
+
+**Green implementation**:
+- [ ] Update `Cargo.toml` workspace dependencies: `arrow = "57"` to `arrow = "58"`, `parquet = "57"` to `parquet = "58"` (lines 22-24)
+- [ ] Run `cargo check --all-targets` and fix any breaking API changes from arrow 57 to 58 across all crates that depend on arrow: `smelt-backend-duckdb`, `smelt-backend-spark`, `smelt-backend`, `smelt-cli`, `smelt-datagen`, `smelt-db`
+- [ ] Verify `crates/smelt-backend-duckdb/src/lib.rs` lines 97 and 207 now compile (the `result.collect()` calls should produce the correct `Vec<arrow::array::RecordBatch>` type once versions align)
+
+**Files modified**:
+- `Cargo.toml` — workspace deps: arrow 57→58, parquet 57→58
+- `crates/smelt-backend-duckdb/src/lib.rs` — should auto-fix once versions align (no code changes expected)
+- Possibly other crates if arrow 58 has breaking API changes
+
+**Verification**:
+- [ ] `cargo check --all-targets` (clean compilation, no type mismatches)
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all-targets` (all targets, including test targets that were previously broken)
+- [ ] `cargo test` (all existing tests pass)
+- [ ] `cargo test -p smelt-cli --test example_diagnostics` (MUST pass — this is the primary success criterion)
+
+---
+
+## Phase 12: Extract Duplicated Functions to Shared Crates `[ ]`
+
+**Priority**: Medium — code hygiene. Three pure functions are duplicated between `main.rs` and `integration.rs`.
+
+**Goal**: Move `is_valid_sql_identifier` to `smelt-parser`, move `find_source_table_yaml_rename` and `find_source_column_yaml_rename` to `smelt-db`. Remove duplicates from `main.rs` and `integration.rs`. Add unit tests in the new locations.
+
+**Red tests (write first)**:
+- [ ] `test_is_valid_sql_identifier_valid` — in `smelt-parser`: asserts `is_valid_sql_identifier("foo_bar")` is true, `is_valid_sql_identifier("_x1")` is true
+- [ ] `test_is_valid_sql_identifier_invalid` — in `smelt-parser`: asserts `is_valid_sql_identifier("")` is false, `is_valid_sql_identifier("1abc")` is false, `is_valid_sql_identifier("a-b")` is false
+- [ ] `test_find_source_table_yaml_rename_found` — in `smelt-db`: given YAML content with `raw:` section and `users:` table, calling `find_source_table_yaml_rename(yaml, "raw", "users", "customers")` returns `Some((line, old, new))` with correct line number and replacement
+- [ ] `test_find_source_table_yaml_rename_not_found` — returns `None` for nonexistent table
+- [ ] `test_find_source_column_yaml_rename_found` — in `smelt-db`: given YAML with `- name: user_id`, returns `Some((line, old, new))` with correct replacement
+- [ ] `test_find_source_column_yaml_rename_not_found` — returns `None` for nonexistent column
+
+**Green implementation**:
+- [ ] Add `pub fn is_valid_sql_identifier(name: &str) -> bool` to `crates/smelt-parser/src/symbol.rs` (alongside `position_to_offset` — both are string/cursor utilities). Add `pub use symbol::is_valid_sql_identifier` to `crates/smelt-parser/src/lib.rs`.
+- [ ] Add `pub fn find_source_table_yaml_rename(...)` and `pub fn find_source_column_yaml_rename(...)` to a new file `crates/smelt-db/src/yaml_edits.rs`. Register the module in `crates/smelt-db/src/lib.rs` as `pub mod yaml_edits`. These are pure functions (YAML line scanners, no Salsa deps), fitting the existing pattern.
+- [ ] In `crates/smelt-lsp/src/main.rs`: remove the three private `fn` definitions (~lines 49-59, ~187-233, ~238-255). Replace with `use smelt_parser::is_valid_sql_identifier;` and `use smelt_db::yaml_edits::{find_source_table_yaml_rename, find_source_column_yaml_rename};`.
+- [ ] In `crates/smelt-lsp/tests/integration.rs`: remove the three duplicated definitions (~lines 744-761, ~765-815, ~3689-3699). Replace with the same imports. Note: `smelt-lsp` already depends on both `smelt-parser` and `smelt-db`.
+
+**Files modified**:
+- `crates/smelt-parser/src/symbol.rs` — add `is_valid_sql_identifier`
+- `crates/smelt-parser/src/lib.rs` — re-export `is_valid_sql_identifier`
+- `crates/smelt-db/src/yaml_edits.rs` — NEW: `find_source_table_yaml_rename`, `find_source_column_yaml_rename`
+- `crates/smelt-db/src/lib.rs` — register `yaml_edits` module
+- `crates/smelt-lsp/src/main.rs` — remove 3 functions, add imports
+- `crates/smelt-lsp/tests/integration.rs` — remove 3 functions, add imports
+
+**Verification**:
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all-targets`
+- [ ] `cargo test` (all existing tests pass — no behavior change, only code movement)
+- [ ] `cargo test -p smelt-cli --test example_diagnostics` (still passes from Phase 11)
+
+---
+
+## Phase 13: Wire All Code Actions to LSP Handler `[ ]`
+
+**Priority**: High — three categories of code actions are implemented as pure functions but not exposed through the LSP handler.
+
+**Goal**: Replace the limited `generate_code_actions` call in the `textDocument/codeAction` handler with the full `generate_all_code_actions` plus cursor-based CTE refactorings. All six code action types should be returned to the editor.
+
+**Red tests (write first)**:
+- [ ] `test_handler_code_action_create_model` — via `TestWorkspace`, model with `smelt.ref('nonexistent')` (an `UndefinedModelRef` diagnostic). Assert the returned actions include one with title containing "Create model". This tests the full handler path, not just the pure function.
+- [ ] `test_handler_code_action_yaml_add_source` — model with `smelt.source('raw.missing_table')` (an `UndefinedSource` diagnostic), assert actions include "Add table" with correct YAML edit shape.
+- [ ] `test_handler_code_action_yaml_add_column` — model with `users.nonexistent_col` (an `UndeclaredColumn` diagnostic), assert actions include "Add column".
+- [ ] `test_handler_code_action_extract_cte` — cursor inside a subquery in FROM, assert actions include one with kind `RefactorExtract` and title containing "Extract".
+- [ ] `test_handler_code_action_inline_cte` — cursor on a CTE definition name that is used exactly once, assert actions include one with kind `RefactorInline` and title containing "Inline".
+
+**Green implementation**:
+- [ ] In the `code_action` handler (main.rs), after collecting matching diagnostics:
+  1. Read `sources_yml` content: `let project_root = db.file_project_root(effective_path.clone()); let sources_yml_content = (*db.project_sources_yaml(project_root.clone())).clone(); let sources_yml_path = project_root.join("sources.yml");`
+  2. Replace `generate_code_actions(diag, &text)` with `generate_all_code_actions(diag, &text, &sources_yml_content)`
+  3. Match on `CodeActionKind` variants:
+     - `TextEdit(suggestion)` — existing logic (QUICKFIX kind, `WorkspaceEdit::changes`)
+     - `CreateModel(suggestion)` — `DocumentChanges::Operations` with `CreateFile { uri }` + `TextDocumentEdit` inserting skeleton content. Kind: QUICKFIX. URI: model file path in same directory as current file.
+     - `YamlEdit(suggestion)` — `TextDocumentEdit` targeting `sources_yml_path`. Compute line range from `insert_after_line`. Kind: QUICKFIX.
+- [ ] After the diagnostic loop, add cursor-based refactoring pass:
+  1. Call `find_extract_cte_suggestion(&text, adj_start_line, request_range.start.character)`
+  2. Call `find_inline_cte_suggestion(&text, adj_start_line, request_range.start.character)`
+  3. For each `ExtractCteResult` / `InlineCteResult`, convert `edits: Vec<TextEditSuggestion>` to LSP `TextEdit`s (adjusting lines by `line_offset`)
+  4. Wrap in `CodeAction` with kind `REFACTOR_EXTRACT` / `REFACTOR_INLINE` respectively
+- [ ] Update `TestWorkspace` test helpers to exercise the full code action paths including the new action kinds.
+
+**Files modified**:
+- `crates/smelt-lsp/src/main.rs` — rewrite `code_action` handler
+- `crates/smelt-lsp/tests/integration.rs` — 5 new red-to-green tests, possibly updated test helpers
+
+**Verification**:
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all-targets`
+- [ ] `cargo test` (all existing + 5 new tests pass)
+- [ ] `cargo test -p smelt-cli --test example_diagnostics` (still passes)
+
+---
+
+## Phase 14: Update ROADMAP.md `[ ]`
+
+**Priority**: Low — documentation update.
+
+**Goal**: Update `docs/ROADMAP.md` to reflect the completed LSP refactorings work. Move "Rename refactoring across models" from Next Steps to Recently Completed. Add code actions and CTE refactoring to the LSP current state.
+
+**Red tests (write first)**:
+- [ ] No tests — documentation-only phase.
+
+**Green implementation**:
+- [ ] Add a new entry to the "Recently Completed" section (after the existing "LSP Goto-Definition" entry):
+  ```
+  ### ~~LSP Refactorings & Code Actions~~ ✅ (April 5-6, 2026)
+
+  Full refactoring support in the LSP: rename (CTEs, models, sources, columns with cross-file lineage tracing), code actions (CAST fixes, create model, add source/column, extract CTE, inline CTE), and find-references. All implemented as pure functions in smelt-db with thin LSP wrappers.
+
+  See [plan](plans/20260405-lsp-refactorings.md) for details.
+  ```
+- [ ] Update the "LSP & Editor Support" section's "Current state" bullets to add:
+  - Find references for models, sources, and CTEs
+  - Rename: CTEs (single-file), models (cross-file with file rename), sources (cross-file + YAML), columns (full lineage tracing)
+  - Code actions: CAST quick-fixes, create model, add source/column to YAML, extract CTE, inline CTE
+- [ ] Remove "Rename refactoring across models" from the "Next steps" list
+- [ ] Optionally add new next steps: "Dialect-specific refactoring hints", "Code action: extract to model"
+
+**Files modified**:
+- `docs/ROADMAP.md` — Recently Completed entry, LSP section updates, Next Steps cleanup
+
+**Verification**:
+- [ ] Review the ROADMAP for accuracy and consistency
+- [ ] No code changes — no cargo checks needed
+
+---
+
 ## Dependency Graph
 
 ```
@@ -434,6 +572,11 @@ Phase 0 (Infrastructure) ← everything depends on this
   │
   ├── Phase 3 (Quick-Fix: CAST) ← independent of Phase 1
   └── Phase 4 (Quick-Fix: Create/Add) ← independent of Phase 1
+
+Phase 11 (Arrow Fix) ← independent, unblocks --all-targets
+Phase 12 (Extract Duplicates) ← depends on 11 (clippy --all-targets)
+Phase 13 (Wire Code Actions) ← depends on 12 (uses extracted yaml_edits)
+Phase 14 (ROADMAP Update) ← depends on 13 (documents completed work)
 ```
 
 Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
