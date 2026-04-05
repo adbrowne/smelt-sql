@@ -1671,10 +1671,18 @@ pub fn walk_select_columns(select_stmt: &SelectStmt, ctx: &TypeContext) {
 
 /// Check for column references that don't resolve against declared schemas.
 /// Returns diagnostics with accurate source positions.
+/// Structured info about an undeclared column
+pub struct UndeclaredColumnInfo {
+    pub message: String,
+    pub range: TextRange,
+    pub qualifier: Option<String>,
+    pub column_name: String,
+}
+
 pub fn check_undeclared_columns(
     select_stmt: &SelectStmt,
     ctx: &TypeContext,
-) -> Vec<(String, TextRange)> {
+) -> Vec<UndeclaredColumnInfo> {
     let mut undeclared = Vec::new();
 
     // Collect SELECT aliases — these are valid references in GROUP BY / ORDER BY / HAVING
@@ -1717,7 +1725,12 @@ pub fn check_undeclared_columns(
                 "Column '{}' not found in any source, model, or CTE".replace("{}", col_name)
             };
 
-            undeclared.push((message, range));
+            undeclared.push(UndeclaredColumnInfo {
+                message,
+                range,
+                qualifier: qualifier.map(|s| s.to_string()),
+                column_name: col_name.to_string(),
+            });
         },
     );
 

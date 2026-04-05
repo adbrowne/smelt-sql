@@ -1,0 +1,166 @@
+//! Cursor-to-symbol resolution for LSP features.
+//!
+//! Pure function that maps a cursor offset to the symbol under the cursor.
+//! Used by goto-definition, find-references, rename, and code actions.
+
+use crate::ast::File as AstFile;
+
+/// The kind of symbol found at a cursor position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolAtCursor {
+    /// Cursor is inside a `smelt.ref('model_name')` call
+    RefCall { name: String },
+    /// Cursor is inside a `smelt.source('source.table')` call
+    SourceCall {
+        source_name: String,
+        table_name: String,
+    },
+    /// Cursor is on a CTE name in a FROM/JOIN clause (reference site)
+    CteReference { name: String },
+    /// Cursor is on a CTE name in a WITH clause (definition site)
+    CteDefinition { name: String },
+    /// Cursor is on a column reference like `t.user_id` or `user_id`
+    ColumnRef {
+        qualifier: Option<String>,
+        name: String,
+    },
+}
+
+/// Resolve what symbol the cursor is on, given a parsed file and its text.
+///
+/// This is a pure function — no Salsa or database dependency.
+/// Returns `None` if the cursor is not on a recognizable symbol.
+pub fn symbol_at_cursor(file: &AstFile, _text: &str, offset: usize) -> Option<SymbolAtCursor> {
+    // Check RefCall at cursor position
+    for ref_call in file.refs() {
+        let range = ref_call.range();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+
+        if offset >= start && offset <= end {
+            if let Some(name) = ref_call.model_name() {
+                return Some(SymbolAtCursor::RefCall { name });
+            }
+            return None;
+        }
+    }
+
+    // Check SourceCall at cursor position
+    for source_call in file.sources() {
+        let range = source_call.range();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+
+        if offset >= start && offset <= end {
+            if let (Some(source_name), Some(table_name)) =
+                (source_call.source_name(), source_call.table_name())
+            {
+                return Some(SymbolAtCursor::SourceCall {
+                    source_name,
+                    table_name,
+                });
+            }
+            return None;
+        }
+    }
+
+    // Check CTE definitions and references
+    if let Some(select_stmt) = file.select_stmt() {
+        // Collect CTE definition names
+        let mut cte_names: Vec<String> = Vec::new();
+        if let Some(with_clause) = select_stmt.with_clause() {
+            for cte in with_clause.ctes() {
+                if let Some(name) = cte.name() {
+                    // Check if cursor is on this CTE's name token in the definition
+                    if let Some(name_range) = cte.name_range() {
+                        let start: usize = name_range.start().into();
+                        let end: usize = name_range.end().into();
+                        if offset >= start && offset <= end {
+                            return Some(SymbolAtCursor::CteDefinition { name: name.clone() });
+                        }
+                    }
+                    cte_names.push(name);
+                }
+            }
+        }
+
+        // Check CTE references in FROM/JOIN clauses
+        if !cte_names.is_empty() {
+            if let Some(from_clause) = select_stmt.from_clause() {
+                let table_refs: Vec<_> = from_clause
+                    .table_refs()
+                    .chain(from_clause.joins().filter_map(|j| j.table_ref()))
+                    .collect();
+
+                for table_ref in table_refs {
+                    // Skip function calls and subqueries
+                    if table_ref.function_call().is_some() || table_ref.subquery().is_some() {
+                        continue;
+                    }
+                    let tr_range = table_ref.syntax().text_range();
+                    let tr_start: usize = tr_range.start().into();
+                    let tr_end: usize = tr_range.end().into();
+
+                    if offset >= tr_start && offset <= tr_end {
+                        if let Some(ident) = table_ref.identifier() {
+                            if cte_names.contains(&ident) {
+                                return Some(SymbolAtCursor::CteReference { name: ident });
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check column references — find tightest expression containing cursor
+    let mut best_expr: Option<crate::ast::Expr> = None;
+    let mut best_len = usize::MAX;
+
+    for node in file.syntax().descendants() {
+        if let Some(expr) = crate::ast::Expr::cast(node) {
+            let range = expr.text_range();
+            let start: usize = range.start().into();
+            let end: usize = range.end().into();
+            let len = end - start;
+
+            if offset >= start && offset <= end && len <= best_len {
+                best_len = len;
+                best_expr = Some(expr);
+            }
+        }
+    }
+
+    if let Some(expr) = best_expr {
+        if let Some(col_ref) = expr.as_column_ref() {
+            return Some(SymbolAtCursor::ColumnRef {
+                qualifier: col_ref.qualifier().map(|s| s.to_string()),
+                name: col_ref.name().to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+/// Convert an LSP-style (line, character) position to a byte offset in the text.
+pub fn position_to_offset(text: &str, line: u32, character: u32) -> usize {
+    let mut offset = 0usize;
+    let mut current_line = 0u32;
+    let mut current_col = 0u32;
+
+    for ch in text.chars() {
+        if current_line == line && current_col == character {
+            break;
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_col = 0;
+        } else {
+            current_col += 1;
+        }
+        offset += ch.len_utf8();
+    }
+    offset
+}

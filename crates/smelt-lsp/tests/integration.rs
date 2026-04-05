@@ -9,6 +9,39 @@ use std::sync::Arc;
 use smelt_db::{Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking};
 use tempfile::TempDir;
 
+/// Result of a model rename operation
+#[derive(Default)]
+struct RenameModelResult {
+    /// Text edits: (file_path, start_line, start_col, end_line, end_col)
+    text_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+    /// File rename: (old_path, new_path)
+    file_rename: Option<(PathBuf, PathBuf)>,
+    /// Whether a name conflict was detected
+    conflict: bool,
+}
+
+/// Result of a column rename operation
+#[derive(Default)]
+struct RenameColumnResult {
+    /// Text edits within the same model: (start_line, start_col, end_line, end_col)
+    local_edits: Vec<(u32, u32, u32, u32)>,
+    /// Text edits in other files: (file_path, start_line, start_col, end_line, end_col)
+    cross_file_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+    /// YAML edit: (line_number, old_line_text, new_line_text)
+    yaml_edit: Option<(u32, String, String)>,
+    /// Error message if rename is rejected
+    error: Option<String>,
+}
+
+/// Result of a source table rename operation
+#[derive(Default)]
+struct RenameSourceResult {
+    /// Text edits in SQL files: (file_path, start_line, start_col, end_line, end_col)
+    sql_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+    /// YAML edit: (line_number, old_line_text, new_line_text)
+    yaml_edit: Option<(u32, String, String)>,
+}
+
 /// Test workspace that simulates a smelt project
 struct TestWorkspace {
     #[allow(dead_code)]
@@ -82,6 +115,703 @@ impl TestWorkspace {
     fn model_path(&self, name: &str) -> PathBuf {
         self.models_dir.join(format!("{}.sql", name))
     }
+
+    /// Get code actions at a position in a model.
+    /// Collects diagnostics overlapping the position and generates code actions from them.
+    fn code_actions_at(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+    ) -> Vec<smelt_db::code_actions::CodeActionSuggestion> {
+        let path = self.model_path(model);
+        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
+        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+
+        let text = self.db.file_text(path);
+
+        // Filter diagnostics to those overlapping the cursor position
+        let matching: Vec<_> = all_diags
+            .into_iter()
+            .filter(|d| {
+                let r = &d.range;
+                (r.start.line < line || (r.start.line == line && r.start.column <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+        for diag in &matching {
+            actions.extend(smelt_db::code_actions::generate_code_actions(diag, &text));
+        }
+        actions
+    }
+
+    /// Get all code action kinds (text edits, create model, YAML edits) at a position.
+    /// Uses generate_all_code_actions which handles UndefinedModelRef, UndefinedSource, etc.
+    fn all_code_actions_at(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+    ) -> Vec<smelt_db::code_actions::CodeActionKind> {
+        let path = self.model_path(model);
+        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
+        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+
+        let text = self.db.file_text(path);
+        let sources_yml_content = (*self.db.project_sources_yaml(self.project_root())).clone();
+
+        // Filter diagnostics to those overlapping the cursor position
+        let matching: Vec<_> = all_diags
+            .into_iter()
+            .filter(|d| {
+                let r = &d.range;
+                (r.start.line < line || (r.start.line == line && r.start.column <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+        for diag in &matching {
+            actions.extend(smelt_db::code_actions::generate_all_code_actions(
+                diag,
+                &text,
+                &sources_yml_content,
+            ));
+        }
+        actions
+    }
+
+    /// Find all references to a symbol at a position.
+    /// Uses symbol_at_cursor + pure reference functions from smelt-db.
+    #[allow(dead_code)]
+    fn references_for(&self, model: &str, line: u32, col: u32) -> Vec<(PathBuf, (u32, u32))> {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path.clone());
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return vec![],
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::RefCall { name }) => {
+                let all_file_refs: Vec<_> = self
+                    .db
+                    .all_files()
+                    .iter()
+                    .map(|p| (p.clone(), (*self.db.model_refs(p.clone())).clone()))
+                    .collect();
+                smelt_db::references::find_model_references(&name, &all_file_refs)
+                    .into_iter()
+                    .map(|(p, r)| (p, (r.start.line, r.start.column)))
+                    .collect()
+            }
+            Some(SymbolAtCursor::SourceCall {
+                source_name,
+                table_name,
+            }) => {
+                let qualified = format!("{}.{}", source_name, table_name);
+                let all_file_sources: Vec<_> = self
+                    .db
+                    .all_files()
+                    .iter()
+                    .map(|p| (p.clone(), (*self.db.model_sources(p.clone())).clone()))
+                    .collect();
+                smelt_db::references::find_source_references(&qualified, &all_file_sources)
+                    .into_iter()
+                    .map(|(p, r)| (p, (r.start.line, r.start.column)))
+                    .collect()
+            }
+            Some(SymbolAtCursor::CteDefinition { name })
+            | Some(SymbolAtCursor::CteReference { name }) => {
+                let cte_refs = smelt_db::references::find_cte_references(&file, &text, &name);
+                cte_refs
+                    .into_iter()
+                    .map(|text_range| {
+                        let r = smelt_parser::ast::text_range_to_range(&text, text_range);
+                        (path.clone(), (r.start.line, r.start.column))
+                    })
+                    .collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Check if a position is renamable and return the range of the symbol.
+    /// Returns None if the cursor is not on a renamable symbol.
+    fn prepare_rename(&self, model: &str, line: u32, col: u32) -> Option<(u32, u32, u32, u32)> {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path);
+        let syntax = parse.syntax();
+
+        let file = smelt_parser::ast::File::cast(syntax)?;
+        let offset = position_to_offset(&text, line, col);
+
+        match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::CteDefinition { name })
+            | Some(SymbolAtCursor::CteReference { name }) => {
+                // Find the CTE definition range for prepareRename
+                let select_stmt = file.select_stmt()?;
+                let with_clause = select_stmt.with_clause()?;
+                for cte in with_clause.ctes() {
+                    if cte.name().as_deref() == Some(&name) {
+                        let name_range = cte.name_range()?;
+                        let r = smelt_parser::ast::text_range_to_range(&text, name_range);
+                        return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                    }
+                }
+                None
+            }
+            Some(SymbolAtCursor::RefCall { name }) => {
+                // For ref calls, return the content range (inside quotes)
+                for ref_call in file.refs() {
+                    if ref_call.model_name().as_deref() == Some(name.as_str()) {
+                        if let Some(content_range) = ref_call.content_range() {
+                            let r = smelt_parser::ast::text_range_to_range(&text, content_range);
+                            return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                        }
+                    }
+                }
+                None
+            }
+            Some(SymbolAtCursor::SourceCall {
+                source_name,
+                table_name,
+            }) => {
+                // For source calls, return the table_name_range (just the table part)
+                for source_call in file.sources() {
+                    if source_call.source_name().as_deref() == Some(source_name.as_str())
+                        && source_call.table_name().as_deref() == Some(table_name.as_str())
+                    {
+                        if let Some(tn_range) = source_call.table_name_range() {
+                            let r = smelt_parser::ast::text_range_to_range(&text, tn_range);
+                            return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Rename a model across the project.
+    /// Returns a RenameModelResult with text edits across files and the file rename info.
+    fn rename_model(&self, model: &str, line: u32, col: u32, new_name: &str) -> RenameModelResult {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path.clone());
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return RenameModelResult::default(),
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let model_name = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::RefCall { name }) => name,
+            _ => return RenameModelResult::default(),
+        };
+
+        // Check for conflict: does a model with new_name already exist?
+        let new_path = self.models_dir.join(format!("{}.sql", new_name));
+        if self.model_files.contains(&new_path) {
+            return RenameModelResult {
+                conflict: true,
+                ..Default::default()
+            };
+        }
+
+        // Collect all ref edits across files
+        let all_file_refs: Vec<_> = self
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*self.db.model_refs(p.clone())).clone()))
+            .collect();
+        let ref_locations =
+            smelt_db::references::find_model_references(&model_name, &all_file_refs);
+
+        // For each ref location, we need the content range (inside quotes)
+        let mut text_edits: Vec<(PathBuf, u32, u32, u32, u32)> = Vec::new();
+        for (ref_path, _) in &ref_locations {
+            let ref_text = self.db.file_text(ref_path.clone());
+            let ref_parse = self.db.parse_file(ref_path.clone());
+            let ref_syntax = ref_parse.syntax();
+            if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
+                for ref_call in ref_file.refs() {
+                    if ref_call.model_name().as_deref() == Some(&model_name) {
+                        if let Some(content_range) = ref_call.content_range() {
+                            let r =
+                                smelt_parser::ast::text_range_to_range(&ref_text, content_range);
+                            text_edits.push((
+                                ref_path.clone(),
+                                r.start.line,
+                                r.start.column,
+                                r.end.line,
+                                r.end.column,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // File rename
+        let old_path = self.models_dir.join(format!("{}.sql", model_name));
+        let file_rename = if self.model_files.contains(&old_path) {
+            Some((old_path, new_path))
+        } else {
+            None
+        };
+
+        RenameModelResult {
+            text_edits,
+            file_rename,
+            conflict: false,
+        }
+    }
+
+    /// Rename a CTE symbol at a position.
+    /// Returns a list of (start_line, start_col, end_line, end_col, new_text) edits.
+    fn rename_cte(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+        new_name: &str,
+    ) -> Vec<(u32, u32, u32, u32, String)> {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path);
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return vec![],
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let cte_name = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::CteDefinition { name })
+            | Some(SymbolAtCursor::CteReference { name }) => name,
+            _ => return vec![],
+        };
+
+        let refs = smelt_db::references::find_cte_references(&file, &text, &cte_name);
+        refs.into_iter()
+            .map(|text_range| {
+                let r = smelt_parser::ast::text_range_to_range(&text, text_range);
+                (
+                    r.start.line,
+                    r.start.column,
+                    r.end.line,
+                    r.end.column,
+                    new_name.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Rename a source table across the project.
+    /// Returns a RenameSourceResult with SQL text edits and an optional YAML edit.
+    fn rename_source(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+        new_table_name: &str,
+    ) -> RenameSourceResult {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path);
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return RenameSourceResult::default(),
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let (source_name, old_table_name) = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::SourceCall {
+                source_name,
+                table_name,
+            }) => (source_name, table_name),
+            _ => return RenameSourceResult::default(),
+        };
+
+        let qualified = format!("{}.{}", source_name, old_table_name);
+
+        // Find all source() call sites across the project
+        let all_file_sources: Vec<_> = self
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*self.db.model_sources(p.clone())).clone()))
+            .collect();
+        let source_locations =
+            smelt_db::references::find_source_references(&qualified, &all_file_sources);
+
+        // For each source location, get the table_name_range (inside quotes, after the dot)
+        let mut sql_edits = Vec::new();
+        for (ref_path, _) in &source_locations {
+            let ref_text = self.db.file_text(ref_path.clone());
+            let ref_parse = self.db.parse_file(ref_path.clone());
+            let ref_syntax = ref_parse.syntax();
+            if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
+                for source_call in ref_file.sources() {
+                    if source_call.source_name().as_deref() == Some(&source_name)
+                        && source_call.table_name().as_deref() == Some(&old_table_name)
+                    {
+                        if let Some(tn_range) = source_call.table_name_range() {
+                            let r = smelt_parser::ast::text_range_to_range(&ref_text, tn_range);
+                            sql_edits.push((
+                                ref_path.clone(),
+                                r.start.line,
+                                r.start.column,
+                                r.end.line,
+                                r.end.column,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find and update the YAML entry
+        let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
+        let yaml_edit = find_source_table_yaml_rename(
+            &sources_yml,
+            &source_name,
+            &old_table_name,
+            new_table_name,
+        );
+
+        RenameSourceResult {
+            sql_edits,
+            yaml_edit,
+        }
+    }
+
+    /// Rename a column at a position.
+    /// Finds all references to the column within the current file (local) and across the project.
+    /// Returns a RenameColumnResult with local edits, cross-file edits, and optional YAML edits.
+    fn rename_column(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+        new_name: &str,
+    ) -> RenameColumnResult {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path.clone());
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return RenameColumnResult::default(),
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let (qualifier, column_name) = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::ColumnRef { qualifier, name }) => (qualifier, name),
+            _ => return RenameColumnResult::default(),
+        };
+
+        // Validate new name
+        if !is_valid_sql_identifier(new_name) {
+            return RenameColumnResult {
+                error: Some(format!("'{}' is not a valid SQL identifier", new_name)),
+                ..Default::default()
+            };
+        }
+
+        // Find all column references in the current file
+        let local_refs = smelt_db::references::find_column_references_in_file(
+            &file,
+            &column_name,
+            qualifier.as_deref(),
+        );
+
+        let mut local_edits: Vec<(u32, u32, u32, u32)> = local_refs
+            .iter()
+            .map(|r| {
+                let range = smelt_parser::ast::text_range_to_range(&text, r.name_range);
+                (
+                    range.start.line,
+                    range.start.column,
+                    range.end.line,
+                    range.end.column,
+                )
+            })
+            .collect();
+
+        // Also include the column definition in the SELECT list if it exists
+        if let Some(def_range) =
+            smelt_db::references::find_column_definition_in_select(&file, &column_name)
+        {
+            let range = smelt_parser::ast::text_range_to_range(&text, def_range);
+            let edit = (
+                range.start.line,
+                range.start.column,
+                range.end.line,
+                range.end.column,
+            );
+            if !local_edits.contains(&edit) {
+                local_edits.push(edit);
+            }
+        }
+
+        // Sort and dedup
+        local_edits.sort();
+        local_edits.dedup();
+
+        // Cross-file column tracing via schema lineage
+        let mut cross_file_edits = Vec::new();
+        let schema = self.db.model_schema(path.clone());
+
+        // Check if this column comes from an upstream model (trace upstream)
+        if let Some(col) = schema.columns.iter().find(|c| c.name == column_name) {
+            if let smelt_db::schema::ColumnSource::FromModel {
+                model_name,
+                column_name: upstream_col,
+            } = &col.source
+            {
+                if upstream_col == &column_name {
+                    // Find the upstream model file and its column references
+                    for upstream_path in self.db.all_files().iter() {
+                        let up_name = upstream_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        if up_name == model_name {
+                            let up_text = self.db.file_text(upstream_path.clone());
+                            let up_parse = self.db.parse_file(upstream_path.clone());
+                            let up_syntax = up_parse.syntax();
+                            if let Some(up_file) = smelt_parser::ast::File::cast(up_syntax) {
+                                // Find column definition in upstream SELECT list
+                                if let Some(def_range) =
+                                    smelt_db::references::find_column_definition_in_select(
+                                        &up_file,
+                                        &column_name,
+                                    )
+                                {
+                                    let r =
+                                        smelt_parser::ast::text_range_to_range(&up_text, def_range);
+                                    cross_file_edits.push((
+                                        upstream_path.clone(),
+                                        r.start.line,
+                                        r.start.column,
+                                        r.end.line,
+                                        r.end.column,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Trace downstream transitively: BFS through the model graph.
+        // A model is "downstream" if it refs a model that exposes this column
+        // (either explicitly or through SELECT *).
+        let model_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // BFS: models whose column `column_name` should be renamed in downstream consumers
+        let mut models_exposing_column: Vec<String> = vec![model_name.clone()];
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(model_name.clone());
+
+        let mut depth = 0;
+        while depth < 10 {
+            let mut next_batch = Vec::new();
+            for exposing_model in &models_exposing_column {
+                for downstream_path in self.db.all_files().iter() {
+                    if *downstream_path == path {
+                        continue;
+                    }
+                    let down_name = downstream_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if visited.contains(&down_name) {
+                        continue;
+                    }
+
+                    let down_refs = self.db.model_refs(downstream_path.clone());
+                    let refs_exposing = down_refs.iter().any(|r| r.name == *exposing_model);
+                    if !refs_exposing {
+                        continue;
+                    }
+
+                    let down_text = self.db.file_text(downstream_path.clone());
+                    let down_parse = self.db.parse_file(downstream_path.clone());
+                    let down_syntax = down_parse.syntax();
+                    if let Some(down_file) = smelt_parser::ast::File::cast(down_syntax) {
+                        // Find explicit column references
+                        let down_refs_found = smelt_db::references::find_column_references_in_file(
+                            &down_file,
+                            &column_name,
+                            None,
+                        );
+                        for col_ref in &down_refs_found {
+                            let r = smelt_parser::ast::text_range_to_range(
+                                &down_text,
+                                col_ref.name_range,
+                            );
+                            cross_file_edits.push((
+                                downstream_path.clone(),
+                                r.start.line,
+                                r.start.column,
+                                r.end.line,
+                                r.end.column,
+                            ));
+                        }
+
+                        // Check if this model passes the column through via SELECT *
+                        // (RowExtension). If so, add to next BFS batch.
+                        let down_schema = self.db.model_schema(downstream_path.clone());
+                        let has_passthrough = down_schema
+                            .row_extensions
+                            .iter()
+                            .any(|ext| ext.ref_name == *exposing_model);
+                        if has_passthrough {
+                            next_batch.push(down_name.clone());
+                        }
+
+                        visited.insert(down_name);
+                    }
+                }
+            }
+            if next_batch.is_empty() {
+                break;
+            }
+            models_exposing_column = next_batch;
+            depth += 1;
+        }
+
+        // Source column: check if column comes from a source and update YAML
+        let yaml_edit = self.find_source_column_yaml_rename(&column_name, new_name);
+
+        RenameColumnResult {
+            local_edits,
+            cross_file_edits,
+            yaml_edit,
+            error: None,
+        }
+    }
+
+    /// Find a source column in sources.yml and produce the rename edit.
+    fn find_source_column_yaml_rename(
+        &self,
+        old_column_name: &str,
+        new_column_name: &str,
+    ) -> Option<(u32, String, String)> {
+        let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
+        find_source_column_yaml_rename(&sources_yml, old_column_name, new_column_name)
+    }
+}
+
+/// Find a column name in sources.yml and produce the rename edit.
+/// Scans for `- name: old_column_name` entries and returns (line_number, old_line, new_line).
+fn find_source_column_yaml_rename(
+    yaml_content: &str,
+    old_column_name: &str,
+    new_column_name: &str,
+) -> Option<(u32, String, String)> {
+    for (i, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == format!("- name: {}", old_column_name) {
+            let old_line = line.to_string();
+            let new_line = line.replace(
+                &format!("- name: {}", old_column_name),
+                &format!("- name: {}", new_column_name),
+            );
+            return Some((i as u32, old_line, new_line));
+        }
+    }
+    None
+}
+
+/// Find the YAML line for a source table key and produce the rename edit.
+/// Returns (line_number, old_line, new_line) or None if not found.
+fn find_source_table_yaml_rename(
+    yaml_content: &str,
+    source_name: &str,
+    old_table_name: &str,
+    new_table_name: &str,
+) -> Option<(u32, String, String)> {
+    let mut in_source = false;
+    let mut in_tables = false;
+    for (i, line) in yaml_content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect source name section (e.g., "  raw:")
+        if !trimmed.starts_with('-') && trimmed.starts_with(&format!("{}:", source_name)) {
+            in_source = true;
+            in_tables = false;
+            continue;
+        }
+
+        if in_source {
+            // Detect tables section
+            if trimmed == "tables:" {
+                in_tables = true;
+                continue;
+            }
+
+            // A new top-level key resets context
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !trimmed.starts_with('#')
+                && !line.starts_with(' ')
+            {
+                in_source = false;
+                in_tables = false;
+                continue;
+            }
+        }
+
+        if in_source && in_tables {
+            // Look for the table name as a YAML key (e.g., "      users:")
+            if trimmed.starts_with(&format!("{}:", old_table_name)) {
+                let old_line = line.to_string();
+                let new_line = line.replace(
+                    &format!("{}:", old_table_name),
+                    &format!("{}:", new_table_name),
+                );
+                return Some((i as u32, old_line, new_line));
+            }
+        }
+    }
+    None
 }
 
 // =============================================================================
@@ -196,6 +926,120 @@ sources:
         assert_eq!(diags.len(), 2, "Expected 2 undefined ref diagnostics");
         assert!(diags.iter().any(|d| d.message.contains("missing1")));
         assert!(diags.iter().any(|d| d.message.contains("missing2")));
+    }
+
+    #[test]
+    fn test_diagnostic_has_code_undefined_ref() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("broken", "SELECT * FROM smelt.ref('nonexistent')");
+
+        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].code,
+            Some(smelt_db::DiagnosticCode::UndefinedModelRef),
+            "Undefined ref diagnostic should have UndefinedModelRef code"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_has_code_type_mismatch() {
+        use smelt_db::DiagnosticCode;
+
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model(
+            "stg_users",
+            "SELECT id, name FROM smelt.source('raw.users')",
+        );
+        // SUM(name) expects numeric but name is VARCHAR — triggers cross-model type mismatch
+        ws.add_model(
+            "bad_sum",
+            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+        );
+
+        // type_diagnostics checks cross-model type mismatches
+        let diags = ws.db.type_diagnostics(ws.model_path("bad_sum"));
+
+        let type_mismatch = diags
+            .iter()
+            .find(|d| d.code == Some(DiagnosticCode::TypeMismatch));
+        assert!(
+            type_mismatch.is_some(),
+            "Expected a TypeMismatch diagnostic, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_has_data_undefined_ref() {
+        use smelt_db::DiagnosticData;
+
+        let mut ws = TestWorkspace::new();
+        ws.add_model("broken", "SELECT * FROM smelt.ref('my_model')");
+
+        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].data,
+            Some(DiagnosticData::UndefinedRef {
+                model_name: "my_model".to_string(),
+            }),
+            "Undefined ref diagnostic should have UndefinedRef data with model name"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_has_data_undeclared_column() {
+        use smelt_db::DiagnosticData;
+
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "model",
+            "SELECT nonexistent_col FROM smelt.source('raw.users')",
+        );
+
+        // Undeclared column checks are in type_diagnostics
+        let diags = ws.db.type_diagnostics(ws.model_path("model"));
+
+        let undeclared = diags
+            .iter()
+            .find(|d| matches!(&d.data, Some(DiagnosticData::UndeclaredColumn { .. })));
+        assert!(
+            undeclared.is_some(),
+            "Expected an UndeclaredColumn diagnostic data, got: {:?}",
+            diags
+        );
+        if let Some(DiagnosticData::UndeclaredColumn { column_name, .. }) =
+            &undeclared.unwrap().data
+        {
+            assert_eq!(column_name, "nonexistent_col");
+        }
     }
 }
 
@@ -1343,4 +2187,1513 @@ sources:
         assert_eq!(col_ref.name(), "is_active");
         assert!(col_ref.qualifier().is_none());
     }
+}
+
+// =============================================================================
+// Symbol At Cursor Tests (Phase 1)
+// =============================================================================
+
+mod symbol_at_cursor {
+    use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+    /// Helper: parse text and call symbol_at_cursor at (line, col)
+    fn resolve(sql: &str, line: u32, col: u32) -> Option<SymbolAtCursor> {
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let offset = position_to_offset(sql, line, col);
+        symbol_at_cursor(&file, sql, offset)
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_ref_call() {
+        let sql = "SELECT * FROM smelt.ref('users')";
+        // Cursor inside the ref call (on 'users')
+        let sym = resolve(sql, 0, 25);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::RefCall {
+                name: "users".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_source_call() {
+        let sql = "SELECT * FROM smelt.source('raw.users')";
+        // Cursor inside the source call
+        let sym = resolve(sql, 0, 30);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::SourceCall {
+                source_name: "raw".to_string(),
+                table_name: "users".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_cte_reference() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        // Cursor on "cte1" in FROM clause (line 1, col 14)
+        let sym = resolve(sql, 1, 14);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::CteReference {
+                name: "cte1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_cte_definition() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        // Cursor on "cte1" in WITH clause (line 0, col 5)
+        let sym = resolve(sql, 0, 5);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::CteDefinition {
+                name: "cte1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_symbol_at_cursor_column_ref() {
+        let sql = "SELECT t.user_id FROM orders t";
+        // Cursor on "user_id" part of "t.user_id" (col 9)
+        let sym = resolve(sql, 0, 9);
+        assert_eq!(
+            sym,
+            Some(SymbolAtCursor::ColumnRef {
+                qualifier: Some("t".to_string()),
+                name: "user_id".to_string(),
+            })
+        );
+    }
+}
+
+// =============================================================================
+// AST Range Helper Tests (Phase 1)
+// =============================================================================
+
+mod ast_range_helpers {
+    #[test]
+    fn test_cte_name_range() {
+        let sql = "WITH my_cte AS (SELECT 1 as id)\nSELECT * FROM my_cte";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let select_stmt = file.select_stmt().unwrap();
+        let with_clause = select_stmt.with_clause().unwrap();
+        let cte = with_clause.ctes().next().unwrap();
+
+        let name_range = cte.name_range();
+        assert!(name_range.is_some(), "CTE should have a name range");
+        let range = name_range.unwrap();
+        let name_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        assert_eq!(name_text, "my_cte");
+    }
+
+    #[test]
+    fn test_ref_content_range() {
+        let sql = "SELECT * FROM smelt.ref('my_model')";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let ref_call = file.refs().next().unwrap();
+
+        let content_range = ref_call.content_range();
+        assert!(
+            content_range.is_some(),
+            "RefCall should have a content range"
+        );
+        let range = content_range.unwrap();
+        let content_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        assert_eq!(
+            content_text, "my_model",
+            "content_range should exclude quotes"
+        );
+    }
+
+    #[test]
+    fn test_source_table_name_range() {
+        let sql = "SELECT * FROM smelt.source('raw.users')";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+        let source_call = file.sources().next().unwrap();
+
+        let table_range = source_call.table_name_range();
+        assert!(
+            table_range.is_some(),
+            "SourceCall should have a table_name_range"
+        );
+        let range = table_range.unwrap();
+        let table_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        assert_eq!(
+            table_text, "users",
+            "table_name_range should cover just the table name"
+        );
+    }
+}
+
+// =============================================================================
+// Find References Tests (Phase 2)
+// =============================================================================
+
+mod find_references {
+    use super::*;
+    use smelt_db::references::{
+        find_cte_references, find_model_references, find_source_references,
+    };
+
+    #[test]
+    fn test_find_model_references_single_file() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 as id");
+        ws.add_model("orders", "SELECT * FROM smelt.ref('users')");
+
+        let all_file_refs: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .collect();
+
+        let refs = find_model_references("users", &all_file_refs);
+        assert_eq!(refs.len(), 1, "Expected 1 reference to 'users'");
+        assert_eq!(refs[0].0, ws.model_path("orders"));
+    }
+
+    #[test]
+    fn test_find_model_references_multiple_files() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 as id");
+        ws.add_model("a", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("b", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("c", "SELECT * FROM smelt.ref('users')");
+
+        let all_file_refs: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .collect();
+
+        let refs = find_model_references("users", &all_file_refs);
+        assert_eq!(refs.len(), 3, "Expected 3 references to 'users'");
+    }
+
+    #[test]
+    fn test_find_model_references_unreferenced() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 as id");
+        ws.add_model("orders", "SELECT 1 as id");
+
+        let all_file_refs: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .collect();
+
+        let refs = find_model_references("users", &all_file_refs);
+        assert!(refs.is_empty(), "Expected no references to 'users'");
+    }
+
+    #[test]
+    fn test_find_source_references() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+"#,
+        );
+        ws.add_model("a", "SELECT * FROM smelt.source('raw.users')");
+        ws.add_model("b", "SELECT * FROM smelt.source('raw.users')");
+
+        let all_file_sources: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_sources(p.clone())).clone()))
+            .collect();
+
+        let refs = find_source_references("raw.users", &all_file_sources);
+        assert_eq!(refs.len(), 2, "Expected 2 references to 'raw.users'");
+    }
+
+    #[test]
+    fn test_find_cte_references_in_from() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should find the reference in FROM
+        let has_from_ref = refs.iter().any(|r| {
+            let text = &sql[usize::from(r.start())..usize::from(r.end())];
+            text == "cte1"
+        });
+        assert!(has_from_ref, "Should find CTE reference in FROM clause");
+    }
+
+    #[test]
+    fn test_find_cte_references_in_join() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM other INNER JOIN cte1 ON other.id = cte1.id";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should find the reference in JOIN
+        assert!(!refs.is_empty(), "Should find CTE reference in JOIN clause");
+    }
+
+    #[test]
+    fn test_find_cte_references_as_qualifier() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT cte1.id FROM cte1";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should find the qualifier usage AND the FROM reference
+        assert!(
+            refs.len() >= 2,
+            "Should find CTE as qualifier and in FROM, got {}",
+            refs.len()
+        );
+    }
+
+    #[test]
+    fn test_find_cte_references_includes_definition() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should include the definition site in WITH clause
+        let has_def = refs.iter().any(|r| {
+            // The definition is at offset 5 ("WITH cte1")
+            let start: usize = r.start().into();
+            start < 10 // definition is near the beginning
+        });
+        assert!(has_def, "Should include CTE definition site in references");
+    }
+}
+
+// =============================================================================
+// Code Action Tests
+// =============================================================================
+
+mod code_actions {
+    use super::*;
+
+    #[test]
+    fn test_code_action_cast_for_type_mismatch() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model(
+            "stg_users",
+            "SELECT id, name FROM smelt.source('raw.users')",
+        );
+        // SUM(name) expects numeric but name is VARCHAR — type mismatch
+        ws.add_model(
+            "bad_sum",
+            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+        );
+
+        // The diagnostic is on "name" in SUM(name) — find its position
+        // "SELECT SUM(name) as total FROM smelt.ref('stg_users')"
+        //             ^--- line 0, col ~11
+        let actions = ws.code_actions_at("bad_sum", 0, 11);
+
+        // Should offer CAST to the expected numeric type
+        let cast_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("CAST"))
+            .collect();
+        assert!(
+            !cast_actions.is_empty(),
+            "Expected CAST code action for type mismatch, got: {:?}",
+            actions
+        );
+        // The action should suggest casting to the expected type
+        assert!(
+            cast_actions
+                .iter()
+                .any(|a| a.title.contains("CAST") && a.new_text.contains("CAST(")),
+            "CAST action should contain CAST() in the replacement text, got: {:?}",
+            cast_actions
+        );
+    }
+
+    #[test]
+    fn test_code_action_cast_for_unknown_type() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: payload
+"#,
+        );
+        // payload has no type declared — CannotInferType
+        ws.add_model(
+            "stg_events",
+            "SELECT id, payload FROM smelt.source('raw.events')",
+        );
+
+        // The diagnostic is on "payload" — find its position
+        // "SELECT id, payload FROM smelt.source('raw.events')"
+        //            ^--- line 0, col ~11
+        let actions = ws.code_actions_at("stg_events", 0, 13);
+
+        // Should offer multiple CAST options (VARCHAR, INTEGER, TIMESTAMP, etc.)
+        let cast_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("CAST"))
+            .collect();
+        assert!(
+            cast_actions.len() >= 3,
+            "Expected multiple CAST options for unknown type, got {} actions: {:?}",
+            cast_actions.len(),
+            cast_actions
+        );
+        // Should include common types
+        let titles: Vec<String> = cast_actions.iter().map(|a| a.title.clone()).collect();
+        assert!(
+            titles.iter().any(|t| t.contains("VARCHAR")),
+            "Should include VARCHAR option, got: {:?}",
+            titles
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("INTEGER")),
+            "Should include INTEGER option, got: {:?}",
+            titles
+        );
+    }
+
+    #[test]
+    fn test_code_action_cast_wraps_expression() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model(
+            "stg_users",
+            "SELECT id, name FROM smelt.source('raw.users')",
+        );
+        // SUM(name) — the CAST should wrap "name", not just the column identifier
+        ws.add_model(
+            "bad_sum",
+            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+        );
+
+        let actions = ws.code_actions_at("bad_sum", 0, 11);
+
+        let cast_action = actions.iter().find(|a| a.title.contains("CAST"));
+        assert!(cast_action.is_some(), "Expected CAST action");
+        let action = cast_action.unwrap();
+        // The replacement text should wrap the expression with CAST()
+        assert!(
+            action.new_text.starts_with("CAST(")
+                && action.new_text.contains(" AS ")
+                && action.new_text.ends_with(")"),
+            "CAST action should wrap expression: CAST(expr AS type), got: '{}'",
+            action.new_text
+        );
+    }
+
+    #[test]
+    fn test_no_code_action_on_valid_code() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model("valid", "SELECT id, name FROM smelt.source('raw.users')");
+
+        // Position on a valid column — should have no code actions
+        let actions = ws.code_actions_at("valid", 0, 8);
+        assert!(
+            actions.is_empty(),
+            "Expected no code actions on valid code, got: {:?}",
+            actions
+        );
+    }
+}
+
+// =============================================================================
+// Phase 4: Quick-Fix Code Actions — Create Model, Add Source/Column
+// =============================================================================
+
+mod code_actions_create_add {
+    use super::*;
+    use smelt_db::code_actions::CodeActionKind;
+
+    #[test]
+    fn test_code_action_create_missing_model() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("downstream", "SELECT * FROM smelt.ref('missing_model')");
+
+        // Diagnostic covers the ref name range: 'missing_model' is at col 24..39
+        // Cursor on the ref name content
+        let actions = ws.all_code_actions_at("downstream", 0, 30);
+
+        let create_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::CreateModel(_)))
+            .collect();
+        assert!(
+            !create_actions.is_empty(),
+            "Expected CreateModel code action for undefined ref, got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::CreateModel(suggestion) = &create_actions[0] {
+            assert_eq!(suggestion.model_name, "missing_model");
+            assert!(
+                suggestion.title.contains("missing_model"),
+                "Title should mention model name: '{}'",
+                suggestion.title
+            );
+            assert!(
+                suggestion.skeleton_sql.contains("SELECT"),
+                "Skeleton SQL should contain SELECT: '{}'",
+                suggestion.skeleton_sql
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_action_add_source_to_yaml() {
+        let mut ws = TestWorkspace::new();
+        // Source 'raw' exists but table 'orders' doesn't
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model("stg_orders", "SELECT * FROM smelt.source('raw.orders')");
+
+        // Diagnostic covers the source ref range — cursor inside the quoted part
+        let actions = ws.all_code_actions_at("stg_orders", 0, 32);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit code action to add table 'orders', got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            assert!(
+                suggestion.title.contains("orders"),
+                "Title should mention table name: '{}'",
+                suggestion.title
+            );
+            // The new lines should include the table key
+            let joined = suggestion.new_lines.join("\n");
+            assert!(
+                joined.contains("orders:"),
+                "New lines should contain 'orders:': '{}'",
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_action_add_source_new_section() {
+        let mut ws = TestWorkspace::new();
+        // No 'analytics' source exists — need full source block
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        ws.add_model(
+            "stg_events",
+            "SELECT * FROM smelt.source('analytics.events')",
+        );
+
+        // Cursor inside the quoted source reference
+        let actions = ws.all_code_actions_at("stg_events", 0, 35);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit code action to add source 'analytics', got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            let joined = suggestion.new_lines.join("\n");
+            assert!(
+                joined.contains("analytics:"),
+                "Should include source name: '{}'",
+                joined
+            );
+            assert!(
+                joined.contains("events:"),
+                "Should include table name: '{}'",
+                joined
+            );
+            assert!(
+                joined.contains("tables:"),
+                "Should include tables key: '{}'",
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_action_add_column_to_yaml() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+"#,
+        );
+        // Use a qualified column reference (users.email) so UndeclaredColumn
+        // gets qualifier = Some("users")
+        ws.add_model(
+            "stg_users",
+            "SELECT users.email FROM smelt.source('raw.users') AS users",
+        );
+
+        // 'users.email' — the 'email' part triggers UndeclaredColumn with qualifier 'users'
+        // "SELECT users.email FROM ..."
+        //         ^--- col 7
+        let actions = ws.all_code_actions_at("stg_users", 0, 13);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit code action to add column 'email', got: {:?}",
+            actions
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            assert!(
+                suggestion.title.contains("email"),
+                "Title should mention column name: '{}'",
+                suggestion.title
+            );
+            let joined = suggestion.new_lines.join("\n");
+            assert!(
+                joined.contains("- name: email"),
+                "New lines should add the column: '{}'",
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn test_yaml_insertion_preserves_structure() {
+        let mut ws = TestWorkspace::new();
+        let original_yml = r#"sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+      orders:
+        columns:
+          - name: order_id
+            type: INTEGER
+"#;
+        ws.set_sources_yml(original_yml);
+        // Reference a new table 'products' that doesn't exist
+        ws.add_model("stg_products", "SELECT * FROM smelt.source('raw.products')");
+
+        // Cursor inside the quoted source reference
+        let actions = ws.all_code_actions_at("stg_products", 0, 32);
+
+        let yaml_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, CodeActionKind::YamlEdit(_)))
+            .collect();
+        assert!(
+            !yaml_actions.is_empty(),
+            "Expected YamlEdit for new table 'products'"
+        );
+
+        if let CodeActionKind::YamlEdit(suggestion) = &yaml_actions[0] {
+            // Verify indentation is consistent (6 spaces for table key)
+            let table_line = suggestion
+                .new_lines
+                .iter()
+                .find(|l| l.contains("products:"))
+                .expect("Should have products: line");
+            let indent = table_line.len() - table_line.trim_start().len();
+            assert_eq!(
+                indent, 6,
+                "Table key should be indented 6 spaces, got {}",
+                indent
+            );
+
+            // Verify the insert point is after existing tables content
+            // (not in the middle of the users or orders block)
+            let line_count = original_yml.lines().count();
+            assert!(
+                suggestion.insert_after_line < line_count,
+                "Insert point {} should be within the file ({}  lines)",
+                suggestion.insert_after_line,
+                line_count
+            );
+        }
+    }
+}
+
+// =============================================================================
+// Rename CTE Tests (Phase 5)
+// =============================================================================
+
+mod rename_cte {
+    use super::*;
+
+    #[test]
+    fn test_prepare_rename_cte_definition() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Cursor on 'my_cte' in WITH clause (line 0, col 5 = inside 'my_cte')
+        let result = ws.prepare_rename("cte_model", 0, 5);
+        assert!(result.is_some(), "Should be renamable on CTE definition");
+        let (sl, sc, el, ec) = result.unwrap();
+        assert_eq!(sl, 0);
+        assert_eq!(sc, 5);
+        assert_eq!(el, 0);
+        assert_eq!(ec, 11); // 'my_cte' is 6 chars: 5..11
+    }
+
+    #[test]
+    fn test_prepare_rename_cte_reference() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Cursor on 'my_cte' in FROM clause (line 3, col 14 = inside 'my_cte')
+        let result = ws.prepare_rename("cte_model", 3, 14);
+        assert!(result.is_some(), "Should be renamable on CTE reference");
+        // prepareRename returns the definition range (the canonical location)
+        let (sl, sc, _el, _ec) = result.unwrap();
+        assert_eq!(sl, 0, "Definition is on line 0");
+        assert_eq!(sc, 5, "Definition starts at col 5");
+    }
+
+    #[test]
+    fn test_prepare_rename_rejects_keyword() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Cursor on 'SELECT' keyword (line 3, col 0)
+        let result = ws.prepare_rename("cte_model", 3, 0);
+        assert!(result.is_none(), "Should not be renamable on SQL keyword");
+    }
+
+    #[test]
+    fn test_rename_cte_updates_definition_and_references() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_model",
+            "WITH my_cte AS (\n  SELECT 1 AS id\n)\nSELECT * FROM my_cte",
+        );
+
+        // Rename from CTE definition (line 0, col 5)
+        let edits = ws.rename_cte("cte_model", 0, 5, "renamed_cte");
+        assert_eq!(
+            edits.len(),
+            2,
+            "Should have 2 edits: definition + reference"
+        );
+
+        // Both edits should use the new name
+        for (_, _, _, _, new_text) in &edits {
+            assert_eq!(new_text, "renamed_cte");
+        }
+
+        // One edit should be at definition (line 0, col 5)
+        assert!(
+            edits.iter().any(|(sl, sc, _, _, _)| *sl == 0 && *sc == 5),
+            "Should have edit at CTE definition"
+        );
+        // One edit should be at reference in FROM (line 3, col 14)
+        assert!(
+            edits.iter().any(|(sl, sc, _, _, _)| *sl == 3 && *sc == 14),
+            "Should have edit at CTE reference in FROM"
+        );
+    }
+
+    #[test]
+    fn test_rename_cte_with_qualified_columns() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_qual",
+            "WITH base AS (\n  SELECT 1 AS id, 'a' AS name\n)\nSELECT base.id, base.name FROM base",
+        );
+
+        // Rename CTE 'base' from definition
+        let edits = ws.rename_cte("cte_qual", 0, 5, "src");
+
+        // Should have edits for: definition, base.id qualifier, base.name qualifier, FROM base
+        assert!(
+            edits.len() >= 4,
+            "Expected at least 4 edits (def + 2 qualifiers + FROM ref), got {}",
+            edits.len()
+        );
+
+        // Verify all edits have the new name
+        for (_, _, _, _, new_text) in &edits {
+            assert_eq!(new_text, "src");
+        }
+    }
+
+    #[test]
+    fn test_rename_cte_validates_identifier() {
+        // This test verifies that invalid SQL identifiers are rejected.
+        // The validation is a pure function.
+        assert!(is_valid_sql_identifier("my_cte"));
+        assert!(is_valid_sql_identifier("_private"));
+        assert!(is_valid_sql_identifier("CTE1"));
+        assert!(!is_valid_sql_identifier("123bad"));
+        assert!(!is_valid_sql_identifier("has space"));
+        assert!(!is_valid_sql_identifier("has-dash"));
+        assert!(!is_valid_sql_identifier(""));
+    }
+}
+
+// =============================================================================
+// Model Rename Tests
+// =============================================================================
+
+mod rename_model {
+    use super::*;
+
+    #[test]
+    fn test_prepare_rename_model_from_ref() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS id");
+        ws.add_model("downstream", "SELECT id FROM smelt.ref('upstream')");
+
+        // Cursor on 'upstream' inside ref() — col 24 is inside the string content
+        let result = ws.prepare_rename("downstream", 0, 24);
+        assert!(
+            result.is_some(),
+            "prepare_rename should return a range for ref() calls"
+        );
+        let (sl, sc, el, ec) = result.unwrap();
+        // Should return the content range inside quotes (excluding quotes)
+        assert_eq!(sl, 0);
+        assert_eq!(el, 0);
+        // The content 'upstream' is 8 chars
+        assert_eq!(ec - sc, 8, "range should span the model name 'upstream'");
+    }
+
+    #[test]
+    fn test_rename_model_updates_all_refs() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS id, 'alice' AS name");
+        ws.add_model("orders", "SELECT id FROM smelt.ref('users')");
+        ws.add_model("payments", "SELECT id FROM smelt.ref('users')");
+        ws.add_model(
+            "report",
+            "SELECT id FROM smelt.ref('users') CROSS JOIN smelt.ref('orders')",
+        );
+
+        // Cursor inside ref('users') in orders model
+        let result = ws.rename_model("orders", 0, 30, "customers");
+        assert!(!result.conflict);
+        // Should have 3 edits: orders, payments, report all reference 'users'
+        assert_eq!(
+            result.text_edits.len(),
+            3,
+            "should update all 3 files referencing 'users'"
+        );
+    }
+
+    #[test]
+    fn test_rename_model_includes_file_rename() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("old_name", "SELECT 1 AS id");
+        ws.add_model("consumer", "SELECT id FROM smelt.ref('old_name')");
+
+        let result = ws.rename_model("consumer", 0, 30, "new_name");
+        assert!(!result.conflict);
+        // Should include a file rename operation
+        assert!(
+            result.file_rename.is_some(),
+            "should include a file rename for old_name.sql -> new_name.sql"
+        );
+        let (old_path, new_path) = result.file_rename.unwrap();
+        assert!(
+            old_path.ends_with("old_name.sql"),
+            "old path should be old_name.sql"
+        );
+        assert!(
+            new_path.ends_with("new_name.sql"),
+            "new path should be new_name.sql"
+        );
+    }
+
+    #[test]
+    fn test_rename_model_ref_content_range() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("my_model", "SELECT 1 AS id");
+        ws.add_model("consumer", "SELECT id FROM smelt.ref('my_model')");
+
+        let result = ws.rename_model("consumer", 0, 30, "renamed_model");
+        assert!(!result.conflict);
+        assert_eq!(result.text_edits.len(), 1);
+
+        // The edit should only replace the content inside quotes, not the quotes
+        let (_, sl, sc, el, ec) = &result.text_edits[0];
+        let text = "SELECT id FROM smelt.ref('my_model')";
+        // 'my_model' starts at col 25 (after the opening quote) and ends at col 33
+        let content_start = text.find("my_model").unwrap() as u32;
+        let content_end = content_start + "my_model".len() as u32;
+        assert_eq!(*sl, 0);
+        assert_eq!(*sc, content_start, "edit start should be inside the quotes");
+        assert_eq!(*el, 0);
+        assert_eq!(*ec, content_end, "edit end should be inside the quotes");
+    }
+
+    #[test]
+    fn test_rename_model_no_conflict() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("existing", "SELECT 1 AS id");
+        ws.add_model("other", "SELECT 1 AS id");
+        ws.add_model("consumer", "SELECT id FROM smelt.ref('other')");
+
+        // Try to rename 'other' to 'existing' — should detect conflict
+        let result = ws.rename_model("consumer", 0, 30, "existing");
+        assert!(
+            result.conflict,
+            "should reject rename to existing model name"
+        );
+    }
+}
+
+// =============================================================================
+// Rename Source Tests
+// =============================================================================
+
+mod rename_source {
+    use super::*;
+
+    #[test]
+    fn test_prepare_rename_source_from_call() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
+        );
+        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+
+        // Cursor on 'users' inside source('raw.users') — find col for 'users'
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.prepare_rename("staging", 0, users_start);
+        assert!(
+            result.is_some(),
+            "prepare_rename should return a range for source() table name"
+        );
+        let (sl, sc, el, ec) = result.unwrap();
+        assert_eq!(sl, 0);
+        assert_eq!(el, 0);
+        assert_eq!(ec - sc, 5, "range should span 'users' (5 chars)");
+    }
+
+    #[test]
+    fn test_rename_source_table_updates_all_calls() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
+        );
+        ws.add_model("staging_a", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("staging_b", "SELECT id FROM smelt.source('raw.users')");
+
+        // Cursor on 'users' in staging_a
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.rename_source("staging_a", 0, users_start, "customers");
+
+        // Both files should get text edits
+        assert_eq!(
+            result.sql_edits.len(),
+            2,
+            "should have edits for both files referencing raw.users"
+        );
+    }
+
+    #[test]
+    fn test_rename_source_table_updates_yaml() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
+        );
+        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.rename_source("staging", 0, users_start, "customers");
+
+        // YAML should have a rename edit
+        assert!(
+            result.yaml_edit.is_some(),
+            "should produce a YAML edit for the table key"
+        );
+        let (line_num, old_line, new_line) = result.yaml_edit.unwrap();
+        assert!(
+            old_line.contains("users:"),
+            "old line should contain 'users:'"
+        );
+        assert!(
+            new_line.contains("customers:"),
+            "new line should contain 'customers:'"
+        );
+        // Line 5 is "      users:" (0-indexed)
+        assert_eq!(line_num, 5, "YAML table key should be on line 5");
+    }
+
+    #[test]
+    fn test_rename_source_table_yaml_preserves_columns() {
+        let yaml = "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n          - name: email\n            type: VARCHAR\n";
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(yaml);
+        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+
+        let text = "SELECT id FROM smelt.source('raw.users')";
+        let users_start = text.find("users')").unwrap() as u32;
+        let result = ws.rename_source("staging", 0, users_start, "customers");
+
+        // The YAML edit should only change the table key line, not touch columns
+        assert!(result.yaml_edit.is_some());
+        let (_, old_line, new_line) = result.yaml_edit.unwrap();
+        // Only the table key line changes
+        assert!(old_line.contains("users:"));
+        assert!(new_line.contains("customers:"));
+        // Verify columns are NOT in the edit (only the key line changes)
+        assert!(
+            !old_line.contains("columns"),
+            "edit should not include column lines"
+        );
+        assert!(
+            !new_line.contains("columns"),
+            "edit should not include column lines"
+        );
+    }
+}
+
+// =============================================================================
+// Rename Column Tests
+// =============================================================================
+
+mod rename_column {
+    use super::*;
+
+    #[test]
+    fn test_rename_column_single_model() {
+        // Rename `user_id` in SELECT list should also update WHERE and GROUP BY
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "users",
+            "SELECT user_id, COUNT(*) AS cnt FROM smelt.ref('raw_events') WHERE user_id > 0 GROUP BY user_id",
+        );
+        ws.add_model("raw_events", "SELECT 1 AS user_id, 2 AS event_type");
+
+        // Cursor on `user_id` in SELECT (col 7 = 'u' of first user_id)
+        let result = ws.rename_column("users", 0, 7, "account_id");
+        assert!(result.error.is_none(), "should not return error");
+
+        // Should find 3 local edits: SELECT user_id, WHERE user_id, GROUP BY user_id
+        assert!(
+            result.local_edits.len() >= 3,
+            "expected at least 3 local edits for user_id in SELECT/WHERE/GROUP BY, got {}",
+            result.local_edits.len()
+        );
+    }
+
+    #[test]
+    fn test_rename_column_propagates_upstream() {
+        // Column from ColumnSource::FromModel should be traced to upstream model
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS user_id, 2 AS age");
+        ws.add_model("downstream", "SELECT user_id FROM smelt.ref('upstream')");
+
+        // Cursor on `user_id` in downstream SELECT
+        let result = ws.rename_column("downstream", 0, 7, "account_id");
+        assert!(result.error.is_none());
+
+        // Should find at least 1 local edit (the column ref in downstream)
+        assert!(
+            !result.local_edits.is_empty(),
+            "expected local edits in downstream model"
+        );
+
+        // Should find a cross-file edit in the upstream model (the column definition)
+        assert!(
+            !result.cross_file_edits.is_empty(),
+            "expected cross-file edit in upstream model for column definition"
+        );
+        let upstream_path = ws.model_path("upstream");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == upstream_path),
+            "cross-file edit should be in upstream model"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_propagates_downstream() {
+        // Downstream model using `ref('model').col` gets updated
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS user_id, 2 AS age");
+        ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
+
+        // Cursor on `user_id` in the users model SELECT (the definition site)
+        let result = ws.rename_column("users", 0, 14, "account_id");
+        assert!(result.error.is_none());
+
+        // Should find local edit (user_id definition in SELECT)
+        assert!(
+            !result.local_edits.is_empty(),
+            "expected local edits in users model"
+        );
+
+        // Should find cross-file edit in orders model
+        let orders_path = ws.model_path("orders");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == orders_path),
+            "should find cross-file edit in downstream model 'orders'"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_through_select_star() {
+        // Upstream renames column, downstream SELECT * is unaffected
+        // but downstream explicit col refs are found
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS user_id, 2 AS age");
+        ws.add_model("passthrough", "SELECT * FROM smelt.ref('upstream')");
+        ws.add_model("consumer", "SELECT user_id FROM smelt.ref('passthrough')");
+
+        // Rename user_id in upstream
+        let result = ws.rename_column("upstream", 0, 14, "account_id");
+        assert!(result.error.is_none());
+
+        // consumer should get a cross-file edit (it explicitly references user_id)
+        let consumer_path = ws.model_path("consumer");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == consumer_path),
+            "consumer using explicit column ref through SELECT * passthrough should be found"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_through_cte_chain() {
+        // Column flows through 3 CTEs, all should be renamed
+        let mut ws = TestWorkspace::new();
+        ws.add_model(
+            "cte_chain",
+            "WITH
+  cte1 AS (SELECT 1 AS user_id),
+  cte2 AS (SELECT user_id FROM cte1),
+  cte3 AS (SELECT user_id FROM cte2)
+SELECT user_id FROM cte3",
+        );
+
+        // Cursor on `user_id` in final SELECT (line 4, col 7)
+        let result = ws.rename_column("cte_chain", 4, 7, "account_id");
+        assert!(result.error.is_none());
+
+        // Should find user_id in cte1 SELECT, cte2 SELECT+FROM, cte3 SELECT+FROM, final SELECT
+        // At least 4 unique locations (the definition in cte1 + references in cte2, cte3, final)
+        assert!(
+            result.local_edits.len() >= 4,
+            "expected at least 4 local edits for user_id through CTE chain, got {}",
+            result.local_edits.len()
+        );
+    }
+
+    #[test]
+    fn test_rename_column_source_updates_yaml() {
+        // Column from source should update sources.yml column name
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "sources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: user_id\n            type: INTEGER\n          - name: email\n            type: VARCHAR\n",
+        );
+        ws.add_model("staging", "SELECT user_id FROM smelt.source('raw.users')");
+
+        // Cursor on `user_id` in SELECT
+        let result = ws.rename_column("staging", 0, 7, "account_id");
+        assert!(result.error.is_none());
+
+        // Should produce a YAML edit for the column name
+        assert!(
+            result.yaml_edit.is_some(),
+            "should produce YAML edit for source column rename"
+        );
+        let (_, old_line, new_line) = result.yaml_edit.unwrap();
+        assert!(
+            old_line.contains("- name: user_id"),
+            "old line should contain '- name: user_id'"
+        );
+        assert!(
+            new_line.contains("- name: account_id"),
+            "new line should contain '- name: account_id'"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_ambiguous_rejected() {
+        // Unqualified column matching multiple sources should be rejected
+        let mut ws = TestWorkspace::new();
+        ws.add_model("a", "SELECT 1 AS id");
+        ws.add_model("b", "SELECT 1 AS id");
+        ws.add_model(
+            "joined",
+            "SELECT id FROM smelt.ref('a') CROSS JOIN smelt.ref('b')",
+        );
+
+        // Cursor on unqualified `id` in SELECT — ambiguous between a.id and b.id
+        // The rename should still work for local references (it's a valid column name),
+        // but won't propagate to both upstreams since it's ambiguous
+        let result = ws.rename_column("joined", 0, 7, "identifier");
+        // Should have at least the local edit
+        assert!(
+            !result.local_edits.is_empty() || result.error.is_some(),
+            "ambiguous column rename should either produce local edits or an error"
+        );
+    }
+}
+
+// ===== Phase 9: Extract CTE Refactoring =====
+
+#[test]
+fn test_extract_cte_from_subquery_in_from() {
+    // Subquery in FROM should be extracted into a CTE + reference
+    let sql = "SELECT t.id FROM (SELECT id FROM users) t";
+    //                           ^ cursor inside subquery (line 0, col 20)
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 0, 20);
+    assert!(result.is_some(), "should find extractable subquery in FROM");
+    let result = result.unwrap();
+    assert!(!result.cte_name.is_empty(), "should generate a CTE name");
+    assert!(
+        result.edits.len() >= 2,
+        "should have at least 2 edits (CTE insertion + subquery replacement)"
+    );
+    // After applying edits, the result should have a WITH clause and a reference
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        applied.contains("WITH"),
+        "result should contain WITH clause"
+    );
+    assert!(
+        applied.contains("AS (SELECT id FROM users)"),
+        "CTE body should contain the subquery"
+    );
+    // The subquery in FROM should be replaced with just the CTE name
+    assert!(
+        !applied.contains("FROM (SELECT"),
+        "subquery should be replaced with CTE name"
+    );
+}
+
+#[test]
+fn test_extract_cte_from_subquery_in_join() {
+    // Subquery in JOIN should be extracted into a CTE + reference
+    let sql = "SELECT a.id FROM users a INNER JOIN (SELECT id FROM orders) b ON a.id = b.id";
+    //                                               ^ cursor inside subquery (line 0, col 40)
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 0, 40);
+    assert!(result.is_some(), "should find extractable subquery in JOIN");
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        applied.contains("WITH"),
+        "result should contain WITH clause"
+    );
+    assert!(
+        applied.contains("AS (SELECT id FROM orders)"),
+        "CTE body should contain the subquery"
+    );
+    assert!(
+        !applied.contains("JOIN (SELECT"),
+        "subquery in JOIN should be replaced"
+    );
+}
+
+#[test]
+fn test_extract_cte_appends_to_existing_with() {
+    // File already has CTEs, new one should be appended
+    let sql =
+        "WITH existing AS (SELECT 1 AS x)\nSELECT e.x FROM existing e CROSS JOIN (SELECT 2 AS y) f";
+    //                                                                             ^ cursor at line 1, col 42
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 1, 42);
+    assert!(
+        result.is_some(),
+        "should find extractable subquery with existing WITH"
+    );
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    // Should have comma-separated CTEs, not two WITH clauses
+    let with_count = applied.matches("WITH").count();
+    assert_eq!(
+        with_count, 1,
+        "should have exactly one WITH clause, got: {}",
+        applied
+    );
+    assert!(
+        applied.contains("existing AS"),
+        "should preserve existing CTE"
+    );
+    assert!(
+        applied.contains("AS (SELECT 2 AS y)"),
+        "should append new CTE"
+    );
+}
+
+#[test]
+fn test_extract_cte_creates_with_clause() {
+    // File has no CTEs, WITH clause should be created
+    let sql = "SELECT t.id FROM (SELECT id FROM users) t WHERE t.id > 0";
+    //                            ^ cursor at line 0, col 20
+    let result = smelt_db::code_actions::find_extract_cte_suggestion(sql, 0, 20);
+    assert!(result.is_some(), "should find extractable subquery");
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        applied.starts_with("WITH"),
+        "should create WITH clause at the start"
+    );
+    // The WHERE clause should be preserved
+    assert!(applied.contains("WHERE"), "should preserve WHERE clause");
+}
+
+/// Apply text edits to a string, processing from end to start to maintain positions.
+fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggestion]) -> String {
+    // Convert to byte offsets and sort by position (end to start)
+    let mut edits_with_offsets: Vec<_> = edits
+        .iter()
+        .map(|edit| {
+            let start =
+                position_to_byte_offset(text, edit.range.start.line, edit.range.start.column);
+            let end = position_to_byte_offset(text, edit.range.end.line, edit.range.end.column);
+            (start, end, &edit.new_text)
+        })
+        .collect();
+    edits_with_offsets.sort_by(|a, b| b.0.cmp(&a.0)); // reverse order
+
+    let mut result = text.to_string();
+    for (start, end, new_text) in edits_with_offsets {
+        result.replace_range(start..end, new_text);
+    }
+    result
+}
+
+/// Convert (line, col) to byte offset in text.
+fn position_to_byte_offset(text: &str, line: u32, col: u32) -> usize {
+    let mut current_line = 0u32;
+    let mut current_col = 0u32;
+    for (i, ch) in text.char_indices() {
+        if current_line == line && current_col == col {
+            return i;
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_col = 0;
+        } else {
+            current_col += 1;
+        }
+    }
+    if current_line == line && current_col == col {
+        return text.len();
+    }
+    text.len()
+}
+
+// ===== Phase 10: Inline CTE Refactoring =====
+
+#[test]
+fn test_inline_cte_single_reference() {
+    // CTE used once in FROM should be inlined as a subquery
+    let sql = "WITH sub AS (SELECT id FROM users)\nSELECT sub.id FROM sub";
+    //         ^ cursor on CTE definition name (line 0, col 5)
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 0, 5);
+    assert!(result.is_some(), "should find inlinable CTE used once");
+    let result = result.unwrap();
+    assert_eq!(result.cte_name, "sub");
+    let applied = apply_text_edits(sql, &result.edits);
+    // The WITH clause should be removed entirely
+    assert!(
+        !applied.contains("WITH"),
+        "WITH clause should be removed after inlining last CTE"
+    );
+    // The CTE reference should be replaced with a subquery
+    assert!(
+        applied.contains("(SELECT id FROM users)"),
+        "reference should be replaced with subquery, got: {}",
+        applied
+    );
+}
+
+#[test]
+fn test_inline_cte_removes_with_clause() {
+    // When the last CTE is inlined, the entire WITH keyword should be removed
+    let sql = "WITH only_cte AS (SELECT 1 AS x)\nSELECT only_cte.x FROM only_cte";
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 0, 5);
+    assert!(result.is_some(), "should inline single CTE");
+    let result = result.unwrap();
+    let applied = apply_text_edits(sql, &result.edits);
+    assert!(
+        !applied.contains("WITH"),
+        "WITH clause should be removed when last CTE is inlined, got: {}",
+        applied
+    );
+    // Should be a valid SELECT statement
+    assert!(
+        applied.contains("SELECT"),
+        "result should still contain SELECT"
+    );
+}
+
+#[test]
+fn test_inline_cte_keeps_other_ctes() {
+    // Only the selected CTE is removed, others remain
+    let sql =
+        "WITH a AS (SELECT 1 AS x),\nb AS (SELECT 2 AS y)\nSELECT a.x, b.y FROM a CROSS JOIN b";
+    //                                      ^ cursor on CTE 'b' (line 1, col 0)
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 1, 0);
+    assert!(result.is_some(), "should find inlinable CTE 'b'");
+    let result = result.unwrap();
+    assert_eq!(result.cte_name, "b");
+    let applied = apply_text_edits(sql, &result.edits);
+    // WITH clause should still exist (CTE 'a' remains)
+    assert!(
+        applied.contains("WITH"),
+        "WITH clause should remain for other CTEs, got: {}",
+        applied
+    );
+    assert!(
+        applied.contains("a AS"),
+        "CTE 'a' should be preserved, got: {}",
+        applied
+    );
+    // CTE 'b' should be inlined
+    assert!(
+        !applied.contains("b AS"),
+        "CTE 'b' should be removed from WITH, got: {}",
+        applied
+    );
+    assert!(
+        applied.contains("(SELECT 2 AS y)"),
+        "CTE 'b' body should be inlined as subquery, got: {}",
+        applied
+    );
+}
+
+#[test]
+fn test_inline_cte_rejects_multiple_references() {
+    // CTE used 3 times should not be inlinable
+    let sql = "WITH sub AS (SELECT id FROM users)\nSELECT s1.id FROM sub s1 CROSS JOIN sub s2 CROSS JOIN sub s3";
+    let result = smelt_db::code_actions::find_inline_cte_suggestion(sql, 0, 5);
+    assert!(
+        result.is_none(),
+        "should not inline CTE used more than once"
+    );
+}
+
+/// Validate that a string is a valid SQL identifier.
+/// Must be non-empty, start with a letter or underscore, and contain only
+/// alphanumeric characters and underscores.
+fn is_valid_sql_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

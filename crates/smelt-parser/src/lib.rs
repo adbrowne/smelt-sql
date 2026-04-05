@@ -2,6 +2,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod printer;
+pub mod symbol;
 /// smelt-parser - Rowan-based parser for smelt SQL files
 ///
 /// This crate provides a standalone parser for smelt model files, which are
