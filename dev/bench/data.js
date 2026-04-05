@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775389138248,
+  "lastUpdate": 1775389139983,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14363,6 +14363,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.32017431939971,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "fe78cdcaccbcdc62aecae284caebe8908a6d9155",
+          "message": "Add smelt check design doc and update roadmap\n\nReplace smelt validate with smelt check — an LLM-optimised diagnostic\nCLI with structured JSON output, severity filtering, scope control, and\ntoken budget management. Full design doc at docs/plans/20260405-smelt-check.md.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-05T21:36:59+10:00",
+          "tree_id": "300e741173c94828a900bddd1a0baeda50afa580",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/fe78cdcaccbcdc62aecae284caebe8908a6d9155"
+        },
+        "date": 1775389139310,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.987752200123076,
             "unit": "MB/s"
           }
         ]
