@@ -8,23 +8,19 @@ The **What's Next** section below is the prioritized work queue. Component secti
 
 The items below are the current priority queue. See completed items in [Recently Completed](#recently-completed) below.
 
-### 1. Metrics DSL
-
-Layer 1 of smelt's two-layer DSL: declarative metric definitions with semantic metadata (decomposability, temporal behavior). Resolves `smelt.metric()` calls.
-
-### 2. `smelt check` — LLM-Optimised Diagnostic CLI
+### 1. `smelt check` — LLM-Optimised Diagnostic CLI
 
 Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
 See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
+### 2. Orchestrator Integration
+
+Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
+
 ### 3. PostgreSQL Backend
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
-
-### 4. Orchestrator Integration
-
-Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
 ---
 
