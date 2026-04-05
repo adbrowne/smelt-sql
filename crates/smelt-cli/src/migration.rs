@@ -1,19 +1,22 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use smelt_backend::Backend;
-use smelt_core::metadata::{yaml_value_to_sql_literal, ModelMetadata};
+use smelt_backend::{Backend, SqlDialect};
+use smelt_core::config::TableFormat;
+use smelt_core::metadata::ModelMetadata;
+use smelt_dialect::BackendCapabilities;
+use smelt_state::ddl_spark::SparkTableFormat;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::schema_tracking::{
-    diff_schemas, plan_migration, DeployedColumn, DeployedSchema, MigrationAction,
+    diff_schemas, plan_migration_for_backend, DdlBackend, DeployedColumn, DeployedSchema,
+    MigrationAction,
 };
 use std::collections::HashMap;
-use tracing::warn;
 
 /// Extract column default values and backfill expressions from model metadata.
 ///
 /// Returns `(column_defaults, backfill_exprs)` where:
-/// - `column_defaults` maps column name → SQL literal (from `default:` in frontmatter)
+/// - `column_defaults` maps column name → SQL expression string (from `default:` in frontmatter)
 /// - `backfill_exprs` maps column name → SQL expression (from `backfill:` in frontmatter)
 pub fn extract_evolution_maps(
     metadata: Option<&ModelMetadata>,
@@ -27,13 +30,7 @@ pub fn extract_evolution_maps(
                     col_meta
                         .default
                         .as_ref()
-                        .and_then(|v| match yaml_value_to_sql_literal(v) {
-                            Ok(sql) => Some((name.clone(), sql)),
-                            Err(e) => {
-                                warn!("Column '{}': {} — ignoring default", name, e);
-                                None
-                            }
-                        })
+                        .map(|expr| (name.clone(), expr.clone()))
                 })
                 .collect();
             let backfills: HashMap<String, String> = m
@@ -64,6 +61,41 @@ pub enum SchemaEvolutionResult {
     FullRefreshRequired { reason: String },
     /// Column removal blocked — requires --allow-column-removal flag.
     ColumnRemovalBlocked { columns: Vec<String> },
+    /// Full refresh required but `--allow-full-refresh` not set — blocked.
+    FullRefreshBlocked { reason: String },
+    /// Table rewrite performed (Spark: CREATE TABLE tmp AS SELECT ... FROM original).
+    TableRewrite { description: String },
+}
+
+/// Construct a `DdlBackend` from a SQL dialect and optional table format.
+///
+/// For DuckDB, returns `DdlBackend::DuckDb`.
+/// For Spark, selects Delta or Parquet capabilities based on the table format.
+/// The `catalog` defaults to `"spark_catalog"` — callers should provide the actual
+/// catalog name if available.
+pub fn ddl_backend_for_dialect(
+    dialect: SqlDialect,
+    table_format: Option<TableFormat>,
+    catalog: Option<&str>,
+) -> DdlBackend {
+    match dialect {
+        SqlDialect::DuckDB | SqlDialect::PostgreSQL => DdlBackend::DuckDb,
+        SqlDialect::SparkSQL => {
+            let format = match table_format {
+                Some(TableFormat::Parquet) => SparkTableFormat::Parquet,
+                Some(TableFormat::Delta) | None => SparkTableFormat::Delta,
+            };
+            let capabilities = match format {
+                SparkTableFormat::Delta => BackendCapabilities::spark_delta(),
+                SparkTableFormat::Parquet => BackendCapabilities::spark_parquet(),
+            };
+            DdlBackend::Spark {
+                catalog: catalog.unwrap_or("spark_catalog").to_string(),
+                format,
+                capabilities,
+            }
+        }
+    }
 }
 
 /// Infer the current schema columns from the model's inferred types.
@@ -82,6 +114,9 @@ pub fn columns_from_inferred(columns: &[(String, Option<String>, bool)]) -> Vec<
 
 /// Check for schema evolution and apply migrations if needed.
 ///
+/// `ddl_backend` selects the DDL generator (DuckDB vs Spark+Delta/Parquet).
+/// When `None`, defaults to DuckDB.
+///
 /// Returns what action was taken (or what action is required).
 #[allow(clippy::too_many_arguments)]
 pub async fn check_and_migrate(
@@ -92,11 +127,15 @@ pub async fn check_and_migrate(
     schema: &str,
     inferred_columns: &[DeployedColumn],
     allow_column_removal: bool,
+    allow_full_refresh: bool,
     dry_run: bool,
     column_defaults: &HashMap<String, String>,
     backfill_exprs: &HashMap<String, String>,
+    ddl_backend: Option<&DdlBackend>,
 ) -> Result<SchemaEvolutionResult> {
     let model_hash = compute_model_hash(model_sql);
+    let default_backend = DdlBackend::DuckDb;
+    let ddl_backend = ddl_backend.unwrap_or(&default_backend);
 
     // Load deployed schema
     let deployed = file_store
@@ -118,14 +157,17 @@ pub async fn check_and_migrate(
         return Ok(SchemaEvolutionResult::NoChange);
     }
 
-    // Plan the migration
-    let action = plan_migration(
+    // Plan the migration using the appropriate backend DDL generator
+    let action = plan_migration_for_backend(
         schema,
         model_name,
         &diff,
         allow_column_removal,
         column_defaults,
         backfill_exprs,
+        ddl_backend,
+        &deployed_schema.columns,
+        inferred_columns,
     );
 
     match action {
@@ -190,6 +232,32 @@ pub async fn check_and_migrate(
         MigrationAction::RequiresColumnRemovalFlag { columns } => {
             Ok(SchemaEvolutionResult::ColumnRemovalBlocked { columns })
         }
+
+        MigrationAction::FullRefreshBlocked { reason } => {
+            if allow_full_refresh {
+                // User opted in — treat as a full refresh
+                Ok(SchemaEvolutionResult::FullRefreshRequired { reason })
+            } else {
+                Ok(SchemaEvolutionResult::FullRefreshBlocked { reason })
+            }
+        }
+
+        MigrationAction::TableRewrite { select_expr } => {
+            if allow_full_refresh {
+                // Table rewrite allowed — report it back for execution
+                Ok(SchemaEvolutionResult::TableRewrite {
+                    description: select_expr,
+                })
+            } else {
+                // Table rewrite blocked without --allow-full-refresh
+                Ok(SchemaEvolutionResult::FullRefreshBlocked {
+                    reason: format!(
+                        "Schema change requires table rewrite. Use --allow-full-refresh to permit. Details: {}",
+                        select_expr
+                    ),
+                })
+            }
+        }
     }
 }
 
@@ -214,4 +282,98 @@ pub fn save_deployed_schema(
     file_store
         .save_schema(&schema)
         .with_context(|| format!("Failed to save schema for {}", model_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_state::ddl_spark::SparkTableFormat;
+    use smelt_state::schema_tracking::DdlBackend;
+
+    #[test]
+    fn test_ddl_backend_duckdb() {
+        let backend = ddl_backend_for_dialect(SqlDialect::DuckDB, None, None);
+        assert!(matches!(backend, DdlBackend::DuckDb));
+    }
+
+    #[test]
+    fn test_ddl_backend_duckdb_ignores_format() {
+        // DuckDB ignores table format
+        let backend = ddl_backend_for_dialect(SqlDialect::DuckDB, Some(TableFormat::Delta), None);
+        assert!(matches!(backend, DdlBackend::DuckDb));
+    }
+
+    #[test]
+    fn test_ddl_backend_postgresql_uses_duckdb() {
+        // PostgreSQL uses DuckDB DDL generator (same SQL dialect)
+        let backend = ddl_backend_for_dialect(SqlDialect::PostgreSQL, None, None);
+        assert!(matches!(backend, DdlBackend::DuckDb));
+    }
+
+    #[test]
+    fn test_ddl_backend_spark_defaults_to_delta() {
+        let backend = ddl_backend_for_dialect(SqlDialect::SparkSQL, None, None);
+        match backend {
+            DdlBackend::Spark {
+                format,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(format, SparkTableFormat::Delta);
+                assert!(capabilities.supports_column_mapping);
+                assert!(capabilities.supports_merge_schema_write);
+            }
+            _ => panic!("Expected Spark backend"),
+        }
+    }
+
+    #[test]
+    fn test_ddl_backend_spark_delta() {
+        let backend = ddl_backend_for_dialect(SqlDialect::SparkSQL, Some(TableFormat::Delta), None);
+        match backend {
+            DdlBackend::Spark {
+                format,
+                capabilities,
+                catalog,
+                ..
+            } => {
+                assert_eq!(format, SparkTableFormat::Delta);
+                assert!(capabilities.supports_column_mapping);
+                assert_eq!(catalog, "spark_catalog");
+            }
+            _ => panic!("Expected Spark backend"),
+        }
+    }
+
+    #[test]
+    fn test_ddl_backend_spark_parquet() {
+        let backend =
+            ddl_backend_for_dialect(SqlDialect::SparkSQL, Some(TableFormat::Parquet), None);
+        match backend {
+            DdlBackend::Spark {
+                format,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(format, SparkTableFormat::Parquet);
+                assert!(!capabilities.supports_column_mapping);
+            }
+            _ => panic!("Expected Spark backend"),
+        }
+    }
+
+    #[test]
+    fn test_ddl_backend_spark_custom_catalog() {
+        let backend = ddl_backend_for_dialect(
+            SqlDialect::SparkSQL,
+            Some(TableFormat::Delta),
+            Some("unity_catalog"),
+        );
+        match backend {
+            DdlBackend::Spark { catalog, .. } => {
+                assert_eq!(catalog, "unity_catalog");
+            }
+            _ => panic!("Expected Spark backend"),
+        }
+    }
 }

@@ -44,6 +44,7 @@ smelt run [OPTIONS]
 | `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
 | `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
+| `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
 
 **Selector syntax:**
 

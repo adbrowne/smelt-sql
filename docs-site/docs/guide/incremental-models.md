@@ -285,7 +285,17 @@ smelt supports multiple strategies for how data is updated. The strategy is chos
 | `append` | Append-only workloads | INSERT only, no deletion |
 | `insert_overwrite` | Backend-specific optimization | Overwrite entire partitions atomically |
 
+## Schema evolution
+
+When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See [Schema Evolution](schema-evolution.md) for full details on:
+
+- Safe vs unsafe changes and how each is handled
+- Complex type support (structs, arrays, maps)
+- Backend-specific behavior (DuckDB, Spark+Delta, Spark+Parquet)
+- The `--allow-full-refresh` flag for changes that require a full table rebuild
+
 ## Further reading
 
 - [Materializations](materializations.md) for an overview of all materialization types
 - [Model Selection](model-selection.md) for running specific models with `--select`
+- [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs

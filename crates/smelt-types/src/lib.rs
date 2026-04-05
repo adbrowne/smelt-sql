@@ -64,6 +64,8 @@ pub enum DataType {
     Array(Box<DataType>),
     /// Struct with named fields: STRUCT(a INTEGER, b VARCHAR)
     Struct(Vec<(String, DataType)>),
+    /// Map from key type to value type: MAP(VARCHAR, INTEGER)
+    Map(Box<DataType>, Box<DataType>),
 
     // Special types
     /// NULL literal type
@@ -94,12 +96,40 @@ impl DataType {
         )
     }
 
+    /// Check if this type is a complex/nested type (Array, Struct, Map)
+    pub fn is_complex(&self) -> bool {
+        matches!(
+            self,
+            DataType::Array(_) | DataType::Struct(_) | DataType::Map(_, _)
+        )
+    }
+
     /// Check if this type is a date/time type
     pub fn is_temporal(&self) -> bool {
         matches!(
             self,
             DataType::Date | DataType::Time | DataType::Timestamp { .. } | DataType::Interval
         )
+    }
+
+    /// Normalize this type to its canonical form for comparison.
+    ///
+    /// - `Text` → `Varchar { max_length: None }` (canonical string type)
+    /// - Recursively normalizes Array elements, Struct fields, Map key/value
+    /// - All other types are returned as-is
+    pub fn normalize(&self) -> DataType {
+        match self {
+            DataType::Text => DataType::Varchar { max_length: None },
+            DataType::Array(inner) => DataType::Array(Box::new(inner.normalize())),
+            DataType::Struct(fields) => DataType::Struct(
+                fields
+                    .iter()
+                    .map(|(name, dt)| (name.clone(), dt.normalize()))
+                    .collect(),
+            ),
+            DataType::Map(k, v) => DataType::Map(Box::new(k.normalize()), Box::new(v.normalize())),
+            other => other.clone(),
+        }
     }
 
     /// Format as SQL type string for backend compilation.
@@ -153,6 +183,9 @@ impl DataType {
                     .map(|(name, dt)| format!("{} {}", name, dt.to_sql()))
                     .collect();
                 format!("STRUCT({})", field_strs.join(", "))
+            }
+            DataType::Map(key, value) => {
+                format!("MAP({}, {})", key.to_sql(), value.to_sql())
             }
             DataType::Null => "NULL".to_string(),
             DataType::Unknown => "UNKNOWN".to_string(),
@@ -271,6 +304,127 @@ mod tests {
         .is_numeric());
         assert!(!DataType::Varchar { max_length: None }.is_numeric());
         assert!(!DataType::Date.is_numeric());
+    }
+
+    #[test]
+    fn test_is_complex() {
+        assert!(DataType::Array(Box::new(DataType::Integer)).is_complex());
+        assert!(DataType::Struct(vec![("a".to_string(), DataType::Integer)]).is_complex());
+        assert!(DataType::Map(
+            Box::new(DataType::Varchar { max_length: None }),
+            Box::new(DataType::Integer)
+        )
+        .is_complex());
+        assert!(!DataType::Integer.is_complex());
+        assert!(!DataType::Varchar { max_length: None }.is_complex());
+        assert!(!DataType::Boolean.is_complex());
+    }
+
+    #[test]
+    fn test_map_to_sql() {
+        assert_eq!(
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer)
+            )
+            .to_sql(),
+            "MAP(VARCHAR, INTEGER)"
+        );
+    }
+
+    // === normalize() tests ===
+
+    #[test]
+    fn test_normalize_text_to_varchar() {
+        assert_eq!(
+            DataType::Text.normalize(),
+            DataType::Varchar { max_length: None }
+        );
+    }
+
+    #[test]
+    fn test_normalize_scalar_unchanged() {
+        assert_eq!(DataType::Integer.normalize(), DataType::Integer);
+        assert_eq!(DataType::BigInt.normalize(), DataType::BigInt);
+        assert_eq!(DataType::Boolean.normalize(), DataType::Boolean);
+        assert_eq!(
+            DataType::Varchar { max_length: None }.normalize(),
+            DataType::Varchar { max_length: None }
+        );
+        assert_eq!(
+            DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+            .normalize(),
+            DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_normalize_array_recursive() {
+        // Array(Text) → Array(Varchar)
+        let arr = DataType::Array(Box::new(DataType::Text));
+        assert_eq!(
+            arr.normalize(),
+            DataType::Array(Box::new(DataType::Varchar { max_length: None }))
+        );
+
+        // Array(Integer) unchanged
+        let arr = DataType::Array(Box::new(DataType::Integer));
+        assert_eq!(
+            arr.normalize(),
+            DataType::Array(Box::new(DataType::Integer))
+        );
+    }
+
+    #[test]
+    fn test_normalize_struct_recursive() {
+        let s = DataType::Struct(vec![
+            ("a".to_string(), DataType::Text),
+            ("b".to_string(), DataType::Integer),
+        ]);
+        assert_eq!(
+            s.normalize(),
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::Varchar { max_length: None }),
+                ("b".to_string(), DataType::Integer),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_normalize_map_recursive() {
+        let m = DataType::Map(Box::new(DataType::Text), Box::new(DataType::Text));
+        assert_eq!(
+            m.normalize(),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Varchar { max_length: None })
+            )
+        );
+    }
+
+    #[test]
+    fn test_normalize_deeply_nested() {
+        // STRUCT(a STRUCT(x Text)) → STRUCT(a STRUCT(x Varchar))
+        let s = DataType::Struct(vec![(
+            "a".to_string(),
+            DataType::Struct(vec![("x".to_string(), DataType::Text)]),
+        )]);
+        assert_eq!(
+            s.normalize(),
+            DataType::Struct(vec![(
+                "a".to_string(),
+                DataType::Struct(vec![(
+                    "x".to_string(),
+                    DataType::Varchar { max_length: None }
+                )]),
+            )])
+        );
     }
 
     #[test]

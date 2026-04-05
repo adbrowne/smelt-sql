@@ -488,6 +488,7 @@ mod tests {
                 connect_url: None,
                 catalog: None,
                 warehouse: None,
+                format: None,
             },
         );
 
@@ -575,6 +576,7 @@ mod tests {
                 connect_url: None,
                 catalog: None,
                 warehouse: None,
+                format: None,
             },
         );
         config.models.insert(

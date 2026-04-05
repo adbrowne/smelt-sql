@@ -83,38 +83,6 @@ pub enum SchemaEvolutionStrategy {
     FullRefresh,
 }
 
-/// Convert a YAML value to a SQL literal string.
-///
-/// Used to generate DEFAULT clauses for ALTER TABLE statements from
-/// frontmatter `default:` values.
-///
-/// Returns an error for YAML sequences and mappings, which are not valid
-/// SQL literals.
-pub fn yaml_value_to_sql_literal(val: &serde_yaml::Value) -> Result<String, String> {
-    match val {
-        serde_yaml::Value::Null => Ok("NULL".to_string()),
-        serde_yaml::Value::Bool(b) => {
-            if *b {
-                Ok("TRUE".to_string())
-            } else {
-                Ok("FALSE".to_string())
-            }
-        }
-        serde_yaml::Value::Number(n) => Ok(n.to_string()),
-        serde_yaml::Value::String(s) => {
-            // Escape single quotes by doubling them
-            Ok(format!("'{}'", s.replace('\'', "''")))
-        }
-        serde_yaml::Value::Sequence(_) => Err(
-            "unsupported YAML type for SQL default: sequences are not valid SQL literals".into(),
-        ),
-        serde_yaml::Value::Mapping(_) => {
-            Err("unsupported YAML type for SQL default: mappings are not valid SQL literals".into())
-        }
-        serde_yaml::Value::Tagged(t) => yaml_value_to_sql_literal(&t.value),
-    }
-}
-
 /// Per-column metadata declared in model frontmatter.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ColumnMetadata {
@@ -130,10 +98,13 @@ pub struct ColumnMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<ColumnTest>,
 
-    /// Default value for schema evolution (used when adding NOT NULL columns
+    /// Default SQL expression for schema evolution (used when adding NOT NULL columns
     /// via ALTER TABLE instead of full refresh).
+    ///
+    /// This is a raw SQL expression string, e.g. `"0"`, `"'unknown'"`, `"NULL"`,
+    /// or complex type expressions like `"STRUCT_PACK(a := 0, b := '')"`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<serde_yaml::Value>,
+    pub default: Option<String>,
 
     /// SQL expression for backfilling existing rows during schema evolution.
     /// Used in UPDATE statements after ALTER TABLE ADD COLUMN.
@@ -188,6 +159,10 @@ pub struct ModelMetadata {
     /// Schema evolution configuration (opt out with strategy: full_refresh)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_evolution: Option<SchemaEvolutionConfig>,
+
+    /// Override table format for this model (e.g., parquet for a specific model on a Delta target)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::config::TableFormat>,
 }
 
 /// Complete file metadata (single or multi-model)
@@ -704,64 +679,67 @@ SELECT * FROM users"#;
     }
 
     #[test]
-    fn test_yaml_value_to_sql_literal() {
-        assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::String("hello".into())).unwrap(),
-            "'hello'"
-        );
-        assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::String("it's".into())).unwrap(),
-            "'it''s'"
-        );
-        assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Number(42.into())).unwrap(),
-            "42"
-        );
-        assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(true)).unwrap(),
-            "TRUE"
-        );
-        assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Bool(false)).unwrap(),
-            "FALSE"
-        );
-        assert_eq!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Null).unwrap(),
-            "NULL"
-        );
-        // Sequences and mappings should return errors
-        assert!(yaml_value_to_sql_literal(&serde_yaml::Value::Sequence(vec![])).is_err());
-        assert!(
-            yaml_value_to_sql_literal(&serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
-                .is_err()
-        );
-    }
-
-    #[test]
     fn test_frontmatter_with_column_default() {
         let source = r#"---
 name: test_model
 materialization: table
 columns:
   status:
-    default: unknown
+    default: "'unknown'"
   priority:
-    default: 0
+    default: "0"
 ---
 SELECT * FROM users"#;
         let result = extract_file_metadata(source).unwrap();
         match result {
             FileMetadata::Single { metadata, .. } => {
                 let status = metadata.columns.get("status").unwrap();
-                assert_eq!(
-                    yaml_value_to_sql_literal(status.default.as_ref().unwrap()).unwrap(),
-                    "'unknown'"
-                );
+                assert_eq!(status.default.as_ref().unwrap(), "'unknown'");
                 let priority = metadata.columns.get("priority").unwrap();
+                assert_eq!(priority.default.as_ref().unwrap(), "0");
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_complex_type_defaults() {
+        let source = r#"---
+name: test_model
+materialization: table
+columns:
+  meta:
+    default: "STRUCT_PACK(a := 0, b := '')"
+  tags:
+    default: "[]::VARCHAR[]"
+  lookup:
+    default: "MAP {}"
+  scores:
+    default: "ARRAY[1, 2, 3]"
+  flag:
+    default: "TRUE"
+  nothing:
+    default: "NULL"
+---
+SELECT * FROM users"#;
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                let meta = metadata.columns.get("meta").unwrap();
                 assert_eq!(
-                    yaml_value_to_sql_literal(priority.default.as_ref().unwrap()).unwrap(),
-                    "0"
+                    meta.default.as_ref().unwrap(),
+                    "STRUCT_PACK(a := 0, b := '')"
                 );
+                let tags = metadata.columns.get("tags").unwrap();
+                assert_eq!(tags.default.as_ref().unwrap(), "[]::VARCHAR[]");
+                let lookup = metadata.columns.get("lookup").unwrap();
+                assert_eq!(lookup.default.as_ref().unwrap(), "MAP {}");
+                let scores = metadata.columns.get("scores").unwrap();
+                assert_eq!(scores.default.as_ref().unwrap(), "ARRAY[1, 2, 3]");
+                let flag = metadata.columns.get("flag").unwrap();
+                assert_eq!(flag.default.as_ref().unwrap(), "TRUE");
+                let nothing = metadata.columns.get("nothing").unwrap();
+                assert_eq!(nothing.default.as_ref().unwrap(), "NULL");
             }
             _ => panic!("Expected Single variant"),
         }
@@ -783,6 +761,30 @@ SELECT * FROM users"#;
                     metadata.schema_evolution.unwrap().strategy,
                     SchemaEvolutionStrategy::FullRefresh
                 );
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_with_format_override() {
+        let source = "---\nname: my_model\nmaterialization: table\nformat: parquet\n---\nSELECT 1";
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.format, Some(crate::config::TableFormat::Parquet));
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_without_format_is_none() {
+        let source = "---\nname: my_model\nmaterialization: table\n---\nSELECT 1";
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(metadata.format, None);
             }
             _ => panic!("Expected Single variant"),
         }

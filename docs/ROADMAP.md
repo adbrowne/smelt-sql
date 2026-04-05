@@ -8,21 +8,19 @@ The **What's Next** section below is the prioritized work queue. Component secti
 
 The items below are the current priority queue. See completed items in [Recently Completed](#recently-completed) below.
 
-### 1. Metrics DSL
+### 1. `smelt check` — LLM-Optimised Diagnostic CLI
 
-Layer 1 of smelt's two-layer DSL: declarative metric definitions with semantic metadata (decomposability, temporal behavior). Resolves `smelt.metric()` calls.
+Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
-### 2. `smelt validate` — Pre-run Validation
+See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-Static validation pass that catches issues before execution: schema compatibility across models, incremental config consistency, backend capability checks.
+### 2. Orchestrator Integration
+
+Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
 ### 3. PostgreSQL Backend
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
-
-### 4. Orchestrator Integration
-
-Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
 ---
 
@@ -88,6 +86,28 @@ Efficient schema migrations using ALTER TABLE + DEFAULT values instead of full t
 - ✅ `schema_evolution: { strategy: full_refresh }` — opt out of ALTER-based migration per model
 - ✅ Nullable-to-NOT-NULL with default — `UPDATE ... WHERE IS NULL` + `ALTER SET NOT NULL`
 - ✅ `smelt diff` shows migration plan with defaults (ALTER with DEFAULT instead of full refresh)
+
+### ~~Schema Evolution — Complex Types~~ ✅ (April 5, 2026)
+
+Production schema evolution for nested/complex types (Struct, Array, Map). Previously, any change to a complex type column triggered a full table refresh.
+
+- ✅ `parse_type()` extended for `STRUCT(...)`, `TYPE[]`, `MAP(K, V)` with recursive nesting
+- ✅ `Map(Box<DataType>, Box<DataType>)` variant added to `DataType`
+- ✅ Recursive type normalization (`DataType::normalize()`)
+- ✅ Structural diff for complex types — field-level additions, removals, type widening, nested changes
+- ✅ Safe widening rules for nested types (e.g., `INTEGER` → `BIGINT` inside a struct)
+- ✅ Abstract `SchemaOperation` enum for backend-agnostic migration planning
+- ✅ DuckDB DDL generation: struct dot-notation, `struct_pack` rewrites, `list_transform` for array-of-struct
+- ✅ Spark DDL generation: `mergeSchema` for safe additions, `TableRewrite` for unsupported operations
+- ✅ Table format config (`format: delta|parquet`) at target and model level
+- ✅ `--allow-full-refresh` CLI gate for expensive operations
+- ✅ `default:` changed from YAML value to SQL expression string (breaking change)
+- ✅ Identifier quoting for SQL keywords and special characters
+- ✅ Graceful fallback for unparseable type strings with warnings
+- ✅ Round-trip verification: `DataType` → `to_sql()` → `parse_type()` → `DataType`
+- ✅ User-facing documentation on smeltsql.com (schema-evolution guide, backend capability matrix)
+
+See [plan](plans/20260405-schema-evolution-complex-types.md) for details.
 
 ### ~~Spark / Databricks Backend~~ ✅ (March 28, 2026)
 
@@ -289,7 +309,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ~~`smelt test`~~ ✅ (March 27, 2026) — see [Data Testing Framework](#data-testing-framework)
 - ~~`smelt docs generate`~~ ✅ (March 29, 2026) — see [What's Next](#1-data-catalog--smelt-docs-generate)
 - ~~`smelt diff`~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-diff--smelt-diff)
-- `smelt validate` — pre-run validation
+- `smelt check` — LLM-optimised diagnostic CLI ([design doc](plans/20260405-smelt-check.md))
 - ~~Schema evolution with efficient migrations~~ ✅ (March 29, 2026) — see [What's Next](#1-schema-evolution)
 
 ## UI Dashboard ✅ Phases 1-4 (March 24-25, 2026)

@@ -549,6 +549,7 @@ mod tests {
                 connect_url: None,
                 catalog: None,
                 warehouse: None,
+                format: None,
             },
         );
 
