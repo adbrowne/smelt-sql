@@ -61,16 +61,16 @@ fn parse_type_inner(upper: &str) -> Result<DataType, TypeParseError> {
     }
 
     // Check for [] suffix (array bracket notation) — peel from right
-    if upper.ends_with("[]") {
-        let inner = upper[..upper.len() - 2].trim();
+    if let Some(inner) = upper.strip_suffix("[]") {
+        let inner = inner.trim();
         let inner_type = parse_type_inner(inner)?;
         return Ok(DataType::Array(Box::new(inner_type)));
     }
 
     // Check for " ARRAY" suffix (SQL standard notation)
     // Must not match "ARRAY" by itself or "ARRAY(...)"
-    if upper.ends_with(" ARRAY") {
-        let inner = upper[..upper.len() - 6].trim();
+    if let Some(inner) = upper.strip_suffix(" ARRAY") {
+        let inner = inner.trim();
         if !inner.is_empty() {
             let inner_type = parse_type_inner(inner)?;
             return Ok(DataType::Array(Box::new(inner_type)));
