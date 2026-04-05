@@ -2156,36 +2156,180 @@ impl LanguageServer for Backend {
             })
             .collect();
 
+        // Read sources.yml for YAML-editing code actions
+        let project_root = db.file_project_root(effective_path.clone());
+        let sources_yml_content = (*db.project_sources_yaml(project_root.clone())).clone();
+        let sources_yml_path = project_root.join("sources.yml");
+
         let mut actions = Vec::new();
+
+        // Diagnostic-based code actions
         for diag in &matching {
-            let suggestions = smelt_db::code_actions::generate_code_actions(diag, &text);
-            for suggestion in suggestions {
-                let range = Range {
-                    start: Position::new(
-                        suggestion.range.start.line + line_offset,
-                        suggestion.range.start.column,
-                    ),
-                    end: Position::new(
-                        suggestion.range.end.line + line_offset,
-                        suggestion.range.end.column,
-                    ),
-                };
-                let edit = TextEdit {
-                    range,
-                    new_text: suggestion.new_text,
-                };
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![edit]);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: suggestion.title,
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }));
+            use smelt_db::code_actions::CodeActionKind as CAK;
+
+            let action_kinds = smelt_db::code_actions::generate_all_code_actions(
+                diag,
+                &text,
+                &sources_yml_content,
+            );
+            for kind in action_kinds {
+                match kind {
+                    CAK::TextEdit(suggestion) => {
+                        let range = Range {
+                            start: Position::new(
+                                suggestion.range.start.line + line_offset,
+                                suggestion.range.start.column,
+                            ),
+                            end: Position::new(
+                                suggestion.range.end.line + line_offset,
+                                suggestion.range.end.column,
+                            ),
+                        };
+                        let edit = TextEdit {
+                            range,
+                            new_text: suggestion.new_text,
+                        };
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(uri.clone(), vec![edit]);
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                    CAK::CreateModel(suggestion) => {
+                        // Build the new model file path in the same directory as the current file
+                        let model_dir = effective_path.parent().unwrap_or(project_root.as_ref());
+                        let new_file_path =
+                            model_dir.join(format!("{}.sql", suggestion.model_name));
+                        let new_file_uri =
+                            Url::from_file_path(&new_file_path).unwrap_or_else(|_| uri.clone());
+
+                        let document_changes = vec![
+                            DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                                uri: new_file_uri.clone(),
+                                options: None,
+                                annotation_id: None,
+                            })),
+                            DocumentChangeOperation::Edit(TextDocumentEdit {
+                                text_document: OptionalVersionedTextDocumentIdentifier {
+                                    uri: new_file_uri,
+                                    version: None,
+                                },
+                                edits: vec![OneOf::Left(TextEdit {
+                                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                                    new_text: suggestion.skeleton_sql,
+                                })],
+                            }),
+                        ];
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                document_changes: Some(DocumentChanges::Operations(
+                                    document_changes,
+                                )),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                    CAK::YamlEdit(suggestion) => {
+                        let yaml_uri =
+                            Url::from_file_path(&sources_yml_path).unwrap_or_else(|_| uri.clone());
+                        // Insert new lines after the specified line
+                        let insert_line = (suggestion.insert_after_line + 1) as u32;
+                        let new_text = suggestion.new_lines.join("\n") + "\n";
+                        let edit = TextEdit {
+                            range: Range::new(
+                                Position::new(insert_line, 0),
+                                Position::new(insert_line, 0),
+                            ),
+                            new_text,
+                        };
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(yaml_uri, vec![edit]);
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                }
             }
+        }
+
+        // Cursor-based CTE refactorings
+        if let Some(result) = smelt_db::code_actions::find_extract_cte_suggestion(
+            &text,
+            adj_start_line,
+            request_range.start.character,
+        ) {
+            let edits: Vec<TextEdit> = result
+                .edits
+                .iter()
+                .map(|e| TextEdit {
+                    range: Range {
+                        start: Position::new(
+                            e.range.start.line + line_offset,
+                            e.range.start.column,
+                        ),
+                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
+                    },
+                    new_text: e.new_text.clone(),
+                })
+                .collect();
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), edits);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: result.title,
+                kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }));
+        }
+
+        if let Some(result) = smelt_db::code_actions::find_inline_cte_suggestion(
+            &text,
+            adj_start_line,
+            request_range.start.character,
+        ) {
+            let edits: Vec<TextEdit> = result
+                .edits
+                .iter()
+                .map(|e| TextEdit {
+                    range: Range {
+                        start: Position::new(
+                            e.range.start.line + line_offset,
+                            e.range.start.column,
+                        ),
+                        end: Position::new(e.range.end.line + line_offset, e.range.end.column),
+                    },
+                    new_text: e.new_text.clone(),
+                })
+                .collect();
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), edits);
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: result.title,
+                kind: Some(CodeActionKind::REFACTOR_INLINE),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }));
         }
 
         if actions.is_empty() {
