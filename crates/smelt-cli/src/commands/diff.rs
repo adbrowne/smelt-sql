@@ -229,13 +229,19 @@ fn print_text(entries: &[ModelDiffEntry]) {
             ModelDiffStatus::Changed { diff, action } => {
                 changed += 1;
                 println!("Model: {}", entry.name);
+                for warning in &diff.warnings {
+                    println!("  ⚠ {}", warning);
+                }
                 for line in diff.summary() {
                     println!("  {}", line);
                 }
                 match action {
                     MigrationAction::NoChange => {}
-                    MigrationAction::AlterTable { .. } => {
+                    MigrationAction::AlterTable { statements } => {
                         println!("  -> Safe: ALTER TABLE (no data loss)");
+                        for stmt in statements {
+                            println!("     {}", stmt);
+                        }
                     }
                     MigrationAction::FullRefresh { reason } => {
                         println!("  -> Requires: --full-refresh ({})", reason);
@@ -429,6 +435,7 @@ fn print_json(entries: &[ModelDiffEntry]) {
                     "name": entry.name,
                     "status": "changed",
                     "changes": changes,
+                    "warnings": diff.warnings,
                     "risk": {
                         "requires_full_refresh": diff.requires_full_refresh(),
                         "has_column_removals": diff.has_column_removals(),

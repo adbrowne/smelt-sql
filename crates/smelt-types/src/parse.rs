@@ -736,6 +736,92 @@ mod tests {
     }
 
     #[test]
+    fn test_round_trip_all_types() {
+        // Verify: DataType → to_sql() → parse_type() → DataType for all canonical types.
+        // NOTE: DataType::Text is NOT round-trip safe (Text.to_sql() = "TEXT",
+        // parse_type("TEXT") = Varchar). Use normalize() before round-trip testing.
+        let types = vec![
+            DataType::Boolean,
+            DataType::SmallInt,
+            DataType::Integer,
+            DataType::BigInt,
+            DataType::Float,
+            DataType::Double,
+            DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            DataType::Decimal {
+                precision: 18,
+                scale: 0,
+            },
+            DataType::Varchar { max_length: None },
+            DataType::Varchar {
+                max_length: Some(255),
+            },
+            DataType::Char { length: 10 },
+            DataType::Date,
+            DataType::Time,
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+            DataType::Timestamp {
+                with_timezone: true,
+            },
+            DataType::Interval,
+            DataType::Blob,
+            // Complex types
+            DataType::Array(Box::new(DataType::Integer)),
+            DataType::Array(Box::new(DataType::Array(Box::new(DataType::BigInt)))),
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Varchar { max_length: None }),
+            ]),
+            DataType::Struct(vec![(
+                "nested".to_string(),
+                DataType::Struct(vec![("x".to_string(), DataType::BigInt)]),
+            )]),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Integer),
+            ),
+            DataType::Map(
+                Box::new(DataType::Varchar { max_length: None }),
+                Box::new(DataType::Struct(vec![("a".to_string(), DataType::Integer)])),
+            ),
+            // Array of struct
+            DataType::Array(Box::new(DataType::Struct(vec![
+                ("id".to_string(), DataType::Integer),
+                ("name".to_string(), DataType::Varchar { max_length: None }),
+            ]))),
+        ];
+
+        for dt in &types {
+            let sql = dt.to_sql();
+            let parsed = parse_type(&sql).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to parse to_sql() output '{}' for {:?}: {}",
+                    sql, dt, e
+                )
+            });
+            assert_eq!(
+                dt, &parsed,
+                "Round-trip failed for {:?}: to_sql()='{}', parsed back={:?}",
+                dt, sql, parsed
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_trip_normalized_text() {
+        // Text normalizes to Varchar, which does round-trip
+        let dt = DataType::Text.normalize();
+        let sql = dt.to_sql();
+        let parsed = parse_type(&sql).unwrap();
+        assert_eq!(dt, parsed);
+    }
+
+    #[test]
     fn test_parse_complex_case_insensitive() {
         assert_eq!(
             parse_type("struct(a integer)").unwrap(),

@@ -1,7 +1,7 @@
 # Plan: Production Schema Evolution for Complex Types
 
 **Date:** 2026-04-05
-**Status:** Proposed
+**Status:** Complete
 **Branch:** worktree-schema_evolution
 
 ## Context
@@ -895,23 +895,23 @@ cd docs-site && pip install -r requirements.txt && mkdocs build --strict
 
 ---
 
-## Phase 14: Polish and Edge Cases [ ]
+## Phase 14: Polish and Edge Cases [x]
 
 **Goal:** Handle edge cases, improve error messages, ensure robustness.
 
 ### Work Items
 
-- [ ] 14a. Handle `parse_type()` failures gracefully in `diff_schemas()`:
+- [x] 14a. Handle `parse_type()` failures gracefully in `diff_schemas()`:
   - If a deployed type string can't be parsed (e.g., from an older smelt version or external source), fall back to string comparison with a warning
   - Test: unparseable type string → fallback to string diff, not crash
-- [ ] 14b. Improve error messages:
+- [x] 14b. Improve error messages:
   - `FullRefreshBlocked` should explain exactly what changed, why it's unsupported, and what flag to use
   - `IncompatibleTypeChange` summary should show the full type paths
   - Dry-run mode (`smelt diff`) should show the full migration plan with operations
-- [ ] 14c. Handle column quoting for identifiers that need it (struct field names with spaces/keywords).
-- [ ] 14d. Verify round-trip: `DataType` → `to_sql()` → `parse_type()` → `DataType` for all types including Map.
-- [ ] 14e. Run `cargo test -p smelt-cli --test example_diagnostics` to verify existing examples still work.
-- [ ] 14f. Update `docs/ROADMAP.md` with completion status.
+- [x] 14c. Handle column quoting for identifiers that need it (struct field names with spaces/keywords).
+- [x] 14d. Verify round-trip: `DataType` → `to_sql()` → `parse_type()` → `DataType` for all types including Map.
+- [x] 14e. Run `cargo test -p smelt-cli --test example_diagnostics` to verify existing examples still work.
+- [x] 14f. Update `docs/ROADMAP.md` with completion status.
 
 ### Verification
 

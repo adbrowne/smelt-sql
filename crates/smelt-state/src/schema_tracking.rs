@@ -6,6 +6,111 @@ use std::collections::HashMap;
 
 use crate::ddl_spark::{self, MigrationExecution, SparkTableFormat};
 
+/// SQL keywords that must be quoted when used as identifiers.
+const SQL_KEYWORDS: &[&str] = &[
+    "ADD",
+    "ALL",
+    "ALTER",
+    "AND",
+    "AS",
+    "ASC",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "CHECK",
+    "COLUMN",
+    "COMMIT",
+    "CONSTRAINT",
+    "CREATE",
+    "CROSS",
+    "CURRENT",
+    "DEFAULT",
+    "DELETE",
+    "DESC",
+    "DISTINCT",
+    "DROP",
+    "ELSE",
+    "END",
+    "EXISTS",
+    "FALSE",
+    "FETCH",
+    "FOR",
+    "FOREIGN",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "HAVING",
+    "IF",
+    "IN",
+    "INDEX",
+    "INNER",
+    "INSERT",
+    "INTO",
+    "IS",
+    "JOIN",
+    "KEY",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "NOT",
+    "NULL",
+    "OFFSET",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "PRIMARY",
+    "REFERENCES",
+    "RIGHT",
+    "ROLLBACK",
+    "ROW",
+    "SELECT",
+    "SET",
+    "TABLE",
+    "THEN",
+    "TIME",
+    "TO",
+    "TRUE",
+    "UNION",
+    "UNIQUE",
+    "UPDATE",
+    "USING",
+    "VALUES",
+    "WHEN",
+    "WHERE",
+    "WITH",
+];
+
+/// Quote a SQL identifier if it needs quoting.
+///
+/// Returns the identifier double-quoted if it:
+/// - Contains spaces or special characters (anything other than `[a-zA-Z0-9_]`)
+/// - Is a SQL keyword (case-insensitive)
+/// - Starts with a digit
+///
+/// Otherwise returns the identifier as-is.
+pub fn quote_identifier(ident: &str) -> String {
+    let needs_quoting = ident.is_empty()
+        || ident.starts_with(|c: char| c.is_ascii_digit())
+        || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || SQL_KEYWORDS.iter().any(|kw| kw.eq_ignore_ascii_case(ident));
+
+    if needs_quoting {
+        format!("\"{}\"", ident.replace('"', "\"\""))
+    } else {
+        ident.to_string()
+    }
+}
+
+/// Quote a dot-separated path of identifiers, quoting each segment individually.
+pub fn quote_dot_path(path: &str) -> String {
+    path.split('.')
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// Persisted schema for a deployed model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployedSchema {
@@ -101,6 +206,8 @@ pub enum SchemaChange {
 #[derive(Debug, Clone)]
 pub struct SchemaDiff {
     pub changes: Vec<SchemaChange>,
+    /// Warnings generated during diffing (e.g., unparseable type strings).
+    pub warnings: Vec<String>,
 }
 
 impl SchemaDiff {
@@ -475,6 +582,7 @@ fn diff_struct_fields(
 /// Compare a deployed schema against a new (inferred) schema to detect changes.
 pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) -> SchemaDiff {
     let mut changes = Vec::new();
+    let mut warnings = Vec::new();
 
     // Build lookup maps
     let deployed_map: std::collections::HashMap<&str, &DeployedColumn> =
@@ -508,16 +616,28 @@ pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) ->
             let from_normalized = normalize_type(&deployed_col.data_type);
             let to_normalized = normalize_type(&col.data_type);
 
+            // Emit warnings for unparseable types
+            if let NormalizedType::Unparsed(_) = &from_normalized {
+                warnings.push(format!(
+                    "Column '{}': deployed type '{}' could not be parsed; falling back to string comparison",
+                    col.name, deployed_col.data_type
+                ));
+            }
+            if let NormalizedType::Unparsed(_) = &to_normalized {
+                warnings.push(format!(
+                    "Column '{}': inferred type '{}' could not be parsed; falling back to string comparison",
+                    col.name, col.data_type
+                ));
+            }
+
             if !normalized_types_equal(&from_normalized, &to_normalized) {
                 // If both types parse and at least one is complex, use structural diff
                 if let (NormalizedType::Parsed(old_dt), NormalizedType::Parsed(new_dt)) =
                     (&from_normalized, &to_normalized)
                 {
                     if old_dt.is_complex() || new_dt.is_complex() {
-                        let parsed_old = parse_type(&deployed_col.data_type).unwrap();
-                        let parsed_new = parse_type(&col.data_type).unwrap();
-                        let structural_changes =
-                            diff_types(&col.name, &[], &parsed_old, &parsed_new);
+                        // Use the already-parsed normalized types directly (no re-parsing)
+                        let structural_changes = diff_types(&col.name, &[], old_dt, new_dt);
                         changes.extend(structural_changes);
                     } else {
                         changes.push(SchemaChange::ChangeType {
@@ -545,7 +665,7 @@ pub fn diff_schemas(deployed: &[DeployedColumn], inferred: &[DeployedColumn]) ->
         }
     }
 
-    SchemaDiff { changes }
+    SchemaDiff { changes, warnings }
 }
 
 /// Result of attempting to parse and normalize a type string.
@@ -1348,6 +1468,7 @@ pub fn plan_migration_for_backend(
                 // Convert this single change into SchemaOperations, then generate DDL.
                 let single_diff = SchemaDiff {
                     changes: vec![change.clone()],
+                    warnings: vec![],
                 };
                 let plan = plan_schema_operations(&single_diff, column_defaults, backfill_exprs);
 
@@ -1547,7 +1668,10 @@ mod tests {
 
     #[test]
     fn test_plan_migration_no_change() {
-        let diff = SchemaDiff { changes: vec![] };
+        let diff = SchemaDiff {
+            changes: vec![],
+            warnings: vec![],
+        };
         let action = plan_migration(
             "main",
             "my_table",
@@ -1567,6 +1691,7 @@ mod tests {
                 data_type: "VARCHAR".to_string(),
                 nullable: true,
             }],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1594,6 +1719,7 @@ mod tests {
             changes: vec![SchemaChange::RemoveColumn {
                 name: "old_col".to_string(),
             }],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1615,6 +1741,7 @@ mod tests {
             changes: vec![SchemaChange::RemoveColumn {
                 name: "old_col".to_string(),
             }],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1644,6 +1771,7 @@ mod tests {
                 data_type: "INTEGER".to_string(),
                 nullable: false,
             }],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1671,6 +1799,7 @@ mod tests {
                     to: "BIGINT".to_string(),
                 },
             ],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1726,6 +1855,7 @@ mod tests {
                     to: "BIGINT".to_string(),
                 },
             ],
+            warnings: vec![],
         };
 
         let summary = diff.summary();
@@ -1745,6 +1875,7 @@ mod tests {
                 data_type: "VARCHAR".to_string(),
                 nullable: false,
             }],
+            warnings: vec![],
         };
         let mut defaults = HashMap::new();
         defaults.insert("status".to_string(), "'unknown'".to_string());
@@ -1770,6 +1901,7 @@ mod tests {
                 data_type: "VARCHAR".to_string(),
                 nullable: false,
             }],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1790,6 +1922,7 @@ mod tests {
                 from_nullable: true,
                 to_nullable: false,
             }],
+            warnings: vec![],
         };
         let mut defaults = HashMap::new();
         defaults.insert("priority".to_string(), "0".to_string());
@@ -1819,6 +1952,7 @@ mod tests {
                 from_nullable: true,
                 to_nullable: false,
             }],
+            warnings: vec![],
         };
         let action = plan_migration(
             "main",
@@ -1839,6 +1973,7 @@ mod tests {
                 data_type: "VARCHAR".to_string(),
                 nullable: true,
             }],
+            warnings: vec![],
         };
         let mut backfills = HashMap::new();
         backfills.insert(
@@ -1871,6 +2006,7 @@ mod tests {
                 data_type: "VARCHAR".to_string(),
                 nullable: false,
             }],
+            warnings: vec![],
         };
         let mut defaults = HashMap::new();
         defaults.insert("status".to_string(), "'pending'".to_string());
@@ -2080,6 +2216,7 @@ mod tests {
                     to: "BIGINT".to_string(),
                 },
             ],
+            warnings: vec![],
         };
         let mut defaults = HashMap::new();
         defaults.insert("priority".to_string(), "0".to_string());
@@ -2210,6 +2347,7 @@ mod tests {
                 from: "INTEGER".to_string(),
                 to: "BIGINT".to_string(),
             }],
+            warnings: vec![],
         };
         assert!(
             !diff.requires_full_refresh(),
@@ -2227,6 +2365,7 @@ mod tests {
                 from: "BIGINT".to_string(),
                 to: "INTEGER".to_string(),
             }],
+            warnings: vec![],
         };
         assert!(
             diff.requires_full_refresh(),
@@ -2243,6 +2382,7 @@ mod tests {
                 from: "INTEGER".to_string(),
                 to: "BIGINT".to_string(),
             }],
+            warnings: vec![],
         };
         assert!(
             !diff.requires_full_refresh(),
@@ -2259,6 +2399,7 @@ mod tests {
                 from: "INTEGER".to_string(),
                 to: "BIGINT".to_string(),
             }],
+            warnings: vec![],
         };
         assert!(
             !diff.requires_full_refresh(),
@@ -2552,6 +2693,7 @@ mod tests {
                     reason: "struct to non-struct".to_string(),
                 },
             ],
+            warnings: vec![],
         };
         let summary = diff.summary();
         assert_eq!(summary.len(), 3);
@@ -2981,7 +3123,7 @@ mod tests {
                 assert_eq!(statements.len(), 1);
                 assert_eq!(
                     statements[0],
-                    "ALTER TABLE main.t ADD COLUMN data.inner.y VARCHAR"
+                    "ALTER TABLE main.t ADD COLUMN data.\"inner\".y VARCHAR"
                 );
             }
             other => panic!("Expected AlterTable, got {:?}", other),
@@ -3200,6 +3342,7 @@ mod tests {
                 to: "INTEGER".to_string(),
                 reason: "struct to scalar".to_string(),
             }],
+            warnings: vec![],
         };
         let action = plan_migration_for_backend(
             "main",
@@ -3233,6 +3376,7 @@ mod tests {
                 from: "VARCHAR".to_string(),
                 to: "INTEGER".to_string(),
             }],
+            warnings: vec![],
         };
         let action = plan_migration_for_backend(
             "main",
@@ -3255,5 +3399,141 @@ mod tests {
             }
             other => panic!("Expected FullRefresh, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_diff_schemas_unparseable_deployed_type_falls_back() {
+        // If a deployed type string can't be parsed (e.g., from an older smelt version
+        // or external source), diff_schemas should fall back to string comparison,
+        // not panic.
+        let deployed = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSONB".to_string(), // unparseable in our type system
+            nullable: true,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSONB".to_string(), // same unparseable type
+            nullable: true,
+        }];
+        // Same type string → no change (should not panic)
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(
+            diff.changes.is_empty(),
+            "Same unparseable types should produce no changes"
+        );
+    }
+
+    #[test]
+    fn test_diff_schemas_unparseable_type_change_detected() {
+        // Different unparseable types should still detect a change via string comparison
+        let deployed = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSONB".to_string(),
+            nullable: true,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSON".to_string(),
+            nullable: true,
+        }];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        assert!(matches!(&diff.changes[0], SchemaChange::ChangeType { .. }));
+    }
+
+    #[test]
+    fn test_diff_schemas_unparseable_complex_type_falls_back() {
+        // When one type is parseable but complex, and the other isn't,
+        // we should fall back to ChangeType, not panic
+        let deployed = vec![DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
+            nullable: true,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "CUSTOM_STRUCT_TYPE".to_string(), // unparseable
+            nullable: true,
+        }];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        assert!(matches!(&diff.changes[0], SchemaChange::ChangeType { .. }));
+    }
+
+    #[test]
+    fn test_diff_schemas_unparseable_to_complex_type_falls_back() {
+        // Deployed type is unparseable, inferred is complex and parseable
+        let deployed = vec![DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "CUSTOM_STRUCT_TYPE".to_string(),
+            nullable: true,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
+            nullable: true,
+        }];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert_eq!(diff.changes.len(), 1);
+        assert!(matches!(&diff.changes[0], SchemaChange::ChangeType { .. }));
+    }
+
+    #[test]
+    fn test_diff_schemas_unparseable_type_emits_warning() {
+        let deployed = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSONB".to_string(),
+            nullable: true,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "VARCHAR".to_string(),
+            nullable: true,
+        }];
+        let diff = diff_schemas(&deployed, &inferred);
+        // Should have a warning about the unparseable deployed type
+        assert_eq!(diff.warnings.len(), 1);
+        assert!(diff.warnings[0].contains("JSONB"));
+        assert!(diff.warnings[0].contains("could not be parsed"));
+        // Should still detect the change via fallback
+        assert_eq!(diff.changes.len(), 1);
+    }
+
+    #[test]
+    fn test_diff_schemas_both_unparseable_same_type_no_warning_on_match() {
+        // When both sides are the same unparseable type, there's still a warning
+        // but no change detected
+        let deployed = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSONB".to_string(),
+            nullable: true,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "JSONB".to_string(),
+            nullable: true,
+        }];
+        let diff = diff_schemas(&deployed, &inferred);
+        // Warnings should still be emitted (they indicate parsing limitations)
+        assert_eq!(diff.warnings.len(), 2); // both sides unparseable
+        assert!(diff.changes.is_empty());
+    }
+
+    #[test]
+    fn test_diff_schemas_parseable_types_no_warning() {
+        let deployed = vec![DeployedColumn {
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: false,
+        }];
+        let inferred = vec![DeployedColumn {
+            name: "id".to_string(),
+            data_type: "BIGINT".to_string(),
+            nullable: false,
+        }];
+        let diff = diff_schemas(&deployed, &inferred);
+        assert!(diff.warnings.is_empty());
+        assert_eq!(diff.changes.len(), 1);
     }
 }

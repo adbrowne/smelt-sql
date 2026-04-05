@@ -6,7 +6,7 @@
 //! - `ALTER COLUMN TYPE ... USING expr` for type rewrites (e.g., `struct_pack(...)`)
 //! - `list_transform` for array element transformations
 
-use crate::schema_tracking::SchemaOperation;
+use crate::schema_tracking::{quote_identifier, SchemaOperation};
 use smelt_types::DataType;
 
 /// Generate DuckDB-specific DDL statements from a list of `SchemaOperation`s.
@@ -25,12 +25,16 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                 default_expr,
             } => {
                 let type_sql = data_type.to_sql();
+                let qname = quote_identifier(name);
                 let mut stmt = if *nullable {
-                    format!("ALTER TABLE {} ADD COLUMN {} {}", qualified, name, type_sql)
+                    format!(
+                        "ALTER TABLE {} ADD COLUMN {} {}",
+                        qualified, qname, type_sql
+                    )
                 } else {
                     format!(
                         "ALTER TABLE {} ADD COLUMN {} {} NOT NULL",
-                        qualified, name, type_sql
+                        qualified, qname, type_sql
                     )
                 };
                 if let Some(default) = default_expr {
@@ -39,13 +43,17 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                 stmts.push(stmt);
             }
             SchemaOperation::RemoveColumn { name } => {
-                stmts.push(format!("ALTER TABLE {} DROP COLUMN {}", qualified, name));
+                stmts.push(format!(
+                    "ALTER TABLE {} DROP COLUMN {}",
+                    qualified,
+                    quote_identifier(name)
+                ));
             }
             SchemaOperation::WidenColumnType { name, to, .. } => {
                 stmts.push(format!(
                     "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
                     qualified,
-                    name,
+                    quote_identifier(name),
                     to.to_sql()
                 ));
             }
@@ -54,22 +62,23 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                 to_nullable,
                 default_expr,
             } => {
+                let qname = quote_identifier(name);
                 if *to_nullable {
                     stmts.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                        qualified, name
+                        qualified, qname
                     ));
                 } else {
                     // Fill NULLs first, then set NOT NULL
                     if let Some(default) = default_expr {
                         stmts.push(format!(
                             "UPDATE {} SET {} = {} WHERE {} IS NULL",
-                            qualified, name, default, name
+                            qualified, qname, default, qname
                         ));
                     }
                     stmts.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        qualified, name
+                        qualified, qname
                     ));
                 }
             }
@@ -107,12 +116,13 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
             } => {
                 // For DuckDB, nested type widening can use dot-notation ALTER COLUMN TYPE
                 // when the path identifies a specific struct field.
+                let qcol = quote_identifier(column);
                 if path.is_empty() {
                     // Direct column type change — shouldn't normally hit this path
                     stmts.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
                         qualified,
-                        column,
+                        qcol,
                         to.to_sql()
                     ));
                 } else if path.len() == 1 && path[0] == "value" {
@@ -126,7 +136,7 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                     stmts.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
                         qualified,
-                        column,
+                        qcol,
                         new_map_type.to_sql()
                     ));
                 } else {
@@ -143,7 +153,9 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
             SchemaOperation::BackfillColumn { name, expression } => {
                 stmts.push(format!(
                     "UPDATE {} SET {} = {}",
-                    qualified, name, expression
+                    qualified,
+                    quote_identifier(name),
+                    expression
                 ));
             }
             SchemaOperation::RewriteColumn {
@@ -154,7 +166,7 @@ pub fn generate_duckdb_ddl(schema: &str, table: &str, ops: &[SchemaOperation]) -
                 stmts.push(format!(
                     "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}",
                     qualified,
-                    column,
+                    quote_identifier(column),
                     target_type.to_sql(),
                     using_expr
                 ));
@@ -198,7 +210,7 @@ fn build_struct_pack_parts(
     for (new_name, new_dt) in new_fields {
         if let Some((_old_name, old_dt)) = old_fields.iter().find(|(n, _)| n == new_name) {
             // Field exists in old type
-            let field_ref = format!("{}.{}", column, new_name);
+            let field_ref = format!("{}.{}", column, quote_identifier(new_name));
             if old_dt == new_dt {
                 // Unchanged — pass through
                 parts.push(format!("{} := {}", new_name, field_ref));
@@ -289,10 +301,10 @@ pub fn build_using_expr(column: &str, old_type: &DataType, new_type: &DataType) 
 /// Format a dot-separated path for DuckDB struct field access.
 /// e.g., `format_dot_path("meta", &["inner"], Some("field"))` → `"meta.inner.field"`
 fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String {
-    let mut parts = vec![column.to_string()];
-    parts.extend(path.iter().cloned());
+    let mut parts = vec![quote_identifier(column)];
+    parts.extend(path.iter().map(|p| quote_identifier(p)));
     if let Some(l) = leaf {
-        parts.push(l.to_string());
+        parts.push(quote_identifier(l));
     }
     parts.join(".")
 }
@@ -410,7 +422,7 @@ mod tests {
         let ddl = generate_duckdb_ddl("main", "t", &ops);
         assert_eq!(
             ddl,
-            vec!["ALTER TABLE main.t ADD COLUMN data.inner.y VARCHAR"]
+            vec!["ALTER TABLE main.t ADD COLUMN data.\"inner\".y VARCHAR"]
         );
     }
 
@@ -570,7 +582,7 @@ mod tests {
         let expr = build_struct_pack_expr("data", &old, &new).unwrap();
         assert_eq!(
             expr,
-            "struct_pack(inner := struct_pack(x := data.inner.x::BIGINT, y := NULL::VARCHAR), b := data.b)"
+            "struct_pack(inner := struct_pack(x := data.\"inner\".x::BIGINT, y := NULL::VARCHAR), b := data.b)"
         );
     }
 
@@ -622,7 +634,7 @@ mod tests {
         let ddl = generate_duckdb_ddl("main", "t", &ops);
         assert_eq!(
             ddl,
-            vec!["ALTER TABLE main.t ALTER COLUMN data.inner.x TYPE BIGINT"]
+            vec!["ALTER TABLE main.t ALTER COLUMN data.\"inner\".x TYPE BIGINT"]
         );
     }
 
@@ -698,5 +710,56 @@ mod tests {
         ]);
         let expr = build_struct_pack_expr("meta", &dt, &dt).unwrap();
         assert_eq!(expr, "struct_pack(a := meta.a, b := meta.b)");
+    }
+
+    // ── quoting tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_add_column_with_keyword_name() {
+        let ops = vec![SchemaOperation::AddColumn {
+            name: "select".to_string(),
+            data_type: DataType::Integer,
+            nullable: true,
+            default_expr: None,
+        }];
+        let stmts = generate_duckdb_ddl("main", "t", &ops);
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].contains("\"select\""),
+            "SQL keyword column name should be quoted, got: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn test_add_struct_field_with_space_in_name() {
+        let ops = vec![SchemaOperation::AddStructField {
+            column: "meta".to_string(),
+            path: vec![],
+            field_name: "first name".to_string(),
+            field_type: DataType::Varchar { max_length: None },
+            default_expr: None,
+        }];
+        let stmts = generate_duckdb_ddl("main", "t", &ops);
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].contains("\"first name\""),
+            "Field name with space should be quoted, got: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn test_remove_column_with_keyword_name() {
+        let ops = vec![SchemaOperation::RemoveColumn {
+            name: "order".to_string(),
+        }];
+        let stmts = generate_duckdb_ddl("main", "t", &ops);
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].contains("\"order\""),
+            "SQL keyword column name should be quoted, got: {}",
+            stmts[0]
+        );
     }
 }

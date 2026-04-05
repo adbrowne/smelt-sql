@@ -83,6 +83,28 @@ Efficient schema migrations using ALTER TABLE + DEFAULT values instead of full t
 - ✅ Nullable-to-NOT-NULL with default — `UPDATE ... WHERE IS NULL` + `ALTER SET NOT NULL`
 - ✅ `smelt diff` shows migration plan with defaults (ALTER with DEFAULT instead of full refresh)
 
+### ~~Schema Evolution — Complex Types~~ ✅ (April 5, 2026)
+
+Production schema evolution for nested/complex types (Struct, Array, Map). Previously, any change to a complex type column triggered a full table refresh.
+
+- ✅ `parse_type()` extended for `STRUCT(...)`, `TYPE[]`, `MAP(K, V)` with recursive nesting
+- ✅ `Map(Box<DataType>, Box<DataType>)` variant added to `DataType`
+- ✅ Recursive type normalization (`DataType::normalize()`)
+- ✅ Structural diff for complex types — field-level additions, removals, type widening, nested changes
+- ✅ Safe widening rules for nested types (e.g., `INTEGER` → `BIGINT` inside a struct)
+- ✅ Abstract `SchemaOperation` enum for backend-agnostic migration planning
+- ✅ DuckDB DDL generation: struct dot-notation, `struct_pack` rewrites, `list_transform` for array-of-struct
+- ✅ Spark DDL generation: `mergeSchema` for safe additions, `TableRewrite` for unsupported operations
+- ✅ Table format config (`format: delta|parquet`) at target and model level
+- ✅ `--allow-full-refresh` CLI gate for expensive operations
+- ✅ `default:` changed from YAML value to SQL expression string (breaking change)
+- ✅ Identifier quoting for SQL keywords and special characters
+- ✅ Graceful fallback for unparseable type strings with warnings
+- ✅ Round-trip verification: `DataType` → `to_sql()` → `parse_type()` → `DataType`
+- ✅ User-facing documentation on smeltsql.com (schema-evolution guide, backend capability matrix)
+
+See [plan](plans/20260405-schema-evolution-complex-types.md) for details.
+
 ### ~~Spark / Databricks Backend~~ ✅ (March 28, 2026)
 
 Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are now functional, connecting to Spark through PySpark's SparkSession.
