@@ -2109,6 +2109,90 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let request_range = params.range;
+
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        // For multi-model files, resolve to the virtual path
+        let (effective_path, line_offset) = if let Some((vp, adjusted_line)) = self
+            .resolve_virtual_path(&path, request_range.start.line)
+            .await
+        {
+            let offset = request_range.start.line - adjusted_line;
+            (vp, offset)
+        } else {
+            (path.clone(), 0)
+        };
+
+        let db = self.db.lock().await;
+        let text = db.file_text(effective_path.clone());
+
+        // Collect diagnostics overlapping the request range
+        let mut all_diags = (*db.file_diagnostics(effective_path.clone())).clone();
+        all_diags.extend((*db.type_diagnostics(effective_path.clone())).clone());
+
+        // Adjust request range for virtual path offset
+        let adj_start_line = request_range.start.line.saturating_sub(line_offset);
+        let adj_end_line = request_range.end.line.saturating_sub(line_offset);
+
+        let matching: Vec<_> = all_diags
+            .into_iter()
+            .filter(|d| {
+                let r = &d.range;
+                // Diagnostic overlaps the request range
+                !(r.end.line < adj_start_line
+                    || (r.end.line == adj_start_line
+                        && r.end.column < request_range.start.character)
+                    || r.start.line > adj_end_line
+                    || (r.start.line == adj_end_line
+                        && r.start.column > request_range.end.character))
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+        for diag in &matching {
+            let suggestions = smelt_db::code_actions::generate_code_actions(diag, &text);
+            for suggestion in suggestions {
+                let range = Range {
+                    start: Position::new(
+                        suggestion.range.start.line + line_offset,
+                        suggestion.range.start.column,
+                    ),
+                    end: Position::new(
+                        suggestion.range.end.line + line_offset,
+                        suggestion.range.end.column,
+                    ),
+                };
+                let edit = TextEdit {
+                    range,
+                    new_text: suggestion.new_text,
+                };
+                let mut changes = std::collections::HashMap::new();
+                changes.insert(uri.clone(), vec![edit]);
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: suggestion.title,
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }));
+            }
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;

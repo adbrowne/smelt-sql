@@ -83,11 +83,35 @@ impl TestWorkspace {
         self.models_dir.join(format!("{}.sql", name))
     }
 
-    /// Get code actions at a position in a model (stub — returns empty until handler is implemented)
-    #[allow(dead_code)]
-    fn code_actions_at(&self, _model: &str, _line: u32, _col: u32) -> Vec<String> {
-        // Stub: will be wired to code action handler in Phase 3
-        vec![]
+    /// Get code actions at a position in a model.
+    /// Collects diagnostics overlapping the position and generates code actions from them.
+    fn code_actions_at(
+        &self,
+        model: &str,
+        line: u32,
+        col: u32,
+    ) -> Vec<smelt_db::code_actions::CodeActionSuggestion> {
+        let path = self.model_path(model);
+        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
+        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+
+        let text = self.db.file_text(path);
+
+        // Filter diagnostics to those overlapping the cursor position
+        let matching: Vec<_> = all_diags
+            .into_iter()
+            .filter(|d| {
+                let r = &d.range;
+                (r.start.line < line || (r.start.line == line && r.start.column <= col))
+                    && (r.end.line > line || (r.end.line == line && r.end.column >= col))
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+        for diag in &matching {
+            actions.extend(smelt_db::code_actions::generate_code_actions(diag, &text));
+        }
+        actions
     }
 
     /// Find all references to a symbol at a position.
@@ -1831,5 +1855,183 @@ sources:
             start < 10 // definition is near the beginning
         });
         assert!(has_def, "Should include CTE definition site in references");
+    }
+}
+
+// =============================================================================
+// Code Action Tests
+// =============================================================================
+
+mod code_actions {
+    use super::*;
+
+    #[test]
+    fn test_code_action_cast_for_type_mismatch() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model(
+            "stg_users",
+            "SELECT id, name FROM smelt.source('raw.users')",
+        );
+        // SUM(name) expects numeric but name is VARCHAR — type mismatch
+        ws.add_model(
+            "bad_sum",
+            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+        );
+
+        // The diagnostic is on "name" in SUM(name) — find its position
+        // "SELECT SUM(name) as total FROM smelt.ref('stg_users')"
+        //             ^--- line 0, col ~11
+        let actions = ws.code_actions_at("bad_sum", 0, 11);
+
+        // Should offer CAST to the expected numeric type
+        let cast_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("CAST"))
+            .collect();
+        assert!(
+            !cast_actions.is_empty(),
+            "Expected CAST code action for type mismatch, got: {:?}",
+            actions
+        );
+        // The action should suggest casting to the expected type
+        assert!(
+            cast_actions
+                .iter()
+                .any(|a| a.title.contains("CAST") && a.new_text.contains("CAST(")),
+            "CAST action should contain CAST() in the replacement text, got: {:?}",
+            cast_actions
+        );
+    }
+
+    #[test]
+    fn test_code_action_cast_for_unknown_type() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      events:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: payload
+"#,
+        );
+        // payload has no type declared — CannotInferType
+        ws.add_model(
+            "stg_events",
+            "SELECT id, payload FROM smelt.source('raw.events')",
+        );
+
+        // The diagnostic is on "payload" — find its position
+        // "SELECT id, payload FROM smelt.source('raw.events')"
+        //            ^--- line 0, col ~11
+        let actions = ws.code_actions_at("stg_events", 0, 13);
+
+        // Should offer multiple CAST options (VARCHAR, INTEGER, TIMESTAMP, etc.)
+        let cast_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| a.title.contains("CAST"))
+            .collect();
+        assert!(
+            cast_actions.len() >= 3,
+            "Expected multiple CAST options for unknown type, got {} actions: {:?}",
+            cast_actions.len(),
+            cast_actions
+        );
+        // Should include common types
+        let titles: Vec<String> = cast_actions.iter().map(|a| a.title.clone()).collect();
+        assert!(
+            titles.iter().any(|t| t.contains("VARCHAR")),
+            "Should include VARCHAR option, got: {:?}",
+            titles
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("INTEGER")),
+            "Should include INTEGER option, got: {:?}",
+            titles
+        );
+    }
+
+    #[test]
+    fn test_code_action_cast_wraps_expression() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model(
+            "stg_users",
+            "SELECT id, name FROM smelt.source('raw.users')",
+        );
+        // SUM(name) — the CAST should wrap "name", not just the column identifier
+        ws.add_model(
+            "bad_sum",
+            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+        );
+
+        let actions = ws.code_actions_at("bad_sum", 0, 11);
+
+        let cast_action = actions.iter().find(|a| a.title.contains("CAST"));
+        assert!(cast_action.is_some(), "Expected CAST action");
+        let action = cast_action.unwrap();
+        // The replacement text should wrap the expression with CAST()
+        assert!(
+            action.new_text.starts_with("CAST(")
+                && action.new_text.contains(" AS ")
+                && action.new_text.ends_with(")"),
+            "CAST action should wrap expression: CAST(expr AS type), got: '{}'",
+            action.new_text
+        );
+    }
+
+    #[test]
+    fn test_no_code_action_on_valid_code() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+            type: INTEGER
+          - name: name
+            type: VARCHAR
+"#,
+        );
+        ws.add_model("valid", "SELECT id, name FROM smelt.source('raw.users')");
+
+        // Position on a valid column — should have no code actions
+        let actions = ws.code_actions_at("valid", 0, 8);
+        assert!(
+            actions.is_empty(),
+            "Expected no code actions on valid code, got: {:?}",
+            actions
+        );
     }
 }

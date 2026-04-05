@@ -141,33 +141,36 @@
 
 ---
 
-## Phase 3: Quick-Fix Code Actions — CAST Fixes `[ ]`
+## Phase 3: Quick-Fix Code Actions — CAST Fixes `[x]`
 
 **Priority**: High — low-hanging fruit with immediate user value.
 
 **Goal**: Implement code action handler + quick-fixes for type-related diagnostics (CAST suggestions).
 
 **Red tests (write first)**:
-- [ ] `test_code_action_cast_for_type_mismatch` — model with `SUM(varchar_col)` gets code action offering `CAST(varchar_col AS INTEGER)`
-- [ ] `test_code_action_cast_for_unknown_type` — model with uninferrable column gets multiple CAST options (VARCHAR, INTEGER, TIMESTAMP, etc.)
-- [ ] `test_code_action_cast_wraps_expression` — CAST action wraps the full expression range, not just the column name
-- [ ] `test_no_code_action_on_valid_code` — model with no diagnostics returns no code actions
+- [x] `test_code_action_cast_for_type_mismatch` — model with `SUM(varchar_col)` gets code action offering `CAST(varchar_col AS INTEGER)`
+- [x] `test_code_action_cast_for_unknown_type` — model with uninferrable column gets multiple CAST options (VARCHAR, INTEGER, TIMESTAMP, etc.)
+- [x] `test_code_action_cast_wraps_expression` — CAST action wraps the full expression range, not just the column name
+- [x] `test_no_code_action_on_valid_code` — model with no diagnostics returns no code actions
 
 **Green implementation**:
-- [ ] Implement `textDocument/codeAction` handler skeleton in main.rs
-- [ ] Match diagnostics by `code` field (from Phase 0)
-- [ ] For `TypeMismatch`: generate `CAST({expr} AS {expected_type})` wrapping the diagnostic range
-- [ ] For `CannotInferType`: generate multiple actions, one per common type (VARCHAR, INTEGER, BIGINT, DOUBLE, BOOLEAN, DATE, TIMESTAMP)
-- [ ] Return `CodeAction` with `kind: QuickFix`, `WorkspaceEdit` with `TextEdit`
+- [x] Implement `textDocument/codeAction` handler skeleton in main.rs
+- [x] Match diagnostics by `code` field (from Phase 0)
+- [x] For `TypeMismatch`: generate `CAST({expr} AS {expected_type})` wrapping the diagnostic range
+- [x] For `CannotInferType`: generate multiple actions, one per common type (VARCHAR, INTEGER, BIGINT, DOUBLE, BOOLEAN, DATE, TIMESTAMP)
+- [x] Return `CodeAction` with `kind: QuickFix`, `WorkspaceEdit` with `TextEdit`
 
-**Files to modify**:
-- `crates/smelt-lsp/src/main.rs` — codeAction handler, CAST quick-fixes
-- `crates/smelt-lsp/tests/integration.rs` — red tests
+**Files modified**:
+- `crates/smelt-db/src/code_actions.rs` — pure functions: generate_code_actions, TypeMismatch/CannotInferType handlers, extract_range_text helper
+- `crates/smelt-db/src/lib.rs` — registered code_actions module
+- `crates/smelt-lsp/src/main.rs` — textDocument/codeAction handler with diagnostic filtering and WorkspaceEdit generation
+- `crates/smelt-lsp/tests/integration.rs` — 4 red→green tests (pre-written in Phase 0 session)
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (clean for smelt-parser, smelt-db, smelt-lsp lib targets)
+- [x] `cargo test` (444 tests pass: 241 parser + 129 db + 74 lsp integration)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb arrow type mismatch
 - [ ] Manual: type mismatch diagnostic in VSCode shows CAST quick-fix
 
 ---
@@ -507,3 +510,25 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 **Decisions**:
 - Put pure functions in a new `crates/smelt-db/src/references.rs` module (not in lib.rs or type_inference.rs as originally planned). This keeps the code organized and follows the single-responsibility principle.
 - Skipped Salsa query wrappers (`model_references`, `source_references`) since the pure functions are simple filtering operations that don't benefit from caching. The LSP handler collects data from existing Salsa queries (`model_refs`, `model_sources`) and calls the pure functions directly. Salsa wrappers can be added later if caching becomes valuable.
+
+### Session 4 — 2026-04-05
+
+**Phase**: 3 (Quick-Fix Code Actions — CAST Fixes)
+**Status**: Complete
+
+**What was done**:
+- Registered `code_actions` module in smelt-db (file existed from Phase 0 but wasn't wired up)
+- Implemented `generate_code_actions()` pure function in `crates/smelt-db/src/code_actions.rs`:
+  - `TypeMismatch`: extracts expression text from diagnostic range, wraps with `CAST(expr AS expected_type)`
+  - `CannotInferType`: offers 7 common SQL types (VARCHAR, INTEGER, BIGINT, DOUBLE, BOOLEAN, DATE, TIMESTAMP)
+  - `extract_range_text()` helper to convert line/col range to substring from file text
+- Implemented `textDocument/codeAction` handler in main.rs:
+  - Filters diagnostics overlapping the request range
+  - Calls pure `generate_code_actions()` for each matching diagnostic
+  - Converts suggestions to LSP `CodeAction` with `QuickFix` kind and `WorkspaceEdit`
+  - Handles multi-model file virtual path resolution
+- All 4 tests pass (were pre-written in Phase 0 session as stubs)
+
+**Decisions**:
+- Kept code action generation as pure functions in smelt-db (not in smelt-lsp) following the pure function rule. The LSP handler is a thin wrapper that collects diagnostics and converts results to LSP types.
+- Used `extract_range_text()` to get the original expression text for wrapping in CAST, rather than storing expression text in DiagnosticData. This keeps DiagnosticData lean and avoids duplication.
