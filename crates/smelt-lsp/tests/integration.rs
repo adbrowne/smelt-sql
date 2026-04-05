@@ -9,6 +9,17 @@ use std::sync::Arc;
 use smelt_db::{Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking};
 use tempfile::TempDir;
 
+/// Result of a model rename operation
+#[derive(Default)]
+struct RenameModelResult {
+    /// Text edits: (file_path, start_line, start_col, end_line, end_col)
+    text_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+    /// File rename: (old_path, new_path)
+    file_rename: Option<(PathBuf, PathBuf)>,
+    /// Whether a name conflict was detected
+    conflict: bool,
+}
+
 /// Test workspace that simulates a smelt project
 struct TestWorkspace {
     #[allow(dead_code)]
@@ -239,7 +250,99 @@ impl TestWorkspace {
                 }
                 None
             }
+            Some(SymbolAtCursor::RefCall { name }) => {
+                // For ref calls, return the content range (inside quotes)
+                for ref_call in file.refs() {
+                    if ref_call.model_name().as_deref() == Some(name.as_str()) {
+                        if let Some(content_range) = ref_call.content_range() {
+                            let r = smelt_parser::ast::text_range_to_range(&text, content_range);
+                            return Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
+        }
+    }
+
+    /// Rename a model across the project.
+    /// Returns a RenameModelResult with text edits across files and the file rename info.
+    fn rename_model(&self, model: &str, line: u32, col: u32, new_name: &str) -> RenameModelResult {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path.clone());
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return RenameModelResult::default(),
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        let model_name = match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::RefCall { name }) => name,
+            _ => return RenameModelResult::default(),
+        };
+
+        // Check for conflict: does a model with new_name already exist?
+        let new_path = self.models_dir.join(format!("{}.sql", new_name));
+        if self.model_files.contains(&new_path) {
+            return RenameModelResult {
+                conflict: true,
+                ..Default::default()
+            };
+        }
+
+        // Collect all ref edits across files
+        let all_file_refs: Vec<_> = self
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*self.db.model_refs(p.clone())).clone()))
+            .collect();
+        let ref_locations =
+            smelt_db::references::find_model_references(&model_name, &all_file_refs);
+
+        // For each ref location, we need the content range (inside quotes)
+        let mut text_edits: Vec<(PathBuf, u32, u32, u32, u32)> = Vec::new();
+        for (ref_path, _) in &ref_locations {
+            let ref_text = self.db.file_text(ref_path.clone());
+            let ref_parse = self.db.parse_file(ref_path.clone());
+            let ref_syntax = ref_parse.syntax();
+            if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
+                for ref_call in ref_file.refs() {
+                    if ref_call.model_name().as_deref() == Some(&model_name) {
+                        if let Some(content_range) = ref_call.content_range() {
+                            let r =
+                                smelt_parser::ast::text_range_to_range(&ref_text, content_range);
+                            text_edits.push((
+                                ref_path.clone(),
+                                r.start.line,
+                                r.start.column,
+                                r.end.line,
+                                r.end.column,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // File rename
+        let old_path = self.models_dir.join(format!("{}.sql", model_name));
+        let file_rename = if self.model_files.contains(&old_path) {
+            Some((old_path, new_path))
+        } else {
+            None
+        };
+
+        RenameModelResult {
+            text_edits,
+            file_rename,
+            conflict: false,
         }
     }
 
@@ -2506,6 +2609,117 @@ mod rename_cte {
         assert!(!is_valid_sql_identifier("has space"));
         assert!(!is_valid_sql_identifier("has-dash"));
         assert!(!is_valid_sql_identifier(""));
+    }
+}
+
+// =============================================================================
+// Model Rename Tests
+// =============================================================================
+
+mod rename_model {
+    use super::*;
+
+    #[test]
+    fn test_prepare_rename_model_from_ref() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("upstream", "SELECT 1 AS id");
+        ws.add_model("downstream", "SELECT id FROM smelt.ref('upstream')");
+
+        // Cursor on 'upstream' inside ref() — col 24 is inside the string content
+        let result = ws.prepare_rename("downstream", 0, 24);
+        assert!(
+            result.is_some(),
+            "prepare_rename should return a range for ref() calls"
+        );
+        let (sl, sc, el, ec) = result.unwrap();
+        // Should return the content range inside quotes (excluding quotes)
+        assert_eq!(sl, 0);
+        assert_eq!(el, 0);
+        // The content 'upstream' is 8 chars
+        assert_eq!(ec - sc, 8, "range should span the model name 'upstream'");
+    }
+
+    #[test]
+    fn test_rename_model_updates_all_refs() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 AS id, 'alice' AS name");
+        ws.add_model("orders", "SELECT id FROM smelt.ref('users')");
+        ws.add_model("payments", "SELECT id FROM smelt.ref('users')");
+        ws.add_model(
+            "report",
+            "SELECT id FROM smelt.ref('users') CROSS JOIN smelt.ref('orders')",
+        );
+
+        // Cursor inside ref('users') in orders model
+        let result = ws.rename_model("orders", 0, 30, "customers");
+        assert!(!result.conflict);
+        // Should have 3 edits: orders, payments, report all reference 'users'
+        assert_eq!(
+            result.text_edits.len(),
+            3,
+            "should update all 3 files referencing 'users'"
+        );
+    }
+
+    #[test]
+    fn test_rename_model_includes_file_rename() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("old_name", "SELECT 1 AS id");
+        ws.add_model("consumer", "SELECT id FROM smelt.ref('old_name')");
+
+        let result = ws.rename_model("consumer", 0, 30, "new_name");
+        assert!(!result.conflict);
+        // Should include a file rename operation
+        assert!(
+            result.file_rename.is_some(),
+            "should include a file rename for old_name.sql -> new_name.sql"
+        );
+        let (old_path, new_path) = result.file_rename.unwrap();
+        assert!(
+            old_path.ends_with("old_name.sql"),
+            "old path should be old_name.sql"
+        );
+        assert!(
+            new_path.ends_with("new_name.sql"),
+            "new path should be new_name.sql"
+        );
+    }
+
+    #[test]
+    fn test_rename_model_ref_content_range() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("my_model", "SELECT 1 AS id");
+        ws.add_model("consumer", "SELECT id FROM smelt.ref('my_model')");
+
+        let result = ws.rename_model("consumer", 0, 30, "renamed_model");
+        assert!(!result.conflict);
+        assert_eq!(result.text_edits.len(), 1);
+
+        // The edit should only replace the content inside quotes, not the quotes
+        let (_, sl, sc, el, ec) = &result.text_edits[0];
+        let text = "SELECT id FROM smelt.ref('my_model')";
+        // 'my_model' starts at col 25 (after the opening quote) and ends at col 33
+        let content_start = text.find("my_model").unwrap() as u32;
+        let content_end = content_start + "my_model".len() as u32;
+        assert_eq!(*sl, 0);
+        assert_eq!(*sc, content_start, "edit start should be inside the quotes");
+        assert_eq!(*el, 0);
+        assert_eq!(*ec, content_end, "edit end should be inside the quotes");
+    }
+
+    #[test]
+    fn test_rename_model_no_conflict() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("existing", "SELECT 1 AS id");
+        ws.add_model("other", "SELECT 1 AS id");
+        ws.add_model("consumer", "SELECT id FROM smelt.ref('other')");
+
+        // Try to rename 'other' to 'existing' — should detect conflict
+        let result = ws.rename_model("consumer", 0, 30, "existing");
+        assert!(
+            result.conflict,
+            "should reject rename to existing model name"
+        );
     }
 }
 

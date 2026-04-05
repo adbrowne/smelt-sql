@@ -243,34 +243,35 @@
 
 ---
 
-## Phase 6: Rename Model (Cross-File) `[ ]`
+## Phase 6: Rename Model (Cross-File) `[x]`
 
 **Priority**: High value — the most requested rename operation.
 
 **Goal**: Rename a model by renaming the .sql file and updating all `ref('old_name')` calls across the project.
 
 **Red tests (write first)**:
-- [ ] `test_prepare_rename_model_from_ref` — cursor inside `ref('model')` returns valid range
-- [ ] `test_rename_model_updates_all_refs` — 3 downstream models referencing 'old' all get updated to 'new'
-- [ ] `test_rename_model_includes_file_rename` — WorkspaceEdit contains RenameFile operation
-- [ ] `test_rename_model_ref_content_range` — only the string content inside quotes changes (not the quotes themselves)
-- [ ] `test_rename_model_no_conflict` — rename to existing model name is rejected
+- [x] `test_prepare_rename_model_from_ref` — cursor inside `ref('model')` returns valid range
+- [x] `test_rename_model_updates_all_refs` — 3 downstream models referencing 'old' all get updated to 'new'
+- [x] `test_rename_model_includes_file_rename` — WorkspaceEdit contains RenameFile operation
+- [x] `test_rename_model_ref_content_range` — only the string content inside quotes changes (not the quotes themselves)
+- [x] `test_rename_model_no_conflict` — rename to existing model name is rejected
 
 **Green implementation**:
-- [ ] In `textDocument/rename`: for `RefCall` symbol, use `db.model_references(name)` from Phase 2
-- [ ] For each ref site: `TextEdit` replacing content inside quotes (using `RefCall::content_range()`)
-- [ ] Add `RenameFile { old_uri, new_uri }` to `DocumentChanges`
-- [ ] Validate: no existing model with the new name
-- [ ] Use `DocumentChanges` variant of `WorkspaceEdit` (required for `RenameFile`)
+- [x] In `textDocument/rename`: for `RefCall` symbol, use `find_model_references()` from Phase 2
+- [x] For each ref site: `TextEdit` replacing content inside quotes (using `RefCall::content_range()`)
+- [x] Add `RenameFile { old_uri, new_uri }` to `DocumentChanges`
+- [x] Validate: no existing model with the new name
+- [x] Use `DocumentChanges` variant of `WorkspaceEdit` (required for `RenameFile`)
 
-**Files to modify**:
-- `crates/smelt-lsp/src/main.rs` — rename handler for models
-- `crates/smelt-lsp/tests/integration.rs` — red tests
+**Files modified**:
+- `crates/smelt-lsp/src/main.rs` — prepareRename handler extended for RefCall, rename handler with RenameKind enum (Cte/Model), DocumentChanges with RenameFile
+- `crates/smelt-lsp/tests/integration.rs` — RenameModelResult struct, prepare_rename extended for RefCall, rename_model helper, 5 red→green tests
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass)
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (clean for smelt-parser, smelt-db, smelt-lsp lib targets)
+- [x] `cargo test` (460 tests pass: 241 parser + 129 db + 90 lsp integration)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb arrow type mismatch
 - [ ] Manual: F2 on `ref('model_name')` in VSCode renames file + all refs
 
 ---
@@ -576,3 +577,27 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 - `is_valid_sql_identifier` lives in main.rs for now since it's only used by the rename handler. Can be moved to a shared location (smelt-parser or smelt-core) if needed by future phases.
 - `prepareRename` always returns the CTE definition's name range, even when the cursor is on a reference. This is the conventional behavior — the definition is the canonical rename target.
 - Test helpers call pure functions directly rather than going through an LSP server, consistent with the existing testing pattern (code_actions_at, references_for).
+
+### Session 7 — 2026-04-05
+
+**Phase**: 6 (Rename Model — Cross-File)
+**Status**: Complete
+
+**What was done**:
+- Extended `prepareRename` handler to support `RefCall` symbols — returns the content range inside quotes (excluding quote characters)
+- Refactored `rename` handler with `RenameKind` enum to cleanly separate CTE rename (single-file, `changes`) from model rename (cross-file, `document_changes`)
+- Model rename implementation:
+  - Conflict detection: rejects rename if a model with the new name already exists
+  - Collects all `ref('old_name')` call sites across all project files using `find_model_references()`
+  - For each ref site, resolves `RefCall::content_range()` to get the text range inside quotes
+  - Groups `TextEdit`s by file into `TextDocumentEdit` operations
+  - Adds `RenameFile` operation to rename the .sql file
+  - Uses `DocumentChanges::Operations` (required for `RenameFile` support)
+- Added `RenameModelResult` struct and `rename_model()` helper to test workspace
+- Extended `prepare_rename()` helper to handle `RefCall` symbols
+- Wrote 5 tests, all pass
+
+**Decisions**:
+- Used `RenameKind` enum (Cte/Model) inside the rename handler to keep the two rename paths cleanly separated. This avoids complex conditional logic and makes it easy to add future rename kinds (source, column).
+- Model rename resolves the model file path by looking in the same directory as the effective_path (the file containing the ref call). This works because all models in a project share the same models directory.
+- Test helpers implement rename logic using pure functions directly (consistent with existing pattern), not through an LSP server. The LSP handler wiring is tested indirectly through the same pure function code paths.

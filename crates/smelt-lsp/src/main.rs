@@ -2269,6 +2269,22 @@ impl LanguageServer for Backend {
                     }
                     found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
                 }
+                Some(SymbolAtCursor::RefCall { name }) => {
+                    // For ref calls, return the content range (inside quotes)
+                    let mut found_range = None;
+                    for ref_call in file.refs() {
+                        if ref_call.model_name().as_deref() == Some(name.as_str()) {
+                            if let Some(content_range) = ref_call.content_range() {
+                                let r =
+                                    smelt_parser::ast::text_range_to_range(&text, content_range);
+                                found_range =
+                                    Some((r.start.line, r.start.column, r.end.line, r.end.column));
+                                break;
+                            }
+                        }
+                    }
+                    found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
+                }
                 _ => None,
             }
         } else {
@@ -2324,54 +2340,194 @@ impl LanguageServer for Backend {
 
         let db = self.db.lock().await;
         let text = db.file_text(effective_path.clone());
-        let parse = db.parse_file(effective_path);
+        let parse = db.parse_file(effective_path.clone());
         let syntax = parse.syntax();
 
-        // Collect rename edits as plain data (no AST nodes across await)
-        let edits: Vec<(u32, u32, u32, u32)> = if let Some(file) = AstFile::cast(syntax) {
+        enum RenameKind {
+            Cte {
+                edits: Vec<(u32, u32, u32, u32)>,
+            },
+            Model {
+                #[allow(dead_code)]
+                model_name: String,
+                /// (file_path, start_line, start_col, end_line, end_col)
+                edits: Vec<(PathBuf, u32, u32, u32, u32)>,
+                /// old .sql file path (if it exists in the project)
+                old_model_path: Option<PathBuf>,
+            },
+        }
+
+        let rename_kind = if let Some(file) = AstFile::cast(syntax) {
             let offset =
                 position_to_offset(&text, effective_position.line, effective_position.character);
             match symbol_at_cursor(&file, &text, offset) {
                 Some(SymbolAtCursor::CteDefinition { name })
                 | Some(SymbolAtCursor::CteReference { name }) => {
                     let cte_refs = smelt_db::references::find_cte_references(&file, &text, &name);
-                    cte_refs
+                    let edits = cte_refs
                         .iter()
                         .map(|text_range| {
                             let r = smelt_parser::ast::text_range_to_range(&text, *text_range);
                             (r.start.line, r.start.column, r.end.line, r.end.column)
                         })
-                        .collect()
+                        .collect();
+                    Some(RenameKind::Cte { edits })
                 }
-                _ => vec![],
+                Some(SymbolAtCursor::RefCall { name }) => {
+                    // Check for naming conflict
+                    let all_files = db.all_files();
+                    let new_model_path = effective_path
+                        .parent()
+                        .unwrap_or(effective_path.as_ref())
+                        .join(format!("{}.sql", new_name));
+                    if all_files.contains(&new_model_path) {
+                        drop(db);
+                        return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                            "A model named '{}' already exists",
+                            new_name
+                        )));
+                    }
+
+                    // Collect all ref locations across the project
+                    let all_file_refs: Vec<_> = all_files
+                        .iter()
+                        .map(|p| (p.clone(), (*db.model_refs(p.clone())).clone()))
+                        .collect();
+                    let ref_locations =
+                        smelt_db::references::find_model_references(&name, &all_file_refs);
+
+                    // For each ref location, get the content range (inside quotes)
+                    let mut edits = Vec::new();
+                    for (ref_path, _) in &ref_locations {
+                        let ref_text = db.file_text(ref_path.clone());
+                        let ref_parse = db.parse_file(ref_path.clone());
+                        let ref_syntax = ref_parse.syntax();
+                        if let Some(ref_file) = AstFile::cast(ref_syntax) {
+                            for ref_call in ref_file.refs() {
+                                if ref_call.model_name().as_deref() == Some(&name) {
+                                    if let Some(content_range) = ref_call.content_range() {
+                                        let r = smelt_parser::ast::text_range_to_range(
+                                            &ref_text,
+                                            content_range,
+                                        );
+                                        edits.push((
+                                            ref_path.clone(),
+                                            r.start.line,
+                                            r.start.column,
+                                            r.end.line,
+                                            r.end.column,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check if the model .sql file exists
+                    let model_dir = effective_path.parent().unwrap_or(effective_path.as_ref());
+                    let old_model_path = model_dir.join(format!("{}.sql", name));
+                    let old_path = if all_files.contains(&old_model_path) {
+                        Some(old_model_path)
+                    } else {
+                        None
+                    };
+
+                    Some(RenameKind::Model {
+                        model_name: name,
+                        edits,
+                        old_model_path: old_path,
+                    })
+                }
+                _ => None,
             }
         } else {
-            vec![]
+            None
         };
         drop(db);
 
-        if edits.is_empty() {
-            return Ok(None);
+        match rename_kind {
+            Some(RenameKind::Cte { edits }) => {
+                if edits.is_empty() {
+                    return Ok(None);
+                }
+                let text_edits: Vec<TextEdit> = edits
+                    .into_iter()
+                    .map(|(sl, sc, el, ec)| TextEdit {
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                        new_text: new_name.clone(),
+                    })
+                    .collect();
+                let mut changes = HashMap::new();
+                changes.insert(uri, text_edits);
+                Ok(Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }))
+            }
+            Some(RenameKind::Model {
+                model_name: _,
+                edits,
+                old_model_path,
+            }) => {
+                if edits.is_empty() && old_model_path.is_none() {
+                    return Ok(None);
+                }
+
+                // Build DocumentChanges with text edits per file + optional RenameFile
+                let mut document_changes: Vec<DocumentChangeOperation> = Vec::new();
+
+                // Group text edits by file path
+                let mut edits_by_file: HashMap<PathBuf, Vec<TextEdit>> = HashMap::new();
+                for (file_path, sl, sc, el, ec) in edits {
+                    edits_by_file.entry(file_path).or_default().push(TextEdit {
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                        new_text: new_name.clone(),
+                    });
+                }
+
+                // Add text edit operations
+                for (file_path, file_edits) in edits_by_file {
+                    let file_uri = Url::from_file_path(&file_path).unwrap_or_else(|_| uri.clone());
+                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier {
+                            uri: file_uri,
+                            version: None,
+                        },
+                        edits: file_edits.into_iter().map(OneOf::Left).collect(),
+                    }));
+                }
+
+                // Add file rename operation
+                if let Some(old_path) = old_model_path {
+                    let new_path = old_path
+                        .parent()
+                        .unwrap_or(old_path.as_ref())
+                        .join(format!("{}.sql", new_name));
+                    let old_uri = Url::from_file_path(&old_path).unwrap_or_else(|_| uri.clone());
+                    let new_uri = Url::from_file_path(&new_path).unwrap_or_else(|_| uri.clone());
+                    document_changes.push(DocumentChangeOperation::Op(ResourceOp::Rename(
+                        RenameFile {
+                            old_uri,
+                            new_uri,
+                            options: None,
+                            annotation_id: None,
+                        },
+                    )));
+                }
+
+                Ok(Some(WorkspaceEdit {
+                    document_changes: Some(DocumentChanges::Operations(document_changes)),
+                    ..Default::default()
+                }))
+            }
+            None => Ok(None),
         }
-
-        let text_edits: Vec<TextEdit> = edits
-            .into_iter()
-            .map(|(sl, sc, el, ec)| TextEdit {
-                range: Range {
-                    start: Position::new(sl, sc),
-                    end: Position::new(el, ec),
-                },
-                new_text: new_name.clone(),
-            })
-            .collect();
-
-        let mut changes = HashMap::new();
-        changes.insert(uri, text_edits);
-
-        Ok(Some(WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
-        }))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
