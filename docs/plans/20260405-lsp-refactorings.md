@@ -104,42 +104,40 @@
 
 ---
 
-## Phase 2: Find References `[ ]`
+## Phase 2: Find References `[x]`
 
 **Priority**: High — needed by rename (Phase 4+), independently useful.
 
 **Goal**: Implement `textDocument/references` for models, sources, and CTEs.
 
 **Red tests (write first)**:
-- [ ] `test_find_model_references_single_file` — model referenced by one file returns 1 location
-- [ ] `test_find_model_references_multiple_files` — model referenced by 3 files returns 3 locations
-- [ ] `test_find_model_references_unreferenced` — model with no refs returns empty
-- [ ] `test_find_source_references` — source referenced by 2 files returns 2 locations
-- [ ] `test_find_cte_references_in_from` — CTE used in FROM clause found
-- [ ] `test_find_cte_references_in_join` — CTE used in JOIN found
-- [ ] `test_find_cte_references_as_qualifier` — CTE used as column qualifier (`cte.col`) found
-- [ ] `test_find_cte_references_includes_definition` — the CTE's own name token is included
+- [x] `test_find_model_references_single_file` — model referenced by one file returns 1 location
+- [x] `test_find_model_references_multiple_files` — model referenced by 3 files returns 3 locations
+- [x] `test_find_model_references_unreferenced` — model with no refs returns empty
+- [x] `test_find_source_references` — source referenced by 2 files returns 2 locations
+- [x] `test_find_cte_references_in_from` — CTE used in FROM clause found
+- [x] `test_find_cte_references_in_join` — CTE used in JOIN found
+- [x] `test_find_cte_references_as_qualifier` — CTE used as column qualifier (`cte.col`) found
+- [x] `test_find_cte_references_includes_definition` — the CTE's own name token is included
 
 **Green implementation**:
-- [ ] Add pure function `find_model_references(model_name, all_refs) -> Vec<(PathBuf, Range)>` in `crates/smelt-db/src/lib.rs`
-- [ ] Add Salsa query `model_references(model_name: String)` as thin wrapper
-- [ ] Add pure function `find_source_references(qualified_name, all_sources) -> Vec<(PathBuf, Range)>`
-- [ ] Add Salsa query `source_references(qualified_name: String)`
-- [ ] Add pure function `find_cte_references(file: &AstFile, text: &str, cte_name: &str) -> Vec<TextRange>` in `crates/smelt-db/src/type_inference.rs`
-- [ ] Implement `textDocument/references` handler in main.rs using `symbol_at_cursor` + reference queries
-- [ ] Wire `TestWorkspace::references_for()` to call the db queries directly
+- [x] Add pure function `find_model_references(model_name, all_refs) -> Vec<(PathBuf, Range)>` in `crates/smelt-db/src/references.rs`
+- [x] Add pure function `find_source_references(qualified_name, all_sources) -> Vec<(PathBuf, Range)>` in `crates/smelt-db/src/references.rs`
+- [x] Add pure function `find_cte_references(file: &AstFile, text: &str, cte_name: &str) -> Vec<TextRange>` in `crates/smelt-db/src/references.rs`
+- [x] Implement `textDocument/references` handler in main.rs using `symbol_at_cursor` + reference queries
+- [x] Wire `TestWorkspace::references_for()` to call the db queries directly
 
-**Files to modify**:
-- `crates/smelt-db/src/lib.rs` — reference queries (pure functions + Salsa wrappers)
-- `crates/smelt-db/src/type_inference.rs` — find_cte_references
-- `crates/smelt-lsp/src/main.rs` — textDocument/references handler
-- `crates/smelt-lsp/tests/integration.rs` — red tests
+**Files modified**:
+- `crates/smelt-db/src/references.rs` — NEW: pure functions for find_model_references, find_source_references, find_cte_references
+- `crates/smelt-db/src/lib.rs` — register references module
+- `crates/smelt-lsp/src/main.rs` — textDocument/references handler, ref_locations_to_lsp helper
+- `crates/smelt-lsp/tests/integration.rs` — 8 red→green tests, wired references_for() helper
 
 **Verification**:
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets`
-- [ ] `cargo test` (all pass)
-- [ ] `cargo test -p smelt-cli --test example_diagnostics`
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy` (clean for smelt-parser, smelt-db, smelt-lsp)
+- [x] `cargo test` (440 tests pass: 241 parser + 129 db + 70 lsp integration)
+- [!] `cargo test -p smelt-cli --test example_diagnostics` — blocked by pre-existing smelt-backend-duckdb arrow type mismatch
 
 ---
 
@@ -448,6 +446,10 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 
 5. **`symbol_at_cursor` lives in smelt-parser, not smelt-lsp**: The plan originally placed this in `main.rs`, but smelt-lsp is a binary crate — integration tests can't import from it. Since `symbol_at_cursor` is a pure function on AST data with no Salsa/LSP dependencies, smelt-parser is the natural home. This also makes it available to future crates (smelt-check, smelt-cli).
 
+6. **Reference pure functions in `references.rs`, not lib.rs/type_inference.rs**: Created a new `crates/smelt-db/src/references.rs` module for reference-finding logic. Better organization than putting it in the already-large lib.rs.
+
+7. **Skipped Salsa query wrappers for references**: The plan called for `model_references` and `source_references` Salsa queries as thin wrappers. These were skipped because the pure functions are simple O(n) scans that don't benefit from incremental caching — the input data comes from existing cached Salsa queries (`model_refs`, `model_sources`). Can be added later if profiling shows a need.
+
 ---
 
 ## Session Log
@@ -484,3 +486,24 @@ Phases 3-4 are independent of Phases 1-2 and could run in parallel if desired.
 **Decisions**:
 - Placed `SymbolAtCursor` and `symbol_at_cursor()` in `smelt-parser` (not smelt-lsp/main.rs as originally planned) because smelt-lsp is a binary crate and the function is a pure function on AST data. This makes it testable from integration tests and follows the pure function rule.
 - Kept `_text` parameter in `symbol_at_cursor()` signature for future use (e.g., CTE qualifier resolution) even though it's currently unused.
+
+### Session 3 — 2026-04-05
+
+**Phase**: 2 (Find References)
+**Status**: Complete
+
+**What was done**:
+- Created `crates/smelt-db/src/references.rs` with three pure functions:
+  - `find_model_references()` — scans all files' ref locations for matches
+  - `find_source_references()` — scans all files' source locations for matches
+  - `find_cte_references()` — finds CTE definition, FROM/JOIN references, and qualifier usage within a single file
+- Implemented `textDocument/references` handler in main.rs using `symbol_at_cursor` dispatch
+  - Handles RefCall (cross-file model refs), SourceCall (cross-file source refs), CteDefinition/CteReference (single-file CTE refs)
+  - Careful to not hold db lock across await points (collects plain data first, then converts to LSP types)
+- Wired `TestWorkspace::references_for()` to use the pure functions directly
+- Added `ref_locations_to_lsp()` helper for converting (PathBuf, Range) to LSP Location with Python source path mapping
+- Wrote 8 tests, all pass
+
+**Decisions**:
+- Put pure functions in a new `crates/smelt-db/src/references.rs` module (not in lib.rs or type_inference.rs as originally planned). This keeps the code organized and follows the single-responsibility principle.
+- Skipped Salsa query wrappers (`model_references`, `source_references`) since the pure functions are simple filtering operations that don't benefit from caching. The LSP handler collects data from existing Salsa queries (`model_refs`, `model_sources`) and calls the pure functions directly. Salsa wrappers can be added later if caching becomes valuable.

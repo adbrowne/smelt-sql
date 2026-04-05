@@ -661,6 +661,30 @@ impl Backend {
         }
     }
 
+    /// Convert (PathBuf, Range) reference locations to LSP Location objects.
+    async fn ref_locations_to_lsp(
+        &self,
+        refs: &[(PathBuf, smelt_parser::ast::Range)],
+    ) -> Vec<Location> {
+        let py_sources = self.python_model_sources.lock().await;
+        refs.iter()
+            .filter_map(|(path, range)| {
+                let (actual_path, line_offset) = py_sources
+                    .get(path)
+                    .map(|(p, line)| (p.clone(), *line))
+                    .unwrap_or((path.clone(), 0));
+                let uri = Url::from_file_path(&actual_path).ok()?;
+                Some(Location {
+                    uri,
+                    range: Range {
+                        start: Position::new(range.start.line + line_offset, range.start.column),
+                        end: Position::new(range.end.line + line_offset, range.end.column),
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Convert our database diagnostic to LSP diagnostic
     fn to_lsp_diagnostic(&self, diag: &DbDiagnostic) -> lsp_types::Diagnostic {
         let code = diag.code.map(|c| {
@@ -1970,6 +1994,118 @@ impl LanguageServer for Backend {
                 }
             }
             None => Ok(None),
+        }
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let path = match self.uri_to_path(&uri).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        // For multi-model files, resolve to the virtual path and adjust position
+        let (effective_path, effective_position) = if let Some((vp, adjusted_line)) =
+            self.resolve_virtual_path(&path, position.line).await
+        {
+            (
+                vp,
+                Position {
+                    line: adjusted_line,
+                    character: position.character,
+                },
+            )
+        } else {
+            (path.clone(), position)
+        };
+
+        let db = self.db.lock().await;
+
+        let text = db.file_text(effective_path.clone());
+        let parse = db.parse_file(effective_path.clone());
+        let syntax = parse.syntax();
+
+        let cursor_offset =
+            position_to_offset(&text, effective_position.line, effective_position.character);
+
+        // Collect reference data as plain types while holding the lock.
+        // We use an enum to avoid holding AST nodes across await points.
+        enum RefResult {
+            PathRanges(Vec<(PathBuf, smelt_parser::ast::Range)>),
+            CteRanges(PathBuf, Vec<(u32, u32, u32, u32)>),
+            Empty,
+        }
+
+        let ref_result = if let Some(file) = AstFile::cast(syntax) {
+            match symbol_at_cursor(&file, &text, cursor_offset) {
+                Some(SymbolAtCursor::RefCall { name }) => {
+                    let all_file_refs: Vec<_> = db
+                        .all_files()
+                        .iter()
+                        .map(|p| (p.clone(), (*db.model_refs(p.clone())).clone()))
+                        .collect();
+                    let refs = smelt_db::references::find_model_references(&name, &all_file_refs);
+                    RefResult::PathRanges(refs)
+                }
+                Some(SymbolAtCursor::SourceCall {
+                    source_name,
+                    table_name,
+                }) => {
+                    let qualified_name = format!("{}.{}", source_name, table_name);
+                    let all_file_sources: Vec<_> = db
+                        .all_files()
+                        .iter()
+                        .map(|p| (p.clone(), (*db.model_sources(p.clone())).clone()))
+                        .collect();
+                    let refs = smelt_db::references::find_source_references(
+                        &qualified_name,
+                        &all_file_sources,
+                    );
+                    RefResult::PathRanges(refs)
+                }
+                Some(SymbolAtCursor::CteDefinition { name })
+                | Some(SymbolAtCursor::CteReference { name }) => {
+                    let cte_refs = smelt_db::references::find_cte_references(&file, &text, &name);
+                    let ranges: Vec<_> = cte_refs
+                        .iter()
+                        .map(|text_range| {
+                            let r = smelt_parser::ast::text_range_to_range(&text, *text_range);
+                            (r.start.line, r.start.column, r.end.line, r.end.column)
+                        })
+                        .collect();
+                    RefResult::CteRanges(effective_path.clone(), ranges)
+                }
+                _ => RefResult::Empty,
+            }
+        } else {
+            RefResult::Empty
+        };
+        drop(db);
+
+        let locations = match ref_result {
+            RefResult::PathRanges(refs) => self.ref_locations_to_lsp(&refs).await,
+            RefResult::CteRanges(path, ranges) => ranges
+                .into_iter()
+                .filter_map(|(sl, sc, el, ec)| {
+                    let uri = Url::from_file_path(&path).ok()?;
+                    Some(Location {
+                        uri,
+                        range: Range {
+                            start: Position::new(sl, sc),
+                            end: Position::new(el, ec),
+                        },
+                    })
+                })
+                .collect(),
+            RefResult::Empty => vec![],
+        };
+
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(locations))
         }
     }
 

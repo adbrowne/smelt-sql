@@ -24,6 +24,7 @@ use serde::Deserialize;
 use smelt_parser::{self, File as AstFile, RefCall, TableRef};
 use smelt_types::{parse_type, DataType, TypedColumn};
 
+pub mod references;
 pub mod schema;
 pub mod type_inference;
 

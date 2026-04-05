@@ -90,11 +90,65 @@ impl TestWorkspace {
         vec![]
     }
 
-    /// Find all references to a symbol at a position (stub — returns empty until handler is implemented)
+    /// Find all references to a symbol at a position.
+    /// Uses symbol_at_cursor + pure reference functions from smelt-db.
     #[allow(dead_code)]
-    fn references_for(&self, _model: &str, _line: u32, _col: u32) -> Vec<(PathBuf, (u32, u32))> {
-        // Stub: will be wired to reference queries in Phase 2
-        vec![]
+    fn references_for(&self, model: &str, line: u32, col: u32) -> Vec<(PathBuf, (u32, u32))> {
+        use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
+
+        let path = self.model_path(model);
+        let text = self.db.file_text(path.clone());
+        let parse = self.db.parse_file(path.clone());
+        let syntax = parse.syntax();
+
+        let file = match smelt_parser::ast::File::cast(syntax) {
+            Some(f) => f,
+            None => return vec![],
+        };
+
+        let offset = position_to_offset(&text, line, col);
+        match symbol_at_cursor(&file, &text, offset) {
+            Some(SymbolAtCursor::RefCall { name }) => {
+                let all_file_refs: Vec<_> = self
+                    .db
+                    .all_files()
+                    .iter()
+                    .map(|p| (p.clone(), (*self.db.model_refs(p.clone())).clone()))
+                    .collect();
+                smelt_db::references::find_model_references(&name, &all_file_refs)
+                    .into_iter()
+                    .map(|(p, r)| (p, (r.start.line, r.start.column)))
+                    .collect()
+            }
+            Some(SymbolAtCursor::SourceCall {
+                source_name,
+                table_name,
+            }) => {
+                let qualified = format!("{}.{}", source_name, table_name);
+                let all_file_sources: Vec<_> = self
+                    .db
+                    .all_files()
+                    .iter()
+                    .map(|p| (p.clone(), (*self.db.model_sources(p.clone())).clone()))
+                    .collect();
+                smelt_db::references::find_source_references(&qualified, &all_file_sources)
+                    .into_iter()
+                    .map(|(p, r)| (p, (r.start.line, r.start.column)))
+                    .collect()
+            }
+            Some(SymbolAtCursor::CteDefinition { name })
+            | Some(SymbolAtCursor::CteReference { name }) => {
+                let cte_refs = smelt_db::references::find_cte_references(&file, &text, &name);
+                cte_refs
+                    .into_iter()
+                    .map(|text_range| {
+                        let r = smelt_parser::ast::text_range_to_range(&text, text_range);
+                        (path.clone(), (r.start.line, r.start.column))
+                    })
+                    .collect()
+            }
+            _ => vec![],
+        }
     }
 
     /// Rename a symbol at a position (stub — returns empty until handler is implemented)
@@ -1628,5 +1682,154 @@ mod ast_range_helpers {
             table_text, "users",
             "table_name_range should cover just the table name"
         );
+    }
+}
+
+// =============================================================================
+// Find References Tests (Phase 2)
+// =============================================================================
+
+mod find_references {
+    use super::*;
+    use smelt_db::references::{
+        find_cte_references, find_model_references, find_source_references,
+    };
+
+    #[test]
+    fn test_find_model_references_single_file() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 as id");
+        ws.add_model("orders", "SELECT * FROM smelt.ref('users')");
+
+        let all_file_refs: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .collect();
+
+        let refs = find_model_references("users", &all_file_refs);
+        assert_eq!(refs.len(), 1, "Expected 1 reference to 'users'");
+        assert_eq!(refs[0].0, ws.model_path("orders"));
+    }
+
+    #[test]
+    fn test_find_model_references_multiple_files() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 as id");
+        ws.add_model("a", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("b", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("c", "SELECT * FROM smelt.ref('users')");
+
+        let all_file_refs: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .collect();
+
+        let refs = find_model_references("users", &all_file_refs);
+        assert_eq!(refs.len(), 3, "Expected 3 references to 'users'");
+    }
+
+    #[test]
+    fn test_find_model_references_unreferenced() {
+        let mut ws = TestWorkspace::new();
+        ws.add_model("users", "SELECT 1 as id");
+        ws.add_model("orders", "SELECT 1 as id");
+
+        let all_file_refs: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .collect();
+
+        let refs = find_model_references("users", &all_file_refs);
+        assert!(refs.is_empty(), "Expected no references to 'users'");
+    }
+
+    #[test]
+    fn test_find_source_references() {
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            r#"
+sources:
+  raw:
+    tables:
+      users:
+        columns:
+          - name: id
+"#,
+        );
+        ws.add_model("a", "SELECT * FROM smelt.source('raw.users')");
+        ws.add_model("b", "SELECT * FROM smelt.source('raw.users')");
+
+        let all_file_sources: Vec<_> = ws
+            .db
+            .all_files()
+            .iter()
+            .map(|p| (p.clone(), (*ws.db.model_sources(p.clone())).clone()))
+            .collect();
+
+        let refs = find_source_references("raw.users", &all_file_sources);
+        assert_eq!(refs.len(), 2, "Expected 2 references to 'raw.users'");
+    }
+
+    #[test]
+    fn test_find_cte_references_in_from() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should find the reference in FROM
+        let has_from_ref = refs.iter().any(|r| {
+            let text = &sql[usize::from(r.start())..usize::from(r.end())];
+            text == "cte1"
+        });
+        assert!(has_from_ref, "Should find CTE reference in FROM clause");
+    }
+
+    #[test]
+    fn test_find_cte_references_in_join() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM other INNER JOIN cte1 ON other.id = cte1.id";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should find the reference in JOIN
+        assert!(!refs.is_empty(), "Should find CTE reference in JOIN clause");
+    }
+
+    #[test]
+    fn test_find_cte_references_as_qualifier() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT cte1.id FROM cte1";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should find the qualifier usage AND the FROM reference
+        assert!(
+            refs.len() >= 2,
+            "Should find CTE as qualifier and in FROM, got {}",
+            refs.len()
+        );
+    }
+
+    #[test]
+    fn test_find_cte_references_includes_definition() {
+        let sql = "WITH cte1 AS (SELECT 1 as id)\nSELECT * FROM cte1";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
+
+        let refs = find_cte_references(&file, sql, "cte1");
+        // Should include the definition site in WITH clause
+        let has_def = refs.iter().any(|r| {
+            // The definition is at offset 5 ("WITH cte1")
+            let start: usize = r.start().into();
+            start < 10 // definition is near the beginning
+        });
+        assert!(has_def, "Should include CTE definition site in references");
     }
 }
