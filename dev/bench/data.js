@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775389999909,
+  "lastUpdate": 1775390001307,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14486,6 +14486,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.987752200123076,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "267f6edc52dca12ce03fea75a2adb851a9d3a8b1",
+          "message": "Reprioritize roadmap: smelt check first, move Metrics DSL out of What's Next\n\nNew order: smelt check, orchestrator integration, PostgreSQL backend.\nMetrics DSL remains in Language & Parser next steps.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-05T21:52:04+10:00",
+          "tree_id": "9ce3c44db73419cc18d90a06d692412acd7e0361",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/267f6edc52dca12ce03fea75a2adb851a9d3a8b1"
+        },
+        "date": 1775390001030,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.06612079923909,
             "unit": "MB/s"
           }
         ]
