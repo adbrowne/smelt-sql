@@ -19,5 +19,8 @@ examples/*/data/
 ui/node_modules/
 ui/dist/
 
+# Docs site build output
+docs-site/site/
+
 # Maturin wheel data (created in CI)
 smelt_sql.data/
