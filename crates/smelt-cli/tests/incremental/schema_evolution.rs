@@ -794,3 +794,875 @@ async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
 
     Ok(())
 }
+
+// ===== Phase 11: DuckDB integration tests for complex type schema evolution =====
+
+/// 11a: Struct field removal with allow_column_removal flag
+#[tokio::test]
+async fn test_e2e_struct_field_removal() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.struct_rm AS SELECT \
+             1 AS id, \
+             {'a': 42, 'b': 'hello'}::STRUCT(a INTEGER, b VARCHAR) AS meta",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "struct_rm".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![
+            DeployedColumn {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: true,
+            },
+            DeployedColumn {
+                name: "meta".to_string(),
+                data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
+                nullable: true,
+            },
+        ],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: struct field 'b' removed
+    let inferred = vec![
+        DeployedColumn {
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: true,
+        },
+        DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "STRUCT(a INTEGER)".to_string(),
+            nullable: true,
+        },
+    ];
+
+    // With allow_column_removal=true, struct field removal should succeed
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "struct_rm",
+        "SELECT 1",
+        "main",
+        &inferred,
+        true, // allow_column_removal
+        false,
+        false, // not dry run — execute DDL
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(!statements.is_empty(), "Should have ALTER statements");
+            assert!(
+                statements.iter().any(|s| s.contains("meta.b")),
+                "Should DROP struct field meta.b, got: {:?}",
+                statements
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify the field was actually removed — meta should now be STRUCT(a INTEGER)
+    let result = backend
+        .execute_sql("SELECT typeof(meta) FROM main.struct_rm LIMIT 1")
+        .await?;
+    let type_str = result[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert!(
+        !type_str.contains("VARCHAR"),
+        "meta should no longer have b VARCHAR, got: {}",
+        type_str
+    );
+
+    Ok(())
+}
+
+/// 11a: Map value type widening → incremental continues
+#[tokio::test]
+async fn test_e2e_map_value_widening() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.mapval_model AS SELECT \
+             MAP {'x': 1, 'y': 2}::MAP(VARCHAR, INTEGER) AS lookup",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "mapval_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "lookup".to_string(),
+            data_type: "MAP(VARCHAR, INTEGER)".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: map value widened to BIGINT
+    let inferred = vec![DeployedColumn {
+        name: "lookup".to_string(),
+        data_type: "MAP(VARCHAR, BIGINT)".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "mapval_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(!statements.is_empty(), "Should have ALTER statements");
+            let all_stmts = statements.join(" ");
+            assert!(
+                all_stmts.contains("MAP(VARCHAR, BIGINT)") || all_stmts.contains("BIGINT"),
+                "Should widen map value type, got: {:?}",
+                statements
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+/// 11a: Array-of-struct field addition → incremental continues
+#[tokio::test]
+async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.arr_struct_model AS SELECT \
+             [{'a': 1}, {'a': 2}]::STRUCT(a INTEGER)[] AS items",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "arr_struct_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "items".to_string(),
+            data_type: "STRUCT(a INTEGER)[]".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: struct inside array gets a new field
+    let inferred = vec![DeployedColumn {
+        name: "items".to_string(),
+        data_type: "STRUCT(a INTEGER, b VARCHAR)[]".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "arr_struct_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(
+                !statements.is_empty(),
+                "Should have migration statements for array-of-struct field add"
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify we can query the new struct field
+    let check = backend
+        .execute_sql("SELECT typeof(items) FROM main.arr_struct_model LIMIT 1")
+        .await?;
+    let type_str = check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert!(
+        type_str.contains("b"),
+        "items should now have field b, got type: {}",
+        type_str
+    );
+
+    Ok(())
+}
+
+/// 11a: Nested struct field addition (deep nesting)
+#[tokio::test]
+async fn test_e2e_nested_struct_field_addition() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.nested_add_model AS SELECT \
+             {'nested': {'x': 10}}::STRUCT(nested STRUCT(x INTEGER)) AS data",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "nested_add_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "STRUCT(nested STRUCT(x INTEGER))".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: nested struct gets a new field
+    let inferred = vec![DeployedColumn {
+        name: "data".to_string(),
+        data_type: "STRUCT(nested STRUCT(x INTEGER, y VARCHAR))".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "nested_add_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(!statements.is_empty(), "Should have ALTER statements");
+            // Should reference the nested path
+            let all_stmts = statements.join(" ");
+            assert!(
+                all_stmts.contains("data") && all_stmts.contains("nested"),
+                "Should reference nested path data.nested, got: {:?}",
+                statements
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify the nested field was added
+    let result = backend
+        .execute_sql("SELECT data.nested.y FROM main.nested_add_model LIMIT 1")
+        .await;
+    assert!(
+        result.is_ok(),
+        "data.nested.y should exist after nested field addition"
+    );
+
+    Ok(())
+}
+
+/// 11a: Multiple changes in one migration (add struct field + widen array type)
+#[tokio::test]
+async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.multi_model AS SELECT \
+             1 AS id, \
+             {'a': CAST(42 AS INTEGER), 'b': 'hello'}::STRUCT(a INTEGER, b VARCHAR) AS meta, \
+             [1, 2, 3]::INTEGER[] AS scores",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "multi_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![
+            DeployedColumn {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: true,
+            },
+            DeployedColumn {
+                name: "meta".to_string(),
+                data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
+                nullable: true,
+            },
+            DeployedColumn {
+                name: "scores".to_string(),
+                data_type: "INTEGER[]".to_string(),
+                nullable: true,
+            },
+        ],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: struct field added + array element widened
+    let inferred = vec![
+        DeployedColumn {
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: true,
+        },
+        DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "STRUCT(a INTEGER, b VARCHAR, c BOOLEAN)".to_string(),
+            nullable: true,
+        },
+        DeployedColumn {
+            name: "scores".to_string(),
+            data_type: "BIGINT[]".to_string(),
+            nullable: true,
+        },
+    ];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "multi_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(
+                statements.len() >= 2,
+                "Should have at least 2 ALTER statements (struct + array), got: {:?}",
+                statements
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify both changes applied
+    let check = backend
+        .execute_sql("SELECT meta.c, typeof(scores) FROM main.multi_model LIMIT 1")
+        .await?;
+    // meta.c should exist (NULL for old rows)
+    assert_eq!(check[0].num_columns(), 2, "Should have both result columns");
+
+    Ok(())
+}
+
+/// 11b: struct_pack rewrite produces correct data — insert v1 rows, migrate, verify
+#[tokio::test]
+async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    // Create table with v1 schema and insert multiple rows
+    backend
+        .execute_sql(
+            "CREATE TABLE main.data_model AS SELECT * FROM (VALUES \
+             (1, {'a': CAST(10 AS INTEGER), 'b': 'foo'}::STRUCT(a INTEGER, b VARCHAR)), \
+             (2, {'a': CAST(20 AS INTEGER), 'b': 'bar'}::STRUCT(a INTEGER, b VARCHAR)), \
+             (3, {'a': CAST(30 AS INTEGER), 'b': 'baz'}::STRUCT(a INTEGER, b VARCHAR))  \
+             ) AS t(id, meta)",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "data_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![
+            DeployedColumn {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: true,
+            },
+            DeployedColumn {
+                name: "meta".to_string(),
+                data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
+                nullable: true,
+            },
+        ],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: widen meta.a from INTEGER to BIGINT, add field c
+    let inferred = vec![
+        DeployedColumn {
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: true,
+        },
+        DeployedColumn {
+            name: "meta".to_string(),
+            data_type: "STRUCT(a BIGINT, b VARCHAR, c BOOLEAN)".to_string(),
+            nullable: true,
+        },
+    ];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "data_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { .. } => {}
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify old rows have correct widened values
+    let check = backend
+        .execute_sql("SELECT id, meta.a, meta.b, meta.c FROM main.data_model ORDER BY id")
+        .await?;
+
+    // Check row count
+    let total_rows: usize = check.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 3, "Should have 3 original rows");
+
+    // Verify types are correct
+    let type_check = backend
+        .execute_sql("SELECT typeof(meta.a) FROM main.data_model LIMIT 1")
+        .await?;
+    let a_type = type_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(a_type, "BIGINT", "meta.a should be BIGINT after widening");
+
+    // Verify old rows have NULL for new field c
+    let null_check = backend
+        .execute_sql("SELECT COUNT(*) FROM main.data_model WHERE meta.c IS NULL")
+        .await?;
+    let null_count = extract_count(&null_check[0]);
+    assert_eq!(null_count, 3, "All old rows should have NULL for meta.c");
+
+    // Verify old data values preserved
+    let value_check = backend
+        .execute_sql("SELECT meta.a, meta.b FROM main.data_model WHERE id = 1")
+        .await?;
+    let a_val = value_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(a_val, 10, "meta.a should still be 10 after widening");
+
+    let b_val = value_check[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(b_val, "foo", "meta.b should still be 'foo'");
+
+    // Insert new row with v2 schema
+    backend
+        .execute_sql(
+            "INSERT INTO main.data_model VALUES \
+             (4, {'a': CAST(40 AS BIGINT), 'b': 'qux', 'c': true})",
+        )
+        .await?;
+
+    // Verify both old and new rows queryable
+    let final_check = backend
+        .execute_sql("SELECT COUNT(*) FROM main.data_model")
+        .await?;
+    let final_count = extract_count(&final_check[0]);
+    assert_eq!(final_count, 4, "Should have 4 total rows");
+
+    // New row should have non-null c
+    let new_row_check = backend
+        .execute_sql("SELECT meta.c FROM main.data_model WHERE id = 4")
+        .await?;
+    let c_val = new_row_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap()
+        .value(0);
+    assert!(c_val, "New row meta.c should be true");
+
+    Ok(())
+}
+
+/// 11c: Deeply nested struct — inner struct gets field added AND type widened
+#[tokio::test]
+async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.deep_model AS SELECT \
+             {'nested': {'x': CAST(10 AS INTEGER)}}::STRUCT(nested STRUCT(x INTEGER)) AS data",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "deep_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "STRUCT(nested STRUCT(x INTEGER))".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: inner.x widened INTEGER→BIGINT, inner.y added
+    let inferred = vec![DeployedColumn {
+        name: "data".to_string(),
+        data_type: "STRUCT(nested STRUCT(x BIGINT, y VARCHAR))".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "deep_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(!statements.is_empty(), "Should have migration statements");
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify the nested type was widened
+    let type_check = backend
+        .execute_sql("SELECT typeof(data.nested.x) FROM main.deep_model LIMIT 1")
+        .await?;
+    let x_type = type_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(x_type, "BIGINT", "data.nested.x should be BIGINT");
+
+    // Verify the new field exists
+    let y_check = backend
+        .execute_sql("SELECT data.nested.y FROM main.deep_model LIMIT 1")
+        .await;
+    assert!(
+        y_check.is_ok(),
+        "data.nested.y should exist after migration"
+    );
+
+    Ok(())
+}
+
+/// 11c: Struct with array field widening
+#[tokio::test]
+async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.struct_arr_model AS SELECT \
+             {'items': [1, 2, 3]::INTEGER[]}::STRUCT(items INTEGER[]) AS data",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "struct_arr_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "data".to_string(),
+            data_type: "STRUCT(items INTEGER[])".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: items widened INTEGER[] → BIGINT[]
+    let inferred = vec![DeployedColumn {
+        name: "data".to_string(),
+        data_type: "STRUCT(items BIGINT[])".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "struct_arr_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(!statements.is_empty(), "Should have migration statements");
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify the nested array type was widened
+    let type_check = backend
+        .execute_sql("SELECT typeof(data.items) FROM main.struct_arr_model LIMIT 1")
+        .await?;
+    let items_type = type_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert!(
+        items_type.contains("BIGINT"),
+        "data.items should be BIGINT[], got: {}",
+        items_type
+    );
+
+    Ok(())
+}
+
+/// 11d: Map value struct field addition
+#[tokio::test]
+async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.map_struct_model AS SELECT \
+             MAP {'k1': {'a': 1}}::MAP(VARCHAR, STRUCT(a INTEGER)) AS lookup",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "map_struct_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "lookup".to_string(),
+            data_type: "MAP(VARCHAR, STRUCT(a INTEGER))".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    // Infer v2: struct inside map value gets new field
+    let inferred = vec![DeployedColumn {
+        name: "lookup".to_string(),
+        data_type: "MAP(VARCHAR, STRUCT(a INTEGER, b TEXT))".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "map_struct_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(
+                !statements.is_empty(),
+                "Should have migration statements for map value struct field add"
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify the map value struct was updated
+    let type_check = backend
+        .execute_sql("SELECT typeof(lookup) FROM main.map_struct_model LIMIT 1")
+        .await?;
+    let lookup_type = type_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert!(
+        lookup_type.contains("b"),
+        "Map value struct should now have field b, got: {}",
+        lookup_type
+    );
+
+    Ok(())
+}
+
+/// 11d: Map value widening (MAP(VARCHAR, INTEGER) → MAP(VARCHAR, BIGINT))
+#[tokio::test]
+async fn test_e2e_map_value_type_widening() -> Result<()> {
+    let (dir, backend) = setup_backend().await?;
+    let file_store = FileStore::new(dir.path());
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.mapwiden_model AS SELECT \
+             MAP {'a': 1, 'b': 2}::MAP(VARCHAR, INTEGER) AS lookup",
+        )
+        .await?;
+
+    let v1 = DeployedSchema {
+        model: "mapwiden_model".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "sha256:v1".to_string(),
+        columns: vec![DeployedColumn {
+            name: "lookup".to_string(),
+            data_type: "MAP(VARCHAR, INTEGER)".to_string(),
+            nullable: true,
+        }],
+    };
+    file_store.save_schema(&v1)?;
+
+    let inferred = vec![DeployedColumn {
+        name: "lookup".to_string(),
+        data_type: "MAP(VARCHAR, BIGINT)".to_string(),
+        nullable: true,
+    }];
+
+    let result = smelt_cli::migration::check_and_migrate(
+        &backend,
+        &file_store,
+        "mapwiden_model",
+        "SELECT 1",
+        "main",
+        &inferred,
+        false,
+        false,
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await?;
+
+    match &result {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+            assert!(
+                !statements.is_empty(),
+                "Should have ALTER statements for map value widening"
+            );
+        }
+        other => panic!("Expected Migrated, got {:?}", other),
+    }
+
+    // Verify the value type was widened
+    let type_check = backend
+        .execute_sql("SELECT typeof(lookup) FROM main.mapwiden_model LIMIT 1")
+        .await?;
+    let type_str = type_check[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap()
+        .value(0);
+    assert!(
+        type_str.contains("BIGINT"),
+        "Map value should be BIGINT, got: {}",
+        type_str
+    );
+
+    Ok(())
+}

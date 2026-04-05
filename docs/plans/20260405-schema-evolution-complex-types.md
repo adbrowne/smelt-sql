@@ -780,33 +780,33 @@ cargo clippy --all-targets
 
 ---
 
-## Phase 11: DuckDB Integration Tests [ ]
+## Phase 11: DuckDB Integration Tests [x]
 
 **Goal:** End-to-end tests that execute real DDL against DuckDB for all complex type schema evolution scenarios.
 
 ### Work Items
 
-- [ ] 11a. Add integration tests in `smelt-cli/tests/incremental/schema_evolution.rs`:
-  - Struct field addition → incremental continues
+- [x] 11a. Add integration tests in `smelt-cli/tests/incremental/schema_evolution.rs`:
+  - Struct field addition → incremental continues (already existed from Phase 10)
   - Struct field removal (with flag) → incremental continues
-  - Struct field type widening via struct_pack → incremental continues
-  - Array element type widening → incremental continues
+  - Struct field type widening via struct_pack → incremental continues (already existed from Phase 10)
+  - Array element type widening → incremental continues (already existed from Phase 10)
   - Map value type change → incremental continues
   - Array-of-struct field addition → incremental continues
   - Nested struct field addition → incremental continues
-  - Incompatible change (struct to scalar) → full refresh
+  - Incompatible change (struct to scalar) → full refresh (already existed from Phase 10)
   - Multiple changes in one migration (add field + widen type)
-  - Complex type with default expression → NOT NULL column added
-- [ ] 11b. Test `struct_pack` rewrite produces correct data:
+  - Complex type with default expression → NOT NULL column added (deferred: default expression tests covered in Phase 9)
+- [x] 11b. Test `struct_pack` rewrite produces correct data:
   - Insert rows with v1 struct schema
   - Migrate to v2 (widened field + new field)
   - Verify old rows have correct widened values and NULL for new field
   - Insert new rows with v2 schema
   - Verify both old and new rows queryable
-- [ ] 11c. Test deeply nested types:
-  - `STRUCT(inner STRUCT(x INTEGER))` → `STRUCT(inner STRUCT(x BIGINT, y VARCHAR))`
+- [x] 11c. Test deeply nested types:
+  - `STRUCT(nested STRUCT(x INTEGER))` → `STRUCT(nested STRUCT(x BIGINT, y VARCHAR))`
   - `STRUCT(items INTEGER[])` → `STRUCT(items BIGINT[])`
-- [ ] 11d. Test Map column evolution:
+- [x] 11d. Test Map column evolution:
   - `MAP(VARCHAR, INTEGER)` → `MAP(VARCHAR, BIGINT)` (value widening)
   - `MAP(VARCHAR, STRUCT(a INTEGER))` → `MAP(VARCHAR, STRUCT(a INTEGER, b TEXT))`
 
@@ -1149,3 +1149,30 @@ cargo test -p smelt-cli --test example_diagnostics
 **Decisions:**
 - DuckDB struct field widening uses simple `ALTER COLUMN col TYPE new_full_struct_type` without USING clause. DuckDB's implicit casting handles safe type widenings (INTEGER→BIGINT) inside structs automatically. The USING+struct_pack approach doesn't work because DuckDB's USING expression context can't reference struct fields of the column being altered.
 - `plan_migration_for_backend` now accepts `deployed_columns` and `inferred_columns` to support this. The `plan_migration` convenience wrapper passes empty slices (its callers don't test struct widening with real columns).
+
+### Session 11 — 2026-04-05
+
+**Phase completed:** Phase 11 (DuckDB Integration Tests)
+
+**What was done:**
+- Added 10 new DuckDB integration tests in `smelt-cli/tests/incremental/schema_evolution.rs`:
+  - `test_e2e_struct_field_removal` — struct field removal with `allow_column_removal=true`
+  - `test_e2e_map_value_widening` — MAP(VARCHAR, INTEGER) → MAP(VARCHAR, BIGINT)
+  - `test_e2e_array_of_struct_field_addition` — STRUCT(a INTEGER)[] → STRUCT(a INTEGER, b VARCHAR)[]
+  - `test_e2e_nested_struct_field_addition` — STRUCT(nested STRUCT(x INTEGER)) → STRUCT(nested STRUCT(x INTEGER, y VARCHAR))
+  - `test_e2e_multiple_changes_one_migration` — struct field add + array element widen in same migration
+  - `test_e2e_struct_pack_data_correctness` — full data verification: insert v1 rows, migrate (widen + add field), verify old values preserved with NULL for new field, insert v2 row, verify all queryable
+  - `test_e2e_deeply_nested_struct_widen_and_add` — inner struct field widened + new field added simultaneously
+  - `test_e2e_struct_with_array_field_widen` — STRUCT(items INTEGER[]) → STRUCT(items BIGINT[])
+  - `test_e2e_map_value_struct_field_addition` — MAP(VARCHAR, STRUCT(a INTEGER)) → MAP(VARCHAR, STRUCT(a INTEGER, b TEXT))
+  - `test_e2e_map_value_type_widening` — MAP value type widening verified against DuckDB
+- **Bug fix:** Extended DuckDB ALTER COLUMN TYPE special-case in `plan_migration_for_backend()` to handle:
+  - `StructFieldAdded` on array/map columns (DuckDB can't use dot-notation ADD COLUMN on non-struct columns)
+  - `StructFieldAdded` with non-empty path (nested struct inside another struct — use full column type ALTER)
+  - `ArrayElementTypeChange` with non-empty path (array inside a struct)
+  - Added deduplication to avoid emitting duplicate ALTER COLUMN TYPE statements when multiple changes affect the same column
+- All 22 schema evolution integration tests pass (10 new + 12 existing), all smelt-state/smelt-types/smelt-cli tests pass, clippy clean, fmt clean
+
+**Decisions:**
+- For DuckDB, any complex type change on an array or map column uses `ALTER COLUMN TYPE` on the full column instead of dot-notation operations. DuckDB only supports dot-notation for direct struct columns, not for struct elements inside arrays/maps.
+- Multiple changes on the same column (e.g., field add + type widen) are deduplicated into a single `ALTER COLUMN TYPE` statement since DuckDB handles all compatible changes in one type cast.

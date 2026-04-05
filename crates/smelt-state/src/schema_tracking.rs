@@ -1281,30 +1281,63 @@ pub fn plan_migration_for_backend(
             | SchemaChange::NestedTypeChange { .. }
             | SchemaChange::ArrayElementTypeChange { .. }
             | SchemaChange::MapValueTypeChange { .. } => {
-                // For DuckDB + NestedTypeChange on struct fields, we need the full
-                // old/new struct types to generate ALTER COLUMN TYPE ... USING struct_pack(...).
-                // DuckDB doesn't support dot-notation for ALTER COLUMN TYPE on struct fields.
-                if matches!(backend, DdlBackend::DuckDb)
-                    && matches!(change, SchemaChange::NestedTypeChange { .. })
-                {
-                    if let SchemaChange::NestedTypeChange { column, .. } = change {
-                        // DuckDB doesn't support dot-notation ALTER COLUMN TYPE for struct fields.
-                        // Instead, we ALTER the full column type — DuckDB handles safe casts
-                        // (e.g., INTEGER→BIGINT inside a struct) automatically.
+                // For DuckDB, certain complex type changes are best handled by ALTER COLUMN TYPE
+                // on the full top-level column — DuckDB auto-casts compatible types inside
+                // structs/arrays/maps. This covers:
+                // 1. NestedTypeChange (e.g., struct field type widening)
+                // 2. ArrayElementTypeChange with non-empty path (array inside a struct)
+                // 3. StructFieldAdded with non-empty path (struct field inside an array)
+                // DuckDB doesn't support dot-notation ALTER COLUMN TYPE for struct fields,
+                // and can't ADD COLUMN on array sub-elements.
+                if matches!(backend, DdlBackend::DuckDb) {
+                    let column_name = match change {
+                        SchemaChange::NestedTypeChange { column, .. } => Some(column.as_str()),
+                        SchemaChange::ArrayElementTypeChange { column, path, .. }
+                            if !path.is_empty() =>
+                        {
+                            Some(column.as_str())
+                        }
+                        SchemaChange::StructFieldAdded { column, path, .. } if !path.is_empty() => {
+                            // Struct field add inside a nested path (e.g., struct inside a struct)
+                            // DuckDB can't use dot-notation ADD COLUMN on nested sub-paths
+                            Some(column.as_str())
+                        }
+                        SchemaChange::StructFieldAdded { column, path, .. } if path.is_empty() => {
+                            // Check if the column is an array/map type — DuckDB can't use
+                            // dot-notation ADD COLUMN on array/map columns, only on structs.
+                            let col_type = inferred_columns
+                                .iter()
+                                .find(|c| c.name == *column)
+                                .and_then(|c| parse_type(&c.data_type).ok());
+                            if matches!(col_type, Some(DataType::Array(_) | DataType::Map(_, _))) {
+                                Some(column.as_str())
+                            } else {
+                                None // Top-level struct: use dot-notation ADD COLUMN
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(col_name) = column_name {
                         let new_type_str = inferred_columns
                             .iter()
-                            .find(|c| c.name == *column)
+                            .find(|c| c.name == col_name)
                             .map(|c| c.data_type.as_str());
 
                         if let Some(new_str) = new_type_str {
                             if let Ok(new_dt) = parse_type(new_str) {
-                                statements.push(format!(
+                                // Deduplicate: if we already emitted ALTER COLUMN TYPE for this
+                                // column, skip (multiple changes on same column → single ALTER).
+                                let alter_stmt = format!(
                                     "ALTER TABLE {}.{} ALTER COLUMN {} TYPE {}",
                                     schema,
                                     table,
-                                    column,
+                                    col_name,
                                     new_dt.to_sql()
-                                ));
+                                );
+                                if !statements.contains(&alter_stmt) {
+                                    statements.push(alter_stmt);
+                                }
                                 continue;
                             }
                         }
