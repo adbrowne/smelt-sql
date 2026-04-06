@@ -2,6 +2,9 @@
 
 smelt provides a Language Server Protocol (LSP) implementation for real-time feedback in your editor.
 
+!!! info "See it in action"
+    For visual demos of every LSP feature -- diagnostics, go-to-definition, hover, completions, references, rename, and code actions -- see [Editor Features](editor-features.md).
+
 ## VSCode
 
 Install the **smelt** extension from the [VS Marketplace](https://marketplace.visualstudio.com/items?itemName=smelt.smelt).

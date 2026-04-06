@@ -6,7 +6,7 @@ smelt is a data transformation framework that separates **logical transformation
 
 - **Automatic incrementalization** — the framework analyzes what's safe to run incrementally
 - **Cross-engine deployment** — split work across DuckDB, Spark, Postgres, etc.
-- **Static analysis** — type checking, LSP support, and semantic validation
+- **Static analysis** — type checking, [rich editor support](guide/editor-features.md), and semantic validation
 - **Rule-based optimization** — automatic rewrites with learning from history
 
 ## Quick Example
@@ -52,6 +52,12 @@ smelt run --dry-run --verbose
 | Type checking | None (runtime errors) | Static analysis with LSP |
 | Cross-engine | One target per project | Split work across engines |
 | Optimization | Manual | Rule-based with learning |
+
+## Editor Experience
+
+smelt's LSP gives you real-time feedback as you write SQL -- diagnostics, go-to-definition, hover schemas, completions, and more. See the full [Editor Features](guide/editor-features.md) showcase.
+
+![Catch errors as you type](assets/editor-features/typo-caught-instantly.gif)
 
 ## Documentation
 

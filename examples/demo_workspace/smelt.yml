@@ -1,0 +1,22 @@
+name: demo_workspace
+version: 1
+
+model_paths:
+  - models/staging
+  - models/intermediate
+  - models/marts
+  - models/broken
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+models:
+  stg_users:
+    materialization: table
+  stg_events:
+    materialization: table

@@ -23,7 +23,8 @@
     "dbt"
   ],
   "activationEvents": [
-    "workspaceContains:**/models/*.sql"
+    "workspaceContains:**/models/**/*.sql",
+    "onLanguage:smelt"
   ],
   "main": "./out/extension.js",
   "contributes": {

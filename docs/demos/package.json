@@ -1,0 +1,14 @@
+{
+  "name": "smelt-lsp-demos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright-driven LSP feature demos for smelt documentation",
+  "scripts": {
+    "test": "playwright test",
+    "test:smoke": "playwright test tests/smoke.spec.ts",
+    "start-server": "bash scripts/start-code-server.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}
