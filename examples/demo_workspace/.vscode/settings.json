@@ -1,0 +1,6 @@
+{
+  "smelt.trace.server": "verbose",
+  "files.associations": {
+    "*.sql": "smelt"
+  }
+}

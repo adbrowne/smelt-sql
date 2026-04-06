@@ -1,0 +1,38 @@
+version: 1
+
+sources:
+  raw:
+    tables:
+      users:
+        description: "Raw user data from the application database"
+        columns:
+          - name: user_id
+            type: INTEGER
+            description: "Unique user identifier"
+          - name: email
+            type: VARCHAR
+            description: "User email address"
+          - name: signup_date
+            type: DATE
+            description: "Date the user signed up"
+          - name: plan_type
+            type: VARCHAR
+            description: "Subscription plan (free, pro, enterprise)"
+      events:
+        description: "Raw event stream from the application"
+        columns:
+          - name: event_id
+            type: INTEGER
+            description: "Unique event identifier"
+          - name: user_id
+            type: INTEGER
+            description: "User who triggered the event"
+          - name: event_type
+            type: VARCHAR
+            description: "Type of event (page_view, purchase, signup)"
+          - name: event_time
+            type: TIMESTAMP
+            description: "When the event occurred"
+          - name: revenue_cents
+            type: INTEGER
+            description: "Revenue in cents (for purchase events)"
