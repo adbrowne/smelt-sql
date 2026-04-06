@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775447261128,
+  "lastUpdate": 1775447262608,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14855,6 +14855,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.323943868777178,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5257fefcc83933d0acb7a95e95d78e08015da05f",
+          "message": "Add LSP end-to-end protocol tests via in-process DuplexStream harness\n\nExtract Backend from main.rs into lib.rs so tests can construct the full\nLSP server in-process. Add 9 E2E tests covering initialize, diagnostics,\nrename (CTE, column, model), goto-definition, code actions, and the three\nregression scenarios from 2026-04-06 (overlapping edits, missing upstream\ncolumn propagation, stale diagnostics after model rename).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-06T13:45:59+10:00",
+          "tree_id": "94b247ef65a33e24d1e7115cc66822ce6b520f53",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5257fefcc83933d0acb7a95e95d78e08015da05f"
+        },
+        "date": 1775447262287,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 16.0021426103259,
             "unit": "MB/s"
           }
         ]
