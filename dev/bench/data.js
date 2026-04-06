@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775507776836,
+  "lastUpdate": 1775507778774,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15470,6 +15470,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.355174394782466,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "bf3b878ca5c204b0f14e5423613a2559f04d3b5a",
+          "message": "Add seed schema design: seeds as data, models as materialization\n\nSeeds become named CSV data referenced via smelt.seed(), with types\ninferred from CSV for LSP support. Models are the only materialization\npath — no direct table creation from seeds. Explicit CASTs in models\noverride inferred types when needed.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-07T06:34:48+10:00",
+          "tree_id": "9399735c737c377fb16af1711f292a23449923cd",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bf3b878ca5c204b0f14e5423613a2559f04d3b5a"
+        },
+        "date": 1775507778117,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.902638913058947,
             "unit": "MB/s"
           }
         ]
