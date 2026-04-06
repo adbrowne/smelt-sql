@@ -62,6 +62,7 @@ nav:
     - Targets & Backends: guide/targets.md
     - Web UI: guide/web-ui.md
     - Editor Setup: guide/editor-setup.md
+    - Editor Features: guide/editor-features.md
   - Reference:
     - CLI Commands: reference/cli.md
     - Project Configuration: reference/smelt-yml.md

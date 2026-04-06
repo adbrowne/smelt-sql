@@ -352,7 +352,7 @@ examples/demo_workspace/
 
 ---
 
-## Phase 8: Documentation Assembly & smeltsql.com Integration `[ ]`
+## Phase 8: Documentation Assembly & smeltsql.com Integration `[x]`
 
 **Goal**: Assemble all media into polished documentation pages and publish them on the docs site (smeltsql.com via gh-pages).
 
@@ -376,11 +376,11 @@ examples/demo_workspace/
   - Consider adding a showcase/hero section on the landing page (`docs-site/docs/index.md`) with the best 1-2 gifs
 
 **Verification**:
-- [ ] `docs/demos/output/lsp-features.md` renders correctly with all media
-- [ ] Total media size is under 20MB
-- [ ] All image/gif links resolve and render inline on GitHub
-- [ ] LSP features page renders correctly on smeltsql.com (via `mkdocs serve`)
-- [ ] GitHub Actions docs workflow builds successfully with the new media
+- [x] `docs/demos/output/lsp-features.md` renders correctly with all media
+- [x] Total media size is 12MB (well under 20MB target)
+- [x] All image/gif links resolve and render inline on GitHub
+- [x] LSP features page renders correctly — `uv run mkdocs build --strict` passes
+- [ ] GitHub Actions docs workflow builds successfully with the new media (to verify after merge)
 
 ---
 
@@ -583,3 +583,23 @@ examples/demo_workspace/
 - Skipped type mismatch test rather than forcing it — the LSP doesn't produce diagnostics on implicit type comparisons, which is the same limitation documented in Phase 1.
 - Used `bad_ref.sql` (existing broken model) rather than typing a new ref — more reliable and reuses the workspace's purpose-built error models.
 - Added `triggerCodeActionsOnWord` helper that encapsulates click + Ctrl+. with retry logic — code actions in code-server are finicky about editor focus.
+
+### Session 10 — 2026-04-06
+
+**Phase**: Phase 8 (Documentation Assembly & smeltsql.com Integration)
+**Status**: Complete
+
+**What was done**:
+- Created `docs-site/docs/guide/editor-features.md` — main showcase page with 7 sections (Diagnostics, Go-to-Definition, Hover, Completion, References, Rename, Code Actions). Each section has descriptive text focused on the "why" for data engineers, embedded gifs and screenshots.
+- Copied 16 best media assets (6 gifs + 10 screenshots) to `docs-site/docs/assets/editor-features/`
+- Updated `docs-site/mkdocs.yml` — added "Editor Features" page to nav after "Editor Setup"
+- Updated `docs-site/docs/index.md` — added "Editor Experience" hero section with diagnostics gif, updated "Static analysis" bullet to link to features page
+- Updated `docs-site/docs/guide/editor-setup.md` — added info admonition cross-referencing the features page
+- Created `docs/demos/generate-docs.ts` — script that scans media/ and generates standalone markdown
+- Generated `docs/demos/output/lsp-features.md` (full showcase) and `docs/demos/output/getting-started.md` (3 best gifs)
+- Verified: `uv run mkdocs build --strict` passes with no errors
+
+**Decisions**:
+- Copied media to `docs-site/docs/assets/editor-features/` rather than symlinking — MkDocs needs files within its docs directory, and symlinks can be fragile in CI.
+- Used editor-crop screenshots where available (smaller, focused on the relevant UI) rather than full-page screenshots.
+- Kept the text concise — the gifs and screenshots are the primary content, with brief contextual descriptions focusing on what problem each feature solves.
