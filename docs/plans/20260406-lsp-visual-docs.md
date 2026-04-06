@@ -322,7 +322,7 @@ examples/demo_workspace/
 
 ---
 
-## Phase 7: Code Actions / Quick Fixes Demo `[ ]`
+## Phase 7: Code Actions / Quick Fixes Demo `[x]`
 
 **Goal**: Show intelligent quick fixes that don't just report problems but offer solutions.
 
@@ -346,8 +346,9 @@ examples/demo_workspace/
 **Test file**: `tests/code-actions.spec.ts`
 
 **Verification**:
-- [ ] 1 animated gif and 3 screenshots in `media/code-actions/`
-- [ ] Lightbulb menu is visible with action descriptions
+- [x] 1 animated gif (654KB) and 4 screenshots (2 full-page + 2 editor crops) in `media/code-actions/`
+- [x] Lightbulb menu is visible with action descriptions
+- [!] "Fix type mismatch with CAST" test skipped — LSP doesn't produce diagnostics on `WHERE user_id = 'abc'` comparisons (same known limitation as Phase 1)
 
 ---
 
@@ -563,3 +564,22 @@ examples/demo_workspace/
 - Screenshot test runs first (shows dialog, then Escape) to avoid workspace modification issues for subsequent tests.
 - Gif test runs second and applies the rename, then afterAll restores files.
 - Used `daily_revenue.sql` as the starting point — clicking on `stg_events` inside a ref() call triggers the rename dialog for the model name.
+
+### Session 9 — 2026-04-06
+
+**Phase**: Phase 7 (Code Actions / Quick Fixes Demo)
+**Status**: Complete
+
+**What was done**:
+- Wrote `docs/demos/tests/code-actions.spec.ts` with 4 tests (3 passing, 1 skipped):
+  1. "Create model quick fix" (screenshot) — opens `bad_ref.sql` with `smelt.ref('stg_uusers')`, Ctrl+. shows lightbulb menu with "Create model 'stg_uusers'" action
+  2. "Create a model from a reference" (gif) — animated demo of the same flow, produces `create-model-from-ref.gif` (654KB, 8.25s)
+  3. "Fix type mismatch with CAST" — **skipped** (same LSP limitation as Phase 1: no diagnostic on `WHERE user_id = 'abc'`)
+  4. "Quick fixes for undeclared columns" (screenshot) — opens `missing_column.sql`, shows CAST code actions for undeclared column
+- Generated 5 media files in `media/code-actions/`
+- afterAll cleans up with `git checkout`/`git clean` to restore workspace after "Create model" action creates files
+
+**Decisions**:
+- Skipped type mismatch test rather than forcing it — the LSP doesn't produce diagnostics on implicit type comparisons, which is the same limitation documented in Phase 1.
+- Used `bad_ref.sql` (existing broken model) rather than typing a new ref — more reliable and reuses the workspace's purpose-built error models.
+- Added `triggerCodeActionsOnWord` helper that encapsulates click + Ctrl+. with retry logic — code actions in code-server are finicky about editor focus.
