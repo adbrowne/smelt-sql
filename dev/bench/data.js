@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775470575287,
+  "lastUpdate": 1775470577497,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15224,6 +15224,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.051170754212517,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "e1dc4b180e084d2644e7611a29e000bda5d44728",
+          "message": "Disable git UI in demo workspace to keep recordings clean\n\nThe VS Code git popup was appearing in Playwright-recorded GIFs on\nthe editor-features docs page. Disabling git integration in the demo\nworkspace settings prevents this.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-06T20:14:55+10:00",
+          "tree_id": "49f027512d2fbe33461bee49c4a5fca0e78265ba",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/e1dc4b180e084d2644e7611a29e000bda5d44728"
+        },
+        "date": 1775470576602,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.242892774100287,
             "unit": "MB/s"
           }
         ]
