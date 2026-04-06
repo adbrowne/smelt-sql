@@ -669,8 +669,10 @@ impl TestWorkspace {
         // Cross-file column tracing via schema lineage
         let mut cross_file_edits = Vec::new();
         let schema = self.db.model_schema(path.clone());
+        let ctx = self.db.type_context(path.clone());
 
         // Check if this column comes from an upstream model (trace upstream)
+        let mut upstream_traced = false;
         if let Some(col) = schema.columns.iter().find(|c| c.name == column_name) {
             if let smelt_db::schema::ColumnSource::FromModel {
                 model_name,
@@ -678,38 +680,52 @@ impl TestWorkspace {
             } = &col.source
             {
                 if upstream_col == &column_name {
-                    // Find the upstream model file and its column references
-                    for upstream_path in self.db.all_files().iter() {
-                        let up_name = upstream_path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        if up_name == model_name {
-                            let up_text = self.db.file_text(upstream_path.clone());
-                            let up_parse = self.db.parse_file(upstream_path.clone());
-                            let up_syntax = up_parse.syntax();
-                            if let Some(up_file) = smelt_parser::ast::File::cast(up_syntax) {
-                                // Find column definition in upstream SELECT list
-                                if let Some(def_range) =
-                                    smelt_db::references::find_column_definition_in_select(
-                                        &up_file,
-                                        &column_name,
-                                    )
-                                {
-                                    let r =
-                                        smelt_parser::ast::text_range_to_range(&up_text, def_range);
-                                    cross_file_edits.push((
-                                        upstream_path.clone(),
-                                        r.start.line,
-                                        r.start.column,
-                                        r.end.line,
-                                        r.end.column,
-                                    ));
+                    self.trace_upstream_column(model_name, &column_name, &mut cross_file_edits);
+                    upstream_traced = true;
+                }
+            }
+        }
+
+        // If column not in schema (used in expressions like e.col ->> 'key'),
+        // resolve the qualifier alias to find the upstream model
+        if !upstream_traced {
+            let model_names: Vec<String> = if let Some(ref q) = qualifier {
+                let resolved = ctx.resolve_alias(q).unwrap_or_else(|| q.to_string());
+                if !ctx.is_cte(&resolved) {
+                    vec![resolved]
+                } else {
+                    vec![]
+                }
+            } else {
+                // Unqualified: check all models in FROM clause
+                let parse = self.db.parse_file(path.clone());
+                let syntax = parse.syntax();
+                let mut names = Vec::new();
+                if let Some(f) = smelt_parser::ast::File::cast(syntax) {
+                    if let Some(ss) = f.select_stmt() {
+                        if let Some(fc) = ss.from_clause() {
+                            for tr in fc
+                                .table_refs()
+                                .chain(fc.joins().filter_map(|j| j.table_ref()))
+                            {
+                                if let Some(func) = tr.function_call() {
+                                    if let Some(rc) =
+                                        smelt_parser::ast::RefCall::from_function_call(func)
+                                    {
+                                        if let Some(mn) = rc.model_name() {
+                                            names.push(mn);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                names
+            };
+
+            for model_name in &model_names {
+                self.trace_upstream_column(model_name, &column_name, &mut cross_file_edits);
             }
         }
 
@@ -815,6 +831,69 @@ impl TestWorkspace {
     ) -> Option<(u32, String, String)> {
         let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
         find_source_column_yaml_rename(&sources_yml, old_column_name, new_column_name)
+    }
+
+    fn trace_upstream_column(
+        &self,
+        model_name: &str,
+        column_name: &str,
+        edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
+    ) {
+        for upstream_path in self.db.all_files().iter() {
+            let up_name = upstream_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if up_name == model_name {
+                self.trace_upstream_column_chain(upstream_path, column_name, 10, edits);
+                break;
+            }
+        }
+    }
+
+    fn trace_upstream_column_chain(
+        &self,
+        model_path: &std::path::Path,
+        column_name: &str,
+        depth_limit: usize,
+        edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
+    ) -> bool {
+        if depth_limit == 0 {
+            return false;
+        }
+        let up_text = self.db.file_text(model_path.to_path_buf());
+        let up_parse = self.db.parse_file(model_path.to_path_buf());
+        let up_syntax = up_parse.syntax();
+        if let Some(up_file) = smelt_parser::ast::File::cast(up_syntax) {
+            if let Some(def_range) =
+                smelt_db::references::find_column_definition_in_select(&up_file, column_name)
+            {
+                let r = smelt_parser::ast::text_range_to_range(&up_text, def_range);
+                edits.push((
+                    model_path.to_path_buf(),
+                    r.start.line,
+                    r.start.column,
+                    r.end.line,
+                    r.end.column,
+                ));
+                return true;
+            }
+            // Check wildcard extensions (SELECT *)
+            let schema = self.db.model_schema(model_path.to_path_buf());
+            for ext in &schema.row_extensions {
+                if let Some(upstream_path) = self.db.resolve_ref(ext.ref_name.clone()) {
+                    if self.trace_upstream_column_chain(
+                        &upstream_path,
+                        column_name,
+                        depth_limit - 1,
+                        edits,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -3633,6 +3712,49 @@ SELECT user_id FROM cte3",
         assert!(
             result.yaml_edit.is_some(),
             "expected YAML column rename edit"
+        );
+    }
+
+    #[test]
+    fn test_rename_column_qualified_propagates_upstream() {
+        // Renaming e.properties in event_properties.sql (downstream, qualified)
+        // should propagate upstream to events.sql.
+        // The column is used in expressions (e.properties ->> 'x'), not as a
+        // bare SELECT item, so it won't appear in model_schema.columns.
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "sources:\n  raw:\n    tables:\n      events:\n        columns:\n          - name: event_id\n            type: INTEGER\n          - name: properties\n            type: VARCHAR\n",
+        );
+        ws.add_model(
+            "events",
+            "SELECT\n    event_id,\n    properties\nFROM smelt.source('raw.events')\n",
+        );
+        ws.add_model(
+            "event_properties",
+            "SELECT\n    e.event_id,\n    e.properties ->> 'page_url' AS page_url\nFROM smelt.ref('events') e\nWHERE e.properties IS NOT NULL\n",
+        );
+
+        // Cursor on `properties` in e.properties ->> 'page_url': line 2, col 6
+        let result = ws.rename_column("event_properties", 2, 6, "attrs");
+
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+
+        // Local edits: e.properties in SELECT (line 2) and WHERE (line 4)
+        assert!(
+            result.local_edits.len() >= 2,
+            "expected at least 2 local edits (SELECT + WHERE), got {:?}",
+            result.local_edits
+        );
+
+        // Cross-file: should propagate to events.sql
+        let events_path = ws.model_path("events");
+        assert!(
+            result
+                .cross_file_edits
+                .iter()
+                .any(|(p, _, _, _, _)| *p == events_path),
+            "should propagate upstream to events.sql, got {:?}",
+            result.cross_file_edits
         );
     }
 }

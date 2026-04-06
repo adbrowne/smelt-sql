@@ -568,6 +568,77 @@ fn collect_from_model_names(db: &Database, path: &std::path::Path) -> Vec<String
     names
 }
 
+/// Trace upstream to find and collect column definition edits in an upstream model.
+/// Follows wildcard (SELECT *) chains up to 10 levels deep.
+fn trace_upstream_column(
+    db: &Database,
+    all_files: &[PathBuf],
+    model_name: &str,
+    column_name: &str,
+    edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
+) {
+    for upstream_path in all_files.iter() {
+        let up_name = upstream_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if up_name == model_name {
+            trace_upstream_column_chain(db, upstream_path, column_name, 10, edits);
+            break;
+        }
+    }
+}
+
+/// Recursively trace a column definition through upstream models,
+/// following wildcard (SELECT *) chains.
+fn trace_upstream_column_chain(
+    db: &Database,
+    model_path: &std::path::Path,
+    column_name: &str,
+    depth_limit: usize,
+    edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
+) -> bool {
+    if depth_limit == 0 {
+        return false;
+    }
+
+    let up_text = db.file_text(model_path.to_path_buf());
+    let up_parse = db.parse_file(model_path.to_path_buf());
+    let up_syntax = up_parse.syntax();
+    if let Some(up_file) = AstFile::cast(up_syntax) {
+        if let Some(def_range) =
+            smelt_db::references::find_column_definition_in_select(&up_file, column_name)
+        {
+            let r = smelt_parser::ast::text_range_to_range(&up_text, def_range);
+            edits.push((
+                model_path.to_path_buf(),
+                r.start.line,
+                r.start.column,
+                r.end.line,
+                r.end.column,
+            ));
+            return true;
+        }
+
+        // Check wildcard extensions (SELECT *)
+        let schema = db.model_schema(model_path.to_path_buf());
+        for ext in &schema.row_extensions {
+            if let Some(upstream_path) = db.resolve_ref(ext.ref_name.clone()) {
+                if trace_upstream_column_chain(
+                    db,
+                    &upstream_path,
+                    column_name,
+                    depth_limit - 1,
+                    edits,
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Build project context JSON from discovered files for Python model execution.
 /// Extracts model names, tags, and directories from the file paths registered in Salsa.
 fn build_python_context(all_files: &[PathBuf], config: &smelt_core::Config) -> String {
@@ -2767,8 +2838,11 @@ impl LanguageServer for Backend {
                     let mut cross_file_edits = Vec::new();
                     let all_files = db.all_files();
                     let schema = db.model_schema(effective_path.clone());
+                    let ctx = db.type_context(effective_path.clone());
 
-                    // Upstream tracing via ColumnSource::FromModel
+                    // Upstream tracing: resolve which models to check
+                    // First try ColumnSource::FromModel (column is in SELECT list)
+                    let mut upstream_traced = false;
                     if let Some(col) = schema.columns.iter().find(|c| c.name == column_name) {
                         if let smelt_db::schema::ColumnSource::FromModel {
                             model_name,
@@ -2776,37 +2850,41 @@ impl LanguageServer for Backend {
                         } = &col.source
                         {
                             if upstream_col == &column_name {
-                                for upstream_path in all_files.iter() {
-                                    let up_name = upstream_path
-                                        .file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("");
-                                    if up_name == model_name {
-                                        let up_text = db.file_text(upstream_path.clone());
-                                        let up_parse = db.parse_file(upstream_path.clone());
-                                        let up_syntax = up_parse.syntax();
-                                        if let Some(up_file) = AstFile::cast(up_syntax) {
-                                            if let Some(def_range) =
-                                                smelt_db::references::find_column_definition_in_select(
-                                                    &up_file,
-                                                    &column_name,
-                                                )
-                                            {
-                                                let r = smelt_parser::ast::text_range_to_range(
-                                                    &up_text, def_range,
-                                                );
-                                                cross_file_edits.push((
-                                                    upstream_path.clone(),
-                                                    r.start.line,
-                                                    r.start.column,
-                                                    r.end.line,
-                                                    r.end.column,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
+                                trace_upstream_column(
+                                    &db,
+                                    &all_files,
+                                    model_name,
+                                    &column_name,
+                                    &mut cross_file_edits,
+                                );
+                                upstream_traced = true;
                             }
+                        }
+                    }
+
+                    // If column not in schema (used in expressions like e.col ->> 'key'),
+                    // resolve the qualifier alias to find the upstream model
+                    if !upstream_traced {
+                        let model_names: Vec<String> = if let Some(ref q) = qualifier {
+                            // Resolve alias (e.g., "e" -> "events")
+                            let resolved = ctx.resolve_alias(q).unwrap_or_else(|| q.to_string());
+                            if !ctx.is_cte(&resolved) {
+                                vec![resolved]
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            collect_from_model_names(&db, &effective_path)
+                        };
+
+                        for model_name in &model_names {
+                            trace_upstream_column(
+                                &db,
+                                &all_files,
+                                model_name,
+                                &column_name,
+                                &mut cross_file_edits,
+                            );
                         }
                     }
 
