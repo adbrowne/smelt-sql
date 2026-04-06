@@ -184,7 +184,7 @@ examples/demo_workspace/
 
 ---
 
-## Phase 3: Hover Information Demo `[ ]`
+## Phase 3: Hover Information Demo `[x]`
 
 **Goal**: Show the rich schema information available on hover — instant documentation without leaving your editor.
 
@@ -201,8 +201,8 @@ examples/demo_workspace/
 **Test file**: `tests/hover.spec.ts`
 
 **Verification**:
-- [ ] 3 screenshots in `media/hover/`
-- [ ] Hover popups are fully visible and readable
+- [x] 5 screenshots in `media/hover/` (3 full-page + 2 editor-only crops)
+- [x] Hover popups are fully visible and readable
 
 ---
 
@@ -417,3 +417,21 @@ examples/demo_workspace/
 - Used F12 (keyboard shortcut) rather than Ctrl+Click — more reliable in Playwright automation since Ctrl+Click requires precise pixel-level cursor positioning.
 - Noted regression in Phase 1 diagnostics: the "type mismatch" test (`type_mismatch.sql`) now times out because with fixed model_paths, refs resolve correctly and the LSP doesn't flag `INTEGER = 'abc'` comparisons as errors. This is a pre-existing LSP limitation, not a Phase 2 issue. The type mismatch test was previously passing because the ref was *unresolvable* (showing "undefined model reference" squiggly, not a type mismatch squiggly).
 - The non-recursive model discovery is a real LSP bug (filed mentally for future fix). The `smelt.yml` workaround is sufficient for the demo workspace.
+
+### Session 4 — 2026-04-06
+
+**Phase**: Phase 3 (Hover Information Demo)
+**Status**: Complete
+
+**What was done**:
+- Wrote `docs/demos/tests/hover.spec.ts` with 3 tests:
+  1. "Model schema on hover" — opens `user_first_purchase.sql`, hovers `smelt.ref('stg_events')`, captures hover popup showing full schema table (columns, types, lineage)
+  2. "Upstream model schema with lineage" — hovers `smelt.ref('stg_users')` in same file, shows user schema with lineage tracing back to `raw.users` source
+  3. "Source schema on hover" — opens `stg_events.sql`, hovers `smelt.source('raw.events')`, shows source columns/types/descriptions from `sources.yml`
+- All 3 tests pass (34.1s total)
+- Generated 5 screenshots in `media/hover/` (3 full-page with overlays + 2 editor-only crops)
+
+**Decisions**:
+- Adapted the plan's demo sequence: the original plan called for "Column type on hover" (hovering a column name), but the LSP hover handler only supports `smelt.ref()` and `smelt.source()` calls — hovering column names returns `None`. Replaced with a second ref hover showing `stg_users` schema to demonstrate the feature works across different models with lineage info.
+- Used `user_first_purchase.sql` instead of `user_lifetime_value.sql` for ref hovers — the LTV model's JOIN syntax may cause parse diagnostics. `user_first_purchase.sql` has two refs (`stg_events`, `stg_users`) making it ideal for showing two different hover schemas.
+- Used `:has-text()` with `.last()` (deepest match) for hover targeting rather than `hoverWord()` helper — more reliable for targeting text inside string literals like ref/source arguments.
