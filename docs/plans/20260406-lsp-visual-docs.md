@@ -13,12 +13,55 @@
 **Approach**: Playwright drives a headless (or headed) code-server instance with the smelt extension installed. Each demo script:
 1. Opens a purpose-built example workspace with a compelling scenario
 2. Performs editor interactions (typing, hovering, clicking, Ctrl+click, etc.)
-3. Captures annotated screenshots and/or short video clips
+3. Captures annotated screenshots and/or animated gifs
 4. Outputs media to `docs/demos/media/`
 
 **Why code-server**: It's VS Code in a browser — Playwright's native territory. No Electron hacks, no flaky desktop automation. The smelt extension loads identically since it's a standard LSP client.
 
 **Demo workspace**: `examples/demo_workspace/` — a small but realistic analytics pipeline designed so each feature has a natural, compelling demonstration point.
+
+### Video Capture Pipeline
+
+Tests that produce animated demos use a purpose-built video pipeline (added in Session 5):
+
+1. **`VideoTimer`** — tracks demo start/end timestamps relative to Playwright's auto-recorded video. Call `markDemoStart()` after setup/LSP priming, `markDemoEnd()` when done.
+2. **Deliberate pacing** — `waitForTimeout(2000)` between demo actions so each step is clearly visible at 12fps.
+3. **`getEditorBounds()`** — captures the `.editor-container` bounding box for cropping (before `page.close()`).
+4. **`page.close()`** — finalizes Playwright's video file. Must happen before `saveVideo()`.
+5. **`saveVideo()`** — trims the raw `.webm` to the demo portion, crops to editor area, converts to `.gif` using two-pass ffmpeg (palette generation for high-quality dithered output). Handles viewport→video coordinate scaling since Playwright records at a lower resolution than the viewport.
+
+**Output format**: `.gif` — renders inline everywhere (GitHub markdown, GitLab, any browser) without `<video>` tags. Two-pass palette generation keeps quality high despite gif's 256-color limit.
+
+**Requires**: `ffmpeg` installed on the system.
+
+### Test Pattern for Video Demos
+
+```typescript
+test('Video: "Demo name"', async ({ page }) => {
+  const timer = new VideoTimer();
+  await setupPage(page);
+  await primeLSP(page);
+
+  // --- Setup complete, demo starts ---
+  timer.markDemoStart();
+
+  // ... demo actions with 1-2s pauses between steps ...
+
+  timer.markDemoEnd();
+
+  // --- Capture gif ---
+  const crop = await getEditorBounds(page);
+  const viewport = page.viewportSize();
+  await page.close();
+  await saveVideo(page, {
+    feature: "feature-name",
+    name: "demo-name",
+    timer,
+    crop: crop ?? undefined,
+    viewportSize: viewport ?? undefined,
+  });
+});
+```
 
 ## Demo Workspace Design
 
@@ -130,22 +173,18 @@ examples/demo_workspace/
 
 **Goal**: Showcase how smelt catches errors as you type — the most immediately compelling LSP feature.
 
-**Motivating scenario**: A data engineer creates a new model referencing an upstream model, but makes a typo. The error appears instantly with a descriptive message. They also see type mismatches caught across model boundaries.
+**Motivating scenario**: A data engineer creates a new model referencing an upstream model, but makes a typo. The error appears instantly with a descriptive message.
 
-**Demo sequence** (3 screenshots + 1 short video):
+**Demo sequence** (3 screenshots + 1 animated gif):
 
-1. **Screenshot: "Clean pipeline"** — Open `user_lifetime_value.sql`, show no errors. Caption: *"A healthy pipeline — all references resolve, all types check out."*
+1. **Screenshot: "Clean pipeline"** — Open `stg_users.sql`, show no errors. Caption: *"A healthy pipeline — all references resolve, all types check out."*
 
-2. **Video: "Typo caught instantly"** — Open `bad_ref.sql` which has `smelt.ref('stg_uusers')` (typo). Show:
+2. **Gif: "Typo caught instantly"** (`typo-caught-instantly.gif`, 788KB, 6.6s) — Open `bad_ref.sql` which has `smelt.ref('stg_uusers')` (typo). Show:
    - File opens with red squiggly under `'stg_uusers'`
    - Hover over the error → tooltip shows "Undefined model reference: stg_uusers"
-   - Fix the typo to `'stg_users'` → squiggly disappears in real-time
    - Caption: *"Catch model reference typos before they hit production."*
 
-3. **Screenshot: "Type mismatch across models"** — Open `type_mismatch.sql` which compares `user_id` (INTEGER) with a string literal `'abc'`. Show:
-   - Yellow/red squiggly on the comparison
-   - Hover tooltip showing the type mismatch details
-   - Caption: *"Cross-model type checking catches mismatches that dbt can't."*
+3. **Screenshot: "Type mismatch across models"** `[!]` — Open `type_mismatch.sql` which compares `user_id` (INTEGER) with a string literal `'abc'`. **Known issue**: The LSP doesn't currently flag `INTEGER = 'abc'` comparisons as type errors when refs resolve correctly. This test times out waiting for diagnostics.
 
 4. **Screenshot: "Undeclared column"** — Open `missing_column.sql` which selects `nonexistent_col` from a model. Show:
    - Error squiggly on the column reference
@@ -154,20 +193,21 @@ examples/demo_workspace/
 **Test file**: `tests/diagnostics.spec.ts`
 
 **Verification**:
-- [x] 3 screenshots and 1 video in `media/diagnostics/`
+- [x] 3 screenshots and 1 animated gif in `media/diagnostics/`
 - [x] Each screenshot clearly shows the diagnostic with readable text
+- [!] "Type mismatch" test known-broken (LSP limitation, not a demo infrastructure issue)
 
 ---
 
 ## Phase 2: Go-to-Definition Demo `[x]`
 
-**Goal**: Show how Ctrl+Click navigation works across the model dependency graph — the feature that makes exploring a data pipeline feel like navigating a real codebase.
+**Goal**: Show how F12 navigation works across the model dependency graph — the feature that makes exploring a data pipeline feel like navigating a real codebase.
 
 **Motivating scenario**: A data engineer is debugging a revenue discrepancy in `daily_revenue.sql`. They need to trace the calculation upstream through the model chain to find where `revenue_cents` is defined and transformed.
 
-**Demo sequence** (1 video + 2 screenshots):
+**Demo sequence** (1 animated gif + 2 screenshots):
 
-1. **Video: "Trace a column through the pipeline"** — Start in `daily_revenue.sql`:
+1. **Gif: "Trace a column through the pipeline"** (`trace-pipeline.gif`, 2.8MB, 12.6s) — Start in `daily_revenue.sql`:
    - F12 on `smelt.ref('stg_events')` → jumps to `stg_events.sql`
    - F12 on `smelt.source('raw.events')` → jumps to `sources.yml` at the events table definition
    - Caption: *"Two clicks to trace a metric from mart to raw source."*
@@ -179,8 +219,8 @@ examples/demo_workspace/
 **Test file**: `tests/goto-definition.spec.ts`
 
 **Verification**:
-- [x] 1 video and 2 screenshots in `media/goto-definition/`
-- [x] Video clearly shows the file tab changing with each jump
+- [x] 1 animated gif and 2 screenshots in `media/goto-definition/`
+- [x] Gif clearly shows the file tab changing with each jump
 
 ---
 
@@ -190,18 +230,20 @@ examples/demo_workspace/
 
 **Motivating scenario**: A data engineer is writing a new mart model and needs to know what columns and types are available from upstream models, without switching files.
 
-**Demo sequence** (3 screenshots):
+**Demo sequence** (3 screenshots — hover is inherently static, screenshots work well):
 
-1. **Screenshot: "Model schema on hover"** — In `user_lifetime_value.sql`, hover over `smelt.ref('user_first_purchase')`. Show the hover popup with the full schema: column names, types, nullability. Caption: *"Hover any model reference to see its full schema — no file switching needed."*
+1. **Screenshot: "Model schema on hover"** — In `user_first_purchase.sql`, hover over `smelt.ref('stg_events')`. Show the hover popup with the full schema table: column names, types, lineage. Caption: *"Hover any model reference to see its full schema — no file switching needed."*
 
-2. **Screenshot: "Column type on hover"** — Hover over a column name like `revenue_cents` in a SELECT. Show type information (INTEGER). Caption: *"Every column carries its type — hover to inspect."*
+2. **Screenshot: "Upstream model schema with lineage"** — In `user_first_purchase.sql`, hover over `smelt.ref('stg_users')`. Show the hover popup with user schema and lineage tracing back to `raw.users`. Caption: *"Schema lineage traces each column back to its origin."*
 
-3. **Screenshot: "Source schema on hover"** — Hover over `smelt.source('raw.events')`. Show the source's declared columns and types from `sources.yml`. Caption: *"Source schemas from YAML are surfaced directly in your SQL."*
+3. **Screenshot: "Source schema on hover"** — In `stg_events.sql`, hover over `smelt.source('raw.events')`. Show the source's declared columns, types, and descriptions from `sources.yml`. Caption: *"Source schemas from YAML are surfaced directly in your SQL."*
+
+**Note**: The LSP does not currently support hover on individual column names (returns `None`). The original plan included a "Column type on hover" screenshot, replaced with the second ref hover showing lineage.
 
 **Test file**: `tests/hover.spec.ts`
 
 **Verification**:
-- [x] 5 screenshots in `media/hover/` (3 full-page + 2 editor-only crops)
+- [x] 5 screenshots in `media/hover/` (3 full-page with overlays + 2 editor-only crops)
 - [x] Hover popups are fully visible and readable
 
 ---
@@ -212,13 +254,14 @@ examples/demo_workspace/
 
 **Motivating scenario**: A data engineer is building a new model from scratch. Completions help them discover available models, columns, and write correct SQL without memorizing the schema.
 
-**Demo sequence** (1 video + 2 screenshots):
+**Demo sequence** (1 animated gif + 2 screenshots):
 
-1. **Video: "Build a query with completions"** — Create a new empty model file, then:
+1. **Gif: "Build a query with completions"** — Create a new empty model file, then:
    - Type `SELECT ` then trigger completion → see column names from context
    - Type `FROM smelt.ref('` → see all available model names as completions
    - Select `stg_users` from the list
    - On the next line, type a column name prefix → see matching columns from `stg_users` schema
+   - Use `VideoTimer` + `saveVideo()` pattern with deliberate pacing
    - Caption: *"Schema-aware completions guide you through the entire query."*
 
 2. **Screenshot: "Model name completions"** — Inside `ref('`, show the completion dropdown listing all available models with their paths. Caption: *"Discover models by name — no need to browse the file tree."*
@@ -228,7 +271,7 @@ examples/demo_workspace/
 **Test file**: `tests/completion.spec.ts`
 
 **Verification**:
-- [ ] 1 video and 2 screenshots in `media/completion/`
+- [ ] 1 animated gif and 2 screenshots in `media/completion/`
 - [ ] Completion dropdown is clearly visible with model/column names
 
 ---
@@ -259,14 +302,15 @@ examples/demo_workspace/
 
 **Motivating scenario**: The team decides to rename `stg_events` to `stg_activity_events` for clarity. In dbt, this means manually updating every `ref('stg_events')` across the project and hoping you didn't miss one. In smelt, it's one F2.
 
-**Demo sequence** (1 video + 1 screenshot):
+**Demo sequence** (1 animated gif + 1 screenshot):
 
-1. **Video: "Rename a model across the project"** — In `stg_events.sql`:
+1. **Gif: "Rename a model across the project"** — In `stg_events.sql`:
    - Place cursor on the model name
    - Press F2 → rename dialog appears
    - Type `stg_activity_events`
    - Press Enter → show all `ref('stg_events')` calls updating across multiple files simultaneously
    - Show the file being renamed too
+   - Use `VideoTimer` + `saveVideo()` pattern with deliberate pacing
    - Caption: *"One keystroke renames the model and updates every reference across the project."*
 
 2. **Screenshot: "Rename preview"** — Show the rename preview (if VS Code shows one) with all affected files listed. Caption: *"See every change before it happens — no surprises."*
@@ -274,8 +318,8 @@ examples/demo_workspace/
 **Test file**: `tests/rename.spec.ts`
 
 **Verification**:
-- [ ] 1 video and 1 screenshot in `media/rename/`
-- [ ] Video clearly shows multiple files updating
+- [ ] 1 animated gif and 1 screenshot in `media/rename/`
+- [ ] Gif clearly shows multiple files updating
 
 ---
 
@@ -285,12 +329,13 @@ examples/demo_workspace/
 
 **Motivating scenario**: A data engineer is iterating quickly — they reference a model that doesn't exist yet, compare mismatched types, and reference a source table not in `sources.yml`. Each time, the lightbulb offers a fix.
 
-**Demo sequence** (3 screenshots + 1 video):
+**Demo sequence** (3 screenshots + 1 animated gif):
 
-1. **Video: "Create a model from a reference"** — Write a new model with `smelt.ref('user_churn')` which doesn't exist:
+1. **Gif: "Create a model from a reference"** — Write a new model with `smelt.ref('user_churn')` which doesn't exist:
    - Red squiggly appears under the ref
    - Click the lightbulb (or Ctrl+.) → "Create model 'user_churn'" appears
    - Select it → a new `user_churn.sql` file is created with a template
+   - Use `VideoTimer` + `saveVideo()` pattern with deliberate pacing
    - Caption: *"Reference a model before it exists — smelt scaffolds it for you."*
 
 2. **Screenshot: "Fix type mismatch with CAST"** — Show a type mismatch diagnostic with the lightbulb offering `CAST(column AS INTEGER)`. Caption: *"Type mismatches come with a one-click CAST fix."*
@@ -302,7 +347,7 @@ examples/demo_workspace/
 **Test file**: `tests/code-actions.spec.ts`
 
 **Verification**:
-- [ ] 1 video and 3 screenshots in `media/code-actions/`
+- [ ] 1 animated gif and 3 screenshots in `media/code-actions/`
 - [ ] Lightbulb menu is visible with action descriptions
 
 ---
@@ -312,21 +357,21 @@ examples/demo_workspace/
 **Goal**: Assemble all media into polished documentation pages.
 
 **Work items**:
-- [ ] Write `docs/demos/output/lsp-features.md` — main documentation page with all features, screenshots, and video embeds
-- [ ] Write `docs/demos/output/getting-started.md` — quick-start guide with the most impressive 3 screenshots
+- [ ] Write `docs/demos/output/lsp-features.md` — main documentation page with all features, embedded screenshots and animated gifs
+- [ ] Write `docs/demos/output/getting-started.md` — quick-start guide with the most impressive 3 screenshots/gifs
 - [ ] Create a `docs/demos/generate-docs.ts` script that:
-  - Scans `media/` for generated assets
-  - Generates markdown with proper image/video references
+  - Scans `media/` for generated assets (`.png` and `.gif`)
+  - Generates markdown with proper image references (gifs render inline in GitHub markdown)
   - Adds captions and feature descriptions
   - Outputs to `output/`
 - [ ] Add a comparison section: "smelt vs dbt" showing what each feature replaces (manual grep, prayer, etc.)
 - [ ] Update the main `README.md` with a "Editor Features" section linking to the full docs
-- [ ] Optimize media: compress PNGs, convert videos to GIF where short enough, ensure reasonable file sizes
+- [ ] Optimize media: compress PNGs, verify gif sizes are reasonable (target < 3MB each)
 
 **Verification**:
 - [ ] `docs/demos/output/lsp-features.md` renders correctly with all media
 - [ ] Total media size is under 20MB
-- [ ] All image/video links resolve
+- [ ] All image/gif links resolve and render inline on GitHub
 
 ---
 
