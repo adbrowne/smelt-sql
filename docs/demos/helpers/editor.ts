@@ -86,8 +86,8 @@ export async function hoverWord(
 
   await wordSpan.hover();
 
-  // Wait for hover widget
-  const hoverWidget = page.locator(".monaco-hover-content");
+  // Wait for hover widget (use .first() — code-server may render multiple hover containers)
+  const hoverWidget = page.locator(".monaco-hover-content").first();
   await hoverWidget.waitFor({ timeout: 5000 });
 
   return hoverWidget;

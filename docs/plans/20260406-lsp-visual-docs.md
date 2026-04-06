@@ -126,7 +126,7 @@ examples/demo_workspace/
 
 ---
 
-## Phase 1: Real-Time Diagnostics Demo `[ ]`
+## Phase 1: Real-Time Diagnostics Demo `[x]`
 
 **Goal**: Showcase how smelt catches errors as you type — the most immediately compelling LSP feature.
 
@@ -154,8 +154,8 @@ examples/demo_workspace/
 **Test file**: `tests/diagnostics.spec.ts`
 
 **Verification**:
-- [ ] 3 screenshots and 1 video in `media/diagnostics/`
-- [ ] Each screenshot clearly shows the diagnostic with readable text
+- [x] 3 screenshots and 1 video in `media/diagnostics/`
+- [x] Each screenshot clearly shows the diagnostic with readable text
 
 ---
 
@@ -376,3 +376,24 @@ examples/demo_workspace/
 **Decisions**:
 - Broken models are under `models/broken/` (not `models_broken/` as originally planned) — this is fine since they're still in the model path and the LSP picks them up.
 - Note: the plan mentioned `models_broken/` as a top-level dir but `models/broken/` subdirectory works better with smelt's model discovery.
+
+### Session 2 — 2026-04-06
+
+**Phase**: Phase 1 (Real-Time Diagnostics Demo)
+**Status**: Complete
+
+**What was done**:
+- Wrote `docs/demos/tests/diagnostics.spec.ts` with 4 tests:
+  1. "Clean pipeline" — opens `stg_users.sql`, verifies 0 errors, captures clean editor screenshot
+  2. "Typo caught instantly" — opens `bad_ref.sql`, waits for red squiggles, hovers `stg_uusers` to show error tooltip, captures both squiggly and hover screenshots; Playwright auto-records video
+  3. "Type mismatch across models" — opens `type_mismatch.sql`, verifies diagnostics, captures screenshot with squiggles
+  4. "Undeclared column" — opens `missing_column.sql`, captures squiggly + hover screenshots
+- Fixed `helpers/editor.ts` — `hoverWord()` now uses `.first()` on hover locator to avoid strict mode violation (code-server renders 2 `.monaco-hover-content` elements)
+- All 4 tests pass (35.5s total)
+- Generated 7 screenshots + 1 video in `media/diagnostics/`
+
+**Decisions**:
+- Used `stg_users.sql` instead of `user_lifetime_value.sql` for "clean pipeline" — the LTV model has real LSP diagnostics (JOIN-related) so it's not a good "zero errors" showcase.
+- Simplified the "typo fix" video to show error + hover only (no find-and-replace) — code-server's find widget has different selectors than desktop VS Code, making find-and-replace brittle. The error detection story is compelling enough without the fix.
+- Made type mismatch hover best-effort — the LSP may not provide hover info on string literals in all cases. The squiggly screenshot alone is a strong visual.
+- Playwright auto-records video for every test (configured in playwright.config.ts), so the dedicated video test just needs to perform actions slowly enough for the recording to be clear.
