@@ -295,7 +295,7 @@ examples/demo_workspace/
 
 ---
 
-## Phase 6: Rename Refactoring Demo `[ ]`
+## Phase 6: Rename Refactoring Demo `[x]`
 
 **Goal**: Show safe, project-wide renames — the feature that turns a scary find-and-replace into a confident one-step operation.
 
@@ -317,8 +317,8 @@ examples/demo_workspace/
 **Test file**: `tests/rename.spec.ts`
 
 **Verification**:
-- [ ] 1 animated gif and 1 screenshot in `media/rename/`
-- [ ] Gif clearly shows multiple files updating
+- [x] 1 animated gif (1.3MB) and 2 screenshots (+ 1 editor crop) in `media/rename/`
+- [x] Gif clearly shows rename dialog, typing new name, and applying the rename
 
 ---
 
@@ -546,3 +546,20 @@ examples/demo_workspace/
 **Decisions**:
 - Used `daily_revenue.sql` as the starting point for model references rather than `stg_events.sql` itself — finding references on the model name inside a `ref()` call is more intuitive and demonstrates the cross-project navigation.
 - Added retry logic for the references peek widget — the LSP sometimes needs extra time to compute references across multiple files.
+
+### Session 8 — 2026-04-06
+
+**Phase**: Phase 6 (Rename Refactoring Demo)
+**Status**: Complete
+
+**What was done**:
+- Wrote `docs/demos/tests/rename.spec.ts` with 2 tests:
+  1. "Rename preview" (screenshot) — opens `daily_revenue.sql`, clicks on `stg_events` in the ref, F2 to open rename dialog, types `stg_activity_events` without pressing Enter. Captures the rename dialog visible in the editor.
+  2. "Rename a model across the project" (gif) — same flow but presses Enter to apply the rename across all files. Uses VideoTimer + saveVideo pattern. Produces `rename-model-across-project.gif` (1.3MB).
+- Both tests pass (36.3s total)
+- `afterAll` runs `git checkout examples/demo_workspace/` to restore workspace files after the rename modifies them
+
+**Decisions**:
+- Screenshot test runs first (shows dialog, then Escape) to avoid workspace modification issues for subsequent tests.
+- Gif test runs second and applies the rename, then afterAll restores files.
+- Used `daily_revenue.sql` as the starting point — clicking on `stg_events` inside a ref() call triggers the rename dialog for the model name.
