@@ -266,6 +266,11 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
   - No PRs needed — just push to `main` after tests pass
 - Normal git operations including push are available
 
+## When writing code
+
+- Always use red-green testing. Stop writing code when the test passes. Update the test or add a new one if you don't think the task is complete.
+- When you discover a property based test failure, add an explicit test to capture that failure before fixing the bug.
+
 ### For Parser/LSP Features
 
 1. Review the spec in README.md for requirements
