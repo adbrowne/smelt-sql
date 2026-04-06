@@ -275,7 +275,7 @@ examples/demo_workspace/
 
 ---
 
-## Phase 5: Find References Demo `[ ]`
+## Phase 5: Find References Demo `[x]`
 
 **Goal**: Show how to answer "who depends on this model?" — essential for impact analysis before making changes.
 
@@ -290,8 +290,8 @@ examples/demo_workspace/
 **Test file**: `tests/references.spec.ts`
 
 **Verification**:
-- [ ] 2 screenshots in `media/references/`
-- [ ] References panel is visible with file paths and line numbers
+- [x] 4 screenshots in `media/references/` (2 full-page + 2 editor crops)
+- [x] References panel is visible with file paths and line numbers
 
 ---
 
@@ -530,3 +530,19 @@ examples/demo_workspace/
 - Used `smelt.ref('` and `smelt.source('` typed at end of file rather than editing existing code — cleaner demo that doesn't risk breaking the file's syntax for subsequent tests.
 - Typed `-- smelt.ref('` (inside a comment) for the gif to avoid introducing parse errors that could interfere with the LSP.
 - Source completions are actually a stronger demo than column completions — they show rich metadata (column names in documentation field) alongside the table name.
+
+### Session 7 — 2026-04-06
+
+**Phase**: Phase 5 (Find References Demo)
+**Status**: Complete
+
+**What was done**:
+- Wrote `docs/demos/tests/references.spec.ts` with 2 tests:
+  1. "Find all consumers of a model" — opens `daily_revenue.sql`, clicks on `stg_events` inside the ref call, Shift+F12 to find references. Peek widget shows all downstream consumers across the project.
+  2. "Find CTE references within a file" — opens `user_first_purchase.sql`, clicks on `purchases` CTE name, Shift+F12. Peek widget shows CTE definition and usage locations within the file.
+- All 2 tests pass (25.4s total)
+- Generated 4 screenshots in `media/references/` (2 full-page + 2 editor crops)
+
+**Decisions**:
+- Used `daily_revenue.sql` as the starting point for model references rather than `stg_events.sql` itself — finding references on the model name inside a `ref()` call is more intuitive and demonstrates the cross-project navigation.
+- Added retry logic for the references peek widget — the LSP sometimes needs extra time to compute references across multiple files.
