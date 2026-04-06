@@ -3044,7 +3044,7 @@ impl LanguageServer for Backend {
                     }));
                 }
 
-                // Add file rename operation
+                // Add file rename operation and update Salsa DB
                 if let Some(old_path) = old_model_path {
                     let new_path = old_path
                         .parent()
@@ -3060,6 +3060,21 @@ impl LanguageServer for Backend {
                             annotation_id: None,
                         },
                     )));
+
+                    // Pre-update the Salsa DB so diagnostics see the new filename
+                    // before VSCode sends didOpen/didChange notifications.
+                    let mut db = self.db.lock().await;
+                    let old_text = db.file_text(old_path.clone());
+                    db.set_file_text(new_path.clone(), old_text);
+                    let old_project_root = db.file_project_root(old_path.clone());
+                    db.set_file_project_root(new_path.clone(), old_project_root);
+                    let mut files = (*db.all_files()).clone();
+                    files.retain(|p| *p != old_path);
+                    if !files.contains(&new_path) {
+                        files.push(new_path);
+                    }
+                    db.set_all_files(Arc::new(files));
+                    drop(db);
                 }
 
                 Ok(Some(WorkspaceEdit {
