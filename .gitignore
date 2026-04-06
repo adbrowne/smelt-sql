@@ -3,6 +3,7 @@ target/
 .claude/*
 !.claude/settings.json
 !.claude/commands/
+/.vscode/
 datagen.duckdb
 output/
 __pycache__/
