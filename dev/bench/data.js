@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775475459142,
+  "lastUpdate": 1775507776836,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11749,6 +11749,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.196123,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "bf3b878ca5c204b0f14e5423613a2559f04d3b5a",
+          "message": "Add seed schema design: seeds as data, models as materialization\n\nSeeds become named CSV data referenced via smelt.seed(), with types\ninferred from CSV for LSP support. Models are the only materialization\npath — no direct table creation from seeds. Explicit CASTs in models\noverride inferred types when needed.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-07T06:34:48+10:00",
+          "tree_id": "9399735c737c377fb16af1711f292a23449923cd",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bf3b878ca5c204b0f14e5423613a2559f04d3b5a"
+        },
+        "date": 1775507775525,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 33.982701,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 32.806131,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.562388,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.320015,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004078,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 36.593613999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.031511,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.017644,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.012291,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.407549,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.0481700000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.098380000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.31185,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.998036,
             "unit": "ms"
           }
         ]
