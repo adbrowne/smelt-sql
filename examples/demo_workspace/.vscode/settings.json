@@ -2,5 +2,7 @@
   "smelt.trace.server": "verbose",
   "files.associations": {
     "*.sql": "smelt"
-  }
+  },
+  "git.enabled": false,
+  "git.autoRepositoryDetection": false
 }
