@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775470577497,
+  "lastUpdate": 1775475457617,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11655,6 +11655,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.25482,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0529f80277db9c2c09d6ab2b145ce6b8c266f493",
+          "message": "Regenerate Playwright demo GIFs and fix demo infrastructure\n\n- Fix code-server setup: use fresh --user-data-dir with pre-configured\n  settings to avoid stale state causing workspace trust and welcome tab\n  issues that blocked all tests\n- Replace git checkout cleanup with disposable workspace copies — tests\n  that modify files (rename, code actions) now operate on a temp copy\n  so the source demo_workspace is never touched\n- Add .gitignore for test-results/ and playwright-report/ (ephemeral\n  Playwright artifacts that shouldn't be committed)\n- Remove previously committed test-results/ and playwright-report/ data\n- Add runCommand, enableScreencastMode helpers for future use\n- Add retry logic to openFile for workspace file index readiness\n- Skip type_mismatch test (LSP doesn't yet flag WHERE int = string)\n- Regenerate all 5 GIFs and 38 screenshots with current LSP features\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-06T21:36:21+10:00",
+          "tree_id": "edcbd03889f389bf821a3568c3d6117336c454e8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0529f80277db9c2c09d6ab2b145ce6b8c266f493"
+        },
+        "date": 1775475456701,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.558395,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.238702999999994,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6077530000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.375019,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002845,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 39.035458000000006,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.02646,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015028,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009678,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.245171,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.321458,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.065650000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.70468,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.196123,
             "unit": "ms"
           }
         ]
