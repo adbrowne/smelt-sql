@@ -3584,6 +3584,57 @@ SELECT user_id FROM cte3",
             "ambiguous column rename should either produce local edits or an error"
         );
     }
+
+    #[test]
+    fn test_rename_column_multiline_source_model() {
+        // Reproduces the events.sql scenario: multiline SELECT from source,
+        // renaming "properties" column (bare, no qualifier, last column before FROM).
+        // Previously failed because find_column_definition_in_select returned an
+        // expression range including trailing newline, creating overlapping edits
+        // that VSCode rejected with "Rename failed to apply edits".
+        let mut ws = TestWorkspace::new();
+        ws.set_sources_yml(
+            "sources:\n  raw:\n    tables:\n      events:\n        columns:\n          - name: event_id\n            type: INTEGER\n          - name: properties\n            type: VARCHAR\n",
+        );
+        ws.add_model(
+            "events",
+            "SELECT\n    event_id,\n    user_id,\n    event_type,\n    event_timestamp,\n    properties\nFROM smelt.source('raw.events')\n",
+        );
+        ws.add_model(
+            "event_properties",
+            "SELECT\n    e.event_id,\n    e.properties\nFROM smelt.ref('events') e\nWHERE e.properties IS NOT NULL\n",
+        );
+
+        // Cursor on `properties` in events.sql: line 5, col 4
+        let result = ws.rename_column("events", 5, 4, "attrs");
+        assert!(
+            result.error.is_none(),
+            "should not return error: {:?}",
+            result.error
+        );
+
+        // Should have exactly 1 local edit for "properties" in the SELECT list
+        assert_eq!(
+            result.local_edits.len(),
+            1,
+            "expected exactly 1 local edit (no overlapping ranges), got {:?}",
+            result.local_edits
+        );
+        // The edit should cover exactly "properties" (10 chars) on line 5
+        assert_eq!(result.local_edits[0], (5, 4, 5, 14));
+
+        // Should propagate to downstream event_properties.sql
+        assert!(
+            !result.cross_file_edits.is_empty(),
+            "expected cross-file edits in event_properties.sql"
+        );
+
+        // Should produce YAML edit
+        assert!(
+            result.yaml_edit.is_some(),
+            "expected YAML column rename edit"
+        );
+    }
 }
 
 // ===== Phase 9: Extract CTE Refactoring =====

@@ -228,10 +228,28 @@ pub fn find_column_definition_in_select(file: &AstFile, column_name: &str) -> Op
             if let Some(alias_range) = item.alias_range() {
                 return Some(alias_range);
             }
-            // Otherwise if it's a simple column ref, return its range
+            // Otherwise if it's a simple column ref, return the IDENT token's range
+            // (not the expression's range, which may include trailing whitespace)
             if let Some(expr) = item.expression() {
-                if expr.as_column_ref().is_some() {
-                    return Some(expr.text_range());
+                if let Some(col_ref) = expr.as_column_ref() {
+                    // For qualified refs (t.col), return the column name token
+                    // For unqualified refs (col), return the single IDENT token
+                    let tokens: Vec<_> = expr
+                        .syntax()
+                        .children_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+                        .collect();
+                    let name_token = if col_ref.qualifier().is_some() && tokens.len() >= 3 {
+                        Some(&tokens[2]) // qualified: table.column
+                    } else if !tokens.is_empty() {
+                        Some(&tokens[0]) // unqualified
+                    } else {
+                        None
+                    };
+                    if let Some(tok) = name_token {
+                        return Some(tok.text_range());
+                    }
                 }
             }
         }
