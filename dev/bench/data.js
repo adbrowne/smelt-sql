@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775428594589,
+  "lastUpdate": 1775447261128,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11279,6 +11279,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.212397,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5257fefcc83933d0acb7a95e95d78e08015da05f",
+          "message": "Add LSP end-to-end protocol tests via in-process DuplexStream harness\n\nExtract Backend from main.rs into lib.rs so tests can construct the full\nLSP server in-process. Add 9 E2E tests covering initialize, diagnostics,\nrename (CTE, column, model), goto-definition, code actions, and the three\nregression scenarios from 2026-04-06 (overlapping edits, missing upstream\ncolumn propagation, stale diagnostics after model rename).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-06T13:45:59+10:00",
+          "tree_id": "94b247ef65a33e24d1e7115cc66822ce6b520f53",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5257fefcc83933d0acb7a95e95d78e08015da05f"
+        },
+        "date": 1775447260519,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.880239,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.536555,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.604597,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.400406,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002966,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 47.159231000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.041748,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.025638,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.019205,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 2.090346,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 3.281275,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 8.23164,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 53.14223,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 20.909075,
             "unit": "ms"
           }
         ]
