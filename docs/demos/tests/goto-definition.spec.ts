@@ -23,6 +23,9 @@ import {
   screenshot,
   screenshotEditor,
   mediaDir,
+  VideoTimer,
+  saveVideo,
+  getEditorBounds,
 } from "../helpers/capture";
 
 let server: CodeServerHandle;
@@ -116,6 +119,7 @@ async function primeLSP(page: import("@playwright/test").Page) {
 // (Playwright auto-records video for the full test)
 // ---------------------------------------------------------------------------
 test('Video: "Trace a column through the pipeline"', async ({ page }) => {
+  const timer = new VideoTimer();
   await setupPage(page);
   await primeLSP(page);
 
@@ -123,19 +127,25 @@ test('Video: "Trace a column through the pipeline"', async ({ page }) => {
   await openFile(page, "daily_revenue.sql");
   await page.waitForTimeout(1500);
 
+  // --- Demo starts here (after setup) ---
+  timer.markDemoStart();
+
   await screenshotEditor(page, {
     feature: "goto-definition",
     name: "01-start-daily-revenue",
   });
 
+  // Pause so the viewer can read the file
+  await page.waitForTimeout(2000);
+
   // Step 2: Click on stg_events inside smelt.ref('stg_events') and F12
   await clickWord(page, "stg_events");
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1000);
   await goToDefinition(page);
 
   // Verify we jumped to stg_events.sql
   await waitForActiveTab(page, "stg_events.sql");
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(2000);
 
   await screenshotEditor(page, {
     feature: "goto-definition",
@@ -144,15 +154,29 @@ test('Video: "Trace a column through the pipeline"', async ({ page }) => {
 
   // Step 3: Jump from stg_events to the raw.events source definition
   await clickWord(page, "raw.events");
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1000);
   await goToDefinition(page);
 
   await waitForActiveTab(page, "sources.yml");
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(2000);
 
   await screenshotEditor(page, {
     feature: "goto-definition",
     name: "03-jumped-to-sources-yml",
+  });
+
+  timer.markDemoEnd();
+
+  // --- Capture the demo as a gif ---
+  const crop = await getEditorBounds(page);
+  const viewport = page.viewportSize();
+  await page.close();
+  await saveVideo(page, {
+    feature: "goto-definition",
+    name: "trace-pipeline",
+    timer,
+    crop: crop ?? undefined,
+    viewportSize: viewport ?? undefined,
   });
 });
 

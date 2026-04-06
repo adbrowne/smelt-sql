@@ -435,3 +435,25 @@ examples/demo_workspace/
 - Adapted the plan's demo sequence: the original plan called for "Column type on hover" (hovering a column name), but the LSP hover handler only supports `smelt.ref()` and `smelt.source()` calls — hovering column names returns `None`. Replaced with a second ref hover showing `stg_users` schema to demonstrate the feature works across different models with lineage info.
 - Used `user_first_purchase.sql` instead of `user_lifetime_value.sql` for ref hovers — the LTV model's JOIN syntax may cause parse diagnostics. `user_first_purchase.sql` has two refs (`stg_events`, `stg_users`) making it ideal for showing two different hover schemas.
 - Used `:has-text()` with `.last()` (deepest match) for hover targeting rather than `hoverWord()` helper — more reliable for targeting text inside string literals like ref/source arguments.
+
+### Session 5 — 2026-04-06
+
+**Phase**: Video capture infrastructure + retrofit Phases 1-2
+**Status**: Complete
+
+**What was done**:
+- Added video capture infrastructure to `helpers/capture.ts`:
+  - `VideoTimer` class — tracks demo start/end timestamps relative to Playwright's video recording
+  - `saveVideo()` — takes Playwright's auto-recorded `.webm`, trims to the demo portion, crops to editor area, converts to `.gif` using two-pass ffmpeg (palette generation for high-quality colors)
+  - `getEditorBounds()` — gets `.editor-container` bounding box for crop coordinates
+  - Handles viewport→video coordinate scaling (Playwright records at lower resolution than viewport)
+- Retrofitted Phase 1 diagnostics: "Typo caught instantly" test now produces `typo-caught-instantly.gif` (788KB, 79 frames, 6.6s) — shows red squiggly appearing on `stg_uusers` then hover tooltip with error message
+- Retrofitted Phase 2 go-to-definition: "Trace a column through the pipeline" test now produces `trace-pipeline.gif` (2.8MB, 151 frames, 12.6s) — shows F12 jumping from `daily_revenue.sql` → `stg_events.sql` → `sources.yml`
+- Removed old `.webm` video from media/ (replaced by gif)
+- All 12 passing tests still pass (the "Type mismatch" test was already known-broken from Session 3)
+
+**Decisions**:
+- Chose `.gif` format over `.mp4` — gifs render inline everywhere (GitHub markdown, GitLab, any browser) without needing `<video>` tags. Two-pass palette generation keeps quality high despite gif's 256-color limit.
+- Used `page.close()` before `saveVideo()` — Playwright only finalizes the video file after the page closes. The test performs all assertions before closing, then processes the video.
+- Added deliberate pacing (`waitForTimeout(2000)`) between demo actions so the gif shows each step clearly at 12fps.
+- Cropping uses viewport-to-video coordinate scaling since Playwright records at a lower resolution (800x450) than the viewport (1280x720).

@@ -23,6 +23,9 @@ import {
   screenshotEditor,
   screenshotWithOverlay,
   mediaDir,
+  VideoTimer,
+  saveVideo,
+  getEditorBounds,
 } from "../helpers/capture";
 
 let server: CodeServerHandle;
@@ -80,6 +83,7 @@ test('Screenshot: "Clean pipeline"', async ({ page }) => {
 // (Playwright records the entire test as a video automatically)
 // ---------------------------------------------------------------------------
 test('Video: "Typo caught instantly"', async ({ page }) => {
+  const timer = new VideoTimer();
   await setupPage(page);
 
   // Open the broken file with a typo: smelt.ref('stg_uusers')
@@ -88,9 +92,15 @@ test('Video: "Typo caught instantly"', async ({ page }) => {
   // Wait for the red squiggly to appear
   await waitForDiagnostics(page, { timeout: 60_000 });
 
+  // --- Demo starts here (error is now visible) ---
+  timer.markDemoStart();
+
   // Verify error exists
   const errorsBefore = await page.locator(".squiggly-error").count();
   expect(errorsBefore).toBeGreaterThan(0);
+
+  // Pause so the viewer can see the red squiggle
+  await page.waitForTimeout(2000);
 
   // Take screenshot showing the error squiggle
   await screenshotEditor(page, {
@@ -101,7 +111,7 @@ test('Video: "Typo caught instantly"', async ({ page }) => {
   // Hover over the erroneous ref string to show the tooltip
   await hoverWord(page, "stg_uusers");
   // Wait for hover content to fully render
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(3000);
 
   // Capture the hover tooltip (full page to include overlays)
   await screenshotWithOverlay(page, {
@@ -109,8 +119,21 @@ test('Video: "Typo caught instantly"', async ({ page }) => {
     name: "02-typo-hover-tooltip",
   });
 
-  // Dismiss hover
+  timer.markDemoEnd();
+
+  // --- Capture the demo as a gif ---
+  const crop = await getEditorBounds(page);
+  const viewport = page.viewportSize();
+  // Dismiss hover before closing
   await page.keyboard.press("Escape");
+  await page.close();
+  await saveVideo(page, {
+    feature: "diagnostics",
+    name: "typo-caught-instantly",
+    timer,
+    crop: crop ?? undefined,
+    viewportSize: viewport ?? undefined,
+  });
 });
 
 // ---------------------------------------------------------------------------
