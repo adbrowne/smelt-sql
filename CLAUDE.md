@@ -8,17 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A next-generation data pipeline tool designed to improve upon dbt by:
 - Separating logical specification (what to compute) from physical execution (how to execute)
-- Enabling automatic optimization across models
+- Enabling optimization across models
 - Supporting multi-backend execution (DuckDB, Databricks, etc.)
 - Using a proper language instead of Jinja templates
 
-**Current Phase**: Parser and LSP implementation - Phases 1-8 complete (smelt.ref() with named parameters, full JOIN syntax).
-
-**Project Status**: Early-stage development - no backward compatibility constraints. The codebase is evolving rapidly and breaking changes are expected.
-
-**Recent Updates**:
-- **JOIN Syntax (Phase 8)**: Full support for INNER, LEFT, RIGHT, FULL, CROSS JOIN with ON/USING conditions
-- **Breaking Change**: Comma-separated FROM syntax removed (use explicit `CROSS JOIN` instead)
+**Project Status**: This is still an experiment - Andrew is testing it out to see how far he can push this idea. Consider this early-stage development - no backward compatibility constraints. The codebase is evolving rapidly and breaking changes are expected. We are trying to push towards production ready from a feature perspecitve - we want to ensure we aren't backing ourselves into a corner.
 
 ## Key Documentation
 
@@ -40,8 +34,10 @@ A next-generation data pipeline tool designed to improve upon dbt by:
   - `architecture_overview.md`: System design and component interactions
   - `lsp_architecture.md`: LSP implementation details
   - `lsp_quickstart.md`: Getting started with the LSP
-  - `example1_insights.md`, `example2_insights.md`: Optimization pattern analysis
   - `planner_rule_api_design.md`: Future planner API design
+
+- **docs/research/**: Research into an idea. Often the predecessor to a plan.
+  - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
 
 - **docs/plans/**: Implementation plans committed to the repo
   - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
@@ -127,20 +123,20 @@ npm run watch
 
 smelt is a **compiler and orchestrator**, not a query engine:
 ```
-User DSL → Parser → Logical IR → Planner → Physical IR → SQL for Target Engines
+User DSL → Parser → Logical CST → Planner → Physical CST → SQL for Target Engines
 ```
 
-- **Logical IR**: Represents WHAT to compute (correctness specification)
-- **Physical IR**: Represents HOW to execute (engine selection, materialization decisions)
-- **Planner**: Transforms logical IR into optimized physical IR while preserving correctness
+- **Logical CST**: Represents WHAT to compute (correctness specification)
+- **Physical CST**: Represents HOW to execute (engine selection, materialization decisions)
+- **Planner**: Transforms logical CST into optimized physical CST while preserving correctness. Supports custom rules.
 
 ### Parser Architecture
 
 The parser is separated into reusable layers:
 ```
 smelt-parser (pure parser)  →  smelt-db (Salsa queries)  →  smelt-lsp (LSP server)
-                          ↘  smelt-planner (future)
-                          ↘  smelt-cli (future)
+                          ↘  smelt-planner
+                          ↘  smelt-cli
 ```
 
 - **smelt-parser**: Standalone Rowan-based parser (no Salsa dependency)
@@ -183,9 +179,7 @@ This is an architectural invariant. The core type inference, schema extraction, 
 - **Salsa**: Incremental computation framework (enables fast recompilation and LSP)
 - **Rowan**: Lossless CST library (error-recovery parser foundation)
 - **tower-lsp**: Language Server Protocol implementation
-- **DataFusion**: SQL parsing, logical plan representation, planner framework
-- **DuckDB**: Local execution engine for testing (bundled, no system install needed)
-- **Arrow**: Data interchange format between components
+- **DuckDB**: One of the supported backends and extensively used for testing.
 
 ### Examples
 
@@ -196,6 +190,10 @@ All examples live under `examples/`:
 - **`examples/broken/`**: Intentionally broken models for testing error handling
 - **`examples/test_workspace/`**: Minimal workspace for VSCode/LSP integration testing
 - **`examples/huge/`**: Auto-generated 2000-model workspace for stress testing
+
+### User documentation
+
+User documentation lives under docs-site/. For any user facing feature change consider whether documentation addition/update is required.
 
 ### Crate Structure
 
@@ -223,7 +221,7 @@ All examples live under `examples/`:
 
 ## Key Differentiators from dbt
 
-1. **Logical/Physical Separation**: Users specify logic, planner decides execution strategy
+1. **Logical/Physical Separation**: Users specify logic in models, possibly with some attributes that specify how planner rules should work, planner rules specify how it actually runs (for example turning a full table query into an incrimental model)
 2. **Engineer controls planning**: Planner is not a black box - the API will allow data engineers to refactor specific logical plans to optimize - the framework should make it easy to do these and know that correctness is preserved - or where not - what has been lost.
 3. **Cross-Model Optimization**: Can fuse or split queries across model boundaries
 4. **Multi-Backend**: Automatically distribute work across engines (e.g., DuckDB for small data, Databricks for large)
@@ -263,9 +261,9 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 ## Development Workflow
 
 **Git Workflow:**
-- Work on local branches for non-trivial changes, then merge to `main` and push
+- Work on local branches for non-trivial changes, then push a branch and create GitHub PR.
 - For small/trivial changes, committing directly to `main` is fine
-- No PRs needed — just push to `main` after tests pass
+  - No PRs needed — just push to `main` after tests pass
 - Normal git operations including push are available
 
 ### For Parser/LSP Features
@@ -281,14 +279,6 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 9. **Run `cargo test -p smelt-cli --test example_diagnostics`** to verify examples have no LSP diagnostics
 10. Update docs/ROADMAP.md with completion status and date
 11. **Commit** with descriptive message (includes ROADMAP.md update)
-
-### For Planner Features (Future)
-
-1. Start with concrete examples showing optimization opportunities
-2. Manually write both naive and optimized versions
-3. Analyze what the planner needs to detect and transform
-4. Extract API patterns from successful optimizations
-5. Generalize into planner framework
 
 ### Before Ending a Conversation
 
@@ -329,7 +319,7 @@ This project uses the [ACE-FCA workflow](docs/ace-fca-guide.md) (Advanced Contex
 
 **Slash commands** (in `.claude/commands/`):
 - `/research` — Explore codebase to understand a topic (outputs to `docs/research/`)
-- `/plan` — Create an implementation plan from research (outputs to `docs/plans/`)
+- `/plan-rpi` — Create an implementation plan from research (outputs to `docs/plans/`)
 - `/iterate-plan` — Refine an existing plan based on feedback
 - `/implement` — Execute a plan phase by phase with verification gates
 - `/validate` — Verify implementation matches the plan specification
