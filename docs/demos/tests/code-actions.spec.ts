@@ -8,8 +8,6 @@
  * Produces 1 animated gif + up to 3 screenshots.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import * as path from "node:path";
 import {
   launchCodeServer,
   type CodeServerHandle,
@@ -30,8 +28,6 @@ import {
   getEditorBounds,
 } from "../helpers/capture";
 
-const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
-
 let server: CodeServerHandle;
 
 test.beforeAll(async () => {
@@ -43,13 +39,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  // Clean up any files created by "create model" actions
-  try {
-    execSync("git checkout examples/demo_workspace/", { cwd: REPO_ROOT });
-    execSync("git clean -fd examples/demo_workspace/", { cwd: REPO_ROOT });
-  } catch {
-    // Best effort
-  }
+  // Workspace is a disposable copy — no cleanup needed
   server?.stop();
 });
 

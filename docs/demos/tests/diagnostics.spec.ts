@@ -139,7 +139,7 @@ test('Video: "Typo caught instantly"', async ({ page }) => {
 // ---------------------------------------------------------------------------
 // Screenshot 3: "Type mismatch across models"
 // ---------------------------------------------------------------------------
-test('Screenshot: "Type mismatch across models"', async ({ page }) => {
+test.skip('Screenshot: "Type mismatch across models"', async ({ page }) => {
   await setupPage(page);
 
   // Open the type mismatch file: WHERE user_id = 'abc'

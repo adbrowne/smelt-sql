@@ -7,10 +7,8 @@
  * Produces 1 animated gif + 1 screenshot.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
 import {
   launchCodeServer,
-  REPO_ROOT,
   type CodeServerHandle,
 } from "../helpers/code-server";
 import {
@@ -40,13 +38,8 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  // Workspace is a disposable copy — no cleanup needed
   server?.stop();
-  // Restore demo workspace files after rename tests may have modified them
-  try {
-    execSync("git checkout examples/demo_workspace/", { cwd: REPO_ROOT });
-  } catch {
-    // Best-effort cleanup
-  }
 });
 
 async function setupPage(page: import("@playwright/test").Page) {

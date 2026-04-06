@@ -19,6 +19,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEMO_DIR="$SCRIPT_DIR"
 PORT="${CODE_SERVER_PORT:-18080}"
 CODE_SERVER_PID=""
+USER_DATA_DIR=""
+WORKSPACE_COPY=""
 
 UPDATE_SNAPSHOTS=false
 for arg in "$@"; do
@@ -40,6 +42,13 @@ cleanup() {
     kill "$CODE_SERVER_PID" 2>/dev/null || true
     wait "$CODE_SERVER_PID" 2>/dev/null || true
   fi
+  # Clean up temporary directories
+  if [ -n "$USER_DATA_DIR" ] && [ -d "$USER_DATA_DIR" ]; then
+    rm -rf "$USER_DATA_DIR"
+  fi
+  if [ -n "$WORKSPACE_COPY" ] && [ -d "$WORKSPACE_COPY" ]; then
+    rm -rf "$WORKSPACE_COPY"
+  fi
 }
 trap cleanup EXIT
 
@@ -59,19 +68,42 @@ echo ""
 echo "=== Step 4: Start code-server ==="
 export PATH="$REPO_ROOT/target/debug:$PATH"
 
-# Install the extension
-echo "Installing smelt extension into code-server..."
-code-server --install-extension "$VSIX_PATH"
+# Create a fresh user-data-dir with demo settings
+USER_DATA_DIR="$(mktemp -d /tmp/code-server-demo-XXXXXX)"
+mkdir -p "$USER_DATA_DIR/User"
+cat > "$USER_DATA_DIR/User/settings.json" << 'SETTINGS'
+{
+  "workbench.startupEditor": "none",
+  "workbench.tips.enabled": false,
+  "workbench.welcomePage.walkthroughs.openOnInstall": false,
+  "chat.commandCenter.enabled": false,
+  "chat.editor.enabled": false,
+  "security.workspace.trust.enabled": false,
+  "security.workspace.trust.startupPrompt": "never",
+  "screencastMode.fontSize": 28,
+  "screencastMode.verticalOffset": 5,
+  "screencastMode.mouseIndicatorSize": 30
+}
+SETTINGS
 
-DEMO_WORKSPACE="$REPO_ROOT/examples/demo_workspace"
+# Create a disposable copy of the demo workspace
+# (some tests create/rename files — we never want to modify the source)
+WORKSPACE_COPY="$(mktemp -d /tmp/smelt-demo-ws-XXXXXX)/demo_workspace"
+cp -r "$REPO_ROOT/examples/demo_workspace" "$WORKSPACE_COPY"
+
+# Install the extension into the fresh user-data-dir
+echo "Installing smelt extension into code-server..."
+code-server --user-data-dir "$USER_DATA_DIR" --install-extension "$VSIX_PATH" --force
+
 code-server \
+  --user-data-dir "$USER_DATA_DIR" \
   --port "$PORT" \
   --auth none \
   --disable-telemetry \
   --disable-update-check \
   --disable-workspace-trust \
   --disable-getting-started-override \
-  "$DEMO_WORKSPACE" &
+  "$WORKSPACE_COPY" &
 CODE_SERVER_PID=$!
 
 # Wait for code-server to be ready
@@ -96,6 +128,7 @@ if $UPDATE_SNAPSHOTS; then
 fi
 
 echo "=== Step 5: Run Playwright tests ==="
+export CODE_SERVER_URL="http://localhost:$PORT"
 (cd "$DEMO_DIR" && npx playwright test)
 
 echo ""

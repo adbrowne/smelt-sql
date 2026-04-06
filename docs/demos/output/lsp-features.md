@@ -29,10 +29,6 @@ Catch errors the moment you make them. smelt validates SQL continuously: undefin
 
 ![02-typo-hover-tooltip.png](media/diagnostics/02-typo-hover-tooltip.png)
 
-![03-type-mismatch.png](media/diagnostics/03-type-mismatch.png)
-
-![04-undeclared-column-detail.png](media/diagnostics/04-undeclared-column-detail.png)
-
 ![04-undeclared-column-hover.png](media/diagnostics/04-undeclared-column-hover.png)
 
 </details>

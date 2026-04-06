@@ -13,43 +13,115 @@ export async function dismissDialogs(page: Page): Promise<void> {
     await trustBtn.click();
   }
 
-  // Close any welcome or getting started tabs
-  const welcomeTab = page.locator('.tab:has-text("Welcome")');
-  if (await welcomeTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-    // Close via the tab's close button
-    await welcomeTab.locator(".codicon-close").click();
+  // Close any welcome or getting started tabs via keyboard shortcut.
+  // Tab label and close-button classes vary across code-server versions,
+  // so the most reliable approach is to use the workbench command.
+  // Ctrl+W closes the active editor tab.
+  for (const label of ["Welcome", "Get Started"]) {
+    const tab = page.locator(`.tab:has-text("${label}")`);
+    if (await tab.isVisible({ timeout: 2000 }).catch(() => false)) {
+      // Click the tab first to make it the active editor
+      await tab.click();
+      // Close via keyboard shortcut — works regardless of close-button class
+      await page.keyboard.press("Control+w");
+      await page.waitForTimeout(500);
+      break;
+    }
+  }
+
+  // Close the chat/secondary side bar if visible
+  const chatPanel = page.locator('.auxiliary-bar-title :text("CHAT")');
+  if (await chatPanel.isVisible({ timeout: 1000 }).catch(() => false)) {
+    // Toggle secondary side bar off
+    await runCommand(page, "View: Toggle Secondary Side Bar Visibility");
   }
 
   // Press Escape to dismiss any other overlays
   await page.keyboard.press("Escape");
 }
 
-/** Wait for the VS Code workbench to be fully loaded. */
+/**
+ * Enable VS Code screencast mode so keystrokes are visible in recordings.
+ */
+export async function enableScreencastMode(page: Page): Promise<void> {
+  await runCommand(page, "Toggle Screencast Mode");
+  // Wait for the screencast overlay to initialize
+  await page.waitForTimeout(500);
+}
+
+/**
+ * Run a VS Code command via the Command Palette (Ctrl+Shift+P).
+ */
+export async function runCommand(page: Page, command: string): Promise<void> {
+  await page.keyboard.press("Control+Shift+p");
+  const input = page.locator(".quick-input-widget input.input");
+  await input.waitFor({ timeout: 5000 });
+  await input.fill(command);
+  await page.waitForTimeout(500);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(500);
+}
+
+/** Wait for the VS Code workbench to be fully loaded and file tree to be ready. */
 export async function waitForWorkbench(page: Page): Promise<void> {
   // The main workbench container
   await page.locator(".monaco-workbench").waitFor({ timeout: 30_000 });
-  // Wait for the editor area to be present
-  await page.locator(".editor-instance").waitFor({ timeout: 30_000 }).catch(() => {
-    // Some code-server versions use different class names
-  });
+
+  // Wait for the explorer file tree to show at least one file entry.
+  // This ensures the workspace folder has been indexed and files are discoverable.
+  try {
+    await page
+      .locator(".explorer-folders-view .monaco-list-row")
+      .first()
+      .waitFor({ timeout: 30_000 });
+  } catch {
+    // Fallback: click the workspace folder in the explorer to expand it
+    const folderEntry = page.locator(".explorer-folders-view .monaco-tl-twistie").first();
+    if (await folderEntry.isVisible().catch(() => false)) {
+      await folderEntry.click();
+      await page.waitForTimeout(2000);
+    }
+  }
+
+  // Give the file watcher additional time to index for Quick Open
+  await page.waitForTimeout(2000);
 }
 
 /**
  * Open a file via the quick-open dialog (Ctrl+P).
- * @param filePath - relative path within the workspace, e.g. "models/staging/stg_users.sql"
+ * Retries if the file index isn't ready yet (common on first load).
+ * @param filePath - file name or relative path, e.g. "bad_ref.sql" or "stg_users.sql"
  */
 export async function openFile(page: Page, filePath: string): Promise<void> {
-  // Trigger quick open
-  await page.keyboard.press("Control+p");
-  // Wait for the quick-open input
-  const input = page.locator(".quick-input-widget input.input");
-  await input.waitFor({ timeout: 5000 });
-  await input.fill(filePath);
-  // Small delay for the file list to filter
-  await page.waitForTimeout(500);
-  await page.keyboard.press("Enter");
-  // Wait for editor to open with the file
-  await page.waitForTimeout(1000);
+  const maxAttempts = 8;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Trigger quick open
+    await page.keyboard.press("Control+p");
+    // Wait for the quick-open input
+    const input = page.locator(".quick-input-widget input.input");
+    await input.waitFor({ timeout: 5000 });
+    await input.fill(filePath);
+    // Wait for the file list to filter
+    await page.waitForTimeout(1500);
+
+    // Check if there are matching results
+    const noResults = page.locator('.quick-input-list :text("No matching results")');
+    const hasNoResults = await noResults.isVisible({ timeout: 500 }).catch(() => false);
+
+    if (hasNoResults) {
+      // Dismiss and retry — the file index may not be ready yet
+      await page.keyboard.press("Escape");
+      if (attempt < maxAttempts) {
+        await page.waitForTimeout(3000);
+        continue;
+      }
+    }
+
+    await page.keyboard.press("Enter");
+    // Wait for editor to open with the file
+    await page.waitForTimeout(1000);
+    return;
+  }
 }
 
 /**
