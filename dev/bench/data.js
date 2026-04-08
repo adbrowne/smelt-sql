@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775686053427,
+  "lastUpdate": 1775686055531,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15593,6 +15593,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.902638913058947,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "b0ba4552e6c811fc7fefc186324a81bae6e28be5",
+          "message": "Add CLAUDE.md docs for demo pipeline and image rebuild workflow\n\n- docs-site/CLAUDE.md: add section on rebuilding editor feature images\n  with the exact copy commands from media/ to assets/\n- docs/demos/CLAUDE.md: new file documenting the Playwright demo\n  infrastructure — pipeline, architecture, helpers, test suite, known\n  issues, and asset flow to the docs site\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-09T08:06:12+10:00",
+          "tree_id": "ef9052a9348fc4f577ada5291784e5bbfdac5528",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b0ba4552e6c811fc7fefc186324a81bae6e28be5"
+        },
+        "date": 1775686054714,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.19881373754463,
             "unit": "MB/s"
           }
         ]
