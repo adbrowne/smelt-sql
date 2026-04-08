@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775686055531,
+  "lastUpdate": 1775687486444,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -11937,6 +11937,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.278006,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4f4d22b4e9d82cb608bef498753e6004937fd05a",
+          "message": "Add comprehensive multi-perspective codebase review (April 2026)\n\n10-perspective review comparing current state against March 26 review.\n7 of 16 previous recommendations addressed. Key upgrades: dbt user\nverdict Wait->Cautious Adopt, Spark verdict Hard Pass->Cautious Evaluate.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-09T08:30:01+10:00",
+          "tree_id": "d7e95ea0a0dd0c557527a85f9ae7aa43a621601d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4f4d22b4e9d82cb608bef498753e6004937fd05a"
+        },
+        "date": 1775687485550,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 38.435568,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.098323,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.664269,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.350213,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002775,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 41.139899,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.0326,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014807,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.013726,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.481673,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.4998009999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.0821700000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.17447,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.401489000000002,
             "unit": "ms"
           }
         ]
