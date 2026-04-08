@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775687486444,
+  "lastUpdate": 1775687488051,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15716,6 +15716,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.19881373754463,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4f4d22b4e9d82cb608bef498753e6004937fd05a",
+          "message": "Add comprehensive multi-perspective codebase review (April 2026)\n\n10-perspective review comparing current state against March 26 review.\n7 of 16 previous recommendations addressed. Key upgrades: dbt user\nverdict Wait->Cautious Adopt, Spark verdict Hard Pass->Cautious Evaluate.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-09T08:30:01+10:00",
+          "tree_id": "d7e95ea0a0dd0c557527a85f9ae7aa43a621601d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4f4d22b4e9d82cb608bef498753e6004937fd05a"
+        },
+        "date": 1775687487486,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.966628708198026,
             "unit": "MB/s"
           }
         ]
