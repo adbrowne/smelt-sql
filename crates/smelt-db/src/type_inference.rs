@@ -4,8 +4,8 @@
 /// including literals, column references, CAST expressions, and aggregates.
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, RowConstructor, SelectStmt,
-    StructLiteral, Subquery,
+    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
+    SelectStmt, StructLiteral, Subquery,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -263,6 +263,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_subquery_type(&subquery, ctx);
     }
 
+    // Try EXTRACT expression
+    if let Some(extract_expr) = expr.as_extract() {
+        return infer_extract_type(&extract_expr);
+    }
+
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
@@ -369,6 +374,23 @@ fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColum
     Some(TypedColumn {
         data_type,
         nullable,
+    })
+}
+
+/// Infer the type of an EXTRACT(field FROM expr) expression.
+fn infer_extract_type(extract_expr: &ExtractExpr) -> Option<TypedColumn> {
+    let field = extract_expr.field_name().unwrap_or_default();
+    let data_type = match field.as_str() {
+        "EPOCH" => DataType::Double,
+        "YEAR" | "MONTH" | "DAY" | "HOUR" | "MINUTE" | "SECOND" | "DOW" | "DOY" | "QUARTER"
+        | "WEEK" | "DAYOFWEEK" | "DAYOFYEAR" | "ISODOW" | "ISOYEAR" | "MICROSECOND"
+        | "MICROSECONDS" | "MILLISECOND" | "MILLISECONDS" | "TIMEZONE" | "TIMEZONE_HOUR"
+        | "TIMEZONE_MINUTE" => DataType::BigInt,
+        _ => DataType::BigInt, // default for unknown fields
+    };
+    Some(TypedColumn {
+        data_type,
+        nullable: true,
     })
 }
 
@@ -1806,6 +1828,11 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
     // Try column reference
     if let Some(col_ref) = expr.as_column_ref() {
         return Some(col_ref.name().to_string());
+    }
+
+    // Try EXTRACT expression
+    if let Some(_extract) = expr.as_extract() {
+        return Some("extract".to_string());
     }
 
     // Try function call - use function name

@@ -618,8 +618,8 @@ impl Expr {
                 }
                 Some(Self(inner))
             }
-            BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | SUBQUERY | BETWEEN_EXPR
-            | IN_EXPR | EXISTS_EXPR => Some(Self(node)),
+            BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
+            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -630,6 +630,7 @@ impl Expr {
                             | FUNCTION_CALL
                             | CASE_EXPR
                             | CAST_EXPR
+                            | EXTRACT_EXPR
                             | SUBQUERY
                             | BETWEEN_EXPR
                             | IN_EXPR
@@ -710,6 +711,14 @@ impl Expr {
             .children()
             .find_map(CaseExpr::cast)
             .or_else(|| CaseExpr::cast(self.0.clone()))
+    }
+
+    /// Check if this is an EXTRACT expression
+    pub fn as_extract(&self) -> Option<ExtractExpr> {
+        self.0
+            .children()
+            .find_map(ExtractExpr::cast)
+            .or_else(|| ExtractExpr::cast(self.0.clone()))
     }
 
     /// Check if this is a CAST expression
@@ -1662,6 +1671,48 @@ impl CastExpr {
             .children_with_tokens()
             .filter_map(|e| e.into_token())
             .any(|t| t.kind() == DOUBLE_COLON)
+    }
+}
+
+/// EXTRACT expression (EXTRACT(field FROM expr))
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtractExpr(SyntaxNode);
+
+impl ExtractExpr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == EXTRACT_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the field name (EPOCH, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND)
+    pub fn field_name(&self) -> Option<String> {
+        // The field is the first IDENT or keyword token after EXTRACT_KW and LPAREN
+        let mut after_lparen = false;
+        for elem in self.0.children_with_tokens() {
+            if let Some(token) = elem.as_token() {
+                match token.kind() {
+                    LPAREN => after_lparen = true,
+                    IDENT if after_lparen => return Some(token.text().to_uppercase()),
+                    k if k.is_keyword() && after_lparen && k != FROM_KW => {
+                        return Some(token.text().to_uppercase())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the source expression (the expression after FROM)
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 }
 

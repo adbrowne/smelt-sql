@@ -360,6 +360,7 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "ELSE" => ELSE_KW,
         "END" => END_KW,
         "CAST" => CAST_KW,
+        "EXTRACT" => EXTRACT_KW,
         "BETWEEN" => BETWEEN_KW,
         "IN" => IN_KW,
         "EXISTS" => EXISTS_KW,

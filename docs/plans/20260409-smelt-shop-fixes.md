@@ -110,19 +110,19 @@ Produce exactly ONE commit per phase. Include all changes (code + plan + roadmap
 
 ---
 
-## Phase 2: EXTRACT(EPOCH FROM ...) Parser Fix `[ ]`
+## Phase 2: EXTRACT(EPOCH FROM ...) Parser Fix `[x]`
 
 **Priority**: High — isolated parser change, no type inference entanglement.
 
 **Goal**: Parse `EXTRACT(field FROM expr)` as a special form, not a regular function call.
 
 **Work**:
-- [ ] Add unit test in `smelt-parser` that parses `EXTRACT(EPOCH FROM ts)` and verifies AST structure (red)
-- [ ] In `parser.rs`, add special-case handling when function name is `EXTRACT`: parse `field FROM expr` as the argument, not a regular expression list
-- [ ] Ensure the AST node preserves the field name (EPOCH, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND) and the source expression
-- [ ] Update type inference in `type_inference.rs` to handle the new EXTRACT AST node — return appropriate types (EPOCH→DOUBLE/BIGINT, YEAR/MONTH/DAY→INTEGER, etc.)
-- [ ] Update dialect printer if needed to emit correct SQL for each backend
-- [ ] Verify `stg_events.sql` in the ecommerce example now has no diagnostics (green)
+- [x] Add unit test in `smelt-parser` that parses `EXTRACT(EPOCH FROM ts)` and verifies AST structure (red)
+- [x] In `parser.rs`, add special-case handling when function name is `EXTRACT`: parse `field FROM expr` as the argument, not a regular expression list
+- [x] Ensure the AST node preserves the field name (EPOCH, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND) and the source expression
+- [x] Update type inference in `type_inference.rs` to handle the new EXTRACT AST node — return appropriate types (EPOCH→DOUBLE/BIGINT, YEAR/MONTH/DAY→INTEGER, etc.)
+- [x] Update dialect printer if needed to emit correct SQL for each backend
+- [x] Verify `stg_events.sql` in the ecommerce example now has no diagnostics (green)
 
 **Verification**: `cargo test -p smelt-parser` passes. `cargo test -p smelt-db` passes. The ecommerce `stg_events` model has no diagnostics.
 
@@ -278,3 +278,12 @@ Produce exactly ONE commit per phase. Include all changes (code + plan + roadmap
 - Added `ecommerce_no_diagnostics` test to example_diagnostics.rs
 - Added `ecommerce_execution.rs` compile-and-execute integration test with DuckDB seeding
 - Both tests compile and fail with clear error messages showing all 7 bugs manifesting
+
+**2026-04-09 — Phase 2: EXTRACT(EPOCH FROM ...) Parser Fix**
+- Added EXTRACT_KW to lexer and EXTRACT_EXPR to syntax kinds
+- New parse_extract_expr() handles EXTRACT(field FROM expr) as special syntax
+- Added ExtractExpr AST node with field_name() and expression() accessors
+- Type inference returns DOUBLE for EPOCH, BIGINT for other fields
+- Dialect printer handles EXTRACT_EXPR via default print_children (standard SQL)
+- 3 new parser tests (epoch, year, arithmetic), all 246 parser tests pass, all 133 type inference tests pass
+- stg_events.sql now has no diagnostics
