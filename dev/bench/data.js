@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775697463472,
+  "lastUpdate": 1775697464881,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15839,6 +15839,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.966628708198026,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "0dce85d55487c40ec0dbd683883c407cb1cfdc84",
+          "message": "Fix inter-crate version pins for 0.2.0 release\n\nUpdate smelt-dialect's explicit version pins on smelt-parser and\nsmelt-types from 0.1.0 to 0.2.0 and regenerate Cargo.lock.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-09T11:15:49+10:00",
+          "tree_id": "b6031386595f3376e041a2978c87bb0edce6b0b5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0dce85d55487c40ec0dbd683883c407cb1cfdc84"
+        },
+        "date": 1775697464442,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.822861039681634,
             "unit": "MB/s"
           }
         ]
