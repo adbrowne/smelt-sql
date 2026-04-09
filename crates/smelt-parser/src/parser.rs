@@ -1567,10 +1567,9 @@ impl<'a> Parser<'a> {
         self.start_node(WHEN_CLAUSE);
         self.expect(WHEN_KW);
 
-        // Parse condition or value (depends on simple vs searched CASE)
-        // Use comparison_expr to avoid consuming beyond THEN keyword
+        // Parse condition (full expression including OR/AND for searched CASE)
         self.skip_trivia();
-        self.parse_comparison_expr();
+        self.parse_or_expr();
 
         // Expect THEN
         self.skip_trivia();
@@ -1578,9 +1577,9 @@ impl<'a> Parser<'a> {
             self.error("Expected THEN in WHEN clause".to_string());
         }
 
-        // Parse result - use comparison_expr to avoid consuming beyond WHEN/ELSE/END
+        // Parse result expression (full expression, WHEN/ELSE/END terminate naturally)
         self.skip_trivia();
-        self.parse_comparison_expr();
+        self.parse_or_expr();
 
         self.finish_node();
     }
@@ -4818,5 +4817,21 @@ LIMIT 100
         let (parse, select) = parse_select(input);
         assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
         assert!(select.from_clause().is_some(), "Should have a FROM clause");
+    }
+
+    #[test]
+    fn test_case_is_null_or() {
+        // Regression: IS NULL OR in CASE WHEN was failing to parse
+        let input = "SELECT CASE WHEN x IS NULL OR y > 1800 THEN 1 ELSE 0 END AS flag FROM t";
+        let (parse, _) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_case_in_sum_with_is_null_or() {
+        // Regression: SUM(CASE WHEN ... IS NULL OR ... THEN ... END)
+        let input = "SELECT SUM(CASE WHEN gap IS NULL OR gap > 1800 THEN 1 ELSE 0 END) OVER (PARTITION BY v ORDER BY ts) AS sid FROM t";
+        let (parse, _) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
     }
 }
