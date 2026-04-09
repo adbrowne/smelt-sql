@@ -349,6 +349,14 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
                 }
             }
         }
+        // Qualified column reference (e.g. "p.product_id") that couldn't be resolved —
+        // return None rather than falling through to infer_literal_type which would
+        // misinterpret the dot as a decimal point.
+        // Unqualified refs (e.g. "INTERVAL") must still fall through so that
+        // infer_literal_type can recognize typed literals like INTERVAL '1' DAY.
+        if col_ref.qualifier().is_some() {
+            return None;
+        }
     }
 
     // Try literal inference (also handles typed literals like DATE '2025-01-15')

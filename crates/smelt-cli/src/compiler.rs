@@ -1335,6 +1335,48 @@ WHERE event_type = 'click'
     }
 
     #[test]
+    fn test_join_type_inference_no_wrong_casts() {
+        // When a model JOINs source + seed, the type wrapper should not apply wrong types
+        let sql = r#"SELECT
+    p.product_id,
+    p.product_name,
+    ch.category_name,
+    p.unit_price_cents / 100.0 AS unit_price,
+    CASE WHEN p.is_digital THEN 'Digital' ELSE 'Physical' END AS product_type
+FROM raw.products AS p
+LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
+
+        let model = ModelFile {
+            name: "stg_products".to_string(),
+            path: "models/staging/stg_products.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+        };
+
+        let config = make_test_config();
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let compiled = compiler.compile(&model, "main").unwrap();
+
+        // product_name is a VARCHAR column — should NOT be cast as DOUBLE
+        assert!(
+            !compiled.sql.contains("CAST(product_name AS DOUBLE)"),
+            "product_name should not be cast as DOUBLE: {}",
+            compiled.sql
+        );
+        // product_id is INTEGER — should NOT be cast as DECIMAL(11,10)
+        assert!(
+            !compiled.sql.contains("DECIMAL(11,10)"),
+            "product_id should not get wrong DECIMAL precision: {}",
+            compiled.sql
+        );
+    }
+
+    #[test]
     fn test_case_in_aggregate_no_question_marks() {
         // COUNT(CASE WHEN ... THEN 1 END) — common funnel pattern
         let sql = "SELECT COUNT(CASE WHEN event_type = 'purchase' THEN 1 END) AS purchases FROM t GROUP BY x";
