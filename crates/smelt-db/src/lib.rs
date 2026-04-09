@@ -24,6 +24,8 @@ use serde::Deserialize;
 use smelt_parser::{self, File as AstFile, RefCall, TableRef};
 use smelt_types::{parse_type, DataType, TypedColumn};
 
+pub use smelt_core::SeedInfo;
+
 pub mod code_actions;
 pub mod references;
 pub mod schema;
@@ -91,6 +93,11 @@ pub trait Syntax: Inputs {
 
     /// Get all models in the project
     fn all_models(&self) -> Arc<HashMap<PathBuf, Model>>;
+
+    /// Discover seed CSV files for a project root and infer their column types.
+    /// This is a derived query that scans the filesystem; it is cached per project_root
+    /// within a session. Seeds that change on disk require a tool restart to be detected.
+    fn project_seed_files(&self, project_root: PathBuf) -> Arc<Vec<SeedInfo>>;
 }
 
 /// Semantic queries - name resolution, type checking, etc.
@@ -359,14 +366,43 @@ fn all_models(db: &dyn Syntax) -> Arc<HashMap<PathBuf, Model>> {
     Arc::new(models)
 }
 
+fn project_seed_files(_db: &dyn Syntax, project_root: PathBuf) -> Arc<Vec<SeedInfo>> {
+    // Load config to get seed_paths (default to ["seeds"] if config unavailable)
+    let seed_paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.seed_paths)
+        .unwrap_or_else(|_| vec!["seeds".to_string()]);
+
+    Arc::new(smelt_core::discover_seed_infos(&project_root, &seed_paths))
+}
+
+/// Returns true if the path points to a seed CSV file (resolved by resolve_ref).
+/// Seed paths must not be passed to SQL model queries like model_schema/parse_file.
+fn is_seed_path(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("csv")
+}
+
 fn resolve_ref(db: &dyn Semantic, model_name: String) -> Option<PathBuf> {
     let models = db.all_models();
 
-    // Find the model with this name
-    models
+    // First: check SQL models
+    if let Some(path) = models
         .iter()
         .find(|(_, model)| model.name == model_name)
         .map(|(path, _)| path.clone())
+    {
+        return Some(path);
+    }
+
+    // Second: check seed CSV files across all project roots
+    for project_root in db.all_project_roots().iter() {
+        for seed in db.project_seed_files(project_root.clone()).iter() {
+            if seed.name == model_name {
+                return Some(seed.path.clone());
+            }
+        }
+    }
+
+    None
 }
 
 fn resolve_source(
@@ -940,13 +976,15 @@ fn available_columns(db: &dyn Schema, path: PathBuf) -> Arc<Vec<Column>> {
                     if let Some(func) = table_ref.function_call() {
                         if let Some(ref_call) = RefCall::from_function_call(func) {
                             if let Some(model_name) = ref_call.model_name() {
-                                // Resolve upstream model schema
+                                // Resolve upstream model schema (skip seeds — CSV paths)
                                 if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                                    let upstream_schema = db.model_schema(upstream_path);
+                                    if !is_seed_path(&upstream_path) {
+                                        let upstream_schema = db.model_schema(upstream_path);
 
-                                    // Add upstream columns to available list
-                                    for col in upstream_schema.columns.iter() {
-                                        available.push(col.clone());
+                                        // Add upstream columns to available list
+                                        for col in upstream_schema.columns.iter() {
+                                            available.push(col.clone());
+                                        }
                                     }
                                 }
                             }
@@ -1102,24 +1140,49 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
     if let Some(func) = table_ref.function_call() {
         if let Some(ref_call) = RefCall::from_function_call(func) {
             if let Some(model_name) = ref_call.model_name() {
-                // Resolve upstream model and get its typed schema
+                // Resolve upstream model or seed and get its typed schema
                 if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                    // Use resolved schema to get columns through wildcards
-                    let resolved = db.resolved_model_schema(upstream_path);
+                    // Check if this is a seed (CSV file) or a SQL model
+                    if upstream_path.extension().and_then(|e| e.to_str()) == Some("csv") {
+                        // Seed ref: look up column types from project_seed_files
+                        'seed_search: for project_root in db.all_project_roots().iter() {
+                            for seed in db.project_seed_files(project_root.clone()).iter() {
+                                if seed.name == model_name {
+                                    for (col_name, data_type) in &seed.columns {
+                                        ctx.add_model_column(
+                                            &model_name,
+                                            col_name,
+                                            TypedColumn {
+                                                data_type: data_type.clone(),
+                                                nullable: true,
+                                            },
+                                        );
+                                    }
+                                    if let Some(explicit_alias) = table_ref.alias() {
+                                        ctx.add_alias(&explicit_alias, &model_name);
+                                    }
+                                    break 'seed_search;
+                                }
+                            }
+                        }
+                    } else {
+                        // SQL model ref: use resolved schema to get columns through wildcards
+                        let resolved = db.resolved_model_schema(upstream_path);
 
-                    // Add all resolved columns to context (use Unknown for untyped
-                    // columns so they remain visible for column reference resolution)
-                    for col in &resolved.columns {
-                        let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
-                            data_type: DataType::Unknown,
-                            nullable: true,
-                        });
-                        ctx.add_model_column(&model_name, &col.name, typed_col);
-                    }
+                        // Add all resolved columns to context (use Unknown for untyped
+                        // columns so they remain visible for column reference resolution)
+                        for col in &resolved.columns {
+                            let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
+                                data_type: DataType::Unknown,
+                                nullable: true,
+                            });
+                            ctx.add_model_column(&model_name, &col.name, typed_col);
+                        }
 
-                    // Register alias if present
-                    if let Some(explicit_alias) = table_ref.alias() {
-                        ctx.add_alias(&explicit_alias, &model_name);
+                        // Register alias if present
+                        if let Some(explicit_alias) = table_ref.alias() {
+                            ctx.add_alias(&explicit_alias, &model_name);
+                        }
                     }
                 }
             }
@@ -1167,9 +1230,14 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
             if let Some(select_stmt) = subquery.select_stmt() {
                 // Get the column names from the SELECT list
                 if let Some(select_list) = select_stmt.select_list() {
-                    // Infer column types using the current context
-                    // For LATERAL subqueries, this allows referencing preceding table columns
-                    let column_types = infer_select_column_types(&select_stmt, ctx);
+                    // Build a subquery-local context by cloning the outer context and
+                    // then processing the subquery's own FROM clause. This allows refs
+                    // like smelt.ref('upstream') inside the subquery to be resolved.
+                    let mut subquery_ctx = ctx.clone();
+                    process_from_clause(db, &select_stmt, &mut subquery_ctx);
+
+                    // Infer column types using the subquery-local context
+                    let column_types = infer_select_column_types(&select_stmt, &subquery_ctx);
 
                     // Register each column under the subquery's alias
                     for (i, item) in select_list.items().enumerate() {
@@ -1269,6 +1337,10 @@ fn resolved_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ResolvedSc
     // First, expand row extensions (they represent columns from SELECT *)
     for ext in &typed_schema.row_extensions {
         if let Some(upstream_path) = db.resolve_ref(ext.ref_name.clone()) {
+            // Skip seeds — they don't participate in schema resolution (no SELECT *)
+            if is_seed_path(&upstream_path) {
+                continue;
+            }
             // Recursively resolve upstream schema
             let upstream_resolved = db.resolved_model_schema(upstream_path);
 
@@ -1657,6 +1729,10 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
             Some(p) => p,
             None => continue, // undefined ref — already reported by file_diagnostics
         };
+        // Seeds don't have type constraints — skip
+        if is_seed_path(&upstream_path) {
+            continue;
+        }
         let upstream_schema = db.typed_model_schema(upstream_path);
 
         for (col_name, col_constraint) in &constraint.required_columns {
@@ -1697,6 +1773,10 @@ fn type_diagnostics(db: &dyn TypeChecking, path: PathBuf) -> Arc<Vec<Diagnostic>
     let refs = db.model_refs(path.clone());
     for ref_loc in refs.iter() {
         if let Some(upstream_path) = db.resolve_ref(ref_loc.name.clone()) {
+            // Seeds can't be in a cycle — skip
+            if is_seed_path(&upstream_path) {
+                continue;
+            }
             let upstream_base = db.model_schema(upstream_path.clone());
             let upstream_resolved = db.resolved_model_schema(upstream_path);
             // If the base schema has columns or row extensions but resolved is empty,
@@ -1881,6 +1961,7 @@ mod tests {
         // Register the file (no other files, so ref won't resolve)
         db.set_all_files(Arc::new(vec![path.clone()]));
         db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_all_project_roots(Arc::new(vec![]));
 
         // Get diagnostics
         let diagnostics = db.file_diagnostics(path);
@@ -1954,6 +2035,7 @@ mod tests {
         // Register the file (no other files, so ref won't resolve)
         db.set_all_files(Arc::new(vec![path.clone()]));
         db.set_file_project_root(path.clone(), PathBuf::from("."));
+        db.set_all_project_roots(Arc::new(vec![]));
 
         // Get diagnostics
         let diagnostics = db.file_diagnostics(path);
@@ -5172,6 +5254,76 @@ sources:
             undeclared.is_empty(),
             "SELECT * should not trigger undeclared column diagnostic, got: {:?}",
             undeclared
+        );
+    }
+
+    #[test]
+    fn test_seed_ref_resolves_and_provides_columns() {
+        use tempfile::TempDir;
+
+        // Create a real temporary directory with a seed CSV
+        let tmp = TempDir::new().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let seeds_dir = project_root.join("seeds");
+        std::fs::create_dir_all(&seeds_dir).unwrap();
+        std::fs::write(
+            seeds_dir.join("order_statuses.csv"),
+            "status_code,status_label,is_terminal,is_successful\ncompleted,Completed,true,true\ncancelled,Cancelled,true,false\n",
+        ).unwrap();
+
+        // Create a model that refs the seed
+        let model_path = project_root.join("stg_orders.sql");
+        let model_sql = "SELECT o.order_id, os.status_label, os.is_terminal \
+                          FROM some_table AS o \
+                          LEFT JOIN smelt.ref('order_statuses') AS os ON o.status = os.status_code";
+
+        let mut db = Database::default();
+        db.set_file_text(model_path.clone(), Arc::new(model_sql.to_string()));
+        db.set_file_project_root(model_path.clone(), project_root.clone());
+        db.set_all_files(Arc::new(vec![model_path.clone()]));
+        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
+
+        // Seed ref should resolve
+        let resolved = db.resolve_ref("order_statuses".to_string());
+        assert!(
+            resolved.is_some(),
+            "smelt.ref('order_statuses') should resolve to the seed CSV path"
+        );
+        assert!(
+            resolved.unwrap().extension().and_then(|e| e.to_str()) == Some("csv"),
+            "resolved path should be the CSV file"
+        );
+
+        // Seed columns should be available in type context
+        let ctx = db.type_context(model_path.clone());
+        let status_label = ctx.lookup_column(Some("os"), "status_label");
+        assert!(
+            status_label.is_some(),
+            "os.status_label should be available in type context via seed alias"
+        );
+        let is_terminal = ctx.lookup_column(Some("os"), "is_terminal");
+        assert!(
+            is_terminal.is_some(),
+            "os.is_terminal should be available in type context"
+        );
+        // is_terminal should be Boolean (inferred from true/false values)
+        assert_eq!(
+            is_terminal.unwrap().data_type,
+            smelt_types::DataType::Boolean,
+            "is_terminal should be inferred as Boolean"
+        );
+
+        // No undefined ref diagnostics
+        let diags = db.file_diagnostics(model_path.clone());
+        let undefined_refs: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("Undefined model reference"))
+            .collect();
+        assert!(
+            undefined_refs.is_empty(),
+            "seed ref should not produce undefined ref diagnostic, got: {:?}",
+            undefined_refs
         );
     }
 }

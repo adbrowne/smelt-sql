@@ -181,26 +181,30 @@ Produce exactly ONE commit per phase. Include all changes (code + plan + roadmap
 - [x] `cargo clippy --all-targets` (no warnings)
 - [x] `cargo test -p smelt-db --lib` (133 passed, 0 failed)
 - [x] `cargo test -p smelt-cli --lib` (all pass including `test_join_type_inference_no_wrong_casts`)
-- [ ] `ecommerce_no_diagnostics` — expected failure (seed refs unresolved until Phase 6)
+- [x] `ecommerce_no_diagnostics` — passes after Phase 6
 
 ---
 
-## Phase 6: Seeds as Ref Targets `[ ]`
+## Phase 6: Seeds as Ref Targets `[x]` ✅ 2026-04-10
 
 **Priority**: High — seeds should be first-class citizens in the dependency graph.
 
 **Goal**: Make `smelt.ref('seed_name')` resolve to seed table schemas.
 
 **Work**:
-- [ ] Add regression test: model with `smelt.ref('category_hierarchy')` where category_hierarchy is a seed — assert it resolves (red)
-- [ ] Extend `all_models()` or add `all_seeds()` in `lib.rs:349-370` to discover seed definitions from config
-- [ ] Extend `resolve_ref()` in `lib.rs:362` to search seeds in addition to models
-- [ ] Seed schema inference: parse CSV headers + first N rows to determine column types, or read from smelt.yml config
-- [ ] Ensure seeds appear in `smelt explain` DAG output
-- [ ] Update ecommerce example: `stg_products.sql` uses `smelt.ref('category_hierarchy')` instead of `smelt.source()`
-- [ ] Verify ref resolution works for seeds (green)
+- [x] Add regression test: model with `smelt.ref('category_hierarchy')` where category_hierarchy is a seed — assert it resolves (red)
+- [x] Extend `all_models()` or add `all_seeds()` in `lib.rs:349-370` to discover seed definitions from config
+- [x] Extend `resolve_ref()` in `lib.rs:362` to search seeds in addition to models
+- [x] Seed schema inference: parse CSV headers + first N rows to determine column types, or read from smelt.yml config
+- [x] Ensure seeds appear in `smelt explain` DAG output
+- [x] Update ecommerce example: seeds CSV files added, stg_products/stg_orders already use seed refs
+- [x] Verify ref resolution works for seeds (green)
 
-**Verification**: `cargo test -p smelt-db` passes. `cargo test -p smelt-cli --test example_diagnostics -- ecommerce` passes (all diagnostic tests green).
+**Verification**:
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --all-targets` (no warnings)
+- [x] `cargo test` (134 passed, 0 failed)
+- [x] `cargo test -p smelt-cli --test example_diagnostics -- ecommerce_no_diagnostics` — passes
 
 ---
 
