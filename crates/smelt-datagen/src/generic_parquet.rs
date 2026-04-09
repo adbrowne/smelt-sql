@@ -439,4 +439,83 @@ mod tests {
         let bytes2 = std::fs::read(tmp2.path().join("data.parquet")).unwrap();
         assert_eq!(bytes1, bytes2, "Output should be deterministic");
     }
+
+    #[test]
+    fn test_date_generator() {
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+        let config = DatasetConfig {
+            name: "test_dates".to_string(),
+            output,
+            num_rows: 100,
+            seed: Some(42),
+            partition: None,
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "event_date".to_string(),
+                generator: GeneratorSpec::Date {
+                    start: "2020-01-01".to_string(),
+                    end: "2024-12-31".to_string(),
+                },
+            }],
+        };
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
+        assert_eq!(count, 100);
+        assert!(tmp.path().join("data.parquet").exists());
+    }
+
+    #[test]
+    fn test_timestamp_generator() {
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+        let config = DatasetConfig {
+            name: "test_timestamps".to_string(),
+            output,
+            num_rows: 100,
+            seed: Some(42),
+            partition: None,
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "created_at".to_string(),
+                generator: GeneratorSpec::Timestamp {
+                    start: "2024-01-01T00:00:00".to_string(),
+                    end: "2024-03-31T23:59:59".to_string(),
+                },
+            }],
+        };
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
+        assert_eq!(count, 100);
+        assert!(tmp.path().join("data.parquet").exists());
+    }
+
+    #[test]
+    fn test_string_pattern_generator() {
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+        let config = DatasetConfig {
+            name: "test_patterns".to_string(),
+            output,
+            num_rows: 100,
+            seed: Some(42),
+            partition: None,
+            entity: None,
+            columns: vec![
+                ColumnConfig {
+                    name: "email".to_string(),
+                    generator: GeneratorSpec::StringPattern {
+                        template: "user_{sequential_id}@example.com".to_string(),
+                    },
+                },
+                ColumnConfig {
+                    name: "sku".to_string(),
+                    generator: GeneratorSpec::StringPattern {
+                        template: "SKU-{uniform_int:1000-9999}".to_string(),
+                    },
+                },
+            ],
+        };
+        let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
+        assert_eq!(count, 100);
+        assert!(tmp.path().join("data.parquet").exists());
+    }
 }

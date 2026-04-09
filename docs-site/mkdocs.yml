@@ -56,6 +56,7 @@ nav:
     - Incremental Models: guide/incremental-models.md
     - Schema Evolution: guide/schema-evolution.md
     - Seeds: guide/seeds.md
+    - Data Generation: guide/datagen.md
     - Model Selection: guide/model-selection.md
     - Python Models: guide/python-models.md
     - Testing: guide/testing.md

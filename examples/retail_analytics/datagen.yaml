@@ -60,9 +60,7 @@ datasets:
           type: one_of
           values: [New York, London, Berlin, Paris, Toronto, Sydney, Tokyo, Sao Paulo, Mumbai, Chicago, Los Angeles, Manchester, Munich, Lyon, Vancouver, Melbourne, Osaka, Rio de Janeiro, Delhi, Houston]
       - name: signup_date
-        generator:
-          type: one_of
-          values: ["2020-01-15", "2020-03-22", "2020-06-10", "2020-09-05", "2021-01-18", "2021-04-30", "2021-07-12", "2021-10-25", "2022-02-14", "2022-05-08", "2022-08-19", "2022-11-30", "2023-01-05", "2023-04-17", "2023-07-22", "2023-10-01", "2024-01-10", "2024-03-15", "2024-06-20", "2024-09-01"]
+        generator: { type: date, start: "2020-01-01", end: "2024-09-30" }
       - name: segment
         generator:
           type: weighted_choice

@@ -97,16 +97,18 @@ jobs:
       - name: Build frontend
         run: cd ui && npm ci && npm run build
 
-      - name: Build smelt-lsp for wheel (non-Linux)
+      - name: Build smelt-lsp and smelt-datagen for wheel (non-Linux)
         if: runner.os != 'Linux'
         shell: bash
         run: |
-          cargo build --release --target ${{ matrix.target }} -p smelt-lsp --no-default-features
+          cargo build --release --target ${{ matrix.target }} -p smelt-lsp -p smelt-datagen --no-default-features
           mkdir -p smelt_sql.data/scripts
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/${{ matrix.target }}/release/smelt-lsp.exe smelt_sql.data/scripts/
+            cp target/${{ matrix.target }}/release/smelt-datagen.exe smelt_sql.data/scripts/
           else
             cp target/${{ matrix.target }}/release/smelt-lsp smelt_sql.data/scripts/
+            cp target/${{ matrix.target }}/release/smelt-datagen smelt_sql.data/scripts/
           fi
 
       - name: Build wheel
@@ -117,9 +119,10 @@ jobs:
           manylinux: 2_28
           docker-options: -e CXXFLAGS=-DDUCKDB_CUSTOM_PLATFORM=${{ contains(matrix.target, 'aarch64') && 'linux_arm64_gcc4' || 'linux_amd64_gcc4' }}
           before-script-linux: |
-            cargo build --release -p smelt-lsp --no-default-features
+            cargo build --release -p smelt-lsp -p smelt-datagen --no-default-features
             mkdir -p smelt_sql.data/scripts
             cp target/release/smelt-lsp smelt_sql.data/scripts/
+            cp target/release/smelt-datagen smelt_sql.data/scripts/
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
@@ -186,7 +189,7 @@ jobs:
         run: cd ui && npm ci && npm run build
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p smelt-cli -p smelt-lsp --features smelt-cli/bundled-duckdb
+        run: cargo build --release --target ${{ matrix.target }} -p smelt-cli -p smelt-lsp -p smelt-datagen --features smelt-cli/bundled-duckdb
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
@@ -195,6 +198,7 @@ jobs:
           mkdir "$staging"
           cp target/${{ matrix.target }}/release/smelt "$staging/"
           cp target/${{ matrix.target }}/release/smelt-lsp "$staging/"
+          cp target/${{ matrix.target }}/release/smelt-datagen "$staging/"
           cp LICENSE README.md "$staging/"
           tar czf "$staging.tar.gz" "$staging"
 
@@ -206,6 +210,7 @@ jobs:
           New-Item -ItemType Directory -Path $staging
           Copy-Item "target/${{ matrix.target }}/release/smelt.exe" "$staging/"
           Copy-Item "target/${{ matrix.target }}/release/smelt-lsp.exe" "$staging/"
+          Copy-Item "target/${{ matrix.target }}/release/smelt-datagen.exe" "$staging/"
           Copy-Item "LICENSE", "README.md" "$staging/"
           Compress-Archive -Path "$staging/*" -DestinationPath "$staging.zip"
 

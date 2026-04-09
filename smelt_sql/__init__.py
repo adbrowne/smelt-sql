@@ -42,3 +42,8 @@ def lsp_binary_path() -> str:
 def cli_binary_path() -> str:
     """Return the absolute path to the bundled smelt CLI binary."""
     return _find_binary("smelt")
+
+
+def datagen_binary_path() -> str:
+    """Return the absolute path to the bundled smelt-datagen binary."""
+    return _find_binary("smelt-datagen")

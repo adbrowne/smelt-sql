@@ -88,6 +88,17 @@ pub enum GeneratorSpec {
     ForeignKey {
         dataset: String,
     },
+    Date {
+        start: String,
+        end: String,
+    },
+    Timestamp {
+        start: String,
+        end: String,
+    },
+    StringPattern {
+        template: String,
+    },
 }
 
 impl GeneratorSpec {
@@ -109,6 +120,9 @@ impl GeneratorSpec {
             GeneratorSpec::Optional { inner, .. } => inner.arrow_type(),
             GeneratorSpec::SequentialId => DataType::Int32,
             GeneratorSpec::ForeignKey { .. } => DataType::Int32,
+            GeneratorSpec::Date { .. } => DataType::Utf8,
+            GeneratorSpec::Timestamp { .. } => DataType::Utf8,
+            GeneratorSpec::StringPattern { .. } => DataType::Utf8,
         }
     }
 

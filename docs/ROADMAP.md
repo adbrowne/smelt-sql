@@ -340,6 +340,10 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ✅ CI verification: example workspaces checked for zero LSP diagnostics (April 3, 2026)
 - ✅ CI release builds fixed for bundled-duckdb feature (April 4, 2026)
 
+- ✅ smelt-datagen bundled in `smelt-sql` PyPI wheel and standalone archives (April 9, 2026)
+- ✅ smelt-datagen documentation: guide page on smeltsql.com covering all features (April 9, 2026)
+- ✅ New datagen generators: `date`, `timestamp`, and `string_pattern` for realistic test data (April 9, 2026)
+
 **Next steps**:
 - Pre-built binaries via GitHub Releases (dev-release.yml workflow exists)
 - dbt-to-smelt cheat sheet showing common pattern equivalents

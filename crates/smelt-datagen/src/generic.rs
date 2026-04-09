@@ -5,6 +5,7 @@ use crate::gen::Gen;
 use crate::generators::{
     bool_with_prob, geometric, log_normal, one_of, uniform, uuid_gen, weighted_choice,
 };
+use chrono::NaiveDate;
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -162,6 +163,184 @@ pub fn apply_spec(
             let count = fk_counts.get(dataset).copied().unwrap_or(1) as u64;
             let id = (rng.next_u64() % count) + 1;
             GenericValue::Int(id as i32)
+        }
+        GeneratorSpec::Date { start, end } => {
+            let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+                .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+            let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+                .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+            let days_range = (end_date - start_date).num_days().max(1) as u64;
+            let offset = (rng.next_u64() % days_range) as i64;
+            let date = start_date + chrono::Duration::days(offset);
+            GenericValue::Str(date.format("%Y-%m-%d").to_string())
+        }
+        GeneratorSpec::Timestamp { start, end } => {
+            let start_dt = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
+                .unwrap_or_else(|_| {
+                    NaiveDate::from_ymd_opt(2024, 1, 1)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                });
+            let end_dt = chrono::NaiveDateTime::parse_from_str(end, "%Y-%m-%dT%H:%M:%S")
+                .unwrap_or_else(|_| {
+                    NaiveDate::from_ymd_opt(2024, 12, 31)
+                        .unwrap()
+                        .and_hms_opt(23, 59, 59)
+                        .unwrap()
+                });
+            let secs_range = (end_dt - start_dt).num_seconds().max(1) as u64;
+            let offset = (rng.next_u64() % secs_range) as i64;
+            let ts = start_dt + chrono::Duration::seconds(offset);
+            GenericValue::Str(ts.format("%Y-%m-%dT%H:%M:%S").to_string())
+        }
+        GeneratorSpec::StringPattern { template } => {
+            let result = apply_string_pattern(rng, template, row_index);
+            GenericValue::Str(result)
+        }
+    }
+}
+
+/// Expand a string pattern template, replacing `{...}` placeholders.
+///
+/// Supported placeholders:
+/// - `{sequential_id}` — row index + 1
+/// - `{uuid}` — random UUID
+/// - `{uniform_int:MIN-MAX}` — random integer in [MIN, MAX)
+/// - `{one_of:a,b,c}` — random choice from comma-separated list
+fn apply_string_pattern(rng: &mut impl RngCore, template: &str, row_index: usize) -> String {
+    let mut result = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            // Collect until closing '}'
+            let mut placeholder = String::new();
+            for inner in chars.by_ref() {
+                if inner == '}' {
+                    break;
+                }
+                placeholder.push(inner);
+            }
+            let expanded = expand_placeholder(rng, &placeholder, row_index);
+            result.push_str(&expanded);
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
+fn expand_placeholder(rng: &mut impl RngCore, placeholder: &str, row_index: usize) -> String {
+    if placeholder == "sequential_id" {
+        return (row_index + 1).to_string();
+    }
+    if placeholder == "uuid" {
+        return uuid_gen().generate(rng).to_string();
+    }
+    if let Some(args) = placeholder.strip_prefix("uniform_int:") {
+        if let Some((min_s, max_s)) = args.split_once('-') {
+            let min: i32 = min_s.trim().parse().unwrap_or(0);
+            let max: i32 = max_s.trim().parse().unwrap_or(100);
+            let range = (max - min).max(1) as u64;
+            let v = min + (rng.next_u64() % range) as i32;
+            return v.to_string();
+        }
+    }
+    if let Some(args) = placeholder.strip_prefix("one_of:") {
+        let items: Vec<&str> = args.split(',').map(|s| s.trim()).collect();
+        if !items.is_empty() {
+            let idx = rng.next_u64() as usize % items.len();
+            return items[idx].to_string();
+        }
+    }
+    // Unknown placeholder — return as-is with braces
+    format!("{{{}}}", placeholder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn test_string_pattern_sequential_id() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let result = apply_string_pattern(&mut rng, "user_{sequential_id}@example.com", 0);
+        assert_eq!(result, "user_1@example.com");
+        let result = apply_string_pattern(&mut rng, "user_{sequential_id}@example.com", 99);
+        assert_eq!(result, "user_100@example.com");
+    }
+
+    #[test]
+    fn test_string_pattern_uniform_int() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let result = apply_string_pattern(&mut rng, "SKU-{uniform_int:1000-9999}", 0);
+        // Should start with SKU- and have a number
+        assert!(result.starts_with("SKU-"));
+        let num: i32 = result.strip_prefix("SKU-").unwrap().parse().unwrap();
+        assert!((1000..9999).contains(&num));
+    }
+
+    #[test]
+    fn test_string_pattern_one_of() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let result = apply_string_pattern(&mut rng, "{one_of:red,green,blue}", 0);
+        assert!(
+            result == "red" || result == "green" || result == "blue",
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_string_pattern_multiple_placeholders() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let result = apply_string_pattern(&mut rng, "{one_of:a,b}-{sequential_id}", 4);
+        assert!(result.ends_with("-5"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_string_pattern_unknown_placeholder() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let result = apply_string_pattern(&mut rng, "hello {unknown} world", 0);
+        assert_eq!(result, "hello {unknown} world");
+    }
+
+    #[test]
+    fn test_date_generator_range() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let fk = FkCounts::new();
+        let spec = GeneratorSpec::Date {
+            start: "2024-01-01".to_string(),
+            end: "2024-01-10".to_string(),
+        };
+        for _ in 0..50 {
+            if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, 0, &fk) {
+                let date = NaiveDate::parse_from_str(&s, "%Y-%m-%d").unwrap();
+                let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+                let end = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+                assert!(date >= start && date < end, "date out of range: {}", s);
+            } else {
+                panic!("Expected Str variant");
+            }
+        }
+    }
+
+    #[test]
+    fn test_timestamp_generator_range() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let fk = FkCounts::new();
+        let spec = GeneratorSpec::Timestamp {
+            start: "2024-01-01T00:00:00".to_string(),
+            end: "2024-01-02T00:00:00".to_string(),
+        };
+        if let GenericValue::Str(s) = apply_spec(&mut rng, &spec, 0, &fk) {
+            assert!(s.starts_with("2024-01-01T"), "got: {}", s);
+        } else {
+            panic!("Expected Str variant");
         }
     }
 }

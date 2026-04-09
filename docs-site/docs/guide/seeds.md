@@ -106,5 +106,6 @@ Seeds work well for:
 
 ## Further reading
 
+- [Data Generation](datagen.md) for generating large deterministic datasets with configurable distributions
 - [Sources](sources.md) for referencing external tables not managed by smelt
 - [Targets and Backends](targets.md) for configuring where seeds are loaded
