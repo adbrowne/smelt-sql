@@ -1835,6 +1835,11 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
         return Some("extract".to_string());
     }
 
+    // Try CASE expression — no natural name, but return a placeholder
+    if expr.as_case().is_some() {
+        return Some("case_expr".to_string());
+    }
+
     // Try function call - use function name
     if let Some(func) = expr.as_function_call() {
         return func.name();
