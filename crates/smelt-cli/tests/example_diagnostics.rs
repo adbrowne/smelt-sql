@@ -91,3 +91,8 @@ fn ephemeral_demo_no_diagnostics() {
 fn multi_engine_no_diagnostics() {
     check_workspace_no_diagnostics("examples/multi_engine");
 }
+
+#[test]
+fn ecommerce_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/ecommerce");
+}
