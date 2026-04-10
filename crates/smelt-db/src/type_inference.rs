@@ -373,6 +373,13 @@ fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColum
     // Parse the type specification
     let data_type = parse_type(&type_text).ok()?;
 
+    // Normalize FLOAT to DOUBLE: DuckDB treats FLOAT as a 4-byte float but
+    // smelt normalizes to DOUBLE to avoid spurious type mismatches downstream.
+    let data_type = match data_type {
+        DataType::Float => DataType::Double,
+        other => other,
+    };
+
     // Check if the input expression is nullable
     let nullable = cast_expr
         .expression()
@@ -409,9 +416,16 @@ fn infer_extract_type(extract_expr: &ExtractExpr) -> Option<TypedColumn> {
 fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let has_else = case_expr.else_expr().is_some();
 
-    // Collect types from all WHEN/THEN branches
-    let mut result_data_type: Option<DataType> = None;
+    // Collect types from all WHEN/THEN branches, promoting across all of them
+    let mut accumulated: Option<TypedColumn> = None;
     let mut all_branches_non_nullable = true;
+
+    let merge = |acc: Option<TypedColumn>, branch: TypedColumn| -> Option<TypedColumn> {
+        match acc {
+            None => Some(branch),
+            Some(existing) => Some(promote_types(&existing, &branch)),
+        }
+    };
 
     for when_clause in case_expr.when_clauses() {
         if let Some(result_expr) = when_clause.result() {
@@ -419,10 +433,8 @@ fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<Typed
                 if result_type.nullable {
                     all_branches_non_nullable = false;
                 }
-                if result_data_type.is_none()
-                    && !matches!(result_type.data_type, DataType::Unknown | DataType::Null)
-                {
-                    result_data_type = Some(result_type.data_type);
+                if !matches!(result_type.data_type, DataType::Unknown | DataType::Null) {
+                    accumulated = merge(accumulated, result_type);
                 }
             } else {
                 all_branches_non_nullable = false;
@@ -438,17 +450,16 @@ fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<Typed
             if else_type.nullable {
                 all_branches_non_nullable = false;
             }
-            if result_data_type.is_none()
-                && !matches!(else_type.data_type, DataType::Unknown | DataType::Null)
-            {
-                result_data_type = Some(else_type.data_type);
+            if !matches!(else_type.data_type, DataType::Unknown | DataType::Null) {
+                accumulated = merge(accumulated, else_type);
             }
         } else {
             all_branches_non_nullable = false;
         }
     }
 
-    let data_type = result_data_type?;
+    let accumulated = accumulated?;
+    let data_type = accumulated.data_type;
 
     // Non-nullable only when ELSE is present and all branches are non-nullable.
     // Without ELSE, the implicit default is NULL.
@@ -1918,6 +1929,20 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
         _ if both_numeric => match (&t1.data_type, &t2.data_type) {
             (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
             (DataType::Float, _) | (_, DataType::Float) => DataType::Float,
+            // When a Decimal combines with an integer type, widen to Decimal(38,10)
+            // to avoid overflow. E.g. CASE WHEN ... THEN 150::INTEGER ELSE 0.5::DECIMAL(2,1)
+            // should not produce DECIMAL(2,1) which can only hold up to 9.9.
+            (
+                DataType::Decimal { .. },
+                DataType::SmallInt | DataType::Integer | DataType::BigInt,
+            )
+            | (
+                DataType::SmallInt | DataType::Integer | DataType::BigInt,
+                DataType::Decimal { .. },
+            ) => DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
             (DataType::Decimal { precision, scale }, _)
             | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
                 precision: *precision,
@@ -2659,7 +2684,8 @@ mod tests {
             .data_type,
             DataType::Float
         );
-        // Decimal + Integer → Decimal
+        // Decimal + Integer → Decimal(38,10) (widened to prevent overflow)
+        // e.g. CASE WHEN ... THEN 150::INTEGER ELSE col::DECIMAL(10,2) must hold integer values
         assert_eq!(
             promote_types(
                 &mk(DataType::Decimal {
@@ -2670,8 +2696,8 @@ mod tests {
             )
             .data_type,
             DataType::Decimal {
-                precision: 10,
-                scale: 2
+                precision: 38,
+                scale: 10
             }
         );
     }
@@ -3021,5 +3047,38 @@ mod tests {
         // Double % Double → Double
         let types = infer_sql("SELECT CAST(10.5 AS DOUBLE) % CAST(3.0 AS DOUBLE)");
         assert_eq!(types[0].data_type, DataType::Double);
+    }
+
+    // Bug #7: promote_types should widen narrow decimal when combined with wider integer type
+    // CASE WHEN cond THEN integer_col ELSE decimal_literal END should not produce a narrow type
+    #[test]
+    fn test_decimal_case_widening() {
+        // CASE result combining Integer and Decimal{2,1}: should widen to at least Decimal{38,10}
+        // so that integer values like 100 don't overflow the decimal type
+        let types = infer_sql(
+            "SELECT CASE WHEN TRUE THEN CAST(150 AS INTEGER) ELSE CAST(0.5 AS DECIMAL(2,1)) END",
+        );
+        match &types[0].data_type {
+            DataType::Decimal { precision, scale } => {
+                // precision - scale = integer digits available; must be >= 3 for value 150
+                let integer_digits = precision - scale;
+                assert!(
+                    integer_digits >= 3,
+                    "CASE of Integer/Decimal should widen to allow values like 150, got DECIMAL({precision},{scale})"
+                );
+            }
+            other => panic!("Expected Decimal, got {other:?}"),
+        }
+    }
+
+    // Bug #8: CAST(x AS FLOAT) should infer as Double (FLOAT normalizes to DOUBLE)
+    #[test]
+    fn test_cast_float_normalizes_to_double() {
+        let types = infer_sql("SELECT CAST(1 AS FLOAT)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Double,
+            "CAST AS FLOAT should infer as Double"
+        );
     }
 }

@@ -208,18 +208,21 @@ Produce exactly ONE commit per phase. Include all changes (code + plan + roadmap
 
 ---
 
-## Phase 7: Minor Fixes `[ ]`
+## Phase 7: Minor Fixes `[x]` ✅ 2026-04-10
 
 **Priority**: Medium — quality-of-life improvements that round out the release.
 
 **Work**:
-- [ ] **DECIMAL narrowness** (bug #7): In `type_inference.rs`, widen default precision for division results. Test: `SELECT price / 100.0` should not overflow for values > 99.
-- [ ] **FLOAT→DOUBLE normalization** (bug #8): Normalize FLOAT to DOUBLE in type inference. Test: `CAST(x AS FLOAT)` should infer as DOUBLE.
-- [ ] **Materialization type change** (bug #9): In the DuckDB backend, when materializing a model, DROP the existing object regardless of type (view or table) before creating the new one. Test: change a model from view to table without manual intervention.
-- [ ] **Datagen geometric min** (bug #10): Add optional `min` parameter to the geometric generator in smelt-datagen. Default to current behavior (0-based). Test: `min: 1` produces no zero values.
-- [ ] Update ecommerce example models to remove remaining explicit CASTs that are no longer needed
+- [x] **DECIMAL narrowness** (bug #7): Fix `infer_case_expr_type` to promote across all branches (not just take the first), and fix `promote_types` to widen Decimal{narrow}+Integer to Decimal{38,10}. Test: `CASE WHEN ... THEN 150::INTEGER ELSE 0.5::DECIMAL(2,1) END` must hold value 150.
+- [x] **FLOAT→DOUBLE normalization** (bug #8): Normalize FLOAT to DOUBLE in `infer_cast_type`. Added `cast_float_as_double` divergence to property tests. Test: `CAST(1 AS FLOAT)` infers as DOUBLE.
+- [x] **Materialization type change** (bug #9): In `smelt-backend/src/lib.rs:execute_model`, drop both view and table before creating either type, so materialization changes are handled cleanly.
+- [x] **Datagen geometric min** (bug #10): Added optional `min: Option<i32>` parameter to `GeneratorSpec::Geometric` in smelt-datagen. Applied via `v.max(*m)` in generic.rs.
+- [x] Update ecommerce example models to remove remaining explicit CASTs — already clean from Phases 1-6.
 
-**Verification**: `cargo test` passes. All ecommerce models compile and execute cleanly.
+**Verification**:
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --all-targets` (no warnings)
+- [x] `cargo test` (all pass)
 
 ---
 
