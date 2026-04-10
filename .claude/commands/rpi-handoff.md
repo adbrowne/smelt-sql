@@ -1,5 +1,5 @@
 ---
-description: Validate that an implementation plan was correctly executed
+description: Only invoke when /rpi-handoff is explicitly requested by the user. Validate that an implementation plan was correctly executed
 model: opus
 ---
 

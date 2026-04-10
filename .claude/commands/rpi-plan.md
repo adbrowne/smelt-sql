@@ -1,5 +1,5 @@
 ---
-description: Create an implementation plan from research or a task description
+description: Only invoke when /rpi-plan is explicitly requested by the user. Create an implementation plan from research or a task description
 model: opus
 ---
 

@@ -1,5 +1,5 @@
 ---
-description: Implement a plan phase by phase with verification between each step
+description: Only invoke when /rpi-implement is explicitly requested by the user. Implement a plan phase by phase with verification between each step
 model: opus
 ---
 

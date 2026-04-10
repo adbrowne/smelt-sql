@@ -1,5 +1,5 @@
 ---
-description: Iterate on an existing implementation plan based on feedback
+description: Only invoke when /rpi-iterate-plan is explicitly requested by the user. Iterate on an existing implementation plan based on feedback
 model: opus
 ---
 

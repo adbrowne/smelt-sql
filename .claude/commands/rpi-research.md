@@ -1,5 +1,5 @@
 ---
-description: Research the codebase to understand a topic, feature, or problem area
+description: Only invoke when /rpi-research is explicitly requested by the user. Research the codebase to understand a topic, feature, or problem area
 model: opus
 ---
 
