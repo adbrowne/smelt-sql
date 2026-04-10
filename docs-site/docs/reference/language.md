@@ -105,6 +105,24 @@ x::INTEGER          -- PostgreSQL-style
 TRY_CAST(x AS DATE) -- Returns NULL on failure
 ```
 
+## Date/time extraction
+
+```sql
+EXTRACT(EPOCH FROM timestamp_col)   -- returns DOUBLE (Unix timestamp)
+EXTRACT(YEAR FROM date_col)          -- returns BIGINT
+EXTRACT(MONTH FROM timestamp_col)    -- returns BIGINT
+EXTRACT(DAY FROM date_col)           -- returns BIGINT
+EXTRACT(HOUR FROM timestamp_col)     -- returns BIGINT
+EXTRACT(MINUTE FROM timestamp_col)   -- returns BIGINT
+EXTRACT(SECOND FROM timestamp_col)   -- returns BIGINT
+EXTRACT(DOW FROM date_col)           -- day of week, returns BIGINT
+EXTRACT(DOY FROM date_col)           -- day of year, returns BIGINT
+EXTRACT(QUARTER FROM date_col)       -- returns BIGINT
+EXTRACT(WEEK FROM date_col)          -- returns BIGINT
+```
+
+`EXTRACT(EPOCH FROM ...)` returns a `DOUBLE` (floating-point Unix timestamp). All other fields return `BIGINT`.
+
 ## Multi-dialect features
 
 These features are parsed in smelt SQL and rewritten to target-specific syntax:

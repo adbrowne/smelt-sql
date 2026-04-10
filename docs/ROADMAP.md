@@ -8,41 +8,19 @@ The **What's Next** section below is the prioritized work queue. Component secti
 
 The items below are the current priority queue. See completed items in [Recently Completed](#recently-completed) below.
 
-### 1. Type Inference, Parser & Ref Resolution Fixes (from smelt_shop validation)
+### 1. `smelt check` — LLM-Optimised Diagnostic CLI
 
-A real-world 19-model ecommerce pipeline ([smelt_shop report](../smelt_report.md)) exposed critical bugs in type inference and ref resolution. These are user-facing correctness issues that block real-world adoption.
+Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
-**Critical/Major:**
-- **Seeds not recognized by `smelt.ref()`** — `resolve_ref()` only searches `all_models()`; seeds aren't in the type-checking model. Workaround: declare seeds as sources in `sources.yml`.
-- **Type inference wrong with JOINs on source tables** — multi-table JOIN context produces incorrect CAST wrappers (e.g., VARCHAR→DOUBLE). Workaround: explicit CAST on every output column.
-- **CASE expressions produce invalid SQL** — `CAST(? AS TYPE) AS ?` placeholders instead of actual column names/expressions. Workaround: replace CASE with boolean/arithmetic equivalents.
-- **`EXTRACT(EPOCH FROM ...)` confuses parser** — FROM inside EXTRACT treated as SQL FROM clause. Workaround: use DuckDB's `EPOCH()` function.
-- **CTEs break type inference** — `build_subquery_context()` lacks access to resolved model schemas, can't trace types through CTE chains. Workaround: split CTEs into separate materialized models.
-- **Subqueries in FROM don't get ref replacement** — same root cause as CTEs; `smelt.ref()` in subqueries not resolved. Workaround: use top-level JOINs instead.
+See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-**Minor:**
-- DECIMAL type inference too narrow for division results (overflow > 99)
-- FLOAT not handled correctly (DOUBLE works fine)
-- Materialization type changes (view↔table) not auto-handled (need manual DROP)
+### 2. Orchestrator Integration
 
-**Root cause pattern:** Issues #5 and #6 share the same root cause — `build_subquery_context()` in `type_inference.rs` is a pure function with no database access, so it can't resolve `smelt.ref()` or `smelt.source()` calls. Fix: thread resolved schemas into context-building functions (consistent with pure-function architecture).
+Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
-### 2. Packaging — Source Distribution & Python 3.14 Wheels
+### 3. PostgreSQL Backend
 
-smelt-sql 0.2.0 has limited wheel availability — only macOS ARM64 (cp314), Windows (cp312), Linux x86_64 (cp311), Linux ARM64 (cp311). No source distribution (sdist). Python 3.14 is the current release and should have wheels on all platforms.
-
-- Publish sdist so users can build from source on any platform
-- Add cp314 wheels for all platforms (Linux x86_64, Linux ARM64, Windows, macOS ARM64)
-- Ensure CI release workflow covers the full matrix
-
-### 3. Testing Strategy Improvements
-
-The smelt_shop bugs weren't caught because existing tests don't exercise real-world SQL patterns. Four gaps identified:
-
-1. **"Compile and execute" integration test** — For each example workspace, compile every model to target SQL via the dialect printer, then execute against DuckDB. Catches invalid CAST wrappers, broken ref replacement, and code-gen bugs that static analysis (LSP diagnostics) misses.
-2. **Complex example workspace** — Add a workspace (or subset of smelt_shop) that exercises JOINs on multiple sources, CASE expressions, CTEs, EXTRACT, subqueries with refs. Becomes both regression test and real-world patterns reference.
-3. **Model-level property tests** — Extend proptest suite to generate full model SQL (not just expressions) with JOINs, CTEs, CASE — verify compiled output executes against DuckDB without errors.
-4. **Seed integration in type checking** — Seeds are currently a CLI/runtime concept invisible to the type-checking layer. After fixing seed refs, add test coverage for seed schema resolution.
+Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
 ### 4. `smelt check` — LLM-Optimised Diagnostic CLI
 
@@ -61,6 +39,36 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 ---
 
 ## Recently Completed
+
+### ~~Type Inference, Parser & Ref Resolution Fixes~~ ✅ (April 10, 2026)
+
+All critical/major bugs from the smelt_shop real-world validation report fixed:
+
+- **Seeds as `smelt.ref()` targets** — Seeds are now first-class dep-graph citizens. `resolve_ref()` searches seeds after SQL models; CSV column types inferred and provided to the type-checking layer. No more `sources.yml` workaround.
+- **JOIN type inference** — Qualified column refs (`p.col`) no longer fall through to `infer_literal_type()`. Fixed by detecting dot patterns before decimal literal inference.
+- **CASE expression column names** — `CAST(? AS TYPE) AS ?` bug fixed; compiler generates `_col1, _col2` deterministic names for unnamed CASE outputs.
+- **CASE expression type widening** — `infer_case_expr_type` now promotes across all branches; `promote_types` widens Decimal+Integer to Decimal(38,10).
+- **EXTRACT(EPOCH FROM ...)** — New dedicated `EXTRACT_EXPR` syntax kind in the parser handles `EXTRACT(field FROM expr)` without treating the FROM keyword as SQL FROM.
+- **CTE type inference** — `parse_when_clause()` fixed to use `parse_or_expr()`, enabling full logical expressions in CASE WHEN.
+- **Subquery ref replacement** — Subquery type inference now clones context and processes inner FROM before calling `infer_select_column_types`.
+- **FLOAT→DOUBLE normalization** — `CAST(x AS FLOAT)` infers as DOUBLE; `float_division` and `cast_float_as_double` divergences documented.
+- **Materialization type changes** — `execute_model()` now drops both table and view before creating either, handling view↔table transitions automatically.
+- **Datagen geometric min** — `GeneratorSpec::Geometric` accepts optional `min: i32` to prevent zero values.
+
+See [plan](plans/20260409-smelt-shop-fixes.md) for full details.
+
+### ~~Packaging — Source Distribution & Python 3.14 Wheels~~ ✅ (April 10, 2026)
+
+- Added `build-sdist` job to release workflow using `maturin sdist`
+- sdist included in PyPI and TestPyPI publish steps
+- `bindings = "bin"` in pyproject.toml produces `py3-none-{platform}` wheels, compatible with Python 3.9–3.14 on all platforms
+
+### ~~Testing Strategy Improvements~~ ✅ (April 10, 2026)
+
+- Added `examples/ecommerce/` workspace (19 models, 2 seeds, 3 sources) as regression scaffold
+- Added `ecommerce_no_diagnostics` test to `example_diagnostics.rs`
+- Added `ecommerce_execution.rs` compile-and-execute integration test against DuckDB
+- Property tests cover CTEs, set operations, joins, and type inference across full model patterns
 
 ### ~~LSP Refactorings & Code Actions~~ ✅ (April 5-6, 2026)
 
