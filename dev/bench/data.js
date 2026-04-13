@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776120836831,
+  "lastUpdate": 1776120838790,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16577,6 +16577,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.52842042587918,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6c0e9fb009e7413636a12040362bfee0b427bbd7",
+          "message": "Add PL/compiler expert review to smelt functions research paper\n\nAppends Section 14 with critical analysis naming the PLT techniques\n(fragment sorts, staged metaprogramming, hygienic expansion, gradual\ntyping, totality, dependent types) and identifying key risks around\nColumn<source> dependent typing, hybrid scoping, block syntax parser\ncomplexity, and planner opacity assumptions.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T08:52:44+10:00",
+          "tree_id": "b6059d250659367f3e574bb583668a34e9924491",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6c0e9fb009e7413636a12040362bfee0b427bbd7"
+        },
+        "date": 1776120837984,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.020975978593267,
             "unit": "MB/s"
           }
         ]
