@@ -81,10 +81,12 @@ jobs:
         shell: bash
         run: |
           DEV_VERSION="${{ needs.compute-version.outputs.dev_version }}"
+          CURRENT_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           sed -i.bak "s/^version = \".*\"/version = \"${DEV_VERSION}\"/" Cargo.toml
           # Also patch inter-crate version dependencies to match
-          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"0\.2\.0\"/version = \"${DEV_VERSION}\"/" {} +
-          echo "Patched Cargo.toml version:"
+          ESCAPED=$(echo "$CURRENT_VERSION" | sed 's/\./\\./g')
+          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"${ESCAPED}\"/version = \"${DEV_VERSION}\"/" {} +
+          echo "Patched Cargo.toml version from ${CURRENT_VERSION}:"
           grep -m1 '^version' Cargo.toml
 
       - name: Install Rust stable
@@ -183,10 +185,12 @@ jobs:
         shell: bash
         run: |
           DEV_VERSION="${{ needs.compute-version.outputs.dev_version }}"
+          CURRENT_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           sed -i.bak "s/^version = \".*\"/version = \"${DEV_VERSION}\"/" Cargo.toml
           # Also patch inter-crate version dependencies to match
-          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"0\.2\.0\"/version = \"${DEV_VERSION}\"/" {} +
-          echo "Patched Cargo.toml version:"
+          ESCAPED=$(echo "$CURRENT_VERSION" | sed 's/\./\\./g')
+          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"${ESCAPED}\"/version = \"${DEV_VERSION}\"/" {} +
+          echo "Patched Cargo.toml version from ${CURRENT_VERSION}:"
           grep -m1 '^version' Cargo.toml
 
       - name: Install Rust stable
