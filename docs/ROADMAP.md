@@ -228,6 +228,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - Fixed bare-token problem and implicit alias detection (April 3, 2026)
 
 **Next steps**:
+- Smelt Functions (`smelt.define` / `smelt.fn.*`) — typed SQL composition to replace Jinja macros. See [discussion paper](research/20260413-smelt-functions.md) and [Future / Exploration](#future--exploration).
 - Metrics DSL (Layer 1 — declarative metric definitions, `smelt.metric()` resolution)
 - `smelt.param()` for parameterized models
 - PIVOT/UNPIVOT support (currently rejected with diagnostic)
@@ -264,6 +265,8 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ⏸️ Rule conflict resolution — how planner rules compose when they conflict (e.g., shared sub-expression vs incremental on same model); currently last-transformation-wins
 
 **Next steps**:
+- Three-level rule architecture: (1) Logical→Logical transforms with functions as opaque typed nodes, (2) Logical→Physical with strategy-dependent function expansion, (3) Physical→Execution plan with multi-statement orchestration. See [smelt functions discussion paper](research/20260413-smelt-functions.md) §8.
+- Function-aware optimizations: join elimination for unused 1:1 LEFT JOINs, predicate pushdown into function blocks, cross-function fusion
 - Shared materialization detection (multiple models computing same intermediate)
 - Model fusion (trivial passthrough models)
 - Cost-based optimization (requires backend statistics)
@@ -396,5 +399,5 @@ Items here are interesting design problems without committed timelines.
 - **Virtual environments / plan-apply workflow**: Compare schemas across dev/prod without materializing; require approval before execution. Interesting state management problem — smelt's logical/physical graph split could enable lightweight virtual environments.
 - **OpenLineage / column-level lineage**: Export model and column-level lineage in OpenLineage format for catalog integration (DataHub, Amundsen, Atlan). Internal lineage tracking partially exists — interesting graph analysis problem.
 - **Substrait integration**: Portable plan representation, DataFusion interop
-- **Reusable SQL patterns**: dbt solves SQL reuse with Jinja macros, which smelt deliberately avoids. The problem is real — common patterns like date spine generation, surrogate key hashing, and standard metric calculations get copy-pasted across models. No clear solution yet. Possible directions: parameterized SQL includes, a lightweight macro system that doesn't compromise the parser, leveraging Python models as generators, or something entirely different. Open design problem.
+- **Smelt Functions — Typed SQL Composition**: Replace Jinja macros with typed, composable SQL fragments (`smelt.define` / `smelt.fn.*`). Design covers expression-level reuse (`safe_divide`), table-level templates (`session_rollup`), and block syntax for ergonomic multi-line fragment passing. SQL fragment type system (`Expr<T>`, `TableExpr`, `SelectItems`, `Predicate`, etc.) ensures structural well-formedness. Optional type annotations (unannotated → parameter-typed → fully-typed) following Rust's gradual model. Lexical scoping, no recursion (guarantees termination). Three-level planner integration: functions visible as opaque nodes in logical plan (Level 1 rules match on function names/properties), strategy-dependent expansion in logical→physical (Level 2), multi-statement execution orchestration (Level 3). Enables optimizations like join elimination when function-provided columns are unused downstream. See [discussion paper](research/20260413-smelt-functions.md).
 - **Learning from history**: Use run statistics to suggest optimizations
