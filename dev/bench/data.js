@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775894496199,
+  "lastUpdate": 1776083149447,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12407,6 +12407,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.372404,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4425772fcea13dffec2aa7340550c9df6dc48427",
+          "message": "Add discussion paper: smelt functions as typed Jinja replacement\n\nExplores design for typed SQL composition (`smelt.define` / `smelt.fn.*`)\nto replace Jinja macros while preserving static analysis. Covers SQL\nfragment types, block syntax, optional annotations (Rust-like gradual\ntyping), lexical scoping, and three-level planner integration where\nfunctions remain visible as opaque typed nodes for optimization.\n\nIncludes worked examples: expression functions (safe_divide), session\nrollup with blocks, and join elimination for unused 1:1 LEFT JOINs.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-13T22:24:08+10:00",
+          "tree_id": "6c000844b74332af5b7736e51a1e71e41eee1681",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4425772fcea13dffec2aa7340550c9df6dc48427"
+        },
+        "date": 1776083148673,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.157222,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.712079,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.7492570000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.361544,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002984,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 39.213353,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.029264,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015303,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.023005,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.347876,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.376062,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.1898,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.739010000000004,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.58871,
             "unit": "ms"
           }
         ]
