@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776083151451,
+  "lastUpdate": 1776083924499,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12501,6 +12501,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.58871,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5a6f5fa46d341a480bb8ec373e827b5155ee3a5b",
+          "message": "Make dev-release version patching derive from Cargo.toml\n\nInstead of hardcoding the version to replace, read CURRENT_VERSION\nfrom the workspace Cargo.toml before patching. This prevents the\ndev-release CI from breaking on future version bumps.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-13T22:36:34+10:00",
+          "tree_id": "8826f75447b6e4d2c81a65cc1bdd8764e460f1d4",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5a6f5fa46d341a480bb8ec373e827b5155ee3a5b"
+        },
+        "date": 1776083923189,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 38.478528,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 37.116305,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6871069999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.357564,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003427,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 39.730305,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.029595,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015439,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.010229,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.341093,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.340662,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.268090000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.354829999999996,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.640911,
             "unit": "ms"
           }
         ]
