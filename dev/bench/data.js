@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776083926523,
+  "lastUpdate": 1776120836831,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12595,6 +12595,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.640911,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6c0e9fb009e7413636a12040362bfee0b427bbd7",
+          "message": "Add PL/compiler expert review to smelt functions research paper\n\nAppends Section 14 with critical analysis naming the PLT techniques\n(fragment sorts, staged metaprogramming, hygienic expansion, gradual\ntyping, totality, dependent types) and identifying key risks around\nColumn<source> dependent typing, hybrid scoping, block syntax parser\ncomplexity, and planner opacity assumptions.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T08:52:44+10:00",
+          "tree_id": "b6059d250659367f3e574bb583668a34e9924491",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6c0e9fb009e7413636a12040362bfee0b427bbd7"
+        },
+        "date": 1776120835406,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 33.240893,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 32.063608,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.561913,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.334689,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0046630000000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 36.087043,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.038272,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.016652,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011982,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.337533,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.036055,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.15272,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.43211,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.929076,
             "unit": "ms"
           }
         ]
