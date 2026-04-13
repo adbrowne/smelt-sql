@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776083924499,
+  "lastUpdate": 1776083926523,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16454,6 +16454,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.62264629975914,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5a6f5fa46d341a480bb8ec373e827b5155ee3a5b",
+          "message": "Make dev-release version patching derive from Cargo.toml\n\nInstead of hardcoding the version to replace, read CURRENT_VERSION\nfrom the workspace Cargo.toml before patching. This prevents the\ndev-release CI from breaking on future version bumps.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-13T22:36:34+10:00",
+          "tree_id": "8826f75447b6e4d2c81a65cc1bdd8764e460f1d4",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5a6f5fa46d341a480bb8ec373e827b5155ee3a5b"
+        },
+        "date": 1776083925759,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.52842042587918,
             "unit": "MB/s"
           }
         ]
