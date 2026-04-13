@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776083149447,
+  "lastUpdate": 1776083151451,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16331,6 +16331,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.02093116540601,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4425772fcea13dffec2aa7340550c9df6dc48427",
+          "message": "Add discussion paper: smelt functions as typed Jinja replacement\n\nExplores design for typed SQL composition (`smelt.define` / `smelt.fn.*`)\nto replace Jinja macros while preserving static analysis. Covers SQL\nfragment types, block syntax, optional annotations (Rust-like gradual\ntyping), lexical scoping, and three-level planner integration where\nfunctions remain visible as opaque typed nodes for optimization.\n\nIncludes worked examples: expression functions (safe_divide), session\nrollup with blocks, and join elimination for unused 1:1 LEFT JOINs.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-13T22:24:08+10:00",
+          "tree_id": "6c000844b74332af5b7736e51a1e71e41eee1681",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4425772fcea13dffec2aa7340550c9df6dc48427"
+        },
+        "date": 1776083151011,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.62264629975914,
             "unit": "MB/s"
           }
         ]
