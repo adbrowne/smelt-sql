@@ -729,3 +729,119 @@ smelt functions are **typed, composable SQL fragments** that replace Jinja macro
 The design occupies a specific point in the design space: more powerful than simple expression macros, less complex than a full functional programming language. It covers the three categories of Jinja usage that smelt currently lacks (expression reuse, fragment generation, model templates) while maintaining the guarantees that make smelt valuable (type checking, planner visibility, LSP support, testability).
 
 The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 — allows shipping incremental value while building toward the full design.
+
+## 14. PL/Compiler Expert Review
+
+**Date:** April 14, 2026
+**Reviewer:** Claude (prompted as PL/compiler expert)
+
+### PLT Techniques Being Used (Named)
+
+1. **Fragment sorts / syntactic categories** (Section 3) — This is the Rust `macro_rules!` technique of *fragment specifiers* (`$e:expr`, `$s:stmt`), which itself derives from the PL concept of **syntactic sorts** in multi-sorted algebras. The idea: a macro system that knows the grammar can restrict substitution to structurally valid positions. MetaML, Template Haskell, and Rust all do this. It's the single strongest idea in the paper.
+
+2. **Staged metaprogramming** (Section 8) — Functions that "compile away" are a one-stage version of **multi-stage programming** (Taha & Sheard, MetaML). The paper correctly identifies Terra as the closest analog. The three-level planner integration is essentially a **multi-pass lowering pipeline** — the same architecture as MLIR (Multi-Level IR), where each dialect level carries different semantic information and rewrites happen at the appropriate level.
+
+3. **Hygienic macro expansion** (Section 7) — Lexical scoping of parameters is **hygienic expansion** (Kohlbecker et al., 1986). The paper draws the right line: Scheme's `syntax-rules`, Rust's `macro_rules!`, versus C's `#define`. Good choice. But see caveats below.
+
+4. **Gradual typing** (Section 6) — The three-tier annotation model is textbook **gradual typing** (Siek & Taha, 2006), following the TypeScript adoption curve. Tier 1 = untyped/duck-typed, Tier 2 = partially typed, Tier 3 = fully typed.
+
+5. **Totality via structural restriction** (no recursion) — This is the Dhall approach, which itself comes from **total functional programming** (Turner, 2004). Banning recursion guarantees termination trivially. The paper correctly notes this is sufficient.
+
+6. **Parametric fragment types** — `Expr<T>`, `Column<source, T>` are a limited form of **dependent types** (the type of `user_col` depends on the *value* of `source`). The paper says "you don't need dependent types" (Section 10, Dhall connection) while actually using a restricted form of them. More on this below.
+
+### Critical Analysis
+
+#### What works well
+
+**The fragment sort system is the right core idea.** Jinja's fundamental failure is operating on strings. The moment you introduce syntactic sorts, you can statically prevent nonsense compositions. Rust's macro system proved this works at industrial scale — the key lesson being that you need *enough* sorts to be useful but not so many that the system becomes its own type theory.
+
+**Late expansion is architecturally sound.** Keeping functions as opaque nodes in the logical plan is the right call. This is exactly how MLIR works — you keep high-level ops as long as possible and lower progressively. The join elimination example (Section 9, Example 3) is a convincing demonstration: once you inline, recovering the semantic structure is a lost cause.
+
+**The gradual annotation strategy is pragmatically correct.** TypeScript's adoption proves this works. The phased implementation (Tier 1 ships first) is the right ordering — you get user adoption before you need the hard type-checking work.
+
+#### Where to push back
+
+**1. `Column<source, T>` is dependent typing in disguise, and it's the hardest part of the design.**
+
+The paper casually introduces `Column<source>` where the type of one parameter depends on the *value* of another parameter. This is a restricted form of dependent types. It's the right design, but the paper undersells the implementation complexity. Consider:
+
+```sql
+smelt.define foo(
+    a: TableExpr,
+    b: TableExpr,
+    col: Column<???>   -- which table does this come from?
+)
+```
+
+You need a system for resolving which table context a column belongs to. What about columns that appear in both tables? What about computed columns from subexpressions of a `TableExpr`? The paper's examples are clean, but real-world usage will hit the edges fast. Haskell's type-level programming and Scala's path-dependent types are warnings about how this kind of "simple" dependent relationship proliferates in complexity.
+
+**Recommendation:** Explicitly scope this as "single-table column provenance only" for v1. Acknowledge that multi-table column resolution (joins inside a `TableExpr` argument) is deferred.
+
+**2. Lexical scoping vs. SQL's inherent dynamic scoping creates a semantic gap.**
+
+SQL is *fundamentally* dynamically scoped — `SELECT user_id FROM events` resolves `user_id` against whatever `events` happens to contain. The paper acknowledges this tension ("slightly less SQL-native") but underestimates it. Consider:
+
+```sql
+smelt.define add_margin(source: TableExpr) -> TableExpr AS (
+    SELECT source.*, revenue - cost AS margin
+    FROM source
+)
+```
+
+Where do `revenue` and `cost` come from? They're not parameters — they're *implicitly* resolved from `source`. This means the function body is *not* actually lexically scoped in the way the paper claims. You have a hybrid: explicit parameters are lexically scoped, but column references within SQL expressions against a `TableExpr` parameter are dynamically resolved. This is closer to **row polymorphism** (as in OCaml's object types or PureScript's row types) than pure lexical scoping.
+
+This isn't fatal, but the paper should name it honestly. The scoping story is: "parameters are lexical; column resolution within table-typed parameters is structural (schema-checked but not name-bound)."
+
+**3. The block syntax introduces a second grammar.**
+
+The `{ metrics: ... filters: ... }` block syntax is effectively a **domain-specific sub-language** embedded in the call site. This has worked before (Ruby blocks, Kotlin DSL builders, Groovy closures in Gradle), but each time it creates a parsing and tooling burden disproportionate to the syntactic convenience.
+
+Specific concerns:
+- What's the delimiter between sections? Newlines? Commas? The examples use blank lines, which makes the parser whitespace-sensitive in a context where SQL is not.
+- How does error recovery work inside blocks? You now have nested parsing contexts (SQL -> function call -> block -> SQL inside block).
+- The LSP complexity note in Section 12 is an understatement — you need *contextual* completion that depends on partial expansion, which is one of the hardest LSP problems.
+
+**Compare with:** Kotlin's trailing lambda syntax, which has the same "pass a block to a function" ergonomic goal but avoids introducing named sections. Consider whether named parameters with parenthesized SQL fragments (the "ugly" version) plus good formatter support might be 80% of the value at 20% of the parser complexity.
+
+**4. The planner integration is the most ambitious and least validated part.**
+
+The three-level planner story is compelling *on paper*, but the join elimination example (Example 3) actually reveals a gap: the planner rule needs to understand the *internal structure* of the function body (which joins exist, which columns come from which join) while the function is supposed to be an "opaque node with typed interface" at Level 1. These are contradictory.
+
+Either:
+- Functions are opaque at Level 1, in which case you can't do join elimination without lowering first (making it a Level 2 optimization).
+- Functions carry structural metadata (join graph, column provenance map) in their type, in which case "opaque" is a misnomer — you've invented **refinement types** for SQL functions.
+
+The paper is implicitly proposing the second, which is the right design, but should name it. What you actually want is something like:
+
+```
+session_rollup : TableExpr
+    @joins(dim_customers ON customer_id [LEFT, 1:1],
+           dim_products ON product_id [LEFT, 1:1])
+    @provenance(customer_segment -> dim_customers.segment,
+                product_category -> dim_products.category, ...)
+```
+
+This is a **refinement type** — the type carries structural invariants beyond just the sort. That's more implementation work than the paper suggests.
+
+**5. The comparison table undersells Malloy.**
+
+Malloy isn't just "deep semantic modeling" — it's the closest direct competitor to this design. Malloy's `dimension` and `measure` declarations are essentially `Expr<T>` and `AggExpr<T>` with fixed scoping. Malloy's `source` extensions are `TableExpr` transformers. The key difference is that Malloy chose a new query language while smelt extends SQL, but the *function composition model* is very similar. A fair comparison would help readers understand the actual trade-off: Malloy gets cleaner semantics by abandoning SQL syntax; smelt gets migration compatibility by extending SQL syntax but inherits SQL's scoping messiness.
+
+**6. Missing: error message design.**
+
+The paper doesn't discuss error reporting, which is where gradual typing systems succeed or fail. When an unannotated function (Tier 1) is called with wrong types, the user sees an error in the *expanded* SQL with a trace back to the call site. This is the C++ template error experience — notoriously terrible. TypeScript succeeded partly because `any` produces *no* errors rather than *confusing* errors.
+
+The paper should commit to: "Tier 1 errors will show the expansion context but also the call site with parameter mapping, not just a raw SQL error." This is the difference between usable and unusable.
+
+### Historical Precedents Worth Studying
+
+- **SML Functors / OCaml modules** — Parameterized modules that produce types based on input types. `Column<source, T>` is a simplified version of this: a type that depends on a module's signature.
+- **Scala's path-dependent types** — `source.Column` where the type depends on a specific value. Ended up being powerful but hard to reason about. Cautionary tale for `Column<source>`.
+- **Template Haskell** — Multi-stage compilation where generated code is type-checked after splicing. The Tier 1 strategy is exactly this. TH showed it works but that error messages are the main usability challenge.
+- **MLIR's progressive lowering** — The three-level planner is structurally identical to MLIR's dialect-to-dialect lowering. MLIR's lesson: you need clear contracts at each level boundary, which maps to the paper's "return type as safety contract."
+
+### Summary Verdict
+
+The core design is sound. Fragment sorts + late expansion + gradual types is the right combination of PL techniques for this problem. The paper is strongest on motivation and weakest on the interaction between `Column<source>` dependent typing, the hybrid scoping model, and the planner's actual information requirements. The block syntax is a significant engineering investment for a syntactic convenience — defer it until the core function system proves itself.
+
+The biggest risk isn't in the design but in the *implementation ordering*: if Tier 1 ships with C++-template-quality error messages, adoption will stall regardless of how sound the type theory is. Error reporting quality should be an explicit first-class design goal, not an afterthought.
