@@ -83,7 +83,7 @@ jobs:
           DEV_VERSION="${{ needs.compute-version.outputs.dev_version }}"
           sed -i.bak "s/^version = \".*\"/version = \"${DEV_VERSION}\"/" Cargo.toml
           # Also patch inter-crate version dependencies to match
-          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"0\.1\.0\"/version = \"${DEV_VERSION}\"/" {} +
+          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"0\.2\.0\"/version = \"${DEV_VERSION}\"/" {} +
           echo "Patched Cargo.toml version:"
           grep -m1 '^version' Cargo.toml
 
@@ -185,7 +185,7 @@ jobs:
           DEV_VERSION="${{ needs.compute-version.outputs.dev_version }}"
           sed -i.bak "s/^version = \".*\"/version = \"${DEV_VERSION}\"/" Cargo.toml
           # Also patch inter-crate version dependencies to match
-          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"0\.1\.0\"/version = \"${DEV_VERSION}\"/" {} +
+          find crates -name Cargo.toml -exec sed -i.bak "s/version = \"0\.2\.0\"/version = \"${DEV_VERSION}\"/" {} +
           echo "Patched Cargo.toml version:"
           grep -m1 '^version' Cargo.toml
 
