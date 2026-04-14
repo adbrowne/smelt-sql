@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776129952770,
+  "lastUpdate": 1776149090472,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12783,6 +12783,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 10.360866,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "88a5fcd36886dab583c0ecc6149eeee5f8da4f90",
+          "message": "Extend context bindings: CTE references, union contexts, pass-through\n\nContext bindings can now reference:\n- TableExpr parameters (Column<source>)\n- CTEs defined in the function body (SelectItems<Agg, sessionized>)\n- Union of multiple contexts (Predicate<source | customers | products>)\n\nAuthors control what each caller-provided fragment can see, enabling\ndeliberate narrowing (e.g., filters bound to source, metrics bound to\nsessionized). Pass-through parameters that are forwarded to inner\nfunctions omit the context binding — the inner function validates.\n\nAdds enrich_order example showing union contexts for joins.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T16:43:44+10:00",
+          "tree_id": "87fe925c8169a83011400717acd3c7f10d43e68a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/88a5fcd36886dab583c0ecc6149eeee5f8da4f90"
+        },
+        "date": 1776149089714,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.175702,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.725173999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.753841,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.370822,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003916,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 40.810136,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.031467,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.016645,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.011747,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.540501,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.712844,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.2124500000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.219340000000003,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.530981,
             "unit": "ms"
           }
         ]
