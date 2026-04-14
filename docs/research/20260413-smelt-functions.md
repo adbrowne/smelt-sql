@@ -72,17 +72,23 @@ These sorts ensure structural well-formedness: you cannot splice a `TableExpr` i
 
 ### Table Context Bindings
 
-Any fragment sort that can contain column references may optionally declare which `TableExpr` parameter its columns resolve against. This is the **table context binding** — written as a type parameter referencing a `TableExpr`-typed parameter of the same function.
+Any fragment sort that can contain column references may optionally declare which **context** its columns resolve against. A context can be:
+
+1. **A `TableExpr` parameter** — e.g., `Column<source>` where `source` is a parameter
+2. **A CTE defined in the function body** — e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause in the body
+3. **A union of contexts** — e.g., `Predicate<source | customers>` for fragments that can reference columns from multiple tables
+
+The compiler derives the schema of each named context: parameter schemas come from the call site, CTE schemas are computed from the function body. Context bindings are then validated against these schemas.
 
 | Sort | With context binding | Meaning |
 |------|---------------------|---------|
 | `Column<T>` | `Column<source, T>` | A column from `source` of SQL type T |
 | `Predicate` | `Predicate<source>` | A boolean expression whose columns come from `source` |
-| `SelectItems` | `SelectItems<Agg, source>` | Aggregate select items whose columns come from `source` |
+| `SelectItems` | `SelectItems<Agg, sessionized>` | Aggregate select items over `sessionized` columns |
 | `Expr<T>` | `Expr<T, source>` | A scalar expression whose columns come from `source` |
-| `OrderSpec` | `OrderSpec<source>` | An ordering expression whose columns come from `source` |
+| `OrderSpec` | `OrderSpec<enriched>` | An ordering expression over `enriched` columns |
 
-Without a context binding, column references are resolved at expansion time (Tier 1 checking). With a context binding, the compiler validates column references at the call site against the bound table's schema — **before expansion** — producing clear, localized errors.
+Without a context binding, column references are resolved at expansion time (Tier 1 checking). With a context binding, the compiler validates column references at the call site against the bound context's schema — **before expansion** — producing clear, localized errors.
 
 ```sql
 smelt.define session_rollup(
@@ -90,14 +96,58 @@ smelt.define session_rollup(
     user_col: Column<source>,                    -- column from source
     ts_col: Column<source, Timestamp>,           -- timestamp column from source
     gap: Expr<Interval> = INTERVAL '30 minutes', -- no table context (literal)
-    metrics: SelectItems<Agg, source> = (),      -- agg expressions over source columns
-    filters: Predicate<source> = TRUE            -- predicate over source columns
-) -> TableExpr @deterministic AS (...)
+    metrics: SelectItems<Agg, sessionized> = (), -- agg over sessionized (source.* + session_id)
+    filters: Predicate<source> = TRUE            -- predicate over source columns only
+) -> TableExpr @deterministic AS (
+    WITH sessionized AS (
+        smelt.fn.sessionize(source, user_col, ts_col, gap)
+    )
+    SELECT
+        user_col, session_id,
+        MIN(ts_col) AS session_start, MAX(ts_col) AS session_end,
+        COUNT(*) AS event_count,
+        metrics
+    FROM sessionized
+    WHERE filters
+    GROUP BY user_col, session_id
+)
 ```
+
+Note the deliberate asymmetry: `metrics` binds to `sessionized` (the caller can reference `session_id` in their aggregate expressions), while `filters` binds to `source` (the author restricts filtering to raw source columns only). **The author controls what each caller-provided fragment can see.** This is a meaningful design choice — narrowing the context is how authors prevent callers from depending on internal implementation details.
+
+#### Union Contexts for Joins
+
+When a function joins multiple tables, the author can expose a union context so callers can reference columns from any of the joined tables:
+
+```sql
+smelt.define enrich_order(
+    source: TableExpr,
+    customer_id_col: Column<source, Integer>,
+    product_id_col: Column<source, Integer>,
+    extra_cols: SelectItems<source | customers | products> = ()
+) -> TableExpr AS (
+    WITH
+        customers AS (SELECT * FROM smelt.ref('dim_customers')),
+        products AS (SELECT * FROM smelt.ref('dim_products'))
+    SELECT
+        source.*,
+        c.segment AS customer_segment,
+        c.country AS customer_country,
+        p.category AS product_category,
+        extra_cols
+    FROM source
+    LEFT JOIN customers c ON source.customer_id_col = c.customer_id
+    LEFT JOIN products p ON source.product_id_col = p.product_id
+)
+```
+
+With `SelectItems<source | customers | products>`, the caller can pass expressions referencing columns from any of the three tables. Ambiguous column names (present in multiple contexts) require qualification — the same rule as standard SQL.
+
+#### Design Properties
 
 Context bindings are **always optional.** A function author who omits them gets Tier 1 behavior (check at expansion, trace errors back). An author who adds them shifts the checking earlier and gives callers better errors. This follows the **author complexity, user clarity** principle: the author bears the annotation cost; every caller benefits.
 
-**Scope for v1:** Context bindings reference a single `TableExpr` parameter. Multi-table contexts (e.g., a predicate that references columns from two different joined tables) are deferred. This covers the vast majority of real-world use cases — most fragment parameters naturally belong to one table context.
+**CTE context is computed, not declared.** The author references a CTE by name in the type annotation; the compiler derives its schema from the body. This means the signature and body are coupled — changing the CTE's SELECT list may change what callers can reference. This coupling is intentional: the context binding names the *splice-point scope*, and the splice point is in the body.
 
 ## 4. Function Definitions
 
@@ -161,7 +211,7 @@ smelt.define session_rollup(
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
-    extra_metrics: SelectItems<Agg, source> = ()
+    extra_metrics: SelectItems<Agg, sessionized> = ()
 ) -> TableExpr AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -230,8 +280,9 @@ smelt.define monitored_session_rollup(
     source: TableExpr,
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
-    metrics: SelectItems<Agg, source> = (),
-    alerts: SelectItems<Agg, source> = ()
+    metrics: SelectItems<Agg> = (),   -- no context: passed through to session_rollup,
+                                      -- which validates against its own context
+    alerts: SelectItems<Agg, base> = ()
 ) -> TableExpr AS (
     WITH base AS (
         smelt.fn.session_rollup(source, user_col, ts_col) {
@@ -474,7 +525,7 @@ smelt.define session_rollup(
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
-    metrics: SelectItems<Agg, source> = ()
+    metrics: SelectItems<Agg, sessionized> = ()
 ) -> TableExpr @deterministic @idempotent AS (
     ...
 )
@@ -567,7 +618,7 @@ smelt.define session_rollup(
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
-    metrics: SelectItems<Agg, source> = (),
+    metrics: SelectItems<Agg, sessionized> = (),
     filters: Predicate<source> = TRUE
 ) -> TableExpr @deterministic AS (
     WITH sessionized AS (
@@ -818,7 +869,7 @@ The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 �
 
 **Date:** April 14, 2026
 **Reviewer:** Claude (prompted as PL/compiler expert)
-**Status:** Review points 1, 2, 4, and 6 have been addressed in revisions to Sections 3, 6, 7, and 8 above. Points 3 (block syntax complexity) and 5 (Malloy comparison) remain as open considerations.
+**Status:** Review points 1, 2, 4, and 6 have been addressed in revisions to Sections 3, 6, 7, and 8 above. Context bindings now support CTE references and union contexts, resolving the `Predicate`/`SelectItems` scoping concern raised in discussion. Points 3 (block syntax complexity) and 5 (Malloy comparison) remain as open considerations.
 
 ### PLT Techniques Being Used (Named)
 
