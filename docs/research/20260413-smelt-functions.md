@@ -49,6 +49,7 @@ The design has four layers, each building on the previous:
 - **Lexical scoping.** Function parameters are explicit bindings, not ambient column references. This makes functions self-contained and analyzable in isolation.
 - **Optional annotations.** Type annotations on parameters and return values are optional. Unannotated functions are checked at call sites (like C++ templates). Annotated functions are also checked in isolation (like Rust generics). Users start simple and add rigor as functions mature.
 - **No recursion.** Functions cannot call themselves, directly or indirectly. This guarantees termination and makes expansion always finite.
+- **Author complexity, user clarity.** Function authors bear the complexity of type annotations so that function users get clean error messages and a great editor experience. This parallels Rust traits: the author writes the bounds; the caller just passes arguments and gets clear errors like "expected Numeric, got Text." Annotations are always optional — but the more an author provides, the better the experience for every caller.
 - **Planner transparency.** The planner can see function boundaries, match on function names/properties, and apply semantic optimizations. Functions are not just a user convenience — they are optimization annotations.
 
 ## 3. SQL Fragment Types
@@ -69,19 +70,34 @@ The core insight: Jinja defeats analysis because it operates on strings. If the 
 
 These sorts ensure structural well-formedness: you cannot splice a `TableExpr` into a WHERE clause, or a `Predicate` into a FROM clause. The compiler checks sort-correctness at each composition point.
 
-### Column References with Table Context
+### Table Context Bindings
 
-The `Column<source, T>` type ties a column reference to a specific table parameter:
+Any fragment sort that can contain column references may optionally declare which `TableExpr` parameter its columns resolve against. This is the **table context binding** — written as a type parameter referencing a `TableExpr`-typed parameter of the same function.
+
+| Sort | With context binding | Meaning |
+|------|---------------------|---------|
+| `Column<T>` | `Column<source, T>` | A column from `source` of SQL type T |
+| `Predicate` | `Predicate<source>` | A boolean expression whose columns come from `source` |
+| `SelectItems` | `SelectItems<Agg, source>` | Aggregate select items whose columns come from `source` |
+| `Expr<T>` | `Expr<T, source>` | A scalar expression whose columns come from `source` |
+| `OrderSpec` | `OrderSpec<source>` | An ordering expression whose columns come from `source` |
+
+Without a context binding, column references are resolved at expansion time (Tier 1 checking). With a context binding, the compiler validates column references at the call site against the bound table's schema — **before expansion** — producing clear, localized errors.
 
 ```sql
-smelt.define sessionize(
+smelt.define session_rollup(
     source: TableExpr,
-    user_col: Column<source>,         -- any column from source
-    ts_col: Column<source, Timestamp> -- timestamp column from source
-) -> TableExpr AS (...)
+    user_col: Column<source>,                    -- column from source
+    ts_col: Column<source, Timestamp>,           -- timestamp column from source
+    gap: Expr<Interval> = INTERVAL '30 minutes', -- no table context (literal)
+    metrics: SelectItems<Agg, source> = (),      -- agg expressions over source columns
+    filters: Predicate<source> = TRUE            -- predicate over source columns
+) -> TableExpr @deterministic AS (...)
 ```
 
-This enables the compiler to check that `user_col` and `ts_col` actually exist in whatever `source` the caller provides.
+Context bindings are **always optional.** A function author who omits them gets Tier 1 behavior (check at expansion, trace errors back). An author who adds them shifts the checking earlier and gives callers better errors. This follows the **author complexity, user clarity** principle: the author bears the annotation cost; every caller benefits.
+
+**Scope for v1:** Context bindings reference a single `TableExpr` parameter. Multi-table contexts (e.g., a predicate that references columns from two different joined tables) are deferred. This covers the vast majority of real-world use cases — most fragment parameters naturally belong to one table context.
 
 ## 4. Function Definitions
 
@@ -145,7 +161,7 @@ smelt.define session_rollup(
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
-    extra_metrics: SelectItems<Agg> = ()
+    extra_metrics: SelectItems<Agg, source> = ()
 ) -> TableExpr AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -214,8 +230,8 @@ smelt.define monitored_session_rollup(
     source: TableExpr,
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
-    metrics: SelectItems<Agg> = (),
-    alerts: SelectItems<Agg> = ()
+    metrics: SelectItems<Agg, source> = (),
+    alerts: SelectItems<Agg, source> = ()
 ) -> TableExpr AS (
     WITH base AS (
         smelt.fn.session_rollup(source, user_col, ts_col) {
@@ -296,6 +312,50 @@ dbt's audience is data analysts and analytics engineers, not programming languag
 
 Tier 1 can ship first — it's just expansion + existing type checking with error tracing. Tier 2 adds constraint checking on bodies. Tier 3 adds return type verification. Each tier is independently shippable.
 
+### Error Message Contract
+
+Error quality determines adoption. Each tier has a specific error message contract — what the *function user* (not author) sees when something goes wrong:
+
+#### Tier 1 errors (unannotated functions)
+
+The compiler expands the function, type-checks the result, and traces errors back to the call site with parameter mapping:
+
+```
+error: type mismatch in expression
+  --> models/metrics.sql:5:12
+   |
+ 5 |     smelt.fn.my_margin('hello', 'world')
+   |                        ^^^^^^^ expected Numeric, got Text
+   |
+   = note: in expansion of `my_margin`, parameter `revenue` was bound to 'hello'
+   = note: function defined at functions/my_margin.sql:1
+```
+
+The key: even though expansion happens before checking, the error message maps back through the expansion to show the call site and parameter binding. This is the minimum viable error experience — better than C++ templates, because the expansion is structured (not arbitrary text substitution) so the trace is always possible.
+
+#### Tier 2 errors (parameters annotated)
+
+The compiler checks at the call site *before expansion*. Errors reference the function's declared parameter types:
+
+```
+error: type mismatch in argument
+  --> models/metrics.sql:5:12
+   |
+ 5 |     smelt.fn.my_margin(user_name, total_cost)
+   |                        ^^^^^^^^^ expected Expr<Numeric>, got Expr<Text>
+   |
+   = note: parameter `revenue` declared as Expr<Numeric>
+           at functions/my_margin.sql:2
+```
+
+No expansion needed. The error is at the call site and references the declared contract. This is the Rust trait-bound experience: the author specified what they need, and the caller is told exactly which argument doesn't match.
+
+#### Tier 3 errors (fully annotated)
+
+Same call-site errors as Tier 2, plus the LSP can show return types on hover without expansion. The function body is also checked in isolation — body-level errors are the *author's* problem, never shown to callers.
+
+**The principle:** As annotation tier increases, errors move earlier (call site vs. expansion), get shorter (declared type vs. traced binding), and shift responsibility toward the function author. This is the **author complexity, user clarity** principle in action.
+
 ## 7. Scoping: Lexical vs Dynamic
 
 ### The Question
@@ -315,17 +375,34 @@ smelt.define sessionize(
 
 Does `user_col` mean the parameter (lexical scoping) or a literal column named `user_col` in the ambient table (dynamic scoping)?
 
-### Decision: Lexical Scoping
+### Decision: Hybrid Scoping (Lexical Parameters + Structural Column Resolution)
 
-Parameters are bindings, not literal SQL identifiers. Inside a function body, `user_col` refers to whatever column the caller passed. The compiler substitutes the actual column reference during expansion.
+The scoping model has two layers, reflecting the fact that SQL fragments inherently reference columns from table contexts:
 
-**Rationale:**
-- Functions are **self-contained** — readable without knowing the call site
-- The compiler can **check the body in isolation** (when annotated)
+**Layer 1 — Lexical scoping for parameters.** Function parameters are explicit bindings. Inside a function body, `user_col` refers to whatever column the caller passed — not a literal column named `user_col` in any ambient table. The compiler substitutes the actual column reference during expansion. This is **hygienic expansion** — like Rust macros, not C preprocessor macros.
+
+**Layer 2 — Structural column resolution within table contexts.** Bare column names in SQL expressions resolve against the schemas of `TableExpr` parameters in scope. This is unavoidable — SQL is structurally scoped against its FROM clause. Consider:
+
+```sql
+smelt.define add_margin(source: TableExpr) -> TableExpr AS (
+    SELECT source.*, revenue - cost AS margin
+    FROM source
+)
+```
+
+Here `revenue` and `cost` are not parameters — they resolve from whatever schema `source` carries. This is closer to **row polymorphism** (as in OCaml's object types or PureScript's row types) than pure lexical scoping: the function body is polymorphic over any table that has columns named `revenue` and `cost` of compatible types.
+
+**The honest description:** "Parameters are lexically scoped; column resolution within table-typed parameters is structural (schema-checked but not name-bound)."
+
+When table context bindings are used (e.g., `filters: Predicate<source>`), the compiler checks that column references in the caller's fragment exist in the bound table's schema — making the structural resolution explicit and checked early. Without context bindings, column resolution happens at expansion time.
+
+**Rationale for the hybrid:**
+- Functions are **self-contained** — readable without knowing the call site (parameters are lexical, column requirements are visible from the `TableExpr` usage)
+- The compiler can **check the body in isolation** (when annotated with context bindings)
 - **No surprises** from ambient column names shadowing parameters
-- **Hygienic expansion** — like Rust macros, not C preprocessor macros
+- **SQL-native** for the parts that are inherently SQL (column references against tables)
 
-**Trade-off:** Slightly less "SQL-native" feeling. SQL developers expect column names to resolve against the FROM clause. But this is a small price for analyzability, and the mental model is straightforward: "parameters are substituted."
+**Trade-off:** The two-layer model is more complex to explain than "everything is lexical." But it matches how SQL actually works — and pretending SQL is lexically scoped would create a different kind of confusion.
 
 ## 8. Planner Integration: Three Levels
 
@@ -346,15 +423,22 @@ The planner operates at three distinct levels, each with different visibility in
 
 #### Level 1: Logical → Logical (pre-expansion)
 
-Rules rewrite the logical DAG. Functions are **opaque nodes with typed interfaces.** Rules match on function names, parameter types, and declared properties — not on SQL internals.
+Rules rewrite the logical DAG. Functions are **nodes with rich typed interfaces** — planner rules match on function names, parameter types, declared properties, and **compiler-derived structural metadata**, not on raw SQL.
+
+The compiler analyzes function bodies and attaches structural metadata to the function's type:
+- **Column provenance map:** Which output columns come from which input tables/parameters
+- **Join graph:** Which tables are joined, join type (LEFT/INNER), and cardinality (1:1, 1:N)
+- **Declared properties:** `@deterministic`, `@idempotent`, `@append_only`, etc.
+
+This metadata is derived automatically — the function author writes plain SQL and the compiler extracts the structure. Authors can also add explicit property annotations for semantics the compiler cannot infer. In PLT terms, this is a **refinement type**: the type carries structural invariants beyond just the fragment sort.
 
 **What happens here:**
 - **Predicate pushdown into blocks.** A downstream WHERE clause is pushed into a function's `filters` parameter.
 - **Fusion.** Two adjacent function calls are merged into a single, more efficient function.
-- **Pruning.** Unused columns from a function's output are projected away, enabling join elimination (see Example 3 below).
+- **Join elimination.** Unused output columns are traced through the provenance map; if all columns from a 1:1 LEFT JOIN are unused, the join is removed (see Example 3 below).
 - **Semantic validation.** A function marked `@requires_append_only` is checked against its source.
 
-Functions at this level are like abstract data types: you reason about the interface, not the implementation.
+Planner rules reason about the typed interface and its metadata — they don't pattern-match on the function's SQL body. The function body is only visible to the compiler (for metadata extraction) and to Level 2 (for expansion).
 
 #### Level 2: Logical → Physical (strategy selection and expansion)
 
@@ -390,7 +474,7 @@ smelt.define session_rollup(
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
-    metrics: SelectItems<Agg> = ()
+    metrics: SelectItems<Agg, source> = ()
 ) -> TableExpr @deterministic @idempotent AS (
     ...
 )
@@ -483,8 +567,8 @@ smelt.define session_rollup(
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
-    metrics: SelectItems<Agg> = (),
-    filters: Predicate = TRUE
+    metrics: SelectItems<Agg, source> = (),
+    filters: Predicate<source> = TRUE
 ) -> TableExpr @deterministic AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -734,6 +818,7 @@ The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 �
 
 **Date:** April 14, 2026
 **Reviewer:** Claude (prompted as PL/compiler expert)
+**Status:** Review points 1, 2, 4, and 6 have been addressed in revisions to Sections 3, 6, 7, and 8 above. Points 3 (block syntax complexity) and 5 (Malloy comparison) remain as open considerations.
 
 ### PLT Techniques Being Used (Named)
 
