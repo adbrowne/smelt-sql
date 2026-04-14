@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776149090472,
+  "lastUpdate": 1776149092542,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16823,6 +16823,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.29363259789288,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "88a5fcd36886dab583c0ecc6149eeee5f8da4f90",
+          "message": "Extend context bindings: CTE references, union contexts, pass-through\n\nContext bindings can now reference:\n- TableExpr parameters (Column<source>)\n- CTEs defined in the function body (SelectItems<Agg, sessionized>)\n- Union of multiple contexts (Predicate<source | customers | products>)\n\nAuthors control what each caller-provided fragment can see, enabling\ndeliberate narrowing (e.g., filters bound to source, metrics bound to\nsessionized). Pass-through parameters that are forwarded to inner\nfunctions omit the context binding — the inner function validates.\n\nAdds enrich_order example showing union contexts for joins.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T16:43:44+10:00",
+          "tree_id": "87fe925c8169a83011400717acd3c7f10d43e68a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/88a5fcd36886dab583c0ecc6149eeee5f8da4f90"
+        },
+        "date": 1776149092111,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.727697127059745,
             "unit": "MB/s"
           }
         ]
