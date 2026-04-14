@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776155912642,
+  "lastUpdate": 1776155914281,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16946,6 +16946,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.727697127059745,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ed85d6c0cd27b1055d14c32d130cf61df46494b0",
+          "message": "Update PL/compiler review: reflect paper revisions, add implementation decisions\n\nRewrite the expert review (Section 14) to evaluate the revised design rather\nthan critiquing the original. Add Section 12 capturing two implementation\ndecisions: explicit planner metadata annotations first (defer automatic\nderivation), and CTE context bindings included in initial design.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T18:36:37+10:00",
+          "tree_id": "fc6ea8c19f91221710e91292eb28a18621bf8406",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ed85d6c0cd27b1055d14c32d130cf61df46494b0"
+        },
+        "date": 1776155913809,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.65685344680836,
             "unit": "MB/s"
           }
         ]
