@@ -822,7 +822,21 @@ Even at maximum ambition, some things remain outside the design:
 
 These limitations are deliberate. The Jinja use cases that hit them are exactly the ones that produce unmaintainable code.
 
-## 12. Open Questions
+## 12. Implementation Decisions
+
+### Planner metadata: explicit annotations first (decided April 14, 2026)
+
+Refinement type metadata (column provenance maps, join graphs) will be **explicitly annotated** by function authors rather than automatically derived by the compiler. Authors declare structural properties like `@joins(dim_customers LEFT 1:1)` and `@provenance(customer_segment -> dim_customers.segment)`.
+
+**Rationale:** Automatic derivation requires a full lineage analyzer — a substantial compiler component. Explicit annotations let the planner integration ship without this, while keeping the door open to add automatic derivation later as a pure DX improvement (no semantic changes needed). In practice, only "model template" functions (session_rollup, enrich_order) benefit from planner-level optimization, so the annotation burden is concentrated on a small number of high-value functions.
+
+### CTE context bindings: include in initial design (decided April 14, 2026)
+
+CTE-derived context bindings (e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause in the function body) are worth the implementation investment and should not be deferred.
+
+**Rationale:** Ambiguous column references are one of the most common and frustrating errors in SQL development. CTE context bindings catch "column X doesn't exist in Y" at the call site before expansion — a qualitative improvement over errors that surface in generated SQL after expansion. The implementation cost is also less than it appears: computing the output schema of a CTE is the same schema inference the type system already performs for models and function calls. The incremental work is wiring CTE schema computation into the context binding checker, not building a new analysis from scratch.
+
+## 13. Open Questions
 
 ### Where do function definitions live?
 
@@ -869,7 +883,7 @@ The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 �
 
 **Date:** April 14, 2026
 **Reviewer:** Claude (prompted as PL/compiler expert)
-**Status:** Review points 1, 2, 4, and 6 have been addressed in revisions to Sections 3, 6, 7, and 8 above. Context bindings now support CTE references and union contexts, resolving the `Predicate`/`SelectItems` scoping concern raised in discussion. Points 3 (block syntax complexity) and 5 (Malloy comparison) remain as open considerations.
+**Revision:** Updated April 14, 2026 after paper revisions addressing original review points 1, 2, 4, and 6. Context bindings now support CTE references and union contexts. Scoping is honestly described as hybrid. Planner model uses refinement types. Error message contract is specified. Points 3 (block syntax complexity) and 5 (Malloy comparison) remain as open considerations.
 
 ### PLT Techniques Being Used (Named)
 
@@ -877,13 +891,15 @@ The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 �
 
 2. **Staged metaprogramming** (Section 8) — Functions that "compile away" are a one-stage version of **multi-stage programming** (Taha & Sheard, MetaML). The paper correctly identifies Terra as the closest analog. The three-level planner integration is essentially a **multi-pass lowering pipeline** — the same architecture as MLIR (Multi-Level IR), where each dialect level carries different semantic information and rewrites happen at the appropriate level.
 
-3. **Hygienic macro expansion** (Section 7) — Lexical scoping of parameters is **hygienic expansion** (Kohlbecker et al., 1986). The paper draws the right line: Scheme's `syntax-rules`, Rust's `macro_rules!`, versus C's `#define`. Good choice. But see caveats below.
+3. **Hygienic macro expansion with structural column resolution** (Section 7) — The revised scoping model correctly identifies two layers: parameter bindings are **hygienic** (Kohlbecker et al., 1986), while bare column names against `TableExpr` parameters use **structural resolution** — closer to **row polymorphism** (OCaml object types, PureScript row types) than pure lexical scoping. The paper now names this honestly as a hybrid, which is the right call. See remaining concerns below.
 
-4. **Gradual typing** (Section 6) — The three-tier annotation model is textbook **gradual typing** (Siek & Taha, 2006), following the TypeScript adoption curve. Tier 1 = untyped/duck-typed, Tier 2 = partially typed, Tier 3 = fully typed.
+4. **Gradual typing with error contracts** (Section 6) — The three-tier annotation model is textbook **gradual typing** (Siek & Taha, 2006), following the TypeScript adoption curve. The addition of explicit error message contracts per tier is a significant improvement — this is where gradual typing systems succeed or fail in practice, and the paper now commits to specific error quality guarantees rather than leaving them implicit.
 
 5. **Totality via structural restriction** (no recursion) — This is the Dhall approach, which itself comes from **total functional programming** (Turner, 2004). Banning recursion guarantees termination trivially. The paper correctly notes this is sufficient.
 
-6. **Parametric fragment types** — `Expr<T>`, `Column<source, T>` are a limited form of **dependent types** (the type of `user_col` depends on the *value* of `source`). The paper says "you don't need dependent types" (Section 10, Dhall connection) while actually using a restricted form of them. More on this below.
+6. **Refinement types for SQL functions** (Section 8) — The revised planner model explicitly adopts **refinement types**: function types carry compiler-derived structural metadata (column provenance maps, join graphs, declared properties) beyond the basic fragment sort. This resolves the original tension between "opaque nodes" and the planner needing internal structure. The paper now correctly names this as refinement typing, following the pattern from liquid types (Rondon et al., 2008) and similar systems.
+
+7. **Context-dependent type binding** (Section 3) — The expanded context binding system (`Column<source, T>`, `Predicate<source>`, `SelectItems<Agg, sessionized>`, union contexts) is a restricted form of **dependent types** where a type parameter references a value-level binding. The extension to CTE-derived contexts and union contexts moves this closer to a proper **row-polymorphic system with structural subtyping** — the union `source | customers | products` is essentially a join of row types.
 
 ### Critical Analysis
 
@@ -891,44 +907,37 @@ The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 �
 
 **The fragment sort system is the right core idea.** Jinja's fundamental failure is operating on strings. The moment you introduce syntactic sorts, you can statically prevent nonsense compositions. Rust's macro system proved this works at industrial scale — the key lesson being that you need *enough* sorts to be useful but not so many that the system becomes its own type theory.
 
-**Late expansion is architecturally sound.** Keeping functions as opaque nodes in the logical plan is the right call. This is exactly how MLIR works — you keep high-level ops as long as possible and lower progressively. The join elimination example (Section 9, Example 3) is a convincing demonstration: once you inline, recovering the semantic structure is a lost cause.
+**The context binding system is well-designed.** The revised Section 3 addresses the original concern about `Column<source>` by generalizing context bindings across all fragment sorts. The key insight — that `metrics` binds to `sessionized` while `filters` binds to `source`, giving the author control over what each caller-provided fragment can see — is a powerful scoping mechanism. This is essentially **capability-based access control** applied to SQL column namespaces: the function author grants each parameter access to specific table contexts.
 
-**The gradual annotation strategy is pragmatically correct.** TypeScript's adoption proves this works. The phased implementation (Tier 1 ships first) is the right ordering — you get user adoption before you need the hard type-checking work.
+The CTE context mechanism (where `sessionized` is a `WITH` clause in the body, and the compiler derives its schema) is elegant. It means the author can expose *computed* contexts — not just the raw input tables — to callers. The coupling between signature and body (changing a CTE's SELECT list changes what callers can reference) is a real trade-off, but the paper correctly identifies it as intentional: the context binding names the splice-point scope.
+
+**The union context design handles joins naturally.** `SelectItems<source | customers | products>` for multi-table contexts follows SQL's own resolution rules (ambiguous names require qualification). This avoids inventing new semantics for a well-understood problem.
+
+**Late expansion with refinement types is architecturally sound.** The revised Level 1 planner model — functions as nodes with rich typed interfaces including compiler-derived structural metadata — resolves the original contradiction between "opaque nodes" and needing join graphs for optimization. The join elimination example (Section 9, Example 3) is now consistent with the planner model: the planner reads column provenance from the refinement type, not by inspecting the SQL body.
+
+**The gradual annotation strategy now includes error contracts.** The error message contract (Section 6) is a critical addition. The Tier 1 contract — "show the call site with parameter mapping, not just a raw SQL error" — is exactly the minimum viable error experience. The progression from traced bindings (Tier 1) to declared contracts (Tier 2) to author-isolated errors (Tier 3) is clean. The "author complexity, user clarity" principle provides a coherent narrative for why this progression matters.
 
 #### Where to push back
 
-**1. `Column<source, T>` is dependent typing in disguise, and it's the hardest part of the design.**
+**1. Context binding scope resolution needs more specification.**
 
-The paper casually introduces `Column<source>` where the type of one parameter depends on the *value* of another parameter. This is a restricted form of dependent types. It's the right design, but the paper undersells the implementation complexity. Consider:
+The context binding system is well-conceived but leaves edge cases underspecified. Consider:
 
 ```sql
 smelt.define foo(
     a: TableExpr,
     b: TableExpr,
-    col: Column<???>   -- which table does this come from?
+    col: Column<a | b, Integer>  -- union context across parameters
 )
 ```
 
-You need a system for resolving which table context a column belongs to. What about columns that appear in both tables? What about computed columns from subexpressions of a `TableExpr`? The paper's examples are clean, but real-world usage will hit the edges fast. Haskell's type-level programming and Scala's path-dependent types are warnings about how this kind of "simple" dependent relationship proliferates in complexity.
+What happens when `a` and `b` both have a column named `id` of type `Integer`? The paper says "ambiguous column names require qualification — the same rule as standard SQL." But in standard SQL, qualification uses table aliases (`a.id`, `b.id`). In the context binding system, the "table" is a parameter name. Does the caller write `a.id` or does the compiler require the caller to disambiguate some other way?
 
-**Recommendation:** Explicitly scope this as "single-table column provenance only" for v1. Acknowledge that multi-table column resolution (joins inside a `TableExpr` argument) is deferred.
+Similarly, for CTE-derived contexts: if a CTE `sessionized` selects `source.*` plus `session_id`, and `source` is a `TableExpr` parameter, the schema of `sessionized` depends on the call site. This means **context-bound type checking is call-site-dependent even for Tier 2+** — the compiler can check that the *form* of the caller's fragment is correct (it references columns, not arbitrary expressions), but validating specific column names requires knowing the call-site schema. This is fine, but it's worth being explicit about: CTE context bindings give you *structural* guarantees (the fragment references columns from the right table) but column-name validation is still call-site-dependent.
 
-**2. Lexical scoping vs. SQL's inherent dynamic scoping creates a semantic gap.**
+**Recommendation:** Specify the disambiguation rules for union contexts (especially parameter-parameter unions vs. parameter-CTE unions), and clarify which checks happen in isolation vs. at the call site for CTE-derived contexts.
 
-SQL is *fundamentally* dynamically scoped — `SELECT user_id FROM events` resolves `user_id` against whatever `events` happens to contain. The paper acknowledges this tension ("slightly less SQL-native") but underestimates it. Consider:
-
-```sql
-smelt.define add_margin(source: TableExpr) -> TableExpr AS (
-    SELECT source.*, revenue - cost AS margin
-    FROM source
-)
-```
-
-Where do `revenue` and `cost` come from? They're not parameters — they're *implicitly* resolved from `source`. This means the function body is *not* actually lexically scoped in the way the paper claims. You have a hybrid: explicit parameters are lexically scoped, but column references within SQL expressions against a `TableExpr` parameter are dynamically resolved. This is closer to **row polymorphism** (as in OCaml's object types or PureScript's row types) than pure lexical scoping.
-
-This isn't fatal, but the paper should name it honestly. The scoping story is: "parameters are lexical; column resolution within table-typed parameters is structural (schema-checked but not name-bound)."
-
-**3. The block syntax introduces a second grammar.**
+**2. The block syntax introduces a second grammar.**
 
 The `{ metrics: ... filters: ... }` block syntax is effectively a **domain-specific sub-language** embedded in the call site. This has worked before (Ruby blocks, Kotlin DSL builders, Groovy closures in Gradle), but each time it creates a parsing and tooling burden disproportionate to the syntactic convenience.
 
@@ -939,45 +948,36 @@ Specific concerns:
 
 **Compare with:** Kotlin's trailing lambda syntax, which has the same "pass a block to a function" ergonomic goal but avoids introducing named sections. Consider whether named parameters with parenthesized SQL fragments (the "ugly" version) plus good formatter support might be 80% of the value at 20% of the parser complexity.
 
-**4. The planner integration is the most ambitious and least validated part.**
-
-The three-level planner story is compelling *on paper*, but the join elimination example (Example 3) actually reveals a gap: the planner rule needs to understand the *internal structure* of the function body (which joins exist, which columns come from which join) while the function is supposed to be an "opaque node with typed interface" at Level 1. These are contradictory.
-
-Either:
-- Functions are opaque at Level 1, in which case you can't do join elimination without lowering first (making it a Level 2 optimization).
-- Functions carry structural metadata (join graph, column provenance map) in their type, in which case "opaque" is a misnomer — you've invented **refinement types** for SQL functions.
-
-The paper is implicitly proposing the second, which is the right design, but should name it. What you actually want is something like:
-
-```
-session_rollup : TableExpr
-    @joins(dim_customers ON customer_id [LEFT, 1:1],
-           dim_products ON product_id [LEFT, 1:1])
-    @provenance(customer_segment -> dim_customers.segment,
-                product_category -> dim_products.category, ...)
-```
-
-This is a **refinement type** — the type carries structural invariants beyond just the sort. That's more implementation work than the paper suggests.
-
-**5. The comparison table undersells Malloy.**
+**3. The comparison table undersells Malloy.**
 
 Malloy isn't just "deep semantic modeling" — it's the closest direct competitor to this design. Malloy's `dimension` and `measure` declarations are essentially `Expr<T>` and `AggExpr<T>` with fixed scoping. Malloy's `source` extensions are `TableExpr` transformers. The key difference is that Malloy chose a new query language while smelt extends SQL, but the *function composition model* is very similar. A fair comparison would help readers understand the actual trade-off: Malloy gets cleaner semantics by abandoning SQL syntax; smelt gets migration compatibility by extending SQL syntax but inherits SQL's scoping messiness.
 
-**6. Missing: error message design.**
+**4. Refinement type metadata derivation is implementation-heavy.** *(Resolved — see Section 12)*
 
-The paper doesn't discuss error reporting, which is where gradual typing systems succeed or fail. When an unannotated function (Tier 1) is called with wrong types, the user sees an error in the *expanded* SQL with a trace back to the call site. This is the C++ template error experience — notoriously terrible. TypeScript succeeded partly because `any` produces *no* errors rather than *confusing* errors.
+The revised planner model is conceptually cleaner, but the compiler work to *derive* structural metadata automatically is substantial. Extracting column provenance maps and join graphs from arbitrary SQL bodies means the compiler must essentially build a relational algebra representation of each function body — this is a query optimizer's job.
 
-The paper should commit to: "Tier 1 errors will show the expansion context but also the call site with parameter mapping, not just a raw SQL error." This is the difference between usable and unusable.
+**Decision:** Start with explicit annotations (`@joins`, `@provenance`) and add automatic derivation later as a DX improvement. This lets the planner integration ship without requiring a full lineage analyzer, while keeping the design compatible with automatic derivation in the future.
 
 ### Historical Precedents Worth Studying
 
 - **SML Functors / OCaml modules** — Parameterized modules that produce types based on input types. `Column<source, T>` is a simplified version of this: a type that depends on a module's signature.
-- **Scala's path-dependent types** — `source.Column` where the type depends on a specific value. Ended up being powerful but hard to reason about. Cautionary tale for `Column<source>`.
-- **Template Haskell** — Multi-stage compilation where generated code is type-checked after splicing. The Tier 1 strategy is exactly this. TH showed it works but that error messages are the main usability challenge.
+- **Scala's path-dependent types** — `source.Column` where the type depends on a specific value. The context binding system is more constrained (contexts are named table scopes, not arbitrary paths), which avoids Scala's complexity pitfalls while preserving the useful dependent relationship.
+- **Template Haskell** — Multi-stage compilation where generated code is type-checked after splicing. The Tier 1 strategy is exactly this. TH showed it works but that error messages are the main usability challenge — the new error message contract directly addresses this lesson.
 - **MLIR's progressive lowering** — The three-level planner is structurally identical to MLIR's dialect-to-dialect lowering. MLIR's lesson: you need clear contracts at each level boundary, which maps to the paper's "return type as safety contract."
+- **Liquid types (Rondon et al., 2008)** — Refinement types that carry logical predicates beyond the base type. The compiler-derived structural metadata (join graphs, provenance maps) attached to function types is a domain-specific form of refinement typing, where the "predicates" are relational algebra properties rather than logical formulas.
 
 ### Summary Verdict
 
-The core design is sound. Fragment sorts + late expansion + gradual types is the right combination of PL techniques for this problem. The paper is strongest on motivation and weakest on the interaction between `Column<source>` dependent typing, the hybrid scoping model, and the planner's actual information requirements. The block syntax is a significant engineering investment for a syntactic convenience — defer it until the core function system proves itself.
+The revised paper is substantially stronger. The four main weaknesses from the original review have been addressed:
 
-The biggest risk isn't in the design but in the *implementation ordering*: if Tier 1 ships with C++-template-quality error messages, adoption will stall regardless of how sound the type theory is. Error reporting quality should be an explicit first-class design goal, not an afterthought.
+1. **Context bindings** (originally: "`Column<source>` is dependent typing in disguise") — Now a well-specified system covering all fragment sorts, with CTE-derived contexts and union contexts. The dependent typing is acknowledged and scoped appropriately. Edge cases around disambiguation remain (see point 1 above), but the core design is sound.
+
+2. **Scoping** (originally: "names the hybrid honestly") — The revised Section 7 correctly describes the two-layer model: lexical parameters + structural column resolution (row polymorphism). This is honest and technically precise.
+
+3. **Planner model** (originally: "opaque vs. refinement type contradiction") — The revised Section 8 explicitly adopts refinement types with compiler-derived metadata, resolving the contradiction. The implementation cost of metadata derivation is the remaining concern (see point 4 above).
+
+4. **Error messages** (originally: "missing error message design") — The error message contract in Section 6 commits to specific quality guarantees per tier, with the "author complexity, user clarity" principle providing coherent motivation.
+
+**Remaining open items** are block syntax complexity (point 2) and the Malloy comparison (point 3) — both are secondary to the core type system design. Refinement type metadata derivation (point 4) has been resolved: explicit annotations first, automatic derivation later.
+
+**Implementation path is now clearer.** Two key decisions reduce the risk: explicit planner annotations avoid the need for a lineage analyzer at launch, while CTE context bindings are confirmed as worth the investment (leveraging existing schema inference). The remaining implementation sequencing question is how Tier 1 error tracing, context binding checking, and the planner annotation system interact — a phased implementation plan identifying which pieces can ship independently would strengthen the path from paper to product.
