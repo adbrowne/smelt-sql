@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776149092542,
+  "lastUpdate": 1776155912642,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12877,6 +12877,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.530981,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ed85d6c0cd27b1055d14c32d130cf61df46494b0",
+          "message": "Update PL/compiler review: reflect paper revisions, add implementation decisions\n\nRewrite the expert review (Section 14) to evaluate the revised design rather\nthan critiquing the original. Add Section 12 capturing two implementation\ndecisions: explicit planner metadata annotations first (defer automatic\nderivation), and CTE context bindings included in initial design.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T18:36:37+10:00",
+          "tree_id": "fc6ea8c19f91221710e91292eb28a18621bf8406",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ed85d6c0cd27b1055d14c32d130cf61df46494b0"
+        },
+        "date": 1776155911816,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.705956,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.404921,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.603416,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.371773,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003326,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 39.096379,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.022863,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.014677,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009889,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.118546,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.342066,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.19529,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.131770000000003,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.569858,
             "unit": "ms"
           }
         ]
