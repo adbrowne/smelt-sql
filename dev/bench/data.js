@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776129950816,
+  "lastUpdate": 1776129952770,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -16700,6 +16700,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.020975978593267,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6c4c1a5d4ec12c4b9052834581c41376c2c11094",
+          "message": "Revise smelt functions paper: context bindings, error contract, scoping, planner model\n\nAddresses review feedback:\n- Extend table context bindings to all fragment sorts (Predicate<source>,\n  SelectItems<Agg, source>, etc.) with single-table scope for v1\n- Add \"author complexity, user clarity\" as explicit design principle\n- Add error message contract per annotation tier with examples\n- Honestly name the hybrid scoping model (lexical params + structural\n  column resolution / row polymorphism)\n- Fix planner Level 1 opacity contradiction: functions carry compiler-\n  derived structural metadata (provenance, join graph) as refinement\n  types, not opaque interfaces\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-14T11:24:01+10:00",
+          "tree_id": "1dbfd42f35dbbe34d346c51e4cdfefb85f37d97c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6c4c1a5d4ec12c4b9052834581c41376c2c11094"
+        },
+        "date": 1776129951975,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.29363259789288,
             "unit": "MB/s"
           }
         ]
