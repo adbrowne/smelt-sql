@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776155914281,
+  "lastUpdate": 1776237584838,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -12971,6 +12971,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.569858,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5c6bfca7168721fd7556fc2dd424b88d70d750bd",
+          "message": "Lock in v1 design decisions for smelt functions paper\n\nCaptures decisions from design discussion: defaults are self-contained\nand type-checked, omission means splice-nothing; no variadics in v1;\nno intra-file ordering, cycle detection in smelt-db over functions only;\nall functions public; function tests deferred; Tier 2/3 signatures stay\nvalid under broken bodies (Tier 1 cascades); directory-derived namespacing;\nno overloading; functions are additive.\n\nReorganises §13 to separate must-decide-before-plan items (block syntax,\ngrammar for smelt.define, annotation syntax, Column vs Expr, MVP scope,\nrelationship to smelt.metric) from in-plan tightening and deferred work.",
+          "timestamp": "2026-04-15T17:18:27+10:00",
+          "tree_id": "a75ef47e108ca0a0a689e621061e371dbca947ab",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5c6bfca7168721fd7556fc2dd424b88d70d750bd"
+        },
+        "date": 1776237584040,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.338257,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.925443,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.7259519999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.364067,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003134,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 38.924941,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.025829,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012379,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009034,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.040364,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.318264,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.05239,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.24616,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.536508,
             "unit": "ms"
           }
         ]
