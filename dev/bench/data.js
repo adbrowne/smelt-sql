@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776237584838,
+  "lastUpdate": 1776237586328,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17069,6 +17069,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.65685344680836,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "5c6bfca7168721fd7556fc2dd424b88d70d750bd",
+          "message": "Lock in v1 design decisions for smelt functions paper\n\nCaptures decisions from design discussion: defaults are self-contained\nand type-checked, omission means splice-nothing; no variadics in v1;\nno intra-file ordering, cycle detection in smelt-db over functions only;\nall functions public; function tests deferred; Tier 2/3 signatures stay\nvalid under broken bodies (Tier 1 cascades); directory-derived namespacing;\nno overloading; functions are additive.\n\nReorganises §13 to separate must-decide-before-plan items (block syntax,\ngrammar for smelt.define, annotation syntax, Column vs Expr, MVP scope,\nrelationship to smelt.metric) from in-plan tightening and deferred work.",
+          "timestamp": "2026-04-15T17:18:27+10:00",
+          "tree_id": "a75ef47e108ca0a0a689e621061e371dbca947ab",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5c6bfca7168721fd7556fc2dd424b88d70d750bd"
+        },
+        "date": 1776237585892,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.71760072834146,
             "unit": "MB/s"
           }
         ]
