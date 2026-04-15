@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776237586328,
+  "lastUpdate": 1776238312163,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13065,6 +13065,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.536508,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "673375356f0c7d6b58b28f1f653d8e0a62cd7992",
+          "message": "Add §15: typing built-in SQL functions\n\nExplores whether the fragment sort system can extend to built-ins.\n~80% of common built-ins fit existing sorts with no new machinery.\nRemaining 20% (generics, variadics, type-as-argument, keyword syntax,\naggregate modifier clauses, schema-returning TVFs) need modest but\nbounded extensions. A small set (auto-schema readers, dynamic EXECUTE,\nuntyped JSON) is fundamentally untypeable. Flags v1 vs v2 split and\nleaves the registry-vs-primitive-shapes choice as an open question.",
+          "timestamp": "2026-04-15T17:26:36+10:00",
+          "tree_id": "69ab1f98e791dc34a218c3c913e40d528cf18dff",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/673375356f0c7d6b58b28f1f653d8e0a62cd7992"
+        },
+        "date": 1776238311236,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 32.607575,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 31.468158000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.548448,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.31038499999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004265,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 35.255756999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.029173,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.015615,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.01055,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.149308,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 1.872695,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.933450000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.91377,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.997368,
             "unit": "ms"
           }
         ]
