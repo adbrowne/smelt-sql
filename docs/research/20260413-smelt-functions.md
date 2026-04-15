@@ -1062,3 +1062,61 @@ The revised paper is substantially stronger. The four main weaknesses from the o
 **Remaining open items** are block syntax complexity (point 2) and the Malloy comparison (point 3) — both are secondary to the core type system design. Refinement type metadata derivation (point 4) has been resolved: explicit annotations first, automatic derivation later.
 
 **Implementation path is now clearer.** Two key decisions reduce the risk: explicit planner annotations avoid the need for a lineage analyzer at launch, while CTE context bindings are confirmed as worth the investment (leveraging existing schema inference). The remaining implementation sequencing question is how Tier 1 error tracing, context binding checking, and the planner annotation system interact — a phased implementation plan identifying which pieces can ship independently would strengthen the path from paper to product.
+
+## 15. Typing Built-in SQL Functions
+
+### Motivation
+
+The fragment sort system in §3 was designed for user-defined `smelt.define` functions, but every model also calls built-ins: `COALESCE`, `SUM`, `CAST`, `SUBSTRING`, `generate_series`, and so on. Typical models call built-ins far more often than user functions. If built-ins carry the same fragment-typed signatures, every SQL call gets the same compile-time checking, hover types, and completion that `smelt.fn.*` gets. Planner rules can also match on built-in names the same way they match on user functions.
+
+This is probably the highest-leverage extension of the type system. It is worth asking up front which built-ins fit, which need modest extensions, and which are fundamentally outside scope.
+
+### What fits with no new machinery
+
+Many built-ins map directly onto the existing sorts:
+
+| Built-in shape | Signature |
+|----------------|-----------|
+| Pure scalar (`LOWER`, `ABS`, `LENGTH`) | `Expr<T1> -> Expr<T2>` |
+| Binary scalar (`POWER`, `MOD`) | `(Expr<T>, Expr<T>) -> Expr<T>` |
+| Aggregates (`SUM`, `COUNT`, `AVG`) | `Expr<T> -> AggExpr<T>` |
+| Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Predicate` |
+| Simple table functions (`generate_series(1, 10)`) | `(Expr<Int>, Expr<Int>) -> TableExpr` |
+
+These are the majority of the SQL standard library. No new typing machinery required.
+
+### What needs extensions
+
+Several ubiquitous built-ins expose gaps:
+
+**1. Generics / type parameters.** `COALESCE(a, b, c)` returns the common supertype of its arguments. `MAX(x)` returns the same type as `x`. `ARRAY_AGG(x)` returns `Array<T>`. Typing these requires type parameters on signatures (e.g., `COALESCE<T>: Expr<T>... -> Expr<T>`) — a modest extension paralleling Rust generics, but it introduces a type-inference step we currently don't have.
+
+**2. Variadics.** `COALESCE`, `CONCAT`, `GREATEST`, `LEAST` all accept arbitrary arity. v1 deliberately excluded variadic *user* functions (§12). For built-ins, either we give them a privileged native-variadic form that user functions can't use, or we reintroduce variadics for both. Worth a deliberate decision.
+
+**3. Types as arguments.** `CAST(x AS INTEGER)` passes a type where a parameter normally sits. Same shape in `TRY_CAST`, `EXTRACT(YEAR FROM ts)` (a field keyword), and parameterised types like `DECIMAL(10, 2)`. Not expressible as `Expr<T>` parameters. Options: add a dedicated `Type` (and maybe `Field`) parameter sort; or treat this syntax as primitive grammar that the checker handles specially.
+
+**4. Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`, `POSITION(sub IN str)`, `LISTAGG(x, ',') WITHIN GROUP (ORDER BY y)`. The SQL standard spells several built-ins with mandatory keywords rather than commas. Our `=>` named-argument syntax doesn't map onto these; they'd need to be treated as primitive grammar rather than ordinary calls.
+
+**5. Modifier clauses on aggregates.** `SUM(x) FILTER (WHERE cond)`, `string_agg(x, ',' ORDER BY y)`, and window `OVER (...)`. These attach `Predicate` / `OrderSpec` fragments to an aggregate call — which the type system already knows how to describe — but the attachment is a syntactic suffix, not a parameter. A refined `AggExpr<T>` that carries optional `filter: Predicate` and `order: OrderSpec` slots would make this explicit.
+
+**6. Schema-returning table functions.** `UNNEST(array_col)` produces a table whose schema depends on the array element type — typeable with generics (`UNNEST<T>: Expr<Array<T>> -> TableExpr{value: T}`). `read_csv` / `read_parquet` with auto-schema detection is **not** compile-time typeable by design: the schema is discovered at runtime. These must either accept a user-supplied schema annotation or fall back to an opaque `TableExpr` where column references are checked at expansion time.
+
+### What is fundamentally untypeable
+
+A small set of features cannot be fit without abandoning compile-time guarantees:
+
+- **Auto-schema built-ins** without a schema hint (`read_csv('x.csv')`). The schema exists only after reading the file. Models using them must either carry an explicit schema annotation or accept opaque `TableExpr`.
+- **Dynamic `EXECUTE` / string-templated SQL.** Out of scope — and rare in analytics SQL.
+- **Untyped JSON navigation** (`col->>'foo'`). Typeable only by committing to `Text` unconditionally and requiring explicit casts, which matches most engines' existing behaviour.
+
+### Where this lands
+
+The direct implication for v1: the existing design already types roughly 80% of common built-ins without new machinery. The remaining 20% — generics, variadics, type-arguments, keyword syntax, modifier clauses — is a substantial but bounded extension. None of it invalidates the existing design; all of it can be added incrementally.
+
+**Honest positioning:** the fragment sort system is a plausible foundation for typing built-ins, but built-in coverage is a separate work item with its own design pressure. A v1 that types only user functions (and leaves built-ins to the existing type inference) is still a large improvement. A v2 that extends coverage to built-ins unlocks a second, larger improvement — but it is not free.
+
+There is also a crossover with the §6 error contract: Tier 1 call-site errors may surface through built-in calls whose arguments we can't check early. That is acceptable (it matches today's behaviour) but worth naming as a constraint the user will see.
+
+### Open question for the v2 discussion
+
+If we extend the type system to built-ins, do we do it through a **signature registry** (a table of built-in signatures the checker consults, one per dialect) or by making the checker aware of a small set of **primitive built-in shapes** (CAST-shaped, EXTRACT-shaped, aggregate-with-modifiers-shaped) that it handles specially? The registry approach scales with engines; the primitive-shapes approach keeps the checker simple but requires per-engine code for anything unusual. Both are viable; the choice affects how much work it is to add a new backend.
