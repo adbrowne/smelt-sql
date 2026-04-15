@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776238312163,
+  "lastUpdate": 1776238313647,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17192,6 +17192,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.71760072834146,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "673375356f0c7d6b58b28f1f653d8e0a62cd7992",
+          "message": "Add §15: typing built-in SQL functions\n\nExplores whether the fragment sort system can extend to built-ins.\n~80% of common built-ins fit existing sorts with no new machinery.\nRemaining 20% (generics, variadics, type-as-argument, keyword syntax,\naggregate modifier clauses, schema-returning TVFs) need modest but\nbounded extensions. A small set (auto-schema readers, dynamic EXECUTE,\nuntyped JSON) is fundamentally untypeable. Flags v1 vs v2 split and\nleaves the registry-vs-primitive-shapes choice as an open question.",
+          "timestamp": "2026-04-15T17:26:36+10:00",
+          "tree_id": "69ab1f98e791dc34a218c3c913e40d528cf18dff",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/673375356f0c7d6b58b28f1f653d8e0a62cd7992"
+        },
+        "date": 1776238313227,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.903779624855186,
             "unit": "MB/s"
           }
         ]
