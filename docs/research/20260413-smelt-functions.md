@@ -815,7 +815,7 @@ Key Dhall lessons:
 
 Even at maximum ambition, some things remain outside the design:
 
-- **Dynamic schema construction.** You cannot write a function that takes column names as runtime strings and produces a SELECT with those columns. The set of columns must be known at compile time (variadic parameters handle the common cases).
+- **Dynamic schema construction.** You cannot write a function that takes column names as runtime strings and produces a SELECT with those columns. The set of columns must be known at compile time. (`SelectItems` parameters cover the "list of things" case without requiring variadics.)
 - **Conditional structure.** A function cannot return a JOIN sometimes and a subquery other times based on a runtime value. SQL structure is fixed at compile time. (Conditional *expressions* like CASE/WHEN are fine.)
 - **Runtime parameterization of sorts.** Fragment type parameters are compile-time. You can pass runtime values as `Expr` (e.g., `WHERE col > smelt.param('cutoff')`), but you can't choose between different SQL structures at runtime.
 - **Recursive patterns.** No function can call itself. Recursive CTEs remain a SQL-level feature, not a function-level one.
@@ -836,33 +836,114 @@ CTE-derived context bindings (e.g., `SelectItems<Agg, sessionized>` where `sessi
 
 **Rationale:** Ambiguous column references are one of the most common and frustrating errors in SQL development. CTE context bindings catch "column X doesn't exist in Y" at the call site before expansion — a qualitative improvement over errors that surface in generated SQL after expansion. The implementation cost is also less than it appears: computing the output schema of a CTE is the same schema inference the type system already performs for models and function calls. The incremental work is wiring CTE schema computation into the context binding checker, not building a new analysis from scratch.
 
+### Default values: self-contained, type-checked, omission-as-empty (decided April 15, 2026)
+
+Default values for parameters follow these rules:
+
+- **Self-contained.** A default expression cannot reference other parameters. This keeps default evaluation order trivial and avoids a mini-scope-resolution problem at the signature layer.
+- **Type-checked at definition time.** A default must satisfy the parameter's declared type. This is a free Tier 2 check — defaults are part of the signature, so checking them is part of checking the signature.
+- **Omission means "splice nothing"** for fragment-typed parameters. A `SelectItems` parameter with a default of "no items" is expressed by simply omitting the argument at the call site — no `()` empty-list syntax needed in the source. `Predicate` parameters that should default to "no filter" use `= TRUE` (a real SQL literal). This avoids inventing non-SQL syntax for empty fragments.
+
+### No variadic parameters in v1 (decided April 15, 2026)
+
+Variadic / splat parameters are out of scope for v1. The `SelectItems` fragment sort already covers the "pass a list of things" case ergonomically. Variadics can be added later without breaking existing functions.
+
+### Function ordering and cycle detection (decided April 15, 2026)
+
+- **No intra-file ordering requirement.** A function may call any other function defined anywhere in the project, regardless of file or position within a file. Forward references are first-class.
+- **Cycle detection lives in `smelt-db`** as a Salsa query over the function-call graph. Detection runs against function definitions only — model-to-function and function-to-model edges are not part of the cycle check.
+
+### Visibility: all functions public in v1 (decided April 15, 2026)
+
+There is no `pub` / `private` distinction. Every function defined in the project is callable from any model or other function. Adding visibility modifiers later is non-breaking (default stays public).
+
+### Function testing deferred (decided April 15, 2026)
+
+A dedicated test mechanism for functions (e.g., `test: true` files calling `smelt.fn.*` directly) is not part of v1. Functions remain testable indirectly through models that use them. A first-class function-test workflow is a follow-up.
+
+### LSP signature stability under broken bodies (decided April 15, 2026)
+
+When a function body becomes invalid mid-edit:
+
+- **Tier 2 / Tier 3 functions** retain their signature. Call sites continue to type-check against the declared parameter and return types. The error is contained to the function being edited; downstream models do not cascade red.
+- **Tier 1 functions** have no signature independent of the body, so call sites cannot be checked while the body is broken. This is unavoidable, and is one more reason to encourage Tier 2+ for shared functions.
+
+This asymmetry should be surfaced in LSP UX (e.g., a hint on Tier 1 functions: "annotate parameters to prevent cascading errors during edits").
+
+### Namespacing: directory-derived (decided April 15, 2026)
+
+Function paths under `smelt.fn.*` mirror the directory layout under `functions/`. `functions/patterns/session_rollup.sql` defines `smelt.fn.patterns.session_rollup`. This matches the `models/` convention and avoids inventing a separate namespace declaration.
+
+### No overloading in v1 (decided April 15, 2026)
+
+Function names are unique within their namespace. Two functions named `margin` with different parameter types are not allowed. Overloading combined with gradual typing is a known footgun (resolution rules become annotation-tier-dependent), and the cost of adding overloading later is low.
+
+### Functions are additive (decided April 15, 2026)
+
+Introducing functions does not change the meaning of existing models. Models that don't call any function compile and run identically to today. The `smelt.define` and `smelt.fn.*` syntax is purely additive to the grammar.
+
 ## 13. Open Questions
 
-### Where do function definitions live?
+The decisions in §12 close most of the prior open questions. The items below are the remaining design choices that must be locked in before an implementation plan can be written.
 
-Options:
-- A `functions/` directory in the project (parallel to `models/`)
-- Inline in model files (less reusable but convenient)
-- A separate `.smelt` file format
-- In `smelt.yml` configuration
+### Block syntax surface (must decide before plan)
 
-Leaning toward `functions/` directory with `.sql` extension, mirroring the `models/` convention.
+The `{ metrics: ... filters: ... }` block introduces a second grammar at the call site, with whitespace-sensitive section delimiters. This is the part of the design most likely to bite the parser, the LSP, and the formatter. Candidates under consideration:
 
-### How does the LSP handle block context?
+- **Named SQL-like clauses.** Reuse SQL keywords/shape:
+  ```sql
+  SELECT * FROM smelt.fn.session_rollup(source => ..., user_col => ..., ts_col => ...)
+    WITH metrics AS (SUM(revenue) AS total_revenue, ...)
+    WITH filters AS (event_type != 'bot')
+  ```
+  Reads like extra CTEs-as-arguments. Avoids significant whitespace and a nested mini-grammar.
+- **Trailing parenthesized labelled blocks.** `) metrics: ( ... ) filters: ( ... )` — still a mini-grammar but inside parens, no significant whitespace.
+- **Pure named arguments.** Multi-line parenthesized lists, lean on the formatter. Worst ergonomics, simplest parser.
+- **Single trailing positional block (Kotlin-style).** Fine for one fragment param; fails when there are two (metrics + filters).
 
-When a user is writing inside a `metrics:` block, the LSP needs to know which columns are in scope (from the function's expansion context). This requires the LSP to partially expand the function to determine the available columns, then provide completions against that context.
+The choice has knock-on effects on parser complexity, LSP completion behaviour, and formatter rules.
 
-### Should functions support multiple expansion modes?
+### Grammar for `smelt.define` (must decide before plan)
 
-Should a function author provide both the "full rebuild" and "incremental" versions of their function? Or should that always be the planner rule's responsibility? The latter is cleaner (separation of concerns), but the former might be pragmatic for common patterns.
+- One definition per file, or many?
+- Frontmatter on function files? (For test markers, future visibility, package metadata.)
+- Is `smelt.define ...` a top-level statement that can appear alongside `SELECT`, or are function files restricted to definitions only?
 
-### Package ecosystem
+### Annotation syntax (must decide before plan)
 
-If smelt functions replace dbt packages (dbt-utils, etc.), there needs to be a mechanism for sharing function libraries across projects. This likely means a package manager and a registry, which is a significant ecosystem investment.
+`@deterministic`, `@append_only`, `@joins(dim_customers LEFT 1:1)`, `@provenance(...)` are used throughout the paper but never given a formal grammar. Need to decide:
 
-### Interaction with Python models
+- Where annotations may attach (parameter, return type, whole function)
+- The grammar for structured annotation arguments
+- Which annotations ship in v1 vs. are reserved
 
-smelt supports Python models via the `@model` decorator. How do smelt functions interact with Python models? Can a Python model call a smelt function? Can a smelt function reference a Python model's output? The answer is probably: functions are a SQL-layer concept, and Python models are opaque table producers. A function can reference a Python model via `smelt.ref()`, but function definitions are SQL-only.
+### `Column<T>` parameters: bare refs only, or expressions? (must decide before plan)
+
+Examples show `user_col => user_id`. Decide whether `Column<T>` accepts only bare column references or also computed expressions (`user_col => lower(user_id)`). This has semantic weight when the parameter is spliced into `PARTITION BY` or `GROUP BY`. Recommendation: `Column<T>` is bare-ref-only; use `Expr<T>` for computed values.
+
+### MVP scope (must decide before plan)
+
+- Which fragment sorts ship in v1 (just `Expr<T>`, or also `TableExpr` / `Predicate` / `SelectItems`)?
+- Which annotation tier ships first? (Paper currently says Tier 1, but a phased path through Tier 2/3 must be in the plan.)
+- Does v1 include any Level 1 planner rule (e.g., the join-elimination showcase from Example 3), or pure expansion only?
+- Does v1 include the block syntax, or are expression-only functions enough to validate the architecture?
+
+### Relationship to `smelt.metric()` (must decide before plan)
+
+The language already has `smelt.metric()` with `=>` named parameters. Does `smelt.fn.*` parallel it, or is `smelt.metric` reframed as a special case of `smelt.define`? Affects parser unification.
+
+### Specification tightening (can resolve inside the plan)
+
+- **Union context disambiguation.** For `Column<a | b, Integer>` when both `a` and `b` have an `id` column, what does the caller write? Parameter-name qualification (`a.id`) is the natural answer but needs to be specified explicitly, including parameter-CTE union cases.
+- **CTE context checking boundary.** `SelectItems<Agg, sessionized>` can be checked structurally (is it a select list of aggregates?) at definition time, but column-name validation against the CTE schema is call-site-dependent because CTE schemas often include `source.*`. Document the split clearly.
+
+### Already deferred / not blocking
+
+- **LSP block-context completion** — architecturally hard, can land after basic diagnostics.
+- **Multiple expansion modes per author** — committed to "the planner's job" unless pain emerges.
+- **Function tests** — deferred per §12; functions remain testable through models that use them.
+- **Package ecosystem / registry** — not v1.
+- **Python model interaction** — functions are SQL-only; Python models are opaque table producers reachable via `smelt.ref()`.
 
 ## 13. Summary
 
