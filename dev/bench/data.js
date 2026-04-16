@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776309125085,
+  "lastUpdate": 1776309126548,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17315,6 +17315,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.903779624855186,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "aa280956e3de29afd88d7da43d7f81e27c618c60",
+          "message": "Merge pull request #106 from adbrowne/worktree-fix_example\n\nFix type inference, parser & ref resolution bugs from smelt_shop testing",
+          "timestamp": "2026-04-16T12:39:51+09:30",
+          "tree_id": "82fed4e6e8781de066b8d096def60f0e41c5ac2a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/aa280956e3de29afd88d7da43d7f81e27c618c60"
+        },
+        "date": 1776309126144,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.661031509057747,
             "unit": "MB/s"
           }
         ]
