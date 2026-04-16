@@ -76,6 +76,8 @@ pub enum GeneratorSpec {
     },
     Geometric {
         p: f64,
+        #[serde(default)]
+        min: Option<i32>,
     },
     Bool {
         prob: f64,

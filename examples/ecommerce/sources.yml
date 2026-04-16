@@ -1,0 +1,54 @@
+version: 1
+
+sources:
+  raw:
+    tables:
+      products:
+        description: "Product catalog"
+        columns:
+          - name: product_id
+            type: INTEGER
+          - name: product_name
+            type: VARCHAR
+          - name: category_code
+            type: VARCHAR
+          - name: brand_tier
+            type: VARCHAR
+          - name: unit_price_cents
+            type: INTEGER
+          - name: cost_cents
+            type: INTEGER
+          - name: weight_grams
+            type: INTEGER
+          - name: is_digital
+            type: BOOLEAN
+
+      orders:
+        description: "Order headers"
+        columns:
+          - name: order_id
+            type: INTEGER
+          - name: customer_id
+            type: INTEGER
+          - name: order_date
+            type: VARCHAR
+          - name: status
+            type: VARCHAR
+          - name: payment_method
+            type: VARCHAR
+          - name: discount_pct
+            type: INTEGER
+
+      events:
+        description: "Raw page-level clickstream events"
+        columns:
+          - name: event_id
+            type: INTEGER
+          - name: visitor_id
+            type: VARCHAR
+          - name: event_type
+            type: VARCHAR
+          - name: event_timestamp
+            type: TIMESTAMP
+          - name: page_url
+            type: VARCHAR

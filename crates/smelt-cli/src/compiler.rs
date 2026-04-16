@@ -144,12 +144,13 @@ impl SqlCompiler {
 
         let col_names: Vec<String> = items
             .iter()
-            .map(|item| {
+            .enumerate()
+            .map(|(i, item)| {
                 item.alias().unwrap_or_else(|| {
                     // Fallback: infer name from expression (e.g. bare column ref "user_id")
                     item.expression()
                         .and_then(|e| e.infer_name())
-                        .unwrap_or_else(|| "?".to_string())
+                        .unwrap_or_else(|| format!("_col{}", i + 1))
                 })
             })
             .collect();
@@ -1259,5 +1260,152 @@ WHERE event_type = 'click'
         let result = rename_table_references(sql, "cleaned", "__smelt_model__cleaned");
         assert!(result.contains("__smelt_model__cleaned"));
         assert!(!result.contains(" cleaned"));
+    }
+
+    #[test]
+    fn test_case_expression_with_alias_no_question_marks() {
+        let sql = "SELECT CASE WHEN x > 0 THEN 'high' ELSE 'low' END AS label FROM t";
+
+        let model = ModelFile {
+            name: "case_test".to_string(),
+            path: "models/case_test.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+        };
+
+        let config = make_test_config();
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let compiled = compiler.compile(&model, "main").unwrap();
+
+        // Should NOT contain question marks in the output
+        assert!(
+            !compiled.sql.contains("CAST(? AS"),
+            "CASE expression should not produce CAST(? AS ...): {}",
+            compiled.sql
+        );
+        assert!(
+            !compiled.sql.contains("AS ?"),
+            "CASE expression should not produce ... AS ?: {}",
+            compiled.sql
+        );
+        // Should contain the alias 'label'
+        assert!(
+            compiled.sql.contains("label"),
+            "Should preserve the 'label' alias: {}",
+            compiled.sql
+        );
+    }
+
+    #[test]
+    fn test_case_expression_without_alias_no_question_marks() {
+        // CASE without explicit alias — should produce a valid name, not '?'
+        let sql = "SELECT x, CASE WHEN x > 0 THEN 'high' ELSE 'low' END FROM t";
+
+        let model = ModelFile {
+            name: "case_test2".to_string(),
+            path: "models/case_test2.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+        };
+
+        let config = make_test_config();
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let compiled = compiler.compile(&model, "main").unwrap();
+
+        assert!(
+            !compiled.sql.contains("CAST(? AS"),
+            "CASE without alias should not produce CAST(? AS ...): {}",
+            compiled.sql
+        );
+        assert!(
+            !compiled.sql.contains("AS ?"),
+            "CASE without alias should not produce ... AS ?: {}",
+            compiled.sql
+        );
+    }
+
+    #[test]
+    fn test_join_type_inference_no_wrong_casts() {
+        // When a model JOINs source + seed, the type wrapper should not apply wrong types
+        let sql = r#"SELECT
+    p.product_id,
+    p.product_name,
+    ch.category_name,
+    p.unit_price_cents / 100.0 AS unit_price,
+    CASE WHEN p.is_digital THEN 'Digital' ELSE 'Physical' END AS product_type
+FROM raw.products AS p
+LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
+
+        let model = ModelFile {
+            name: "stg_products".to_string(),
+            path: "models/staging/stg_products.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+        };
+
+        let config = make_test_config();
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let compiled = compiler.compile(&model, "main").unwrap();
+
+        // product_name is a VARCHAR column — should NOT be cast as DOUBLE
+        assert!(
+            !compiled.sql.contains("CAST(product_name AS DOUBLE)"),
+            "product_name should not be cast as DOUBLE: {}",
+            compiled.sql
+        );
+        // product_id is INTEGER — should NOT be cast as DECIMAL(11,10)
+        assert!(
+            !compiled.sql.contains("DECIMAL(11,10)"),
+            "product_id should not get wrong DECIMAL precision: {}",
+            compiled.sql
+        );
+    }
+
+    #[test]
+    fn test_case_in_aggregate_no_question_marks() {
+        // COUNT(CASE WHEN ... THEN 1 END) — common funnel pattern
+        let sql = "SELECT COUNT(CASE WHEN event_type = 'purchase' THEN 1 END) AS purchases FROM t GROUP BY x";
+
+        let model = ModelFile {
+            name: "case_agg_test".to_string(),
+            path: "models/case_agg_test.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+        };
+
+        let config = make_test_config();
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let compiled = compiler.compile(&model, "main").unwrap();
+
+        assert!(
+            !compiled.sql.contains("CAST(? AS"),
+            "CASE in aggregate should not produce CAST(? AS ...): {}",
+            compiled.sql
+        );
+        assert!(
+            compiled.sql.contains("purchases"),
+            "Should preserve the 'purchases' alias: {}",
+            compiled.sql
+        );
     }
 }

@@ -84,6 +84,7 @@ pub enum SyntaxKind {
     UNPIVOT_KW,
     LIKE_KW,
     ILIKE_KW,
+    EXTRACT_KW,
 
     // Contextual keywords (lexed as IDENT, recognized by parser contextually)
     // These variants exist for the enum but are never produced by the lexer.
@@ -197,6 +198,7 @@ pub enum SyntaxKind {
     VALUES_ROW,          // Single row in VALUES: (1, 2)
     STRUCT_LITERAL,      // STRUCT(a, b, c)
     ROW_CONSTRUCTOR,     // ROW(1, 2, 3)
+    EXTRACT_EXPR,        // EXTRACT(field FROM expr)
     ANY_EXPR,            // ANY(expr) / ALL(expr) / SOME(expr)
     WITHIN_GROUP_CLAUSE, // WITHIN GROUP (ORDER BY ...)
     FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
@@ -287,6 +289,7 @@ impl SyntaxKind {
                 | UNPIVOT_KW
                 | LIKE_KW
                 | ILIKE_KW
+                | EXTRACT_KW
         )
     }
 

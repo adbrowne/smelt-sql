@@ -4,8 +4,8 @@
 /// including literals, column references, CAST expressions, and aggregates.
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, FunctionCall, RowConstructor, SelectStmt,
-    StructLiteral, Subquery,
+    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
+    SelectStmt, StructLiteral, Subquery,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -263,6 +263,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_subquery_type(&subquery, ctx);
     }
 
+    // Try EXTRACT expression
+    if let Some(extract_expr) = expr.as_extract() {
+        return infer_extract_type(&extract_expr);
+    }
+
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
@@ -344,6 +349,14 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
                 }
             }
         }
+        // Qualified column reference (e.g. "p.product_id") that couldn't be resolved —
+        // return None rather than falling through to infer_literal_type which would
+        // misinterpret the dot as a decimal point.
+        // Unqualified refs (e.g. "INTERVAL") must still fall through so that
+        // infer_literal_type can recognize typed literals like INTERVAL '1' DAY.
+        if col_ref.qualifier().is_some() {
+            return None;
+        }
     }
 
     // Try literal inference (also handles typed literals like DATE '2025-01-15')
@@ -360,6 +373,13 @@ fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColum
     // Parse the type specification
     let data_type = parse_type(&type_text).ok()?;
 
+    // Normalize FLOAT to DOUBLE: DuckDB treats FLOAT as a 4-byte float but
+    // smelt normalizes to DOUBLE to avoid spurious type mismatches downstream.
+    let data_type = match data_type {
+        DataType::Float => DataType::Double,
+        other => other,
+    };
+
     // Check if the input expression is nullable
     let nullable = cast_expr
         .expression()
@@ -372,6 +392,23 @@ fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColum
     })
 }
 
+/// Infer the type of an EXTRACT(field FROM expr) expression.
+fn infer_extract_type(extract_expr: &ExtractExpr) -> Option<TypedColumn> {
+    let field = extract_expr.field_name().unwrap_or_default();
+    let data_type = match field.as_str() {
+        "EPOCH" => DataType::Double,
+        "YEAR" | "MONTH" | "DAY" | "HOUR" | "MINUTE" | "SECOND" | "DOW" | "DOY" | "QUARTER"
+        | "WEEK" | "DAYOFWEEK" | "DAYOFYEAR" | "ISODOW" | "ISOYEAR" | "MICROSECOND"
+        | "MICROSECONDS" | "MILLISECOND" | "MILLISECONDS" | "TIMEZONE" | "TIMEZONE_HOUR"
+        | "TIMEZONE_MINUTE" => DataType::BigInt,
+        _ => DataType::BigInt, // default for unknown fields
+    };
+    Some(TypedColumn {
+        data_type,
+        nullable: true,
+    })
+}
+
 /// Infer the type of a CASE expression.
 /// The result type is the type of the first THEN expression (or ELSE if no WHEN clauses).
 /// Non-nullable only when an ELSE clause is present AND all branches (THEN + ELSE) are non-nullable.
@@ -379,9 +416,16 @@ fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedColum
 fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<TypedColumn> {
     let has_else = case_expr.else_expr().is_some();
 
-    // Collect types from all WHEN/THEN branches
-    let mut result_data_type: Option<DataType> = None;
+    // Collect types from all WHEN/THEN branches, promoting across all of them
+    let mut accumulated: Option<TypedColumn> = None;
     let mut all_branches_non_nullable = true;
+
+    let merge = |acc: Option<TypedColumn>, branch: TypedColumn| -> Option<TypedColumn> {
+        match acc {
+            None => Some(branch),
+            Some(existing) => Some(promote_types(&existing, &branch)),
+        }
+    };
 
     for when_clause in case_expr.when_clauses() {
         if let Some(result_expr) = when_clause.result() {
@@ -389,10 +433,8 @@ fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<Typed
                 if result_type.nullable {
                     all_branches_non_nullable = false;
                 }
-                if result_data_type.is_none()
-                    && !matches!(result_type.data_type, DataType::Unknown | DataType::Null)
-                {
-                    result_data_type = Some(result_type.data_type);
+                if !matches!(result_type.data_type, DataType::Unknown | DataType::Null) {
+                    accumulated = merge(accumulated, result_type);
                 }
             } else {
                 all_branches_non_nullable = false;
@@ -408,17 +450,16 @@ fn infer_case_expr_type(case_expr: &CaseExpr, ctx: &TypeContext) -> Option<Typed
             if else_type.nullable {
                 all_branches_non_nullable = false;
             }
-            if result_data_type.is_none()
-                && !matches!(else_type.data_type, DataType::Unknown | DataType::Null)
-            {
-                result_data_type = Some(else_type.data_type);
+            if !matches!(else_type.data_type, DataType::Unknown | DataType::Null) {
+                accumulated = merge(accumulated, else_type);
             }
         } else {
             all_branches_non_nullable = false;
         }
     }
 
-    let data_type = result_data_type?;
+    let accumulated = accumulated?;
+    let data_type = accumulated.data_type;
 
     // Non-nullable only when ELSE is present and all branches are non-nullable.
     // Without ELSE, the implicit default is NULL.
@@ -1808,6 +1849,16 @@ fn infer_column_name(expr: &Expr) -> Option<String> {
         return Some(col_ref.name().to_string());
     }
 
+    // Try EXTRACT expression
+    if let Some(_extract) = expr.as_extract() {
+        return Some("extract".to_string());
+    }
+
+    // Try CASE expression — no natural name, but return a placeholder
+    if expr.as_case().is_some() {
+        return Some("case_expr".to_string());
+    }
+
     // Try function call - use function name
     if let Some(func) = expr.as_function_call() {
         return func.name();
@@ -1878,6 +1929,20 @@ pub fn promote_types(t1: &TypedColumn, t2: &TypedColumn) -> TypedColumn {
         _ if both_numeric => match (&t1.data_type, &t2.data_type) {
             (DataType::Double, _) | (_, DataType::Double) => DataType::Double,
             (DataType::Float, _) | (_, DataType::Float) => DataType::Float,
+            // When a Decimal combines with an integer type, widen to Decimal(38,10)
+            // to avoid overflow. E.g. CASE WHEN ... THEN 150::INTEGER ELSE 0.5::DECIMAL(2,1)
+            // should not produce DECIMAL(2,1) which can only hold up to 9.9.
+            (
+                DataType::Decimal { .. },
+                DataType::SmallInt | DataType::Integer | DataType::BigInt,
+            )
+            | (
+                DataType::SmallInt | DataType::Integer | DataType::BigInt,
+                DataType::Decimal { .. },
+            ) => DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
             (DataType::Decimal { precision, scale }, _)
             | (_, DataType::Decimal { precision, scale }) => DataType::Decimal {
                 precision: *precision,
@@ -2619,7 +2684,8 @@ mod tests {
             .data_type,
             DataType::Float
         );
-        // Decimal + Integer → Decimal
+        // Decimal + Integer → Decimal(38,10) (widened to prevent overflow)
+        // e.g. CASE WHEN ... THEN 150::INTEGER ELSE col::DECIMAL(10,2) must hold integer values
         assert_eq!(
             promote_types(
                 &mk(DataType::Decimal {
@@ -2630,8 +2696,8 @@ mod tests {
             )
             .data_type,
             DataType::Decimal {
-                precision: 10,
-                scale: 2
+                precision: 38,
+                scale: 10
             }
         );
     }
@@ -2981,5 +3047,38 @@ mod tests {
         // Double % Double → Double
         let types = infer_sql("SELECT CAST(10.5 AS DOUBLE) % CAST(3.0 AS DOUBLE)");
         assert_eq!(types[0].data_type, DataType::Double);
+    }
+
+    // Bug #7: promote_types should widen narrow decimal when combined with wider integer type
+    // CASE WHEN cond THEN integer_col ELSE decimal_literal END should not produce a narrow type
+    #[test]
+    fn test_decimal_case_widening() {
+        // CASE result combining Integer and Decimal{2,1}: should widen to at least Decimal{38,10}
+        // so that integer values like 100 don't overflow the decimal type
+        let types = infer_sql(
+            "SELECT CASE WHEN TRUE THEN CAST(150 AS INTEGER) ELSE CAST(0.5 AS DECIMAL(2,1)) END",
+        );
+        match &types[0].data_type {
+            DataType::Decimal { precision, scale } => {
+                // precision - scale = integer digits available; must be >= 3 for value 150
+                let integer_digits = precision - scale;
+                assert!(
+                    integer_digits >= 3,
+                    "CASE of Integer/Decimal should widen to allow values like 150, got DECIMAL({precision},{scale})"
+                );
+            }
+            other => panic!("Expected Decimal, got {other:?}"),
+        }
+    }
+
+    // Bug #8: CAST(x AS FLOAT) should infer as Double (FLOAT normalizes to DOUBLE)
+    #[test]
+    fn test_cast_float_normalizes_to_double() {
+        let types = infer_sql("SELECT CAST(1 AS FLOAT)");
+        assert_eq!(
+            types[0].data_type,
+            DataType::Double,
+            "CAST AS FLOAT should infer as Double"
+        );
     }
 }

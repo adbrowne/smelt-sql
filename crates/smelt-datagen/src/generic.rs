@@ -142,8 +142,9 @@ pub fn apply_spec(
             let v = log_normal(*median, *sigma, *max).generate(rng);
             GenericValue::Int(v)
         }
-        GeneratorSpec::Geometric { p } => {
+        GeneratorSpec::Geometric { p, min } => {
             let v = geometric(*p).generate(rng);
+            let v = if let Some(m) = min { v.max(*m) } else { v };
             GenericValue::Int(v)
         }
         GeneratorSpec::Bool { prob } => {

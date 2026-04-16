@@ -215,6 +215,14 @@ Geometric distribution — "number of failures before first success". Useful for
 generator: { type: geometric, p: 0.5 }
 ```
 
+Use the optional `min` parameter to set a lower bound (useful for quantities that must be at least 1):
+
+```yaml
+generator: { type: geometric, p: 0.5, min: 1 }
+```
+
+With `min: 1`, the generator produces values ≥ 1 — no zero quantities. Without `min`, the distribution includes 0.
+
 ### Dates and timestamps
 
 #### `date`

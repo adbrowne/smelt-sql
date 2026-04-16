@@ -91,19 +91,26 @@ pub trait Backend: Send + Sync {
 
         match materialization {
             Materialization::Table => {
+                // Drop both view and table in case the materialization type changed
+                self.drop_view_if_exists(schema, name).await?;
                 self.drop_table_if_exists(schema, name).await?;
                 self.create_table_as(schema, name, sql).await?;
             }
             Materialization::View => {
+                // Drop both table and view in case the materialization type changed
+                self.drop_table_if_exists(schema, name).await?;
                 self.drop_view_if_exists(schema, name).await?;
                 self.create_view_as(schema, name, sql).await?;
             }
             Materialization::MaterializedView => {
                 if self.capabilities().supports_materialized_views {
+                    self.drop_table_if_exists(schema, name).await?;
+                    self.drop_view_if_exists(schema, name).await?;
                     self.drop_materialized_view_if_exists(schema, name).await?;
                     self.create_materialized_view_as(schema, name, sql).await?;
                 } else {
                     eprintln!("  Warning: backend doesn't support materialized views, using table for '{}'", name);
+                    self.drop_view_if_exists(schema, name).await?;
                     self.drop_table_if_exists(schema, name).await?;
                     self.create_table_as(schema, name, sql).await?;
                 }

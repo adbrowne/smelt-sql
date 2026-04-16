@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e0ead2a218e80c81355930767c3db4f73ce651c995c391ecae232f3722cb9ba5 # shrinks to base = Float
+cc 9b28a578aaa0c9c28de446171f6db5992365c06cad482c48d9ca55a030493e74 # shrinks to t1 = SmallInt, t2 = Float
+cc 7c2cf6525c31b6ae509f51803712802cbfa28b53b53fbd1fc1336f60612728bf # shrinks to base = SmallInt, t1 = Cast(Float), t2 = Identity
+cc 60c0fa99d3049df9076a881b65911df17dca22b38d0b567464233d6552cffd80 # shrinks to base = SmallInt, target = Float

@@ -1,0 +1,6 @@
+status_code,status_label,is_terminal,is_successful
+completed,Completed,true,true
+shipped,Shipped,false,true
+processing,Processing,false,true
+cancelled,Cancelled,true,false
+returned,Returned,true,false
