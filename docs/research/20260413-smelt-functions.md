@@ -60,15 +60,14 @@ The core insight: Jinja defeats analysis because it operates on strings. If the 
 
 | Sort | What it represents | Where it can appear |
 |------|-------------------|-------------------|
-| `Expr<T>` | Scalar expression of SQL type T | SELECT, WHERE, ON, HAVING, CASE |
+| `Expr<T>` | Scalar expression of SQL type T | SELECT, WHERE, ON, HAVING, CASE, QUALIFY |
 | `AggExpr<T>` | Expression containing aggregation | SELECT (with GROUP BY), HAVING |
 | `TableExpr` | Something with a schema | FROM, JOIN, WITH |
 | `SelectItems` | List of (expression, alias) pairs | SELECT clause |
-| `Predicate` | Boolean expression | WHERE, ON, HAVING, QUALIFY |
 | `Column<T>` | Column reference of type T | Anywhere Expr<T> is valid |
 | `OrderSpec` | Expression + direction | ORDER BY |
 
-These sorts ensure structural well-formedness: you cannot splice a `TableExpr` into a WHERE clause, or a `Predicate` into a FROM clause. The compiler checks sort-correctness at each composition point.
+These sorts ensure structural well-formedness: you cannot splice a `TableExpr` into a WHERE clause, or an `Expr<Boolean>` into a FROM clause. The compiler checks sort-correctness at each composition point.
 
 ### Table Context Bindings
 
@@ -76,14 +75,14 @@ Any fragment sort that can contain column references may optionally declare whic
 
 1. **A `TableExpr` parameter** — e.g., `Column<source>` where `source` is a parameter
 2. **A CTE defined in the function body** — e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause in the body
-3. **A union of contexts** — e.g., `Predicate<source | customers>` for fragments that can reference columns from multiple tables
+3. **A union of contexts** — e.g., `Expr<Boolean, source | customers>` for fragments that can reference columns from multiple tables
 
 The compiler derives the schema of each named context: parameter schemas come from the call site, CTE schemas are computed from the function body. Context bindings are then validated against these schemas.
 
 | Sort | With context binding | Meaning |
 |------|---------------------|---------|
 | `Column<T>` | `Column<source, T>` | A column from `source` of SQL type T |
-| `Predicate` | `Predicate<source>` | A boolean expression whose columns come from `source` |
+| `Expr<Boolean>` | `Expr<Boolean, source>` | A boolean expression whose columns come from `source` |
 | `SelectItems` | `SelectItems<Agg, sessionized>` | Aggregate select items over `sessionized` columns |
 | `Expr<T>` | `Expr<T, source>` | A scalar expression whose columns come from `source` |
 | `OrderSpec` | `OrderSpec<enriched>` | An ordering expression over `enriched` columns |
@@ -97,7 +96,7 @@ smelt.define session_rollup(
     ts_col: Column<source, Timestamp>,           -- timestamp column from source
     gap: Expr<Interval> = INTERVAL '30 minutes', -- no table context (literal)
     metrics: SelectItems<Agg, sessionized> = (), -- agg over sessionized (source.* + session_id)
-    filters: Predicate<source> = TRUE            -- predicate over source columns only
+    filters: Expr<Boolean, source> = TRUE         -- boolean filter over source columns only
 ) -> TableExpr @deterministic AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -249,7 +248,7 @@ SELECT * FROM smelt.fn.session_rollup(
 
 ### Block Syntax as Sugar
 
-The `{ }` block after a function call provides named sections for fragment-typed parameters:
+Named `WITH ... AS (...)` clauses trailing a function call provide named sections for fragment-typed parameters:
 
 ```sql
 SELECT * FROM smelt.fn.session_rollup(
@@ -257,19 +256,18 @@ SELECT * FROM smelt.fn.session_rollup(
     user_col => user_id,
     ts_col => event_timestamp,
     gap => INTERVAL '20 minutes'
-) {
-    metrics:
-        SUM(revenue) AS total_revenue,
-        COUNT(DISTINCT page_url) AS unique_pages,
-        smelt.fn.safe_divide(SUM(revenue), COUNT(*)) AS revenue_per_event
-
-    filters:
-        event_type != 'bot'
-        AND user_id IS NOT NULL
-}
+)
+WITH metrics AS (
+    SUM(revenue) AS total_revenue,
+    COUNT(DISTINCT page_url) AS unique_pages,
+    smelt.fn.safe_divide(SUM(revenue), COUNT(*)) AS revenue_per_event
+)
+WITH filters AS (
+    event_type != 'bot' AND user_id IS NOT NULL
+)
 ```
 
-This desugars to passing the block contents as fragment-typed arguments. The compiler treats it identically to inline arguments. But the syntax is dramatically better for the common case of multi-line SQL fragments.
+Each `WITH name AS (...)` clause binds a fragment-typed parameter by name. The compiler treats it identically to inline arguments. The syntax reuses SQL's existing `WITH ... AS (...)` shape — no significant whitespace, no nested mini-grammar, and the parser already knows how to handle parenthesized expressions after `AS`. Block clauses must trail the function call's closing `)` directly.
 
 ### Blocks Compose
 
@@ -285,9 +283,8 @@ smelt.define monitored_session_rollup(
     alerts: SelectItems<Agg, base> = ()
 ) -> TableExpr AS (
     WITH base AS (
-        smelt.fn.session_rollup(source, user_col, ts_col) {
-            metrics: metrics   -- pass through caller's metrics
-        }
+        smelt.fn.session_rollup(source, user_col, ts_col)
+        WITH metrics AS (metrics)  -- pass through caller's metrics
     )
     SELECT base.*,
         alerts
@@ -443,9 +440,22 @@ smelt.define add_margin(source: TableExpr) -> TableExpr AS (
 
 Here `revenue` and `cost` are not parameters — they resolve from whatever schema `source` carries. This is closer to **row polymorphism** (as in OCaml's object types or PureScript's row types) than pure lexical scoping: the function body is polymorphic over any table that has columns named `revenue` and `cost` of compatible types.
 
-**The honest description:** "Parameters are lexically scoped; column resolution within table-typed parameters is structural (schema-checked but not name-bound)."
+These column requirements can also be declared explicitly using annotated `TableExpr`:
 
-When table context bindings are used (e.g., `filters: Predicate<source>`), the compiler checks that column references in the caller's fragment exist in the bound table's schema — making the structural resolution explicit and checked early. Without context bindings, column resolution happens at expansion time.
+```sql
+smelt.define add_margin(
+    source: TableExpr<{revenue: Numeric, cost: Numeric}>
+) -> TableExpr AS (
+    SELECT source.*, revenue - cost AS margin
+    FROM source
+)
+```
+
+With the annotation, the compiler checks the `revenue` and `cost` requirements at the call site before expansion — the caller gets "table passed to `source` is missing required column `revenue: Numeric`" rather than a post-expansion SQL error. Adding `..r` to the annotation (`TableExpr<{revenue: Numeric, cost: Numeric, ..r}>`) further allows threading the caller's extra columns through to the return type.
+
+**The honest description:** "Parameters are lexically scoped; column resolution within table-typed parameters is structural (schema-checked but not name-bound). Annotations make the structural requirements explicit."
+
+When table context bindings are used (e.g., `filters: Expr<Boolean, source>`), the compiler checks that column references in the caller's fragment exist in the bound table's schema — making the structural resolution explicit and checked early. Without context bindings, column resolution happens at expansion time.
 
 **Rationale for the hybrid:**
 - Functions are **self-contained** — readable without knowing the call site (parameters are lexical, column requirements are visible from the `TableExpr` usage)
@@ -486,7 +496,7 @@ The compiler analyzes function bodies and attaches structural metadata to the fu
 This metadata is derived automatically — the function author writes plain SQL and the compiler extracts the structure. Authors can also add explicit property annotations for semantics the compiler cannot infer. In PLT terms, this is a **refinement type**: the type carries structural invariants beyond just the fragment sort.
 
 **What happens here:**
-- **Predicate pushdown into blocks.** A downstream WHERE clause is pushed into a function's `filters` parameter.
+- **Filter pushdown into blocks.** A downstream WHERE clause is pushed into a function's `filters` parameter.
 - **Fusion.** Two adjacent function calls are merged into a single, more efficient function.
 - **Join elimination.** Unused output columns are traced through the provenance map; if all columns from a 1:1 LEFT JOIN are unused, the join is removed (see Example 3 below).
 - **Semantic validation.** A function marked `@requires_append_only` is checked against its source.
@@ -621,7 +631,7 @@ smelt.define session_rollup(
     ts_col: Column<source, Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
     metrics: SelectItems<Agg, sessionized> = (),
-    filters: Predicate<source> = TRUE
+    filters: Expr<Boolean, source> = TRUE
 ) -> TableExpr @deterministic AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -654,16 +664,15 @@ SELECT * FROM smelt.fn.session_rollup(
     user_col => user_id,
     ts_col => event_timestamp,
     gap => INTERVAL '20 minutes'
-) {
-    metrics:
-        SUM(revenue) AS total_revenue,
-        COUNT(DISTINCT page_url) AS unique_pages,
-        smelt.fn.safe_divide(SUM(revenue), COUNT(*)) AS revenue_per_event
-
-    filters:
-        event_type != 'bot'
-        AND user_id IS NOT NULL
-}
+)
+WITH metrics AS (
+    SUM(revenue) AS total_revenue,
+    COUNT(DISTINCT page_url) AS unique_pages,
+    smelt.fn.safe_divide(SUM(revenue), COUNT(*)) AS revenue_per_event
+)
+WITH filters AS (
+    event_type != 'bot' AND user_id IS NOT NULL
+)
 ```
 
 **What the planner does:**
@@ -844,7 +853,7 @@ Default values for parameters follow these rules:
 
 - **Self-contained.** A default expression cannot reference other parameters. This keeps default evaluation order trivial and avoids a mini-scope-resolution problem at the signature layer.
 - **Type-checked at definition time.** A default must satisfy the parameter's declared type. This is a free Tier 2 check — defaults are part of the signature, so checking them is part of checking the signature.
-- **Omission means "splice nothing"** for fragment-typed parameters. A `SelectItems` parameter with a default of "no items" is expressed by simply omitting the argument at the call site — no `()` empty-list syntax needed in the source. `Predicate` parameters that should default to "no filter" use `= TRUE` (a real SQL literal). This avoids inventing non-SQL syntax for empty fragments.
+- **Omission means "splice nothing"** for fragment-typed parameters. A `SelectItems` parameter with a default of "no items" is expressed by simply omitting the argument at the call site — no `()` empty-list syntax needed in the source. `Expr<Boolean>` filter parameters that should default to "no filter" use `= TRUE` (a real SQL literal). This avoids inventing non-SQL syntax for empty fragments.
 
 ### No variadic parameters in v1 (decided April 15, 2026)
 
@@ -888,68 +897,64 @@ Introducing functions does not change the meaning of existing models. Models tha
 
 The type inference algorithm is **bidirectional checking** (Pierce, 2004; Dunfield & Krishnaswami, 2021) with a local unification step for row variables. This is a global design decision: all tiers of the gradual typing system, all row-polymorphic checking (both `TableExpr` and `Struct`), and all error message generation follow from this choice. See §18 for the full rationale, per-tier behavior, and error message properties.
 
+### Block syntax: named SQL-like clauses (decided April 16, 2026)
+
+Fragment-typed parameters can be passed as trailing `WITH name AS (...)` clauses after the function call's closing `)`. This reuses SQL's existing `WITH ... AS (...)` shape — no significant whitespace, no nested mini-grammar. Block clauses must trail the function call directly. See §5 for examples.
+
+### Grammar: functions go where models go (decided April 16, 2026)
+
+- Function files use frontmatter, same as model files.
+- A `.sql` file may contain **multiple** `smelt.define` definitions. Conflicts (same function name in same directory) are reported as errors.
+- A file may contain both `smelt.define` definitions and a model `SELECT` — they coexist at the top level.
+- Function namespacing is directory-derived (§12, "Namespacing: directory-derived").
+
+### Predicate sort removed (decided April 16, 2026)
+
+The `Predicate` fragment sort is removed. Use `Expr<Boolean>` instead. The positional constraint (WHERE, ON, HAVING) is enforced by SQL syntax; `Expr<Boolean>` carries the same type information with one fewer concept to learn. Context bindings use `Expr<Boolean, source>` where `Predicate<source>` was previously written.
+
+### Column\<T\> accepts bare refs only (decided April 16, 2026)
+
+`Column<source, Timestamp>` accepts only bare column references (`user_id`), not computed expressions (`LOWER(user_id)`). Use `Expr<T>` for computed values. This has semantic weight when the parameter is spliced into `PARTITION BY` or `GROUP BY`.
+
+### Annotation syntax: bare keywords in v1 (decided April 16, 2026)
+
+v1 annotations are bare keyword annotations only: `@deterministic`, `@idempotent`, `@append_only`. No structured arguments. Annotations appear after the type, before the `=` default (for parameters) or before `AS` (for return types). Structured annotations (`@joins(...)`, `@provenance(...)`) are deferred to v2 when the planner needs them. Function-level annotations (e.g., `@deprecated`) are reserved but not implemented.
+
+### Named parameter syntax follows PostgreSQL (decided April 16, 2026)
+
+smelt's `param => value` named-parameter syntax follows PostgreSQL's named notation for function calls (supported since PostgreSQL 9.5). Oracle PL/SQL uses the same `=>` convention. This is an established convention, not new syntax. `smelt.metric()` will use the same `=>` named-parameter syntax when implemented.
+
+### MVP scope: subset of fragment sorts (decided April 16, 2026)
+
+The initial implementation targets a subset of fragment sorts: `Expr<T>`, `TableExpr`, and `Column<T>`. The remaining sorts (`AggExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Implementation order determines what gets built when — each sort is independently addable without breaking existing functions.
+
+### Planner integration is post-MVP (decided April 16, 2026)
+
+v1 is pure expansion — no Level 1 planner rules. Function properties (`@deterministic`, `@append_only`) are parsed and stored but not actively used by the planner. This lets the function system be validated independently before adding planner complexity.
+
+### Error trace depth: direct in phase 1 (decided April 16, 2026)
+
+When function A calls B calls C and C produces a type error, the Tier 1 error shows A→C (call site → innermost error), skipping intermediate expansions. Full-chain traces (A→B→C) are a future improvement if the direct trace proves insufficient.
+
 ## 13. Open Questions
 
-The decisions in §12 close most of the prior open questions. The items below are the remaining design choices that must be locked in before an implementation plan can be written.
-
-### Block syntax surface (must decide before plan)
-
-The `{ metrics: ... filters: ... }` block introduces a second grammar at the call site, with whitespace-sensitive section delimiters. This is the part of the design most likely to bite the parser, the LSP, and the formatter. Candidates under consideration:
-
-- **Named SQL-like clauses.** Reuse SQL keywords/shape:
-  ```sql
-  SELECT * FROM smelt.fn.session_rollup(source => ..., user_col => ..., ts_col => ...)
-    WITH metrics AS (SUM(revenue) AS total_revenue, ...)
-    WITH filters AS (event_type != 'bot')
-  ```
-  Reads like extra CTEs-as-arguments. Avoids significant whitespace and a nested mini-grammar.
-- **Trailing parenthesized labelled blocks.** `) metrics: ( ... ) filters: ( ... )` — still a mini-grammar but inside parens, no significant whitespace.
-- **Pure named arguments.** Multi-line parenthesized lists, lean on the formatter. Worst ergonomics, simplest parser.
-- **Single trailing positional block (Kotlin-style).** Fine for one fragment param; fails when there are two (metrics + filters).
-
-The choice has knock-on effects on parser complexity, LSP completion behaviour, and formatter rules.
-
-### Grammar for `smelt.define` (must decide before plan)
-
-- One definition per file, or many?
-- Frontmatter on function files? (For test markers, future visibility, package metadata.)
-- Is `smelt.define ...` a top-level statement that can appear alongside `SELECT`, or are function files restricted to definitions only?
-
-### Annotation syntax (must decide before plan)
-
-`@deterministic`, `@append_only`, `@joins(dim_customers LEFT 1:1)`, `@provenance(...)` are used throughout the paper but never given a formal grammar. Need to decide:
-
-- Where annotations may attach (parameter, return type, whole function)
-- The grammar for structured annotation arguments
-- Which annotations ship in v1 vs. are reserved
-
-### `Column<T>` parameters: bare refs only, or expressions? (must decide before plan)
-
-Examples show `user_col => user_id`. Decide whether `Column<T>` accepts only bare column references or also computed expressions (`user_col => lower(user_id)`). This has semantic weight when the parameter is spliced into `PARTITION BY` or `GROUP BY`. Recommendation: `Column<T>` is bare-ref-only; use `Expr<T>` for computed values.
-
-### MVP scope (must decide before plan)
-
-- Which fragment sorts ship in v1 (just `Expr<T>`, or also `TableExpr` / `Predicate` / `SelectItems`)?
-- Which annotation tier ships first? (Paper currently says Tier 1, but a phased path through Tier 2/3 must be in the plan.)
-- Does v1 include any Level 1 planner rule (e.g., the join-elimination showcase from Example 3), or pure expansion only?
-- Does v1 include the block syntax, or are expression-only functions enough to validate the architecture?
-
-### Relationship to `smelt.metric()` (must decide before plan)
-
-The language already has `smelt.metric()` with `=>` named parameters. Does `smelt.fn.*` parallel it, or is `smelt.metric` reframed as a special case of `smelt.define`? Affects parser unification.
+The decisions in §12 now close most design questions. The items below are what remains.
 
 ### Specification tightening (can resolve inside the plan)
 
 - **Union context disambiguation.** For `Column<a | b, Integer>` when both `a` and `b` have an `id` column, what does the caller write? Parameter-name qualification (`a.id`) is the natural answer but needs to be specified explicitly, including parameter-CTE union cases.
 - **CTE context checking boundary.** `SelectItems<Agg, sessionized>` can be checked structurally (is it a select list of aggregates?) at definition time, but column-name validation against the CTE schema is call-site-dependent because CTE schemas often include `source.*`. Document the split clearly.
+- **`AggExpr<T>` — keep or collapse into `Expr<T>`?** Same argument as the `Predicate` removal: aggregation context is already enforced by SQL syntax. Counter-argument: `AggExpr<T>` is more informative than `Predicate` was because "this parameter expects an aggregate" is a common source of confusion. Deferred to implementation — not in MVP scope either way.
 
 ### Already deferred / not blocking
 
 - **LSP block-context completion** — architecturally hard, can land after basic diagnostics.
 - **Multiple expansion modes per author** — committed to "the planner's job" unless pain emerges.
 - **Function tests** — deferred per §12; functions remain testable through models that use them.
-- **Package ecosystem / registry** — not v1.
+- **Package ecosystem / registry** — not in initial scope.
 - **Python model interaction** — functions are SQL-only; Python models are opaque table producers reachable via `smelt.ref()`.
+- **Structured annotations** (`@joins(...)`, `@provenance(...)`) — deferred to v2 per §12.
+- **Malloy comparison** — the §10 comparison table undersells Malloy. A fair side-by-side comparing the composition models would strengthen the paper but is not blocking.
 
 ## 14. Summary
 
@@ -986,7 +991,7 @@ The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 �
 
 6. **Refinement types for SQL functions** (Section 8) — The revised planner model explicitly adopts **refinement types**: function types carry compiler-derived structural metadata (column provenance maps, join graphs, declared properties) beyond the basic fragment sort. This resolves the original tension between "opaque nodes" and the planner needing internal structure. The paper now correctly names this as refinement typing, following the pattern from liquid types (Rondon et al., 2008) and similar systems.
 
-7. **Context-dependent type binding** (Section 3) — The expanded context binding system (`Column<source, T>`, `Predicate<source>`, `SelectItems<Agg, sessionized>`, union contexts) is a restricted form of **dependent types** where a type parameter references a value-level binding. The extension to CTE-derived contexts and union contexts moves this closer to a proper **row-polymorphic system with structural subtyping** — the union `source | customers | products` is essentially a join of row types.
+7. **Context-dependent type binding** (Section 3) — The expanded context binding system (`Column<source, T>`, `Expr<Boolean, source>`, `SelectItems<Agg, sessionized>`, union contexts) is a restricted form of **dependent types** where a type parameter references a value-level binding. The extension to CTE-derived contexts and union contexts moves this closer to a proper **row-polymorphic system with structural subtyping** — the union `source | customers | products` is essentially a join of row types.
 
 ### Critical Analysis
 
@@ -1086,7 +1091,7 @@ Many built-ins map directly onto the existing sorts:
 | Pure scalar (`LOWER`, `ABS`, `LENGTH`) | `Expr<T1> -> Expr<T2>` |
 | Binary scalar (`POWER`, `MOD`) | `(Expr<T>, Expr<T>) -> Expr<T>` |
 | Aggregates (`SUM`, `COUNT`, `AVG`) | `Expr<T> -> AggExpr<T>` |
-| Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Predicate` |
+| Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Expr<Boolean>` |
 | Simple table functions (`generate_series(1, 10)`) | `(Expr<Int>, Expr<Int>) -> TableExpr` |
 
 These are the majority of the SQL standard library. No new typing machinery required.
@@ -1103,7 +1108,7 @@ Several ubiquitous built-ins expose gaps:
 
 **4. Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`, `POSITION(sub IN str)`, `LISTAGG(x, ',') WITHIN GROUP (ORDER BY y)`. The SQL standard spells several built-ins with mandatory keywords rather than commas. Our `=>` named-argument syntax doesn't map onto these; they'd need to be treated as primitive grammar rather than ordinary calls.
 
-**5. Modifier clauses on aggregates.** `SUM(x) FILTER (WHERE cond)`, `string_agg(x, ',' ORDER BY y)`, and window `OVER (...)`. These attach `Predicate` / `OrderSpec` fragments to an aggregate call — which the type system already knows how to describe — but the attachment is a syntactic suffix, not a parameter. A refined `AggExpr<T>` that carries optional `filter: Predicate` and `order: OrderSpec` slots would make this explicit.
+**5. Modifier clauses on aggregates.** `SUM(x) FILTER (WHERE cond)`, `string_agg(x, ',' ORDER BY y)`, and window `OVER (...)`. These attach `Expr<Boolean>` / `OrderSpec` fragments to an aggregate call — which the type system already knows how to describe — but the attachment is a syntactic suffix, not a parameter. A refined `AggExpr<T>` that carries optional `filter: Expr<Boolean>` and `order: OrderSpec` slots would make this explicit.
 
 **6. Schema-returning table functions.** `UNNEST(array_col)` produces a table whose schema depends on the array element type — typeable with generics (`UNNEST<T>: Expr<Array<T>> -> TableExpr{value: T}`). `read_csv` / `read_parquet` with auto-schema detection is **not** compile-time typeable by design: the schema is discovered at runtime. These must either accept a user-supplied schema annotation or fall back to an opaque `TableExpr` where column references are checked at expansion time.
 
