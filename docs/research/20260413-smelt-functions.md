@@ -1,62 +1,34 @@
 # Smelt Functions: Typed SQL Composition to Replace Jinja
 
-**Date:** April 13, 2026
-**Status:** Discussion / Design Exploration
+**Date:** April 2026
+**Status:** Research / Design Exploration
 **Author:** Andrew Browne, with design input from Claude
 
-## 1. Motivation
+This paper explores a design for **smelt functions**: typed, composable SQL fragments that replace Jinja macros while preserving smelt's static analysis guarantees. The core insight is that if the type system tracks *what kind of SQL fragment* a value is, composition can be free and still statically checked. We describe the type system, scoping model, gradual annotation strategy, planner integration, and an experimentation roadmap where each step teaches something that informs the next.
 
-dbt's Jinja macros solve a real problem: SQL reuse. Common patterns like currency conversion, surrogate key generation, session rollups, and standard enrichment joins get copy-pasted across models without a composition mechanism. Jinja macros provide that mechanism — but at a steep cost:
+## 1. The Problem
 
-- **No type checking.** A macro that expects a numeric column silently produces invalid SQL when given a string. Errors appear in the generated SQL, not the macro.
-- **No editor support.** No go-to-definition for macro parameters, no completions inside macro bodies, no hover types.
-- **No planner visibility.** Jinja expands to text before the SQL is parsed. The optimizer can't see through macros, can't reason about their semantics, can't apply macro-aware optimizations.
-- **Obscured logic.** Interleaving `{% for %}`, `{% if %}`, and SQL makes both the template logic and the business logic harder to read.
+smelt models are pure SQL with `smelt.ref()` / `smelt.source()` extensions. This covers orchestration (model dependencies, source declarations) and configuration (YAML frontmatter). It does not cover **logic reuse** -- the ability to define a pattern once and instantiate it across models with different inputs.
 
-smelt deliberately avoids Jinja, but the reuse problem remains. Today, smelt models are pure SQL with `smelt.ref()` / `smelt.source()` extensions. This covers orchestration (model dependencies, source declarations) and configuration (YAML frontmatter). It does not cover **logic reuse** — the ability to define a pattern once and instantiate it across models with different inputs.
-
-This paper explores a design for **smelt functions**: typed, composable SQL fragments that replace Jinja macros while preserving smelt's static analysis guarantees.
-
-### What Jinja Is Actually Used For
+dbt solves this with Jinja macros, but at a steep cost: no type checking, no editor support, no planner visibility, and obscured logic from interleaving `{% for %}` / `{% if %}` with SQL.
 
 Examining real dbt projects, Jinja macro usage falls into five categories:
 
 | Category | Example | Smelt Status |
 |----------|---------|-------------|
-| **Expression reuse** | `{{ cents_to_dollars(amount) }}` | **Gap — this paper** |
-| **SQL fragment generation** | `{{ generate_surrogate_key(['col1', 'col2']) }}` | **Gap — this paper** |
-| **Whole-model templates** | `{{ generate_base_model(source('raw', 'orders')) }}` | **Gap — this paper** |
+| **Expression reuse** | `{{ cents_to_dollars(amount) }}` | **Gap -- this paper** |
+| **SQL fragment generation** | `{{ generate_surrogate_key(['col1', 'col2']) }}` | **Gap -- this paper** |
+| **Whole-model templates** | `{{ generate_base_model(source('raw', 'orders')) }}` | **Gap -- this paper** |
 | **Conditional SQL by environment** | `{% if target.name == 'prod' %}` | Solved by planner rules |
 | **Variable / config access** | `{{ var('start_date') }}` | Solved by frontmatter + project config |
 
-The gap is categories 1–3: reusable SQL at the expression, fragment, and model level.
+The gap is categories 1--3: reusable SQL at the expression, fragment, and model level. Jinja's fundamental failure is that it operates on strings. The type system cannot see through macros, the planner cannot reason about their semantics, and the LSP cannot provide completions inside macro bodies. If the type system tracks what kind of SQL fragment a value is, composition can be free and still statically checked.
 
-## 2. Design Overview
+## 2. Fragment Sorts -- The Core Idea
 
-The design has four layers, each building on the previous:
+The design rests on **fragment sorts**: syntactic categories that distinguish different kinds of SQL fragments. This is the technique Rust's `macro_rules!` uses (fragment specifiers like `$e:expr`, `$s:stmt`), which derives from the PL concept of syntactic sorts in multi-sorted algebras. Rust proved this works at industrial scale. The key lesson: you need *enough* sorts to be useful but not so many that the system becomes its own type theory.
 
-1. **SQL Fragment Types** — The type system distinguishes different kinds of SQL fragments (expressions, table expressions, select lists, predicates). This is the foundation that makes safe composition possible.
-
-2. **Functions over fragments** — Users define functions (`smelt.define`) that take typed SQL fragments as parameters and return typed SQL fragments. These compose freely — a function can call other functions.
-
-3. **Block syntax** — Ergonomic call-site syntax for passing multi-line SQL fragments to functions. Syntactic sugar over fragment-typed parameters.
-
-4. **Three-level planner integration** — Functions are visible in the logical plan as first-class nodes. Planner rules can match on function names and properties, enabling function-aware optimization. Expansion to plain SQL happens late, guided by the planner's strategy decisions.
-
-### Design Principles
-
-- **Functions compile away.** The target database engine never sees `smelt.fn.*` calls. Everything expands to plain SQL before execution. Functions are a compile-time mechanism.
-- **Lexical scoping.** Function parameters are explicit bindings, not ambient column references. This makes functions self-contained and analyzable in isolation.
-- **Optional annotations.** Type annotations on parameters and return values are optional. Unannotated functions are checked at call sites (like C++ templates). Annotated functions are also checked in isolation (like Rust generics). Users start simple and add rigor as functions mature.
-- **No recursion.** Functions cannot call themselves, directly or indirectly. This guarantees termination and makes expansion always finite.
-- **Author complexity, user clarity.** Function authors bear the complexity of type annotations so that function users get clean error messages and a great editor experience. This parallels Rust traits: the author writes the bounds; the caller just passes arguments and gets clear errors like "expected Numeric, got Text." Annotations are always optional — but the more an author provides, the better the experience for every caller.
-- **Planner transparency.** The planner can see function boundaries, match on function names/properties, and apply semantic optimizations. Functions are not just a user convenience — they are optimization annotations.
-
-## 3. SQL Fragment Types
-
-The core insight: Jinja defeats analysis because it operates on strings. If the type system tracks **what kind of SQL fragment** a value is, composition can be free and still statically checked.
-
-### Fragment Sorts
+### The Sorts
 
 | Sort | What it represents | Where it can appear |
 |------|-------------------|-------------------|
@@ -69,34 +41,113 @@ The core insight: Jinja defeats analysis because it operates on strings. If the 
 
 These sorts ensure structural well-formedness: you cannot splice a `TableExpr` into a WHERE clause, or an `Expr<Boolean>` into a FROM clause. The compiler checks sort-correctness at each composition point.
 
-### Table Context Bindings
+`Column<T>` accepts only bare column references (`user_id`), not computed expressions (`LOWER(user_id)`). Use `Expr<T>` for computed values. This distinction has semantic weight when the parameter is spliced into `PARTITION BY` or `GROUP BY`.
 
-Any fragment sort that can contain column references may optionally declare which **context** its columns resolve against. A context can be:
+A `Predicate` sort was considered and rejected. Use `Expr<Boolean>` instead -- the positional constraint (WHERE, ON, HAVING) is already enforced by SQL syntax, and one fewer concept to learn is worth more than one more sort.
 
-1. **A `TableExpr` parameter** — e.g., `Column<source>` where `source` is a parameter
-2. **A CTE defined in the function body** — e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause in the body
-3. **A union of contexts** — e.g., `Expr<Boolean, source | customers>` for fragments that can reference columns from multiple tables
+The initial implementation targets a subset: `Expr<T>`, `TableExpr`, and `Column<T>`. The remaining sorts (`AggExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions.
 
-The compiler derives the schema of each named context: parameter schemas come from the call site, CTE schemas are computed from the function body. Context bindings are then validated against these schemas.
+### Comparison: Malloy
+
+Malloy is the closest direct competitor to this design. Malloy's `dimension` and `measure` declarations are essentially `Expr<T>` and `AggExpr<T>` with fixed scoping. Malloy's `source` extensions are `TableExpr` transformers. The key trade-off: Malloy gets cleaner semantics by abandoning SQL syntax; smelt gets migration compatibility by extending SQL but inherits SQL's scoping messiness. smelt's approach is less opinionated -- SQL fragments rather than a new semantic layer -- which makes incremental adoption easier for teams with large SQL codebases.
+
+## 3. Functions over Fragments
+
+Functions are defined with `smelt.define` and called via the `smelt.fn.*` namespace:
+
+```sql
+-- functions/core/safe_divide.sql
+smelt.define safe_divide(
+    numerator: Expr<Numeric>,
+    denominator: Expr<Numeric>
+) -> Expr<Double> AS (
+    CASE WHEN denominator = 0 OR denominator IS NULL THEN NULL
+         ELSE CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE)
+    END
+)
+```
+
+```sql
+-- Usage in a model
+SELECT
+    product_id,
+    smelt.fn.safe_divide(total_revenue - total_cost, total_revenue) AS margin_pct
+FROM smelt.ref('product_summary')
+```
+
+### Design Properties
+
+**Functions compile away.** The target database engine never sees `smelt.fn.*` calls. Everything expands to plain SQL before execution. This is one-stage metaprogramming -- the same framing as Terra (Devito et al.) and MetaML (Taha & Sheard), where a high-level composition language generates low-level code.
+
+**Named parameters follow PostgreSQL.** The `param => value` syntax follows PostgreSQL's named notation for function calls (supported since PostgreSQL 9.5). Oracle PL/SQL uses the same `=>` convention.
+
+**No recursion.** Functions cannot call themselves, directly or indirectly. This guarantees termination -- the same totality property that makes Dhall work as a configuration language. Dhall demonstrated that a non-Turing-complete language with a modest type system can replace complex templating in practice. smelt's type system (SQL types plus fragment sorts) is the equivalent of Dhall's records and unions.
+
+**Composition is free.** Functions can call other functions to any depth. A calls B calls C. The only restriction is no cycles, which guarantees finite expansion:
+
+```sql
+smelt.define sessionize(
+    source: TableExpr,
+    user_col: Column<source>,
+    ts_col: Column<source, Timestamp>,
+    gap: Expr<Interval> = INTERVAL '30 minutes'
+) -> TableExpr AS (
+    SELECT source.*,
+        SUM(CASE WHEN ts_col - LAG(ts_col)
+            OVER (PARTITION BY user_col ORDER BY ts_col)
+            > gap THEN 1 ELSE 0 END)
+        OVER (PARTITION BY user_col ORDER BY ts_col) AS session_id
+    FROM source
+)
+```
+
+### Conventions
+
+**Namespacing is directory-derived.** Function paths under `smelt.fn.*` mirror the directory layout under `functions/`. `functions/patterns/session_rollup.sql` defines `smelt.fn.patterns.session_rollup`. This matches the `models/` convention.
+
+**All functions are public.** No `pub` / `private` distinction in v1. Adding visibility modifiers later is non-breaking (default stays public).
+
+**No overloading.** Function names are unique within their namespace. Overloading combined with gradual typing is a known footgun (resolution rules become annotation-tier-dependent).
+
+**Functions are additive.** Introducing functions does not change the meaning of existing models. `smelt.define` and `smelt.fn.*` are purely additive to the grammar.
+
+**Default values are self-contained.** A default expression cannot reference other parameters (keeps evaluation order trivial). Defaults are type-checked at definition time. For fragment-typed parameters, omitting the argument means "splice nothing" -- no special empty-list syntax needed. `Expr<Boolean>` filter parameters that should default to "no filter" use `= TRUE`.
+
+**Function files use frontmatter** (same as model files). A `.sql` file may contain multiple `smelt.define` definitions. A file may also contain both definitions and a model `SELECT`. Conflicts (same function name in same directory) are reported as errors.
+
+**Ordering is unrestricted.** A function may call any other function defined anywhere in the project, regardless of file or position within a file. Cycle detection lives in `smelt-db` as a Salsa query over the function-call graph.
+
+## 4. Context Bindings -- Controlling What Callers Can See
+
+When a function takes a fragment-typed parameter that contains column references, a natural question arises: which columns can it reference? The answer is **context bindings** -- optional annotations that declare which table context a fragment's columns resolve against.
+
+Any fragment sort that can contain column references may declare a context:
 
 | Sort | With context binding | Meaning |
 |------|---------------------|---------|
 | `Column<T>` | `Column<source, T>` | A column from `source` of SQL type T |
-| `Expr<Boolean>` | `Expr<Boolean, source>` | A boolean expression whose columns come from `source` |
+| `Expr<Boolean>` | `Expr<Boolean, source>` | Boolean expression whose columns come from `source` |
 | `SelectItems` | `SelectItems<Agg, sessionized>` | Aggregate select items over `sessionized` columns |
-| `Expr<T>` | `Expr<T, source>` | A scalar expression whose columns come from `source` |
-| `OrderSpec` | `OrderSpec<enriched>` | An ordering expression over `enriched` columns |
+| `Expr<T>` | `Expr<T, source>` | Scalar expression whose columns come from `source` |
+| `OrderSpec` | `OrderSpec<enriched>` | Ordering expression over `enriched` columns |
 
-Without a context binding, column references are resolved at expansion time (Tier 1 checking). With a context binding, the compiler validates column references at the call site against the bound context's schema — **before expansion** — producing clear, localized errors.
+A context can be:
+1. **A `TableExpr` parameter** -- e.g., `Column<source>` where `source` is a parameter
+2. **A CTE defined in the function body** -- e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause
+3. **A union of contexts** -- e.g., `Expr<Boolean, source | customers>` for fragments referencing columns from multiple tables
+
+### The Key Insight: Asymmetric Access Control
+
+Consider `session_rollup`:
 
 ```sql
 smelt.define session_rollup(
     source: TableExpr,
-    user_col: Column<source>,                    -- column from source
-    ts_col: Column<source, Timestamp>,           -- timestamp column from source
-    gap: Expr<Interval> = INTERVAL '30 minutes', -- no table context (literal)
-    metrics: SelectItems<Agg, sessionized> = (), -- agg over sessionized (source.* + session_id)
-    filters: Expr<Boolean, source> = TRUE         -- boolean filter over source columns only
+    user_col: Column<source>,
+    ts_col: Column<source, Timestamp>,
+    gap: Expr<Interval> = INTERVAL '30 minutes',
+    metrics: SelectItems<Agg, sessionized> = (),
+    filters: Expr<Boolean, source> = TRUE
 ) -> TableExpr @deterministic AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -112,11 +163,17 @@ smelt.define session_rollup(
 )
 ```
 
-Note the deliberate asymmetry: `metrics` binds to `sessionized` (the caller can reference `session_id` in their aggregate expressions), while `filters` binds to `source` (the author restricts filtering to raw source columns only). **The author controls what each caller-provided fragment can see.** This is a meaningful design choice — narrowing the context is how authors prevent callers from depending on internal implementation details.
+`metrics` binds to `sessionized` (the caller can reference `session_id` in their aggregate expressions), while `filters` binds to `source` (the author restricts filtering to raw source columns only). **The author controls what each caller-provided fragment can see.** This is capability-based access control applied to SQL column namespaces: the function author grants each parameter access to specific table contexts. Narrowing the context is how authors prevent callers from depending on internal implementation details.
 
-#### Union Contexts for Joins
+### CTE-Derived Contexts
 
-When a function joins multiple tables, the author can expose a union context so callers can reference columns from any of the joined tables:
+CTE context is computed, not declared. The author references a CTE by name in the type annotation; the compiler derives its schema from the body. This means the signature and body are coupled -- changing the CTE's SELECT list may change what callers can reference. This coupling is intentional: the context binding names the *splice-point scope*, and the splice point is in the body.
+
+Computing the output schema of a CTE uses the same schema inference the type system already performs for models and function calls. The incremental work is wiring CTE schema computation into the context binding checker, not building a new analysis from scratch.
+
+### Union Contexts for Joins
+
+When a function joins multiple tables, the author can expose a union context:
 
 ```sql
 smelt.define enrich_order(
@@ -140,115 +197,194 @@ smelt.define enrich_order(
 )
 ```
 
-With `SelectItems<source | customers | products>`, the caller can pass expressions referencing columns from any of the three tables. Ambiguous column names (present in multiple contexts) require qualification — the same rule as standard SQL.
+Ambiguous column names (present in multiple contexts) require qualification -- the same rule as standard SQL.
 
-#### Design Properties
+### Open Edge Cases
 
-Context bindings are **always optional.** A function author who omits them gets Tier 1 behavior (check at expansion, trace errors back). An author who adds them shifts the checking earlier and gives callers better errors. This follows the **author complexity, user clarity** principle: the author bears the annotation cost; every caller benefits.
+Union context disambiguation needs further specification. When both `a` and `b` have an `id` column, does the caller write `a.id`? The natural answer is parameter-name qualification, but the rules for parameter-CTE unions need to be made explicit.
 
-**CTE context is computed, not declared.** The author references a CTE by name in the type annotation; the compiler derives its schema from the body. This means the signature and body are coupled — changing the CTE's SELECT list may change what callers can reference. This coupling is intentional: the context binding names the *splice-point scope*, and the splice point is in the body.
+CTE context checking is partially call-site-dependent: `SelectItems<Agg, sessionized>` can be structurally checked (is it a select list of aggregates?) at definition time, but column-name validation requires knowing the call-site schema when the CTE includes `source.*`.
 
-## 4. Function Definitions
+Context bindings are **always optional.** Without them, column resolution happens at expansion time (Tier 1 behavior). Authors add them to shift checking earlier and give callers better errors.
 
-### Syntax: `smelt.define`
+## 5. Hybrid Scoping -- Lexical Parameters + Structural Column Resolution
 
-Functions are defined in `.sql` files (likely in a `functions/` directory, location TBD):
+When a function body says `user_col`, does it mean the parameter or a literal column named `user_col`?
 
-```sql
--- Expression-level function
-smelt.define safe_divide(
-    numerator: Expr<Numeric>,
-    denominator: Expr<Numeric>
-) -> Expr<Double> AS (
-    CASE WHEN denominator = 0 OR denominator IS NULL THEN NULL
-         ELSE CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE)
-    END
-)
-```
+The scoping model has two layers, reflecting the fact that SQL fragments inherently reference columns from table contexts:
+
+**Layer 1 -- Lexical scoping for parameters.** Function parameters are explicit bindings. Inside a function body, `user_col` refers to whatever column the caller passed -- not a literal column in any ambient table. The compiler substitutes the actual column reference during expansion. This is **hygienic expansion** (Kohlbecker et al., 1986) -- like Rust macros, not C preprocessor macros.
+
+**Layer 2 -- Structural column resolution within table contexts.** Bare column names in SQL expressions resolve against the schemas of `TableExpr` parameters in scope. This is unavoidable -- SQL is structurally scoped against its FROM clause:
 
 ```sql
--- Table-level function (produces a full query)
-smelt.define sessionize(
-    source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
-    gap: Expr<Interval> = INTERVAL '30 minutes'
-) -> TableExpr AS (
-    SELECT source.*,
-        SUM(CASE WHEN ts_col - LAG(ts_col)
-            OVER (PARTITION BY user_col ORDER BY ts_col)
-            > gap THEN 1 ELSE 0 END)
-        OVER (PARTITION BY user_col ORDER BY ts_col) AS session_id
+smelt.define add_margin(source: TableExpr) -> TableExpr AS (
+    SELECT source.*, revenue - cost AS margin
     FROM source
 )
 ```
 
-### Calling Convention
+Here `revenue` and `cost` are not parameters -- they resolve from whatever schema `source` carries. This is **row polymorphism** (Remy, 1994; OCaml object types; PureScript row types): the function body is polymorphic over any table that has columns named `revenue` and `cost` of compatible types.
 
-Functions are called via the `smelt.fn.*` namespace:
-
-```sql
--- Expression function: inline in any expression context
-SELECT smelt.fn.safe_divide(revenue, cost) AS margin
-FROM smelt.ref('orders')
-
--- Table function: used as a table source
-SELECT * FROM smelt.fn.sessionize(
-    source => smelt.ref('events'),
-    user_col => user_id,
-    ts_col => event_timestamp
-)
-```
-
-### Composition
-
-Functions can call other functions:
+Column requirements can be declared explicitly:
 
 ```sql
-smelt.define session_rollup(
-    source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
-    gap: Expr<Interval> = INTERVAL '30 minutes',
-    extra_metrics: SelectItems<Agg, sessionized> = ()
+smelt.define add_margin(
+    source: TableExpr<{revenue: Numeric, cost: Numeric}>
 ) -> TableExpr AS (
-    WITH sessionized AS (
-        smelt.fn.sessionize(source, user_col, ts_col, gap)
-    )
-    SELECT
-        user_col,
-        session_id,
-        MIN(ts_col) AS session_start,
-        MAX(ts_col) AS session_end,
-        COUNT(*) AS event_count,
-        extra_metrics
-    FROM sessionized
-    GROUP BY user_col, session_id
+    SELECT source.*, revenue - cost AS margin
+    FROM source
 )
 ```
 
-There is no limit on composition depth. A calls B calls C. The only restriction is no cycles (no recursion), which guarantees finite expansion.
+With the annotation, the compiler checks requirements at the call site before expansion -- the caller gets "table passed to `source` is missing required column `revenue: Numeric`" rather than a post-expansion SQL error. Adding `..r` (`TableExpr<{revenue: Numeric, cost: Numeric, ..r}>`) further allows threading the caller's extra columns through to the return type.
 
-## 5. Block Syntax
+**The honest description:** "Parameters are lexically scoped; column resolution within table-typed parameters is structural (schema-checked but not name-bound). Annotations make the structural requirements explicit."
 
-### The Problem
+**Why hybrid rather than pure lexical:** Functions are self-contained (readable without knowing the call site). The compiler can check bodies in isolation (when annotated). No surprises from ambient column names shadowing parameters. And the structural part is SQL-native for the parts that are inherently SQL. The two-layer model is more complex to explain than "everything is lexical," but it matches how SQL actually works.
 
-Passing multi-line SQL fragments as function arguments is syntactically awkward:
+## 6. Gradual Typing -- Three Tiers of Annotation
+
+Mandatory type annotations would kill adoption among data analysts and analytics engineers. smelt follows TypeScript's gradual typing trajectory (Siek & Taha, 2006): start untyped, add types as code matures and gets shared.
+
+### Tier 1: Unannotated (quick and personal)
 
 ```sql
--- This is hard to read
-SELECT * FROM smelt.fn.session_rollup(
-    source => smelt.ref('events'),
-    user_col => user_id,
-    ts_col => event_timestamp,
-    extra_metrics => (SUM(revenue) AS total_revenue, COUNT(DISTINCT page) AS unique_pages),
-    filters => (event_type != 'bot' AND user_id IS NOT NULL)
+smelt.define my_margin(revenue, cost) AS (
+    CASE WHEN cost = 0 THEN NULL
+         ELSE (revenue - cost) / cost
+    END
 )
 ```
 
-### Block Syntax as Sugar
+No types declared. The compiler expands at each call site and type-checks the result. Good for personal utilities and prototyping.
 
-Named `WITH ... AS (...)` clauses trailing a function call provide named sections for fragment-typed parameters:
+### Tier 2: Parameters annotated (production code)
+
+```sql
+smelt.define my_margin(
+    revenue: Expr<Numeric>,
+    cost: Expr<Numeric>
+) AS (
+    CASE WHEN cost = 0 THEN NULL
+         ELSE (revenue - cost) / cost
+    END
+)
+```
+
+Parameters typed, return type inferred. The compiler checks the body against parameter types **in isolation** -- no call site needed. Also checks each call site against declared types. Good for shared team code.
+
+### Tier 3: Fully annotated (library quality)
+
+```sql
+smelt.define my_margin(
+    revenue: Expr<Numeric>,
+    cost: Expr<Numeric>
+) -> Expr<Double> AS (
+    CASE WHEN cost = 0 THEN NULL
+         ELSE CAST(revenue - cost AS DOUBLE) / CAST(cost AS DOUBLE)
+    END
+)
+```
+
+Fully annotated. Checked in isolation. The LSP shows the return type on hover without expanding. Body-level errors are the *author's* problem, never shown to callers. Good for published packages.
+
+### Error Message Contract
+
+Error quality determines adoption. Each tier has a specific contract for what the *function user* sees:
+
+**Tier 1:** The compiler expands, checks, and traces errors back to the call site with parameter mapping:
+
+```
+error: type mismatch in expression
+  --> models/metrics.sql:5:12
+   |
+ 5 |     smelt.fn.my_margin('hello', 'world')
+   |                        ^^^^^^^ expected Numeric, got Text
+   |
+   = note: in expansion of `my_margin`, parameter `revenue` was bound to 'hello'
+   = note: function defined at functions/my_margin.sql:1
+```
+
+Even though expansion happens before checking, the error maps back through the expansion to show the call site. This is better than C++ template errors because the expansion is structured (not arbitrary text substitution), so the trace is always possible.
+
+**Tier 2:** Errors reference the function's declared parameter types, with no expansion needed:
+
+```
+error: type mismatch in argument
+  --> models/metrics.sql:5:12
+   |
+ 5 |     smelt.fn.my_margin(user_name, total_cost)
+   |                        ^^^^^^^^^ expected Expr<Numeric>, got Expr<Text>
+   |
+   = note: parameter `revenue` declared as Expr<Numeric>
+           at functions/my_margin.sql:2
+```
+
+**Tier 3:** Same call-site errors as Tier 2, plus hover types in the LSP.
+
+**The principle:** As annotation tier increases, errors move earlier (call site vs. expansion), get shorter (declared type vs. traced binding), and shift responsibility toward the function author. The author bears the complexity of type annotations so that function users get clean error messages -- the same trade-off as Rust trait bounds.
+
+### LSP Stability Under Broken Bodies
+
+Tier 2/3 functions retain their signature when the body becomes invalid mid-edit. Call sites continue to type-check against declared types. Tier 1 functions have no signature independent of the body, so call sites cannot be checked while the body is broken -- a reason to encourage Tier 2+ for shared functions.
+
+### Implementation Phasing
+
+Tier 1 ships first -- it's just expansion plus existing type checking with error tracing. Tier 2 adds checking-mode verification on bodies. Tier 3 adds return type verification. Each tier is independently shippable. The type inference algorithm (next section) maps directly onto this phasing.
+
+## 7. Type Inference -- Bidirectional Checking
+
+smelt functions use **bidirectional type checking** (Pierce, 2004; Dunfield & Krishnaswami, 2021) with a local unification step at row-variable binding sites.
+
+### Why Bidirectional
+
+Three algorithm families were considered:
+
+**Bidirectional checking (chosen):** Types flow in two directions -- "checking" mode pushes an expected type *down* into an expression, "synthesis" mode computes a type *up* from an expression. At function call sites, the declared parameter type is pushed down; the argument is checked against it. At function bodies, parameter types are pushed in, the body synthesizes a result, and the return annotation (if present) provides a checking target.
+
+**Hindley-Milner / Algorithm W:** Overkill. smelt has no higher-order functions, no lambdas, no let-bindings where generalization matters. The only polymorphism is row polymorphism on parameters. Worse, HM's global constraint solving produces *non-local* error messages: when unification fails, the error references two constraints that are individually fine but jointly contradictory, far from where the conflict surfaces. This is the famously poor ML/Haskell error experience.
+
+**Constraint-based with ranked heuristics (TypeScript/Scala 3 style):** Interesting but premature. The error quality advantage comes from ranking complex type relationships. smelt's type relationships are simple enough that bidirectional checking produces good errors without ranking.
+
+### How It Maps to the Three Tiers
+
+**Tier 1:** Expand the function, then run the checker on the expanded SQL in pure synthesis mode -- types flow up from leaves. Errors are mapped back to call-site parameter bindings via the expansion trace.
+
+**Tier 2:** At the call site, push each parameter type into the corresponding argument in checking mode. If the parameter has a row variable (`Struct<{ts: Timestamp, ..r}>`), perform local unification against the concrete argument type -- this binds `r` immediately. The function body is checked in isolation: parameter types pushed in, body synthesized bottom-up.
+
+**Tier 2+ (row variable in return type):** After binding `r` at the parameter, substitute into the return type. Downstream checking uses the concrete type. Error messages never mention row variables -- the user sees fully resolved types.
+
+**Tier 3:** Check the body against the return type in checking mode. Row variables in the return type are still abstract (not bound to a concrete call), so the checker verifies the body produces *at least* the declared fields.
+
+### Row Unification Is Local
+
+Row-variable unification happens **at the point of use**, not via global constraint solving:
+
+1. Match declared fields against concrete fields (check names and types).
+2. Bind the row variable to the *remainder*.
+3. Substitute the binding forward into other uses of that row variable.
+
+This is strictly simpler than full HM unification: no union-find data structure, no occurs-check, no let-generalization, no global constraint propagation. Each call site is checked independently.
+
+### Error Message Guarantees
+
+The algorithm guarantees:
+
+1. **Errors are always local.** Every error references a specific source location. No "constraint X from line 5 conflicts with constraint Y from line 20."
+2. **Row variables never appear in user-facing errors.** By the time an error occurs, the variable is either bound (error shows the concrete type) or the binding failed (error shows "expected field X, struct has: {concrete fields}").
+3. **Errors say "expected X, got Y."** Every type mismatch has two sides. This is the Rust/TypeScript error experience.
+4. **Tier escalation improves locality without changing format.** Moving from Tier 1 to Tier 2 moves errors closer to the source without changing the error shape.
+
+### What This Rules Out
+
+- **Cross-boundary inference.** A Tier 1 function's return type is computed at each call site by expansion, not inferred from the body and propagated. Cross-boundary inference creates non-local errors. Functions that want stable types declare them (Tier 3).
+- **Higher-rank polymorphism.** A parameter cannot itself be polymorphic. smelt functions are not higher-order.
+- **Implicit subtyping coercions.** The checker does not silently insert casts. If a parameter expects `Expr<Double>` and the caller passes `Expr<Integer>`, this is a type error. The user writes `CAST(x AS DOUBLE)`. (Exception: engine aliases like `Text`/`Varchar` are treated as the same type.)
+
+## 8. Block Syntax -- Ergonomic Fragment Passing
+
+Passing multi-line SQL fragments as inline function arguments is syntactically awkward. Block syntax provides named `WITH ... AS (...)` clauses trailing a function call:
 
 ```sql
 SELECT * FROM smelt.fn.session_rollup(
@@ -267,24 +403,23 @@ WITH filters AS (
 )
 ```
 
-Each `WITH name AS (...)` clause binds a fragment-typed parameter by name. The compiler treats it identically to inline arguments. The syntax reuses SQL's existing `WITH ... AS (...)` shape — no significant whitespace, no nested mini-grammar, and the parser already knows how to handle parenthesized expressions after `AS`. Block clauses must trail the function call's closing `)` directly.
+Each `WITH name AS (...)` clause binds a fragment-typed parameter by name. The compiler treats it identically to inline arguments. The syntax reuses SQL's existing `WITH ... AS (...)` shape -- no significant whitespace, no nested mini-grammar, and the parser already knows how to handle parenthesized expressions after `AS`. Block clauses must trail the function call's closing `)` directly.
 
 ### Blocks Compose
 
-A function can receive blocks from its caller and pass them through to other functions:
+A function can receive blocks from its caller and pass them through:
 
 ```sql
 smelt.define monitored_session_rollup(
     source: TableExpr,
     user_col: Column<source>,
     ts_col: Column<source, Timestamp>,
-    metrics: SelectItems<Agg> = (),   -- no context: passed through to session_rollup,
-                                      -- which validates against its own context
+    metrics: SelectItems<Agg> = (),
     alerts: SelectItems<Agg, base> = ()
 ) -> TableExpr AS (
     WITH base AS (
         smelt.fn.session_rollup(source, user_col, ts_col)
-        WITH metrics AS (metrics)  -- pass through caller's metrics
+        WITH metrics AS (metrics)
     )
     SELECT base.*,
         alerts
@@ -292,268 +427,181 @@ smelt.define monitored_session_rollup(
 )
 ```
 
-## 6. Optional Type Annotations
+### Trade-offs
 
-### Three Tiers
+Block syntax introduces a second grammar layer at the call site. This has worked before (Ruby blocks, Kotlin DSL builders, Groovy closures in Gradle), but each time it creates parsing and tooling burden. Specific concerns:
 
-Following Rust's model of optional trait bounds, smelt functions support three levels of type annotation:
+- Error recovery inside blocks requires nested parsing contexts (SQL -> function call -> block -> SQL inside block).
+- LSP contextual completion inside blocks depends on partial expansion -- one of the hardest LSP problems.
 
-#### Tier 1: Unannotated (quick and personal)
+The choice to reuse SQL's existing `WITH ... AS (...)` shape mitigates parser complexity vs. inventing a wholly new block syntax. Named parameters with parenthesized fragments (the "ugly" version from the examples) remain available as the fallback -- blocks are pure sugar.
+
+## 9. Row Polymorphism for Struct Values
+
+The hybrid scoping model (section 5) handles row polymorphism for `TableExpr` parameters -- "this function works on any table with at least columns X, Y." But struct-typed columns (DuckDB, Spark, BigQuery) face the same brittleness problem at the *value* level: if struct parameters are closed, adding a field to the struct breaks every function that accepts it.
+
+| | `TableExpr` | `Expr<Struct<{...}>>` |
+|---|---|---|
+| What it represents | A table/relation | A single struct-typed expression |
+| Where it appears | FROM clause | Any expression position |
+| Field access | Bare column names (`ts`, `user_id`) | Dot syntax (`event.ts`, `event.user_id`) |
+| Expansion | Table reference substitution | Expression substitution with field access |
+
+The PLT concept is the same -- row variables standing for "plus any other fields" -- but the surface types, field-access syntax, and compilation models differ.
+
+### Open Struct Types
+
+Extend `Struct<{...}>` with a **row variable** that stands in for "plus any other fields":
+
+```text
+Struct<{ ts: Timestamp, user_id: Text, ..r }>
+```
+
+`..r` is a named row variable bound at the function signature. `..` (anonymous) creates a fresh variable per parameter.
+
+### Examples
+
+**Reading fields from a struct column:**
 
 ```sql
-smelt.define my_margin(revenue, cost) AS (
-    CASE WHEN cost = 0 THEN NULL
-         ELSE (revenue - cost) / cost
-    END
+smelt.define event_hour(
+    event: Expr<Struct<{ts: Timestamp, ..}>>
+) -> Expr<Integer> AS (
+    EXTRACT(HOUR FROM event.ts)
 )
 ```
 
-No types declared. The compiler expands at each call site and type-checks the result. If someone calls `my_margin('hello', 'world')`, the error traces back to the call site.
+Accepts any struct with a `ts: Timestamp` field. No overloads, no wrapping.
 
-**Checking strategy:** Expand, then check the plain SQL, then trace errors to the source location in the calling model.
-
-**Good for:** Personal utilities, prototyping, one-off models.
-
-#### Tier 2: Parameters annotated (production code)
+**Returning a struct with pass-through fields:**
 
 ```sql
-smelt.define my_margin(
-    revenue: Expr<Numeric>,
-    cost: Expr<Numeric>
-) AS (
-    CASE WHEN cost = 0 THEN NULL
-         ELSE (revenue - cost) / cost
-    END
+smelt.define with_hour(
+    event: Expr<Struct<{ts: Timestamp, ..r}>>
+) -> Expr<Struct<{hour: Integer, ..r}>> AS (
+    {hour: EXTRACT(HOUR FROM event.ts), ..event}
 )
 ```
 
-Parameters typed, return type inferred. The compiler checks the body against parameter types **in isolation** — no call site needed.
+The `..event` spread in the body is the value-level counterpart of the type-level `..r`. The same row variable appears in both positions, so the checker knows the output struct's extra fields are the input struct's extra fields. Calling `with_hour` on a `STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT)` produces `STRUCT(hour INTEGER, ts TIMESTAMP, user_id TEXT, page TEXT)`.
 
-**Checking strategy:** Check body against declared parameter types. Also check each call site.
+### Compilation Model
 
-**Good for:** Shared team code, models others depend on.
-
-#### Tier 3: Fully annotated (library quality)
+Row-polymorphic struct parameters **erase at expansion.** The compiler knows the concrete struct type at the call site and generates explicit field references:
 
 ```sql
-smelt.define my_margin(
-    revenue: Expr<Numeric>,
-    cost: Expr<Numeric>
-) -> Expr<Double> AS (
-    CASE WHEN cost = 0 THEN NULL
-         ELSE CAST(revenue - cost AS DOUBLE) / CAST(cost AS DOUBLE)
-    END
-)
+-- event_hour expands to:
+SELECT EXTRACT(HOUR FROM event_data.ts) AS hour
+FROM page_events;
+
+-- with_hour expands to:
+SELECT {'hour': EXTRACT(HOUR FROM event_data.ts),
+        'ts': event_data.ts,
+        'user_id': event_data.user_id,
+        'page': event_data.page} AS enriched
+FROM page_events;
 ```
 
-Fully annotated. Checked in isolation. The LSP shows the return type on hover without expanding.
+Row variables are resolved at the call site. At definition time, the body is checked against declared fields only; the row variable is opaque (you cannot enumerate or reflect on `..r`). The `..event` spread expands to the caller's remaining fields in a deterministic order (declaration order, with declared return fields first).
 
-**Checking strategy:** Check body against parameter AND return type. Check each call site against declared types.
+The compiler must support the target engine's struct literal syntax (DuckDB uses `{'field': value, ...}`). If an engine lacks struct literals, functions that construct new structs cannot target that engine -- a backend capability error, not a type error.
 
-**Good for:** Published packages, widely-shared functions.
+### Constraints
 
-### Why Optional
+One named row variable per function in v1. Multi-row cases like `merge(a: Expr<Struct<{..r}>>, b: Expr<Struct<{..s}>>) -> Expr<Struct<{..r, ..s}>>` are deferred. When added, the semantics will be disjoint union (PureScript-style: the checker errors if `r` and `s` overlap). The single-variable rule covers essentially all current analytics use cases.
 
-dbt's audience is data analysts and analytics engineers, not programming language enthusiasts. Mandatory `Column<source, Timestamp>` annotations would kill adoption. Unannotated functions that "just work" let people get value immediately. Types become valuable as code matures and gets shared — the same trajectory as TypeScript's gradual typing adoption.
+If two parameters both declare `..r`, they are constrained to have the same extra fields (useful when two struct arguments must share a shape). Anonymous `..` creates a fresh variable per parameter and can never be referenced elsewhere.
 
-### Implementation Phasing
+No defaults on row-polymorphic parameters in v1.
 
-Tier 1 can ship first — it's just expansion + existing type checking with error tracing. Tier 2 adds checking-mode verification on bodies. Tier 3 adds return type verification. Each tier is independently shippable. The type inference algorithm (§18, bidirectional checking) maps directly onto this phasing: Tier 1 uses pure synthesis mode, Tier 2 adds checking mode at call sites and in bodies, Tier 3 adds checking mode against return types.
-
-### Error Message Contract
-
-Error quality determines adoption. Each tier has a specific error message contract — what the *function user* (not author) sees when something goes wrong:
-
-#### Tier 1 errors (unannotated functions)
-
-The compiler expands the function, type-checks the result, and traces errors back to the call site with parameter mapping:
-
-```
-error: type mismatch in expression
-  --> models/metrics.sql:5:12
-   |
- 5 |     smelt.fn.my_margin('hello', 'world')
-   |                        ^^^^^^^ expected Numeric, got Text
-   |
-   = note: in expansion of `my_margin`, parameter `revenue` was bound to 'hello'
-   = note: function defined at functions/my_margin.sql:1
-```
-
-The key: even though expansion happens before checking, the error message maps back through the expansion to show the call site and parameter binding. This is the minimum viable error experience — better than C++ templates, because the expansion is structured (not arbitrary text substitution) so the trace is always possible.
-
-#### Tier 2 errors (parameters annotated)
-
-The compiler checks at the call site *before expansion*. Errors reference the function's declared parameter types:
-
-```
-error: type mismatch in argument
-  --> models/metrics.sql:5:12
-   |
- 5 |     smelt.fn.my_margin(user_name, total_cost)
-   |                        ^^^^^^^^^ expected Expr<Numeric>, got Expr<Text>
-   |
-   = note: parameter `revenue` declared as Expr<Numeric>
-           at functions/my_margin.sql:2
-```
-
-No expansion needed. The error is at the call site and references the declared contract. This is the Rust trait-bound experience: the author specified what they need, and the caller is told exactly which argument doesn't match.
-
-#### Tier 3 errors (fully annotated)
-
-Same call-site errors as Tier 2, plus the LSP can show return types on hover without expansion. The function body is also checked in isolation — body-level errors are the *author's* problem, never shown to callers.
-
-**The principle:** As annotation tier increases, errors move earlier (call site vs. expansion), get shorter (declared type vs. traced binding), and shift responsibility toward the function author. This is the **author complexity, user clarity** principle in action.
-
-## 7. Scoping: Lexical vs Dynamic
-
-### The Question
-
-When a function body says `user_col`:
-
-```sql
-smelt.define sessionize(
-    source: TableExpr,
-    user_col: Column<source>,
-    ...
-) -> TableExpr AS (
-    SELECT ... PARTITION BY user_col ...
-    FROM source
-)
-```
-
-Does `user_col` mean the parameter (lexical scoping) or a literal column named `user_col` in the ambient table (dynamic scoping)?
-
-### Decision: Hybrid Scoping (Lexical Parameters + Structural Column Resolution)
-
-The scoping model has two layers, reflecting the fact that SQL fragments inherently reference columns from table contexts:
-
-**Layer 1 — Lexical scoping for parameters.** Function parameters are explicit bindings. Inside a function body, `user_col` refers to whatever column the caller passed — not a literal column named `user_col` in any ambient table. The compiler substitutes the actual column reference during expansion. This is **hygienic expansion** — like Rust macros, not C preprocessor macros.
-
-**Layer 2 — Structural column resolution within table contexts.** Bare column names in SQL expressions resolve against the schemas of `TableExpr` parameters in scope. This is unavoidable — SQL is structurally scoped against its FROM clause. Consider:
-
-```sql
-smelt.define add_margin(source: TableExpr) -> TableExpr AS (
-    SELECT source.*, revenue - cost AS margin
-    FROM source
-)
-```
-
-Here `revenue` and `cost` are not parameters — they resolve from whatever schema `source` carries. This is closer to **row polymorphism** (as in OCaml's object types or PureScript's row types) than pure lexical scoping: the function body is polymorphic over any table that has columns named `revenue` and `cost` of compatible types.
-
-These column requirements can also be declared explicitly using annotated `TableExpr`:
-
-```sql
-smelt.define add_margin(
-    source: TableExpr<{revenue: Numeric, cost: Numeric}>
-) -> TableExpr AS (
-    SELECT source.*, revenue - cost AS margin
-    FROM source
-)
-```
-
-With the annotation, the compiler checks the `revenue` and `cost` requirements at the call site before expansion — the caller gets "table passed to `source` is missing required column `revenue: Numeric`" rather than a post-expansion SQL error. Adding `..r` to the annotation (`TableExpr<{revenue: Numeric, cost: Numeric, ..r}>`) further allows threading the caller's extra columns through to the return type.
-
-**The honest description:** "Parameters are lexically scoped; column resolution within table-typed parameters is structural (schema-checked but not name-bound). Annotations make the structural requirements explicit."
-
-When table context bindings are used (e.g., `filters: Expr<Boolean, source>`), the compiler checks that column references in the caller's fragment exist in the bound table's schema — making the structural resolution explicit and checked early. Without context bindings, column resolution happens at expansion time.
-
-**Rationale for the hybrid:**
-- Functions are **self-contained** — readable without knowing the call site (parameters are lexical, column requirements are visible from the `TableExpr` usage)
-- The compiler can **check the body in isolation** (when annotated with context bindings)
-- **No surprises** from ambient column names shadowing parameters
-- **SQL-native** for the parts that are inherently SQL (column references against tables)
-
-**Trade-off:** The two-layer model is more complex to explain than "everything is lexical." But it matches how SQL actually works — and pretending SQL is lexically scoped would create a different kind of confusion.
-
-> **Note (added §17):** §17 extends row polymorphism to struct-typed *values* (e.g., a column of type `STRUCT(ts TIMESTAMP, user_id TEXT)`). The PLT concept is the same — row variables standing for "plus any other fields" — but the surface types, field-access syntax (`.field` vs. bare column names), and compilation models differ. See §17 for the full treatment.
-
-## 8. Planner Integration: Three Levels
+## 10. Planner Integration -- Three Levels
 
 This is where smelt functions differ most fundamentally from Jinja macros. In dbt, macros are expanded to text before anything sees them. In smelt, functions are **visible to the planner as first-class nodes** with typed interfaces and declared properties.
 
 ### Why Not Just Expand?
 
-If functions were expanded to plain SQL before the planner runs, the planner loses semantic information. It sees `SUM(CASE WHEN ts - LAG(ts) OVER (...) > INTERVAL '30 minutes' THEN 1 ELSE 0 END) OVER (...)` instead of knowing "this is a session rollup." Pattern-matching on raw SQL to rediscover this structure is fragile and will break with any variation.
+If functions were expanded to plain SQL before the planner runs, the planner loses semantic information. It sees `SUM(CASE WHEN ts - LAG(ts) OVER (...) > INTERVAL '30 minutes' THEN 1 ELSE 0 END) OVER (...)` instead of knowing "this is a session rollup." Pattern-matching on raw SQL to rediscover this structure is fragile. Keeping functions in the IR means planner rules match on **function names and properties**, not SQL patterns.
 
-Keeping functions in the IR means:
-- Planner rules match on **function names and properties**, not SQL patterns
-- The function's **type contract** (return schema) serves as a safety check for rewrites
-- **Column provenance** through function boundaries is explicit, not inferred from SQL
+### Level 1: Logical -> Logical (pre-expansion)
 
-### Three Rule Levels
+Rules rewrite the logical DAG. Functions are nodes with rich typed interfaces. In PLT terms, function types carry **refinement types** (Rondon et al., 2008): structural invariants beyond the basic fragment sort.
 
-The planner operates at three distinct levels, each with different visibility into functions:
+The compiler analyzes function bodies and attaches structural metadata:
+- **Column provenance map:** Which output columns come from which input tables
+- **Join graph:** Which tables are joined, join type, cardinality
+- **Declared properties:** `@deterministic`, `@idempotent`, `@append_only`
 
-#### Level 1: Logical → Logical (pre-expansion)
+This metadata enables filter pushdown, function fusion, join elimination, and semantic validation -- all by reasoning about the typed interface, never pattern-matching on SQL.
 
-Rules rewrite the logical DAG. Functions are **nodes with rich typed interfaces** — planner rules match on function names, parameter types, declared properties, and **compiler-derived structural metadata**, not on raw SQL.
+In v1, metadata is **explicitly annotated** by function authors (`@joins(dim_customers LEFT 1:1)`, `@provenance(customer_segment -> dim_customers.segment)`) rather than automatically derived. Automatic derivation requires a full lineage analyzer -- a substantial compiler component. Explicit annotations let the planner integration ship without this, while keeping the door open to add automatic derivation later as a DX improvement. In practice, only "model template" functions benefit from planner-level optimization, so the annotation burden is concentrated on a small number of high-value functions.
 
-The compiler analyzes function bodies and attaches structural metadata to the function's type:
-- **Column provenance map:** Which output columns come from which input tables/parameters
-- **Join graph:** Which tables are joined, join type (LEFT/INNER), and cardinality (1:1, 1:N)
-- **Declared properties:** `@deterministic`, `@idempotent`, `@append_only`, etc.
+However: v1 annotations are bare keywords only (`@deterministic`, `@idempotent`, `@append_only`). Structured annotations (`@joins(...)`, `@provenance(...)`) are deferred until the planner actually needs them. Annotations appear after the type, before `=` (for parameters) or before `AS` (for return types).
 
-This metadata is derived automatically — the function author writes plain SQL and the compiler extracts the structure. Authors can also add explicit property annotations for semantics the compiler cannot infer. In PLT terms, this is a **refinement type**: the type carries structural invariants beyond just the fragment sort.
+The three-level planner architecture parallels MLIR's (Multi-Level IR) progressive lowering through dialect levels, where each level carries different semantic information and rewrites happen at the appropriate abstraction.
 
-**What happens here:**
-- **Filter pushdown into blocks.** A downstream WHERE clause is pushed into a function's `filters` parameter.
-- **Fusion.** Two adjacent function calls are merged into a single, more efficient function.
-- **Join elimination.** Unused output columns are traced through the provenance map; if all columns from a 1:1 LEFT JOIN are unused, the join is removed (see Example 3 below).
-- **Semantic validation.** A function marked `@requires_append_only` is checked against its source.
+### Level 2: Logical -> Physical (strategy selection and expansion)
 
-Planner rules reason about the typed interface and its metadata — they don't pattern-match on the function's SQL body. The function body is only visible to the compiler (for metadata extraction) and to Level 2 (for expansion).
+Rules choose an execution strategy and expand functions into strategy-specific SQL. The expansion is not mechanical inlining -- it's guided by the strategy:
 
-#### Level 2: Logical → Physical (strategy selection and expansion)
-
-Rules choose an execution strategy and expand functions into strategy-specific SQL. The expansion is not mechanical inlining — it's **guided by the strategy.**
-
-**A function might expand differently depending on the strategy:**
 - **Full rebuild:** Expand body as-is.
 - **Incremental append:** Expand with a temporal filter injected into the source scan.
 - **Incremental merge:** Expand with affected-key detection and recomputation.
 
 The function author writes the pure logical version. Planner rules produce strategy-specific expansions. The function's declared return type is the safety contract: the rule must produce the same output schema.
 
-#### Level 3: Physical → Execution Plan (multi-statement orchestration)
+### Level 3: Physical -> Execution Plan
 
-A single physical node becomes one or more concrete SQL statements with control flow.
+A single physical node becomes one or more concrete SQL statements:
+- Incremental merge: `CREATE TEMP TABLE -> DELETE matching rows -> INSERT FROM temp -> DROP temp`
+- Cross-engine: `Run query on Spark -> Write Parquet -> Read in DuckDB`
+- Validated write: `Run query -> Check invariants -> Swap target table`
 
-**Examples:**
-- An incremental merge becomes: `CREATE TEMP TABLE → DELETE matching rows → INSERT FROM temp → DROP temp`
-- A cross-engine model becomes: `Run query on Spark → Write Parquet → COPY INTO DuckDB`
-- A validated write becomes: `Run query → Check row count / schema invariants → Swap target table`
+Function properties still matter: `@idempotent` tells Level 3 that retry is safe; `@deterministic` tells it re-execution produces the same result.
 
-Functions are already expanded at this level, but function **properties** still matter:
-- `@idempotent` tells Level 3 that retry is safe
-- `@deterministic` tells it that re-execution produces the same result
+### Planner Integration Is Post-MVP
 
-### Function Properties as Optimization Hints
+v1 is pure expansion -- no Level 1 planner rules. Properties are parsed and stored but not actively used. This lets the function system be validated independently before adding planner complexity.
 
-Annotations on functions serve double duty — they help the type checker AND the planner:
+## 11. Built-in Function Typing
 
-```sql
-smelt.define session_rollup(
-    source: TableExpr @append_only,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
-    gap: Expr<Interval> = INTERVAL '30 minutes',
-    metrics: SelectItems<Agg, sessionized> = ()
-) -> TableExpr @deterministic @idempotent AS (
-    ...
-)
-```
+Models call built-in SQL functions far more often than user functions. If built-ins carry the same fragment-typed signatures, every SQL call gets compile-time checking, hover types, and completion.
 
-- `@append_only` on `source`: planner checks the source is actually append-only; enables incremental strategies
-- `@deterministic` on return: planner knows re-execution is safe
-- `@idempotent` on return: execution planner knows retry won't corrupt data
+### What Fits With No New Machinery (~80%)
 
-Some properties are verifiable by the compiler (e.g., `@deterministic` — check for `RANDOM()`, `NOW()`). Others are declared by the user and trusted. This parallels Rust's `unsafe` — the compiler checks what it can, and trusts the programmer on the rest.
+| Built-in shape | Signature |
+|----------------|-----------|
+| Pure scalar (`LOWER`, `ABS`, `LENGTH`) | `Expr<T1> -> Expr<T2>` |
+| Binary scalar (`POWER`, `MOD`) | `(Expr<T>, Expr<T>) -> Expr<T>` |
+| Aggregates (`SUM`, `COUNT`, `AVG`) | `Expr<T> -> AggExpr<T>` |
+| Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Expr<Boolean>` |
+| Simple table functions (`generate_series`) | `(Expr<Int>, Expr<Int>) -> TableExpr` |
 
-## 9. Examples
+### What Needs Extensions (~20%)
 
-### Example 1: Expression Function — safe_divide
+1. **Generics / type parameters.** `COALESCE(a, b, c)` returns the common supertype. `ARRAY_AGG(x)` returns `Array<T>`. Requires type parameters on signatures.
+2. **Variadics.** `COALESCE`, `CONCAT`, `GREATEST` accept arbitrary arity. v1 excluded variadic user functions. For built-ins: either a privileged native-variadic form or reintroduce variadics for both.
+3. **Types as arguments.** `CAST(x AS INTEGER)`, `EXTRACT(YEAR FROM ts)`. Not expressible as `Expr<T>`. Options: a `Type`/`Field` parameter sort, or primitive grammar handling.
+4. **Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`. Must be treated as primitive grammar.
+5. **Modifier clauses.** `SUM(x) FILTER (WHERE cond)`, `OVER (...)`. Syntactic suffixes on aggregate calls.
+6. **Schema-returning table functions.** `UNNEST(array_col)` depends on element type. `read_csv` with auto-schema is not compile-time typeable.
 
-The simplest case. Reusable across any model without modification.
+### What Is Untypeable
+
+- Auto-schema built-ins without a schema hint (`read_csv('x.csv')`)
+- Dynamic `EXECUTE` / string-templated SQL
+- Untyped JSON navigation (`col->>'foo'`) -- typeable only as unconditional `Text`
+
+### Positioning
+
+v1 types only user functions and leaves built-ins to existing inference. v2 extends coverage. The extension is bounded and does not invalidate the existing design.
+
+Open question: signature registry per dialect vs. primitive built-in shapes in the checker. The registry scales with engines; primitive shapes keep the checker simple.
+
+## 12. Concrete Examples
+
+### Example 1: safe_divide -- Expression Function
+
+The simplest case. A reusable expression function.
 
 **Definition:**
 ```sql
@@ -570,7 +618,6 @@ smelt.define safe_divide(
 
 **Usage:**
 ```sql
--- models/product_metrics.sql
 SELECT
     product_id,
     total_revenue,
@@ -581,84 +628,22 @@ FROM smelt.ref('product_summary')
 ```
 
 **What the compiler does:**
-1. Verifies `total_revenue - total_cost` and `total_revenue` are numeric (they are — both are aggregated sums)
+1. Verifies `total_revenue - total_cost` and `total_revenue` are numeric
 2. Expands to `CASE WHEN total_revenue = 0 OR total_revenue IS NULL THEN NULL ELSE CAST((total_revenue - total_cost) AS DOUBLE) / CAST(total_revenue AS DOUBLE) END`
-3. Infers return type as `DOUBLE` (nullable, since the CASE can produce NULL)
+3. Infers return type as `DOUBLE` (nullable)
 
 **What the LSP does:**
 - Hover on `safe_divide` shows: `(Numeric, Numeric) -> Double?`
 - Go-to-definition jumps to `functions/core/safe_divide.sql`
 - Completions inside the call show available columns from `product_summary`
 
-**Testing:**
-```sql
--- tests/test_safe_divide.sql
----
-test: true
----
-SELECT
-    smelt.fn.safe_divide(10, 3) AS normal_case,
-    smelt.fn.safe_divide(10, 0) AS zero_denom,
-    smelt.fn.safe_divide(NULL, 5) AS null_num,
-    smelt.fn.safe_divide(10, NULL) AS null_denom
--- Expected: ~3.33, NULL, NULL, NULL
-```
-
 ### Example 2: Session Rollup with Blocks
 
-A reusable model pattern: sessionize events and compute per-session metrics. The caller provides the source table, key columns, and custom metrics.
+A reusable model pattern demonstrating composition, block syntax, context bindings, and planner integration.
 
-**Definition:**
-```sql
--- functions/patterns/session_rollup.sql
-smelt.define sessionize(
-    source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
-    gap: Expr<Interval> = INTERVAL '30 minutes'
-) -> TableExpr AS (
-    SELECT source.*,
-        SUM(CASE WHEN ts_col - LAG(ts_col)
-            OVER (PARTITION BY user_col ORDER BY ts_col)
-            > gap THEN 1 ELSE 0 END)
-        OVER (PARTITION BY user_col ORDER BY ts_col) AS session_id
-    FROM source
-)
-
-smelt.define session_rollup(
-    source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
-    gap: Expr<Interval> = INTERVAL '30 minutes',
-    metrics: SelectItems<Agg, sessionized> = (),
-    filters: Expr<Boolean, source> = TRUE
-) -> TableExpr @deterministic AS (
-    WITH sessionized AS (
-        smelt.fn.sessionize(source, user_col, ts_col, gap)
-    )
-    SELECT
-        user_col,
-        session_id,
-        MIN(ts_col) AS session_start,
-        MAX(ts_col) AS session_end,
-        COUNT(*) AS event_count,
-        metrics
-    FROM sessionized
-    WHERE filters
-    GROUP BY user_col, session_id
-)
-```
-
-**Usage (with blocks):**
+**Usage:**
 ```sql
 -- models/web_sessions.sql
----
-name: web_sessions
-materialization: table
-incremental:
-  enabled: true
-  event_time_column: session_start
----
 SELECT * FROM smelt.fn.session_rollup(
     source => smelt.ref('web_events'),
     user_col => user_id,
@@ -675,57 +660,30 @@ WITH filters AS (
 )
 ```
 
-**What the planner does:**
+**Planner walkthrough:**
 
-*Level 1 (Logical → Logical):* The planner sees a `session_rollup` node. It checks that `web_events` is append-only (from source metadata) and that `event_timestamp` is a timestamp column. Both checks pass.
+*Level 1 (logical -> logical):* The planner sees a `session_rollup` node. Checks that `web_events` is append-only and `event_timestamp` is a timestamp. Both pass.
 
-*Level 2 (Logical → Physical):* A planner rule selects the incremental-append strategy. It expands `session_rollup` with a temporal filter: `FROM web_events WHERE event_timestamp > :watermark` instead of `FROM web_events`. The expanded SQL still matches the declared return schema — safe.
+*Level 2 (logical -> physical):* Selects incremental-append strategy. Expands with temporal filter: `FROM web_events WHERE event_timestamp > :watermark`.
 
-*Level 3 (Physical → Execution):* The incremental strategy produces:
+*Level 3 (physical -> execution):*
 1. `CREATE TEMP TABLE __staging AS (SELECT ... WHERE event_timestamp > :last_watermark)`
-2. `DELETE FROM web_sessions WHERE session_id IN (SELECT session_id FROM __staging)` — handles late events extending existing sessions
+2. `DELETE FROM web_sessions WHERE session_id IN (SELECT session_id FROM __staging)` -- handles late events
 3. `INSERT INTO web_sessions SELECT * FROM __staging`
 4. Update watermark
 
-**Note how the function properties flow through all three levels:** `@deterministic` (declared on `session_rollup`) tells Level 3 that replaying a failed batch is safe. `@append_only` (required on `source`) tells Level 2 that incremental processing is valid.
+Properties flow through all three levels: `@deterministic` tells Level 3 replaying a failed batch is safe; `@append_only` on `source` tells Level 2 incremental processing is valid.
 
 ### Example 3: Join Elimination via Function-Aware Planning
 
-This example demonstrates why planner-visible functions enable optimizations that blind expansion cannot. It is based on a real pattern from the retail_analytics example.
+This demonstrates why planner-visible functions enable optimizations that blind expansion cannot.
 
-**Setup:** A reusable enrichment function joins a fact table to multiple dimension tables:
+**Setup:** `enrich_order` (defined in section 4) joins a fact table to customer and product dimensions via LEFT JOINs with unique keys (1:1 cardinality).
 
+**Model A uses both dimensions:**
 ```sql
--- functions/enrichment/enrich_order.sql
-smelt.define enrich_order(
-    source: TableExpr,
-    customer_id_col: Column<source, Integer>,
-    product_id_col: Column<source, Integer>
-) -> TableExpr AS (
-    SELECT
-        source.*,
-        c.segment AS customer_segment,
-        c.country AS customer_country,
-        c.name AS customer_name,
-        p.category AS product_category,
-        p.brand AS product_brand,
-        p.department AS product_department
-    FROM source
-    LEFT JOIN smelt.ref('dim_customers') c
-        ON source.customer_id_col = c.customer_id
-    LEFT JOIN smelt.ref('dim_products') p
-        ON source.product_id_col = p.product_id
-)
-```
-
-The function enriches an order table by joining customer and product dimensions. Both are LEFT JOINs, so they never filter rows from the source. Both dimension tables have unique primary keys (`customer_id`, `product_id`), so each join matches at most one row — 1:1 cardinality.
-
-**Model A — Uses both dimensions:**
-```sql
--- models/order_analysis.sql
 SELECT
-    customer_segment,
-    product_category,
+    customer_segment, product_category,
     SUM(amount) AS total_revenue
 FROM smelt.fn.enrich_order(
     source => smelt.ref('orders'),
@@ -735,14 +693,12 @@ FROM smelt.fn.enrich_order(
 GROUP BY customer_segment, product_category
 ```
 
-Both joins are needed. No optimization possible.
+Both joins needed. No optimization.
 
-**Model B — Uses only customer columns:**
+**Model B uses only customer columns:**
 ```sql
--- models/customer_revenue.sql
 SELECT
-    customer_segment,
-    customer_country,
+    customer_segment, customer_country,
     SUM(amount) AS total_revenue,
     COUNT(*) AS order_count
 FROM smelt.fn.enrich_order(
@@ -753,78 +709,28 @@ FROM smelt.fn.enrich_order(
 GROUP BY customer_segment, customer_country
 ```
 
-This model uses `customer_segment` and `customer_country` (from `dim_customers`) but **no columns from `dim_products`**. The `dim_products` JOIN is dead code.
-
-**Level 1 planner rule — Join elimination:**
+No columns from `dim_products` are used. The planner eliminates the join entirely:
 
 ```
 rule eliminate_unused_1to1_left_join:
     match: function F containing LEFT JOIN to table T
     when:
         - no column from T is used by any downstream consumer of F
-        - T's join key is declared unique (primary key or unique constraint)
+        - T's join key is declared unique
     then:
         rewrite F to remove the JOIN to T
 ```
 
-The planner can apply this rule because:
-1. **Column provenance is explicit.** The function's typed interface tells the planner that `customer_segment` comes from `dim_customers` and `product_category` comes from `dim_products`. No need to trace lineage through raw SQL.
-2. **Join cardinality is known.** The LEFT JOIN with a unique key means at most 1:1 — removing the join doesn't change row count.
-3. **Downstream column usage is known.** The typed logical CST tells the planner exactly which columns `customer_revenue` consumes.
+This works because:
+1. **Column provenance is explicit.** The typed interface tells the planner which columns come from which table.
+2. **Join cardinality is known.** LEFT JOIN with unique key means 1:1 -- removing the join doesn't change row count.
+3. **Downstream column usage is known.** The typed logical CST tells the planner exactly which columns are consumed.
 
-**After optimization, Model B effectively becomes:**
-```sql
-SELECT
-    c.segment AS customer_segment,
-    c.country AS customer_country,
-    SUM(orders.amount) AS total_revenue,
-    COUNT(*) AS order_count
-FROM orders
-LEFT JOIN dim_customers c ON orders.customer_id = c.customer_id
-GROUP BY c.segment, c.country
-```
+With blind expansion, the planner would need to pattern-match raw SQL to identify JOINs, trace column lineage through aliases, check uniqueness constraints, and determine downstream usage. Steps 2-3 are fragile and break with SQL variations. With function-aware planning, the planner reads provenance from the typed interface.
 
-The `dim_products` join has been eliminated entirely — fewer tables scanned, simpler query plan, faster execution.
+## 13. Limits of the Design
 
-**Why this requires planner-visible functions:**
-
-With blind expansion, the planner would need to:
-1. Expand the function to raw SQL
-2. Pattern-match the SQL to identify individual JOINs
-3. Trace column lineage through the expanded SQL to determine which columns come from which JOIN
-4. Check uniqueness constraints on each joined table
-5. Determine which columns are consumed downstream
-
-Steps 2-3 are fragile and will break with SQL variations (subqueries, CTEs, aliasing). With function-aware planning, the planner matches on the function's declared structure and reads column provenance directly from the typed interface.
-
-**Broader applicability:** This optimization isn't limited to user-defined functions. It applies wherever smelt can see a join whose columns aren't consumed downstream. Functions make it practical because they formalize the pattern with explicit types.
-
-## 10. Comparison to Existing Systems
-
-| System | Approach | Lesson for smelt |
-|--------|----------|-----------------|
-| **dbt Jinja macros** | Untyped text substitution | Solves the reuse problem but destroys analyzability. smelt functions must be the opposite — typed composition that preserves analysis. |
-| **Rust `macro_rules!`** | Hygienic, fragment-sorted (`$x:expr`, `$t:ty`, `$s:stmt`) | Proof that fragment sorts work at scale. Rust's `expr` is our `Expr<T>`, `stmt` is our `TableExpr`. Hygiene = lexical scoping. |
-| **Dhall** | Total, typed, no side effects, import-based composition | Totality from no-recursion. Modest type system covers 95% of cases. Don't need dependent types or type-level programming. |
-| **C++ templates** | Untyped expansion, check at instantiation | Good error tracing can compensate for late checking (Tier 1 annotations). But smelt should also support early checking (Tier 2-3). |
-| **TypeScript** | Gradual typing (strict optional, `any` escape hatch) | Adoption story — start untyped, add types as code matures. Same trajectory for smelt function annotations. |
-| **Malloy** | First-class dimensions and measures with reusable definitions | Deep semantic modeling. smelt's approach is less opinionated — SQL fragments rather than a new semantic layer. More migration-friendly. |
-| **PRQL** | Functions as first-class values, pipeline syntax | Functions over expressions work well. But PRQL is a whole new language; smelt extends SQL. |
-| **Terra** | Staged programming — generate low-level code from high-level | "Generate SQL from a composition language" is exactly this framing. smelt's staging is simpler (one stage of expansion). |
-
-### The Dhall Connection
-
-Dhall is particularly relevant because it demonstrates that a **non-Turing-complete language with a modest type system** can replace complex templating in practice. Dhall replaced YAML/JSON templating (Kubernetes configs, CI pipelines) the same way smelt functions would replace Jinja SQL templating.
-
-Key Dhall lessons:
-- **Totality** (guaranteed termination) comes for free from no-recursion — smelt gets this automatically.
-- **Records and unions** cover most use cases — smelt's SQL types (numeric, string, timestamp) plus fragment sorts (Expr, TableExpr, SelectItems) are the equivalent.
-- **Imports** are the composition mechanism — smelt's `smelt.fn.*` namespace serves this role.
-- **You don't need fancy types.** Dhall has no dependent types, no type-level programming, no HKTs. Its type system is modest but sufficient. smelt should follow this example.
-
-## 11. Limits of the Design
-
-Even at maximum ambition, some things remain outside the design:
+Even at maximum ambition, some things remain outside scope:
 
 - **Dynamic schema construction.** You cannot write a function that takes column names as runtime strings and produces a SELECT with those columns. The set of columns must be known at compile time. (`SelectItems` parameters cover the "list of things" case without requiring variadics.)
 - **Conditional structure.** A function cannot return a JOIN sometimes and a subquery other times based on a runtime value. SQL structure is fixed at compile time. (Conditional *expressions* like CASE/WHEN are fine.)
@@ -833,545 +739,134 @@ Even at maximum ambition, some things remain outside the design:
 
 These limitations are deliberate. The Jinja use cases that hit them are exactly the ones that produce unmaintainable code.
 
-## 12. Implementation Decisions
-
-### Planner metadata: explicit annotations first (decided April 14, 2026)
-
-Refinement type metadata (column provenance maps, join graphs) will be **explicitly annotated** by function authors rather than automatically derived by the compiler. Authors declare structural properties like `@joins(dim_customers LEFT 1:1)` and `@provenance(customer_segment -> dim_customers.segment)`.
-
-**Rationale:** Automatic derivation requires a full lineage analyzer — a substantial compiler component. Explicit annotations let the planner integration ship without this, while keeping the door open to add automatic derivation later as a pure DX improvement (no semantic changes needed). In practice, only "model template" functions (session_rollup, enrich_order) benefit from planner-level optimization, so the annotation burden is concentrated on a small number of high-value functions.
-
-### CTE context bindings: include in initial design (decided April 14, 2026)
-
-CTE-derived context bindings (e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause in the function body) are worth the implementation investment and should not be deferred.
-
-**Rationale:** Ambiguous column references are one of the most common and frustrating errors in SQL development. CTE context bindings catch "column X doesn't exist in Y" at the call site before expansion — a qualitative improvement over errors that surface in generated SQL after expansion. The implementation cost is also less than it appears: computing the output schema of a CTE is the same schema inference the type system already performs for models and function calls. The incremental work is wiring CTE schema computation into the context binding checker, not building a new analysis from scratch.
-
-### Default values: self-contained, type-checked, omission-as-empty (decided April 15, 2026)
-
-Default values for parameters follow these rules:
-
-- **Self-contained.** A default expression cannot reference other parameters. This keeps default evaluation order trivial and avoids a mini-scope-resolution problem at the signature layer.
-- **Type-checked at definition time.** A default must satisfy the parameter's declared type. This is a free Tier 2 check — defaults are part of the signature, so checking them is part of checking the signature.
-- **Omission means "splice nothing"** for fragment-typed parameters. A `SelectItems` parameter with a default of "no items" is expressed by simply omitting the argument at the call site — no `()` empty-list syntax needed in the source. `Expr<Boolean>` filter parameters that should default to "no filter" use `= TRUE` (a real SQL literal). This avoids inventing non-SQL syntax for empty fragments.
-
-### No variadic parameters in v1 (decided April 15, 2026)
-
-Variadic / splat parameters are out of scope for v1. The `SelectItems` fragment sort already covers the "pass a list of things" case ergonomically. Variadics can be added later without breaking existing functions.
-
-### Function ordering and cycle detection (decided April 15, 2026)
-
-- **No intra-file ordering requirement.** A function may call any other function defined anywhere in the project, regardless of file or position within a file. Forward references are first-class.
-- **Cycle detection lives in `smelt-db`** as a Salsa query over the function-call graph. Detection runs against function definitions only — model-to-function and function-to-model edges are not part of the cycle check.
-
-### Visibility: all functions public in v1 (decided April 15, 2026)
-
-There is no `pub` / `private` distinction. Every function defined in the project is callable from any model or other function. Adding visibility modifiers later is non-breaking (default stays public).
-
-### Function testing deferred (decided April 15, 2026)
-
-A dedicated test mechanism for functions (e.g., `test: true` files calling `smelt.fn.*` directly) is not part of v1. Functions remain testable indirectly through models that use them. A first-class function-test workflow is a follow-up.
-
-### LSP signature stability under broken bodies (decided April 15, 2026)
-
-When a function body becomes invalid mid-edit:
-
-- **Tier 2 / Tier 3 functions** retain their signature. Call sites continue to type-check against the declared parameter and return types. The error is contained to the function being edited; downstream models do not cascade red.
-- **Tier 1 functions** have no signature independent of the body, so call sites cannot be checked while the body is broken. This is unavoidable, and is one more reason to encourage Tier 2+ for shared functions.
-
-This asymmetry should be surfaced in LSP UX (e.g., a hint on Tier 1 functions: "annotate parameters to prevent cascading errors during edits").
-
-### Namespacing: directory-derived (decided April 15, 2026)
-
-Function paths under `smelt.fn.*` mirror the directory layout under `functions/`. `functions/patterns/session_rollup.sql` defines `smelt.fn.patterns.session_rollup`. This matches the `models/` convention and avoids inventing a separate namespace declaration.
-
-### No overloading in v1 (decided April 15, 2026)
-
-Function names are unique within their namespace. Two functions named `margin` with different parameter types are not allowed. Overloading combined with gradual typing is a known footgun (resolution rules become annotation-tier-dependent), and the cost of adding overloading later is low.
-
-### Functions are additive (decided April 15, 2026)
-
-Introducing functions does not change the meaning of existing models. Models that don't call any function compile and run identically to today. The `smelt.define` and `smelt.fn.*` syntax is purely additive to the grammar.
-
-### Type inference: bidirectional checking with local row unification (decided April 16, 2026)
-
-The type inference algorithm is **bidirectional checking** (Pierce, 2004; Dunfield & Krishnaswami, 2021) with a local unification step for row variables. This is a global design decision: all tiers of the gradual typing system, all row-polymorphic checking (both `TableExpr` and `Struct`), and all error message generation follow from this choice. See §18 for the full rationale, per-tier behavior, and error message properties.
-
-### Block syntax: named SQL-like clauses (decided April 16, 2026)
-
-Fragment-typed parameters can be passed as trailing `WITH name AS (...)` clauses after the function call's closing `)`. This reuses SQL's existing `WITH ... AS (...)` shape — no significant whitespace, no nested mini-grammar. Block clauses must trail the function call directly. See §5 for examples.
-
-### Grammar: functions go where models go (decided April 16, 2026)
-
-- Function files use frontmatter, same as model files.
-- A `.sql` file may contain **multiple** `smelt.define` definitions. Conflicts (same function name in same directory) are reported as errors.
-- A file may contain both `smelt.define` definitions and a model `SELECT` — they coexist at the top level.
-- Function namespacing is directory-derived (§12, "Namespacing: directory-derived").
-
-### Predicate sort removed (decided April 16, 2026)
-
-The `Predicate` fragment sort is removed. Use `Expr<Boolean>` instead. The positional constraint (WHERE, ON, HAVING) is enforced by SQL syntax; `Expr<Boolean>` carries the same type information with one fewer concept to learn. Context bindings use `Expr<Boolean, source>` where `Predicate<source>` was previously written.
-
-### Column\<T\> accepts bare refs only (decided April 16, 2026)
-
-`Column<source, Timestamp>` accepts only bare column references (`user_id`), not computed expressions (`LOWER(user_id)`). Use `Expr<T>` for computed values. This has semantic weight when the parameter is spliced into `PARTITION BY` or `GROUP BY`.
-
-### Annotation syntax: bare keywords in v1 (decided April 16, 2026)
-
-v1 annotations are bare keyword annotations only: `@deterministic`, `@idempotent`, `@append_only`. No structured arguments. Annotations appear after the type, before the `=` default (for parameters) or before `AS` (for return types). Structured annotations (`@joins(...)`, `@provenance(...)`) are deferred to v2 when the planner needs them. Function-level annotations (e.g., `@deprecated`) are reserved but not implemented.
-
-### Named parameter syntax follows PostgreSQL (decided April 16, 2026)
-
-smelt's `param => value` named-parameter syntax follows PostgreSQL's named notation for function calls (supported since PostgreSQL 9.5). Oracle PL/SQL uses the same `=>` convention. This is an established convention, not new syntax. `smelt.metric()` will use the same `=>` named-parameter syntax when implemented.
-
-### MVP scope: subset of fragment sorts (decided April 16, 2026)
-
-The initial implementation targets a subset of fragment sorts: `Expr<T>`, `TableExpr`, and `Column<T>`. The remaining sorts (`AggExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Implementation order determines what gets built when — each sort is independently addable without breaking existing functions.
-
-### Planner integration is post-MVP (decided April 16, 2026)
-
-v1 is pure expansion — no Level 1 planner rules. Function properties (`@deterministic`, `@append_only`) are parsed and stored but not actively used by the planner. This lets the function system be validated independently before adding planner complexity.
-
-### Error trace depth: direct in phase 1 (decided April 16, 2026)
-
-When function A calls B calls C and C produces a type error, the Tier 1 error shows A→C (call site → innermost error), skipping intermediate expansions. Full-chain traces (A→B→C) are a future improvement if the direct trace proves insufficient.
-
-## 13. Open Questions
-
-The decisions in §12 now close most design questions. The items below are what remains.
-
-### Specification tightening (can resolve inside the plan)
-
-- **Union context disambiguation.** For `Column<a | b, Integer>` when both `a` and `b` have an `id` column, what does the caller write? Parameter-name qualification (`a.id`) is the natural answer but needs to be specified explicitly, including parameter-CTE union cases.
-- **CTE context checking boundary.** `SelectItems<Agg, sessionized>` can be checked structurally (is it a select list of aggregates?) at definition time, but column-name validation against the CTE schema is call-site-dependent because CTE schemas often include `source.*`. Document the split clearly.
-- **`AggExpr<T>` — keep or collapse into `Expr<T>`?** Same argument as the `Predicate` removal: aggregation context is already enforced by SQL syntax. Counter-argument: `AggExpr<T>` is more informative than `Predicate` was because "this parameter expects an aggregate" is a common source of confusion. Deferred to implementation — not in MVP scope either way.
-
-### Already deferred / not blocking
-
-- **LSP block-context completion** — architecturally hard, can land after basic diagnostics.
-- **Multiple expansion modes per author** — committed to "the planner's job" unless pain emerges.
-- **Function tests** — deferred per §12; functions remain testable through models that use them.
-- **Package ecosystem / registry** — not in initial scope.
-- **Python model interaction** — functions are SQL-only; Python models are opaque table producers reachable via `smelt.ref()`.
-- **Structured annotations** (`@joins(...)`, `@provenance(...)`) — deferred to v2 per §12.
-- **Malloy comparison** — the §10 comparison table undersells Malloy. A fair side-by-side comparing the composition models would strengthen the paper but is not blocking.
-
-## 14. Summary
-
-smelt functions are **typed, composable SQL fragments** that replace Jinja macros while preserving static analysis:
-
-- **SQL fragment types** ensure structural well-formedness
-- **Lexical scoping** makes functions self-contained and analyzable
-- **Optional annotations** allow gradual adoption of type rigor
-- **Block syntax** provides ergonomic multi-line fragment passing
-- **Three-level planner integration** makes functions visible to optimization
-- **No recursion** guarantees termination
-
-The design occupies a specific point in the design space: more powerful than simple expression macros, less complex than a full functional programming language. It covers the three categories of Jinja usage that smelt currently lacks (expression reuse, fragment generation, model templates) while maintaining the guarantees that make smelt valuable (type checking, planner visibility, LSP support, testability).
-
-The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 — allows shipping incremental value while building toward the full design.
-
-## 15. PL/Compiler Expert Review
-
-**Date:** April 14, 2026
-**Reviewer:** Claude (prompted as PL/compiler expert)
-**Revision:** Updated April 14, 2026 after paper revisions addressing original review points 1, 2, 4, and 6. Context bindings now support CTE references and union contexts. Scoping is honestly described as hybrid. Planner model uses refinement types. Error message contract is specified. Points 3 (block syntax complexity) and 5 (Malloy comparison) remain as open considerations.
-
-### PLT Techniques Being Used (Named)
-
-1. **Fragment sorts / syntactic categories** (Section 3) — This is the Rust `macro_rules!` technique of *fragment specifiers* (`$e:expr`, `$s:stmt`), which itself derives from the PL concept of **syntactic sorts** in multi-sorted algebras. The idea: a macro system that knows the grammar can restrict substitution to structurally valid positions. MetaML, Template Haskell, and Rust all do this. It's the single strongest idea in the paper.
-
-2. **Staged metaprogramming** (Section 8) — Functions that "compile away" are a one-stage version of **multi-stage programming** (Taha & Sheard, MetaML). The paper correctly identifies Terra as the closest analog. The three-level planner integration is essentially a **multi-pass lowering pipeline** — the same architecture as MLIR (Multi-Level IR), where each dialect level carries different semantic information and rewrites happen at the appropriate level.
-
-3. **Hygienic macro expansion with structural column resolution** (Section 7) — The revised scoping model correctly identifies two layers: parameter bindings are **hygienic** (Kohlbecker et al., 1986), while bare column names against `TableExpr` parameters use **structural resolution** — closer to **row polymorphism** (OCaml object types, PureScript row types) than pure lexical scoping. The paper now names this honestly as a hybrid, which is the right call. See remaining concerns below.
-
-4. **Gradual typing with error contracts** (Section 6) — The three-tier annotation model is textbook **gradual typing** (Siek & Taha, 2006), following the TypeScript adoption curve. The addition of explicit error message contracts per tier is a significant improvement — this is where gradual typing systems succeed or fail in practice, and the paper now commits to specific error quality guarantees rather than leaving them implicit.
-
-5. **Totality via structural restriction** (no recursion) — This is the Dhall approach, which itself comes from **total functional programming** (Turner, 2004). Banning recursion guarantees termination trivially. The paper correctly notes this is sufficient.
-
-6. **Refinement types for SQL functions** (Section 8) — The revised planner model explicitly adopts **refinement types**: function types carry compiler-derived structural metadata (column provenance maps, join graphs, declared properties) beyond the basic fragment sort. This resolves the original tension between "opaque nodes" and the planner needing internal structure. The paper now correctly names this as refinement typing, following the pattern from liquid types (Rondon et al., 2008) and similar systems.
-
-7. **Context-dependent type binding** (Section 3) — The expanded context binding system (`Column<source, T>`, `Expr<Boolean, source>`, `SelectItems<Agg, sessionized>`, union contexts) is a restricted form of **dependent types** where a type parameter references a value-level binding. The extension to CTE-derived contexts and union contexts moves this closer to a proper **row-polymorphic system with structural subtyping** — the union `source | customers | products` is essentially a join of row types.
-
-### Critical Analysis
-
-#### What works well
-
-**The fragment sort system is the right core idea.** Jinja's fundamental failure is operating on strings. The moment you introduce syntactic sorts, you can statically prevent nonsense compositions. Rust's macro system proved this works at industrial scale — the key lesson being that you need *enough* sorts to be useful but not so many that the system becomes its own type theory.
-
-**The context binding system is well-designed.** The revised Section 3 addresses the original concern about `Column<source>` by generalizing context bindings across all fragment sorts. The key insight — that `metrics` binds to `sessionized` while `filters` binds to `source`, giving the author control over what each caller-provided fragment can see — is a powerful scoping mechanism. This is essentially **capability-based access control** applied to SQL column namespaces: the function author grants each parameter access to specific table contexts.
-
-The CTE context mechanism (where `sessionized` is a `WITH` clause in the body, and the compiler derives its schema) is elegant. It means the author can expose *computed* contexts — not just the raw input tables — to callers. The coupling between signature and body (changing a CTE's SELECT list changes what callers can reference) is a real trade-off, but the paper correctly identifies it as intentional: the context binding names the splice-point scope.
-
-**The union context design handles joins naturally.** `SelectItems<source | customers | products>` for multi-table contexts follows SQL's own resolution rules (ambiguous names require qualification). This avoids inventing new semantics for a well-understood problem.
-
-**Late expansion with refinement types is architecturally sound.** The revised Level 1 planner model — functions as nodes with rich typed interfaces including compiler-derived structural metadata — resolves the original contradiction between "opaque nodes" and needing join graphs for optimization. The join elimination example (Section 9, Example 3) is now consistent with the planner model: the planner reads column provenance from the refinement type, not by inspecting the SQL body.
-
-**The gradual annotation strategy now includes error contracts.** The error message contract (Section 6) is a critical addition. The Tier 1 contract — "show the call site with parameter mapping, not just a raw SQL error" — is exactly the minimum viable error experience. The progression from traced bindings (Tier 1) to declared contracts (Tier 2) to author-isolated errors (Tier 3) is clean. The "author complexity, user clarity" principle provides a coherent narrative for why this progression matters.
-
-#### Where to push back
-
-**1. Context binding scope resolution needs more specification.**
-
-The context binding system is well-conceived but leaves edge cases underspecified. Consider:
-
-```sql
-smelt.define foo(
-    a: TableExpr,
-    b: TableExpr,
-    col: Column<a | b, Integer>  -- union context across parameters
-)
-```
-
-What happens when `a` and `b` both have a column named `id` of type `Integer`? The paper says "ambiguous column names require qualification — the same rule as standard SQL." But in standard SQL, qualification uses table aliases (`a.id`, `b.id`). In the context binding system, the "table" is a parameter name. Does the caller write `a.id` or does the compiler require the caller to disambiguate some other way?
-
-Similarly, for CTE-derived contexts: if a CTE `sessionized` selects `source.*` plus `session_id`, and `source` is a `TableExpr` parameter, the schema of `sessionized` depends on the call site. This means **context-bound type checking is call-site-dependent even for Tier 2+** — the compiler can check that the *form* of the caller's fragment is correct (it references columns, not arbitrary expressions), but validating specific column names requires knowing the call-site schema. This is fine, but it's worth being explicit about: CTE context bindings give you *structural* guarantees (the fragment references columns from the right table) but column-name validation is still call-site-dependent.
-
-**Recommendation:** Specify the disambiguation rules for union contexts (especially parameter-parameter unions vs. parameter-CTE unions), and clarify which checks happen in isolation vs. at the call site for CTE-derived contexts.
-
-**2. The block syntax introduces a second grammar.**
-
-The `{ metrics: ... filters: ... }` block syntax is effectively a **domain-specific sub-language** embedded in the call site. This has worked before (Ruby blocks, Kotlin DSL builders, Groovy closures in Gradle), but each time it creates a parsing and tooling burden disproportionate to the syntactic convenience.
-
-Specific concerns:
-- What's the delimiter between sections? Newlines? Commas? The examples use blank lines, which makes the parser whitespace-sensitive in a context where SQL is not.
-- How does error recovery work inside blocks? You now have nested parsing contexts (SQL -> function call -> block -> SQL inside block).
-- The LSP complexity note in Section 12 is an understatement — you need *contextual* completion that depends on partial expansion, which is one of the hardest LSP problems.
-
-**Compare with:** Kotlin's trailing lambda syntax, which has the same "pass a block to a function" ergonomic goal but avoids introducing named sections. Consider whether named parameters with parenthesized SQL fragments (the "ugly" version) plus good formatter support might be 80% of the value at 20% of the parser complexity.
-
-**3. The comparison table undersells Malloy.**
-
-Malloy isn't just "deep semantic modeling" — it's the closest direct competitor to this design. Malloy's `dimension` and `measure` declarations are essentially `Expr<T>` and `AggExpr<T>` with fixed scoping. Malloy's `source` extensions are `TableExpr` transformers. The key difference is that Malloy chose a new query language while smelt extends SQL, but the *function composition model* is very similar. A fair comparison would help readers understand the actual trade-off: Malloy gets cleaner semantics by abandoning SQL syntax; smelt gets migration compatibility by extending SQL syntax but inherits SQL's scoping messiness.
-
-**4. Refinement type metadata derivation is implementation-heavy.** *(Resolved — see Section 12)*
-
-The revised planner model is conceptually cleaner, but the compiler work to *derive* structural metadata automatically is substantial. Extracting column provenance maps and join graphs from arbitrary SQL bodies means the compiler must essentially build a relational algebra representation of each function body — this is a query optimizer's job.
-
-**Decision:** Start with explicit annotations (`@joins`, `@provenance`) and add automatic derivation later as a DX improvement. This lets the planner integration ship without requiring a full lineage analyzer, while keeping the design compatible with automatic derivation in the future.
+## 14. Comparisons and Theoretical Foundations
+
+### Comparison Table
+
+| System | Approach | Lesson for smelt |
+|--------|----------|-----------------|
+| **dbt Jinja macros** | Untyped text substitution | Solves reuse but destroys analyzability. smelt must be the opposite. |
+| **Rust `macro_rules!`** | Hygienic, fragment-sorted (`$e:expr`, `$t:ty`) | Proof that fragment sorts work at scale. Our `Expr<T>` is their `$e:expr`. |
+| **Dhall** | Total, typed, no side effects | Totality from no-recursion. Modest type system covers 95% of cases. |
+| **C++ templates** | Untyped expansion, check at instantiation | Good tracing can compensate for late checking (Tier 1). But early checking is better. |
+| **TypeScript** | Gradual typing, strict optional | Adoption trajectory: start untyped, add types as code matures. |
+| **Malloy** | First-class dimensions, measures, sources | Closest direct competitor. Cleaner semantics by abandoning SQL; smelt is more migration-friendly by extending SQL. Malloy's `dimension`/`measure` = our `Expr<T>`/`AggExpr<T>` with fixed scoping. |
+| **PRQL** | Functions as first-class values, pipeline syntax | Functions over expressions work well. But PRQL is a whole new language. |
+| **Terra** | Staged programming -- generate low-level code from high-level | "Generate SQL from a composition language" is exactly this framing. |
+
+### Theoretical Underpinnings
+
+The design draws from several established PL techniques:
+
+- **Fragment sorts / syntactic categories.** Multi-sorted algebras; Rust `macro_rules!` fragment specifiers. The foundation of safe composition.
+- **Staged metaprogramming.** MetaML (Taha & Sheard); Terra. Functions that "compile away" are one-stage programming.
+- **Hygienic macro expansion.** Kohlbecker et al., 1986. Lexical scoping for parameters prevents C-preprocessor-style surprises.
+- **Row polymorphism.** Remy, 1994; OCaml object types; PureScript row types. Structural column/field resolution for tables and structs.
+- **Gradual typing.** Siek & Taha, 2006. Optional annotations with a clean adoption trajectory.
+- **Totality via structural restriction.** Turner, 2004. No recursion guarantees termination.
+- **Refinement types.** Rondon et al., 2008 (liquid types). Function types carry structural invariants (provenance, join graphs) beyond the basic sort.
+- **Bidirectional type checking.** Pierce, 2004; Dunfield & Krishnaswami, 2021. Types flow up (synthesis) and down (checking).
+- **Progressive lowering.** MLIR. Three planner levels with clear contracts at each boundary.
 
 ### Historical Precedents Worth Studying
 
-- **SML Functors / OCaml modules** — Parameterized modules that produce types based on input types. `Column<source, T>` is a simplified version of this: a type that depends on a module's signature.
-- **Scala's path-dependent types** — `source.Column` where the type depends on a specific value. The context binding system is more constrained (contexts are named table scopes, not arbitrary paths), which avoids Scala's complexity pitfalls while preserving the useful dependent relationship.
-- **Template Haskell** — Multi-stage compilation where generated code is type-checked after splicing. The Tier 1 strategy is exactly this. TH showed it works but that error messages are the main usability challenge — the new error message contract directly addresses this lesson.
-- **MLIR's progressive lowering** — The three-level planner is structurally identical to MLIR's dialect-to-dialect lowering. MLIR's lesson: you need clear contracts at each level boundary, which maps to the paper's "return type as safety contract."
-- **Liquid types (Rondon et al., 2008)** — Refinement types that carry logical predicates beyond the base type. The compiler-derived structural metadata (join graphs, provenance maps) attached to function types is a domain-specific form of refinement typing, where the "predicates" are relational algebra properties rather than logical formulas.
+- **SML Functors / OCaml modules** -- Parameterized modules that produce types based on input types. `Column<source, T>` is a simplified version.
+- **Scala's path-dependent types** -- `source.Column` where the type depends on a specific value. Context bindings are more constrained, avoiding Scala's complexity.
+- **Template Haskell** -- Multi-stage compilation where generated code is type-checked after splicing. Tier 1 is exactly this. TH showed that error messages are the main usability challenge.
+- **Liquid types (Rondon et al., 2008)** -- Refinement types carrying logical predicates. The compiler-derived structural metadata is a domain-specific form.
+- **Heeren et al. (2003), "Top Quality Type Error Messages"** -- Analysis of why constraint-based systems produce poor errors. A "what to avoid" reference justifying bidirectional checking.
 
-### Summary Verdict
+## 15. Open Questions
 
-The revised paper is substantially stronger. The four main weaknesses from the original review have been addressed:
+### Specification to Tighten
 
-1. **Context bindings** (originally: "`Column<source>` is dependent typing in disguise") — Now a well-specified system covering all fragment sorts, with CTE-derived contexts and union contexts. The dependent typing is acknowledged and scoped appropriately. Edge cases around disambiguation remain (see point 1 above), but the core design is sound.
+- **Union context disambiguation.** For `Column<a | b, Integer>` when both have an `id` column, does the caller write `a.id`? Parameter-name qualification is the natural answer but needs explicit specification, including parameter-CTE union cases.
+- **CTE context checking boundary.** `SelectItems<Agg, sessionized>` can be structurally checked at definition time, but column-name validation is call-site-dependent when the CTE includes `source.*`. The split needs clear documentation.
+- **`AggExpr<T>` -- keep or collapse into `Expr<T>`?** Same argument as the Predicate removal: aggregation context is enforced by SQL syntax. Counter-argument: "this parameter expects an aggregate" is a common source of confusion. Deferred to implementation -- not in MVP scope either way.
 
-2. **Scoping** (originally: "names the hybrid honestly") — The revised Section 7 correctly describes the two-layer model: lexical parameters + structural column resolution (row polymorphism). This is honest and technically precise.
+### Deferred
 
-3. **Planner model** (originally: "opaque vs. refinement type contradiction") — The revised Section 8 explicitly adopts refinement types with compiler-derived metadata, resolving the contradiction. The implementation cost of metadata derivation is the remaining concern (see point 4 above).
+- **LSP block-context completion** -- architecturally hard, can land after basic diagnostics.
+- **Function tests** -- functions remain testable through models that use them. First-class function-test workflow is a follow-up.
+- **Package ecosystem / registry** -- not in initial scope.
+- **Python model interaction** -- functions are SQL-only; Python models are opaque table producers reachable via `smelt.ref()`.
+- **Structured annotations** (`@joins(...)`, `@provenance(...)`) -- deferred until the planner needs them.
+- **Error trace depth for nested calls** -- when A calls B calls C and C errors, Tier 1 shows A->C (call site -> innermost error), skipping intermediates. Full-chain traces are a future improvement.
 
-4. **Error messages** (originally: "missing error message design") — The error message contract in Section 6 commits to specific quality guarantees per tier, with the "author complexity, user clarity" principle providing coherent motivation.
+## 16. Experimentation Roadmap -- What We Learn at Each Step
 
-**Remaining open items** are block syntax complexity (point 2) and the Malloy comparison (point 3) — both are secondary to the core type system design. Refinement type metadata derivation (point 4) has been resolved: explicit annotations first, automatic derivation later.
+This is a research sequence, not a shipping plan. Each step teaches something that informs the next.
 
-**Implementation path is now clearer.** Two key decisions reduce the risk: explicit planner annotations avoid the need for a lineage analyzer at launch, while CTE context bindings are confirmed as worth the investment (leveraging existing schema inference). The remaining implementation sequencing question is how Tier 1 error tracing, context binding checking, and the planner annotation system interact — a phased implementation plan identifying which pieces can ship independently would strengthen the path from paper to product.
+### Step 1: Fragment Sorts + Expr<T> Functions
 
-## 16. Typing Built-in SQL Functions
+**Build:** `smelt.define` for expression-level functions. `Expr<T>` and `Column<T>` sorts. Tier 1 checking (expand, check, trace errors back). The `safe_divide` example end-to-end.
 
-### Motivation
+**What we learn:** Does the fragment sort concept work in practice? Does expansion + type checking produce errors good enough for Tier 1? Is the `smelt.define` / `smelt.fn.*` syntax natural?
 
-The fragment sort system in §3 was designed for user-defined `smelt.define` functions, but every model also calls built-ins: `COALESCE`, `SUM`, `CAST`, `SUBSTRING`, `generate_series`, and so on. Typical models call built-ins far more often than user functions. If built-ins carry the same fragment-typed signatures, every SQL call gets the same compile-time checking, hover types, and completion that `smelt.fn.*` gets. Planner rules can also match on built-in names the same way they match on user functions.
+**How it ladders:** If Tier 1 errors are adequate, the gradual typing thesis holds. If not, we know exactly where the pain is before adding complexity.
 
-This is probably the highest-leverage extension of the type system. It is worth asking up front which built-ins fit, which need modest extensions, and which are fundamentally outside scope.
+### Step 2: TableExpr Functions + Row Polymorphism
 
-### What fits with no new machinery
+**Build:** `TableExpr` sort. Structural column resolution (bare column names resolving against table schemas). The `sessionize` and `add_margin` examples.
 
-Many built-ins map directly onto the existing sorts:
+**What we learn:** Does structural column resolution work? How do errors feel when a table is missing required columns? Is the hybrid scoping model (lexical parameters + structural columns) confusing or natural?
 
-| Built-in shape | Signature |
-|----------------|-----------|
-| Pure scalar (`LOWER`, `ABS`, `LENGTH`) | `Expr<T1> -> Expr<T2>` |
-| Binary scalar (`POWER`, `MOD`) | `(Expr<T>, Expr<T>) -> Expr<T>` |
-| Aggregates (`SUM`, `COUNT`, `AVG`) | `Expr<T> -> AggExpr<T>` |
-| Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Expr<Boolean>` |
-| Simple table functions (`generate_series(1, 10)`) | `(Expr<Int>, Expr<Int>) -> TableExpr` |
+**How it ladders:** This validates the row polymorphism thesis. If structural resolution works for tables, the same concept extends to structs (Step 7).
 
-These are the majority of the SQL standard library. No new typing machinery required.
+### Step 3: Context Bindings
 
-### What needs extensions
+**Build:** Context parameters on fragment sorts. `SelectItems<Agg, sessionized>`, `Expr<Boolean, source>`. CTE-derived contexts. Union contexts.
 
-Several ubiquitous built-ins expose gaps:
+**What we learn:** Can we derive CTE schemas reliably? Do context-bound errors actually help? Is the capability-based access control ("author controls what callers see") valuable in practice?
 
-**1. Generics / type parameters.** `COALESCE(a, b, c)` returns the common supertype of its arguments. `MAX(x)` returns the same type as `x`. `ARRAY_AGG(x)` returns `Array<T>`. Typing these requires type parameters on signatures (e.g., `COALESCE<T>: Expr<T>... -> Expr<T>`) — a modest extension paralleling Rust generics, but it introduces a type-inference step we currently don't have.
+**How it ladders:** Context bindings are what make the error story qualitatively better than "just expand and check." This is the bridge from "it works" to "it works well."
 
-**2. Variadics.** `COALESCE`, `CONCAT`, `GREATEST`, `LEAST` all accept arbitrary arity. v1 deliberately excluded variadic *user* functions (§12). For built-ins, either we give them a privileged native-variadic form that user functions can't use, or we reintroduce variadics for both. Worth a deliberate decision.
+### Step 4: Tier 2 Annotations + Bidirectional Checking
 
-**3. Types as arguments.** `CAST(x AS INTEGER)` passes a type where a parameter normally sits. Same shape in `TRY_CAST`, `EXTRACT(YEAR FROM ts)` (a field keyword), and parameterised types like `DECIMAL(10, 2)`. Not expressible as `Expr<T>` parameters. Options: add a dedicated `Type` (and maybe `Field`) parameter sort; or treat this syntax as primitive grammar that the checker handles specially.
+**Build:** Parameter type annotations. Bidirectional checking in synthesis and checking modes. Pre-expansion call-site checking.
 
-**4. Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`, `POSITION(sub IN str)`, `LISTAGG(x, ',') WITHIN GROUP (ORDER BY y)`. The SQL standard spells several built-ins with mandatory keywords rather than commas. Our `=>` named-argument syntax doesn't map onto these; they'd need to be treated as primitive grammar rather than ordinary calls.
+**What we learn:** Does pre-expansion checking produce meaningfully better errors? Is bidirectional checking sufficient, or do we hit cases that want constraint-based solving? How much annotation do people actually write?
 
-**5. Modifier clauses on aggregates.** `SUM(x) FILTER (WHERE cond)`, `string_agg(x, ',' ORDER BY y)`, and window `OVER (...)`. These attach `Expr<Boolean>` / `OrderSpec` fragments to an aggregate call — which the type system already knows how to describe — but the attachment is a syntactic suffix, not a parameter. A refined `AggExpr<T>` that carries optional `filter: Expr<Boolean>` and `order: OrderSpec` slots would make this explicit.
+**How it ladders:** This is the inflection point for library-quality functions. If Tier 2 errors are good, Tier 3 (return type annotations) is a small incremental step.
 
-**6. Schema-returning table functions.** `UNNEST(array_col)` produces a table whose schema depends on the array element type — typeable with generics (`UNNEST<T>: Expr<Array<T>> -> TableExpr{value: T}`). `read_csv` / `read_parquet` with auto-schema detection is **not** compile-time typeable by design: the schema is discovered at runtime. These must either accept a user-supplied schema annotation or fall back to an opaque `TableExpr` where column references are checked at expansion time.
+### Step 5: Block Syntax
 
-### What is fundamentally untypeable
+**Build:** Trailing `WITH name AS (...)` clauses on function calls. Parser integration and error recovery.
 
-A small set of features cannot be fit without abandoning compile-time guarantees:
+**What we learn:** Is the parser complexity manageable? Does the syntax actually improve readability over inline arguments? How does error recovery work inside blocks?
 
-- **Auto-schema built-ins** without a schema hint (`read_csv('x.csv')`). The schema exists only after reading the file. Models using them must either carry an explicit schema annotation or accept opaque `TableExpr`.
-- **Dynamic `EXECUTE` / string-templated SQL.** Out of scope — and rare in analytics SQL.
-- **Untyped JSON navigation** (`col->>'foo'`). Typeable only by committing to `Text` unconditionally and requiring explicit casts, which matches most engines' existing behaviour.
+**How it ladders:** Block syntax is pure ergonomics. It does not change the type system. It can be added or deferred without affecting anything else. Can happen any time after Step 1.
 
-### Where this lands
+### Step 6: Planner Visibility
 
-The direct implication for v1: the existing design already types roughly 80% of common built-ins without new machinery. The remaining 20% — generics, variadics, type-arguments, keyword syntax, modifier clauses — is a substantial but bounded extension. None of it invalidates the existing design; all of it can be added incrementally.
+**Build:** Functions as nodes in the logical plan. Explicit property annotations. Column provenance annotations. The join elimination example.
 
-**Honest positioning:** the fragment sort system is a plausible foundation for typing built-ins, but built-in coverage is a separate work item with its own design pressure. A v1 that types only user functions (and leaves built-ins to the existing type inference) is still a large improvement. A v2 that extends coverage to built-ins unlocks a second, larger improvement — but it is not free.
+**What we learn:** Can planner rules reason about functions effectively? Does join elimination actually fire on real workloads? Is the explicit annotation burden acceptable, or is automatic derivation needed sooner than expected?
 
-There is also a crossover with the §6 error contract: Tier 1 call-site errors may surface through built-in calls whose arguments we can't check early. That is acceptable (it matches today's behaviour) but worth naming as a constraint the user will see.
+**How it ladders:** This is where smelt functions become fundamentally different from Jinja macros. Everything before this is "better macros." This is "optimization annotations."
 
-### Open question for the v2 discussion
+### Step 7: Struct Row Polymorphism
 
-If we extend the type system to built-ins, do we do it through a **signature registry** (a table of built-in signatures the checker consults, one per dialect) or by making the checker aware of a small set of **primitive built-in shapes** (CAST-shaped, EXTRACT-shaped, aggregate-with-modifiers-shaped) that it handles specially? The registry approach scales with engines; the primitive-shapes approach keeps the checker simple but requires per-engine code for anything unusual. Both are viable; the choice affects how much work it is to add a new backend.
+**Build:** `Expr<Struct<{ts: Timestamp, ..r}>>`. Row variables on struct types. Spread syntax. Value-level erasure at expansion.
 
-## 17. Struct Parameters and Row Polymorphism for Values
+**What we learn:** Do analytics teams actually have struct-typed columns that benefit from this? Does the single-named-variable restriction bite? Can row-unification errors be explained clearly?
 
-### Motivation
+**How it ladders:** Validates whether row polymorphism generalizes from tables to values. If it does, the type system has broader reach than initially designed for.
 
-§7 settled on **row polymorphism for `TableExpr` parameters**: bare column names inside a function body resolve structurally against whatever table is passed in, and the compiler checks the required columns exist. That handles the table/row case — columns of a relation.
+### Step 8: Built-in Function Typing
 
-It does not handle the *value-level* case: a parameter whose type is a **struct-typed column** where the function needs specific fields but not the whole struct. In DuckDB (and Spark, BigQuery, etc.), struct columns are first-class: a table might have `event_data STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT, referrer TEXT)` as a single column. Functions that operate on struct columns face the same brittleness problem as functions that operate on tables — if the struct parameter type is closed, adding a field to the struct breaks every function that accepts it.
+**Build:** Signature registry or primitive shapes for SQL built-ins. Generics and variadics for the 20% that need extensions.
 
-This case shows up constantly in analytics SQL once struct-typed columns are in play:
+**What we learn:** Can the fragment sort system extend to cover SQL built-ins? Which extension categories (generics, variadics, type-as-arguments, keyword syntax, modifier clauses) have the best effort/value ratio?
 
-- An aggregate helper that needs a `timestamp` field out of an event struct column but doesn't care what else the struct carries.
-- A scoring function that reads `{amount, currency}` out of a transaction struct and ignores everything else.
-- A normalizer that extracts and reshapes specific fields from a nested struct while passing other fields through.
+**How it ladders:** This is the second-largest leverage point after the core function system. If it works, every SQL call in every model benefits from the type system.
 
-If struct parameters are **closed** (either nominally or structurally), every such helper is pinned to one concrete struct type. Add a field to the struct schema and every helper stops accepting it. That's the same brittleness §7 rejected for table parameters — and the fix is the same: **row variables**.
+### Dependency Graph
 
-### How this differs from `TableExpr` row polymorphism
-
-`TableExpr` parameters represent **tables** — things that appear in FROM clauses, with columns resolved by name in SQL scope. Row polymorphism for `TableExpr` (§7, plus the Tier 2/2+ annotations) handles "this function works on any table with at least columns X, Y."
-
-`Expr<Struct<{...}>>` parameters represent **struct-typed values** — a single column or expression whose SQL type is a struct. Field access uses dot syntax on the expression (`event_data.ts`), not bare column names in FROM scope. The distinction matters at compilation:
-
-| | `TableExpr` | `Expr<Struct<{...}>>` |
-|---|---|---|
-| What it represents | A table/relation | A single struct-typed expression |
-| Where it appears | FROM clause | Any expression position |
-| Field access | Bare column names (`ts`, `user_id`) | Dot syntax (`event.ts`, `event.user_id`) |
-| Expansion | Table reference substitution | Expression substitution with field access |
-
-The row-variable mechanism (`..r`, `..`) is the same PLT concept in both cases — but the surface types, field-access syntax, and compilation models are distinct.
-
-### Proposed surface
-
-Extend the existing `Struct<{...}>` type with a **row variable** (`..r`) that stands in for "plus any other fields":
-
-```text
-Struct<{ ts: Timestamp, user_id: Text, ..r }>
 ```
-
-Reads as: a struct with at least `ts: Timestamp` and `user_id: Text`, and any other fields the caller's struct happens to carry. `r` is bound at the function signature — it is not something the caller writes. It exists so that:
-
-1. **Input parameters** can say "I require these fields; pass me any struct that has them."
-2. **Return types** can say "I produce at least these fields; the rest pass through from the input."
-
-This is exactly the OCaml object type / PureScript row story, ported to smelt's `Struct<T>`.
-
-### Example A — Reading fields from a struct column
-
-A helper that extracts the hour-of-day from whatever struct has a `ts` field:
-
-```sql
-smelt.define event_hour(
-    event: Expr<Struct<{ts: Timestamp, ..}>>
-) -> Expr<Integer> AS (
-    EXTRACT(HOUR FROM event.ts)
-)
+Step 1 -> Step 2 -> Step 3 -> Step 4   (sequential: each builds on the previous)
+                                  |
+Step 5 (independent, any time after Step 1)
+                                  |
+                         Step 6, 7, 8   (independent of each other, all need 1-4)
 ```
-
-Call sites:
-
-```sql
--- page_events has column: event_data STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT, referrer TEXT)
-SELECT smelt.fn.event_hour(event => event_data) AS hour
-FROM page_events
-
--- sensor_readings has column: reading STRUCT(ts TIMESTAMP, device_id TEXT, value DOUBLE)
-SELECT smelt.fn.event_hour(event => reading) AS hour
-FROM sensor_readings
-```
-
-Both are accepted. The checker requires `ts: Timestamp` in the struct; it does not require any particular superset. No overloads, no wrapping, no constructing an intermediate struct.
-
-### Example B — Reading multiple fields from a struct column
-
-A function that checks whether a session gap has occurred, operating on struct-typed event columns:
-
-```sql
-smelt.define is_new_session(
-    event: Expr<Struct<{user_id: Text, ts: Timestamp, ..}>>,
-    gap: Expr<Interval>
-) -> Expr<Boolean> AS (
-    event.ts - LAG(event.ts) OVER (
-        PARTITION BY event.user_id ORDER BY event.ts
-    ) > gap
-)
-```
-
-The signature encodes the exact contract: "I need these two fields on whatever struct you hand me." Adding more fields to the caller's struct type is forward-compatible.
-
-### Example C — Returning a struct with pass-through fields
-
-The harder case is **returning** a struct that preserves the caller's extra fields. This comes up when a function enriches a struct value:
-
-```sql
-smelt.define with_hour(
-    event: Expr<Struct<{ts: Timestamp, ..r}>>
-) -> Expr<Struct<{hour: Integer, ..r}>> AS (
-    {hour: EXTRACT(HOUR FROM event.ts), ..event}
-)
-```
-
-Call site:
-
-```sql
--- event_data is STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT)
-SELECT smelt.fn.with_hour(event => event_data) AS enriched
-FROM page_events
--- enriched has type: STRUCT(hour INTEGER, ts TIMESTAMP, user_id TEXT, page TEXT)
-```
-
-The `..event` spread in the body is the value-level counterpart of the type-level `..r`: it says "carry the remaining fields through unchanged." The same row variable `r` appears in both positions, so the checker knows the output struct's extra fields *are* the input struct's extra fields.
-
-**Projecting specific fields after the call:**
-
-```sql
-SELECT
-    smelt.fn.with_hour(event => event_data).hour     AS hour,
-    smelt.fn.with_hour(event => event_data).user_id  AS user_id
-FROM page_events
-```
-
-Field access on the returned struct works the same as on any other struct value; the checker has the full output row (explicit fields + row variable bound to the caller's extras) to validate against.
-
-### Compilation model
-
-Row-polymorphic struct parameters **erase at expansion**. The compiler knows the concrete struct type at the call site and generates explicit field references:
-
-```sql
--- Example A expands to:
-SELECT EXTRACT(HOUR FROM event_data.ts) AS hour
-FROM page_events;
-
--- Example C expands to:
-SELECT {'hour': EXTRACT(HOUR FROM event_data.ts),
-        'ts': event_data.ts,
-        'user_id': event_data.user_id,
-        'page': event_data.page} AS enriched
-FROM page_events;
-```
-
-Consequences:
-
-- Row variables are resolved at the **call site**, where the caller's concrete struct type is known. At function-definition time, the body is checked against the *declared* fields only; the row variable is opaque inside the body (you cannot enumerate or reflect on `..r`).
-- `..event` spread in the return struct expands to the list of the caller's remaining fields, projected in a deterministic order (proposal: declaration order of the caller's struct, with declared return fields first).
-- The compiler must support the target engine's struct literal syntax. DuckDB uses `{'field': value, ...}`. If an engine lacks struct literals, `with_hour`-style functions that construct new structs cannot target that engine — the compiler reports this as a backend capability error, not a type error.
-
-### Interaction with existing design
-
-- **Fragment sorts (§3):** unchanged. `Expr<Struct<{...}>>` is still an `Expr`. Row variables are a refinement of `Struct<T>`, not a new sort.
-- **Scoping (§7):** complementary, not overlapping. Tables use row polymorphism for bare column names in FROM-scope; struct-typed expressions use row polymorphism for `.field` access. Same PLT concept, different scopes and compilation models.
-- **Planner metadata (§8):** `@provenance` annotations extend naturally — a function that spreads `..event` can declare "output fields `..r` come from input `event` field-for-field."
-- **Error contract (§6):** Tier 1 errors at call sites look like "field `ts` not found on struct type passed to `event_hour` (struct has: device_id, value, quality_flag)." Tier 2 catches the same error at function-definition boundaries.
-
-### Decisions (April 16, 2026)
-
-1. **Syntax: `..r` for named row variables, `..` for anonymous.** Keeps symmetry with the value-level spread (`{hour: ..., ..event}`), so the type-level `..r` visually matches the value-level `..event` that binds it.
-
-2. **Named row variables are per-function; anonymous `..` is per-parameter.** A named variable like `..r` is bound once at the function signature — if two parameters both declare `..r`, they are constrained to have the same extra fields (useful when two struct arguments must share a shape). Anonymous `..` creates a fresh variable per parameter and can never be referenced elsewhere. This matches OCaml's scoping for object type variables.
-
-3. **One named row variable per function in v1.** Multi-row cases like `merge(a: Expr<Struct<{..r}>>, b: Expr<Struct<{..s}>>) -> Expr<Struct<{..r, ..s}>>` are deferred. When added later, the semantics will be **disjoint union** (PureScript-style): the checker errors if `r` and `s` have overlapping field names. The single-named-variable rule covers essentially all current analytics use cases; the syntax is forward-compatible.
-
-4. **Row-variable mechanism is shared with `TableExpr`, but the parameter types remain distinct.** `TableExpr<{ts: Timestamp, ..r}>` and `Expr<Struct<{ts: Timestamp, ..r}>>` use the same row-variable syntax and unification algorithm, but represent different things (tables vs. struct-typed expressions) with different compilation models (table reference substitution vs. struct field access). This avoids a false unification that would confuse users who work with both tables and struct columns.
-
-5. **No defaults on row-polymorphic parameters in v1.** A parameter whose type contains `..r` (or `..`) must be passed explicitly — no default value allowed. This restriction can be relaxed later (the natural rule would be "default binds `..r` to the empty row").
-
-### Implementation sequencing
-
-**v1: Tier 1 only.** Struct parameters with row variables are checked at expansion time — the compiler infers required fields from `.field` references in the body and checks they exist on the caller's concrete struct type. No row-variable unification algorithm needed; the compiler simply substitutes the concrete type and checks field existence. This is the same strategy §7 uses for bare `TableExpr`.
-
-**Fast-follow: Tier 2/2+ with explicit row variables.** Adds pre-expansion checking and row-variable threading through return types. Requires implementing local row-variable unification (see §18 for the algorithm choice: bidirectional checking with local unification at row-variable binding sites). The syntax is forward-compatible, so Tier 1 functions gain Tier 2 checking by adding annotations without other changes.
-
-The open empirical questions are **expressiveness** (do analytics teams actually have struct-typed columns that benefit from this?), **DX** (does the single-named-variable restriction bite?), and **error message quality** (can row-unification failures be explained clearly?). Tier 1 deployment answers the first question before investing in the unification algorithm.
-
-## 18. Type Inference Algorithm: Bidirectional Checking with Local Row Unification
-
-### The decision (April 16, 2026)
-
-smelt functions will use **bidirectional type checking** as the inference framework, with a **local unification step** at row-variable binding sites. This is a global design decision that shapes how every tier of the gradual typing system (§6) works, how row polymorphism (§7, §17) is checked, and what error messages users see.
-
-### Why bidirectional checking
-
-Three algorithm families were considered:
-
-**Bidirectional checking** (chosen): types flow in two directions — "checking" mode pushes an expected type *down* into an expression, "synthesis" mode computes a type *up* from an expression. At function call sites, the declared parameter type is pushed down; the argument expression is checked against it. At function bodies, parameter types are pushed in, the body synthesizes a result type, and the return annotation (if present) provides a checking target.
-
-**Hindley-Milner / Algorithm W**: collect constraints from the entire function body, solve globally via unification, generalize at let-bindings. Overkill for smelt — there are no higher-order functions, no lambdas, no let-bindings where generalization matters. The only polymorphism is row polymorphism on parameters. Worse, HM's global constraint solving produces *non-local* error messages: when unification fails, the error references two constraints that are individually fine but jointly contradictory, and the source of the conflict may be far from where the error surfaces. This is the famously poor ML/Haskell error experience.
-
-**Constraint-based with ranked heuristics** (TypeScript/Scala 3 style): like HM, but collects constraints and solves with custom ordering to produce better errors by ranking which constraint to blame. Interesting but premature — the error quality advantage comes from ranking complex type relationships (generics with bounds, conditional types, variance). smelt's type relationships are simple enough that bidirectional checking produces good errors without a ranking heuristic.
-
-### How it maps to the three tiers
-
-**Tier 1 (unannotated):** Expand the function, then run the bidirectional checker on the expanded SQL in pure synthesis mode — types flow up from leaves. Errors are mapped back to call-site parameter bindings via the expansion trace. No row variables involved (Tier 1 has no annotations).
-
-**Tier 2 (parameters annotated):** At the call site, push each parameter type into the corresponding argument in checking mode. If the parameter has a row variable (`Struct<{ts: Timestamp, ..r}>`), perform local unification against the concrete argument type — this binds `r` immediately. If a declared field is missing or has the wrong type, report: "expected field `ts: Timestamp` on struct passed to parameter `event`, but struct has: {device_id: Text, value: Double, quality_flag: Boolean}." No deferred constraints. The function body is also checked in isolation: parameter types are pushed in, the body is synthesized bottom-up.
-
-**Tier 2+ (row variable in return type):** After binding `r` at the parameter, substitute into the return type. `Struct<{hour: Integer, ..r}>` becomes `Struct<{hour: Integer, user_id: Text, page: Text}>`. Downstream type checking uses this concrete type. Error messages never mention row variables — the user sees the fully resolved struct type.
-
-**Tier 3 (return type annotated):** Check the function body against the return type in checking mode. Row variables in the return type are still abstract at this point (not bound to a concrete call), so the checker verifies that the body produces *at least* the declared fields. The row variable passes through unchecked — it will be checked at call sites.
-
-### Row unification is local, not global
-
-The critical design property: row-variable unification happens **at the point of use**, not via global constraint solving. When a concrete struct meets a row-polymorphic parameter:
-
-1. Match the declared fields against the concrete fields (check names and types).
-2. Bind the row variable to the *remainder* — the concrete fields not matched by declared fields.
-3. Substitute the binding forward into any other uses of that row variable (return type, other parameters sharing the same variable).
-
-This is strictly simpler than full HM unification:
-- No union-find data structure needed (row variables are solved immediately, not unified incrementally).
-- No occurs-check (row variables can't appear in their own binding — structs are not recursive).
-- No let-generalization (functions are not first-class values).
-- No global constraint propagation (each call site is checked independently).
-
-The main implementation work is step 1 (field matching with subtype checking for compatible types like Text/Varchar) and step 3 (forward substitution into the return type).
-
-### Error message properties
-
-The algorithm guarantees several error-message properties that are worth committing to:
-
-1. **Errors are always local.** Every error references a specific source location where an expected type meets an actual type. There are no "constraint X from line 5 conflicts with constraint Y from line 20" messages.
-
-2. **Row variables never appear in user-facing errors.** By the time an error can occur:
-   - At the call site, the row variable is either successfully bound (and the error shows the concrete type) or the binding failed (and the error shows "expected field X, struct has: {concrete fields}").
-   - In the function body, the row variable is opaque — errors reference only the declared fields.
-
-3. **Errors say "expected X, got Y."** Every type mismatch can be phrased as two things: what was expected (from the annotation or context) and what was found (from the expression). This is the Rust/TypeScript error experience.
-
-4. **Tier escalation improves error locality without changing error format.** Moving from Tier 1 to Tier 2 moves errors from post-expansion (with traces) to pre-expansion (direct call-site errors). The error *format* is the same ("expected X, got Y"); the *location* gets closer to the source of the problem.
-
-### What this rules out (and why that's fine)
-
-- **Type inference across function boundaries.** A Tier 1 function's return type is not inferred from its body and propagated to callers — it's computed at each call site by expansion. This is intentional: cross-boundary inference creates non-local errors. Functions that want callers to see a stable type declare it (Tier 3).
-
-- **Higher-rank polymorphism.** A parameter cannot itself be polymorphic (e.g., "a function that works for any T"). smelt functions are not higher-order, so this never comes up.
-
-- **Implicit subtyping coercions.** The checker does not silently insert casts. If a parameter expects `Expr<Double>` and the caller passes `Expr<Integer>`, this is a type error, not an implicit coercion. The user writes `CAST(x AS DOUBLE)` explicitly. This keeps the checker simple and errors predictable. (The exception is type *compatibility* checking — `Text` and `Varchar` are treated as the same type, since this is an engine alias, not a coercion.)
-
-### References
-
-- Pierce, B.C. (2004), "Local Type Inference" — the foundational paper for bidirectional checking.
-- Dunfield & Krishnaswami (2021), "Bidirectional Typing" — comprehensive survey of the approach.
-- Rémy, D. (1994), "Type Inference for Records in a Natural Extension of ML" — row polymorphism with local unification, the direct precedent for smelt's row-variable handling.
-- Heeren et al. (2003), "Top Quality Type Error Messages" — analysis of why constraint-based systems produce poor errors and how to improve them (relevant as a "what to avoid" reference).
