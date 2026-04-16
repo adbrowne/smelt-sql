@@ -361,7 +361,7 @@ dbt's audience is data analysts and analytics engineers, not programming languag
 
 ### Implementation Phasing
 
-Tier 1 can ship first — it's just expansion + existing type checking with error tracing. Tier 2 adds constraint checking on bodies. Tier 3 adds return type verification. Each tier is independently shippable.
+Tier 1 can ship first — it's just expansion + existing type checking with error tracing. Tier 2 adds checking-mode verification on bodies. Tier 3 adds return type verification. Each tier is independently shippable. The type inference algorithm (§18, bidirectional checking) maps directly onto this phasing: Tier 1 uses pure synthesis mode, Tier 2 adds checking mode at call sites and in bodies, Tier 3 adds checking mode against return types.
 
 ### Error Message Contract
 
@@ -454,6 +454,8 @@ When table context bindings are used (e.g., `filters: Predicate<source>`), the c
 - **SQL-native** for the parts that are inherently SQL (column references against tables)
 
 **Trade-off:** The two-layer model is more complex to explain than "everything is lexical." But it matches how SQL actually works — and pretending SQL is lexically scoped would create a different kind of confusion.
+
+> **Note (added §17):** §17 extends row polymorphism to struct-typed *values* (e.g., a column of type `STRUCT(ts TIMESTAMP, user_id TEXT)`). The PLT concept is the same — row variables standing for "plus any other fields" — but the surface types, field-access syntax (`.field` vs. bare column names), and compilation models differ. See §17 for the full treatment.
 
 ## 8. Planner Integration: Three Levels
 
@@ -882,6 +884,10 @@ Function names are unique within their namespace. Two functions named `margin` w
 
 Introducing functions does not change the meaning of existing models. Models that don't call any function compile and run identically to today. The `smelt.define` and `smelt.fn.*` syntax is purely additive to the grammar.
 
+### Type inference: bidirectional checking with local row unification (decided April 16, 2026)
+
+The type inference algorithm is **bidirectional checking** (Pierce, 2004; Dunfield & Krishnaswami, 2021) with a local unification step for row variables. This is a global design decision: all tiers of the gradual typing system, all row-polymorphic checking (both `TableExpr` and `Struct`), and all error message generation follow from this choice. See §18 for the full rationale, per-tier behavior, and error message properties.
+
 ## 13. Open Questions
 
 The decisions in §12 close most of the prior open questions. The items below are the remaining design choices that must be locked in before an implementation plan can be written.
@@ -945,7 +951,7 @@ The language already has `smelt.metric()` with `=>` named parameters. Does `smel
 - **Package ecosystem / registry** — not v1.
 - **Python model interaction** — functions are SQL-only; Python models are opaque table producers reachable via `smelt.ref()`.
 
-## 13. Summary
+## 14. Summary
 
 smelt functions are **typed, composable SQL fragments** that replace Jinja macros while preserving static analysis:
 
@@ -960,7 +966,7 @@ The design occupies a specific point in the design space: more powerful than sim
 
 The phased implementation path — Tier 1 annotations first, then Tier 2 and 3 — allows shipping incremental value while building toward the full design.
 
-## 14. PL/Compiler Expert Review
+## 15. PL/Compiler Expert Review
 
 **Date:** April 14, 2026
 **Reviewer:** Claude (prompted as PL/compiler expert)
@@ -1063,7 +1069,7 @@ The revised paper is substantially stronger. The four main weaknesses from the o
 
 **Implementation path is now clearer.** Two key decisions reduce the risk: explicit planner annotations avoid the need for a lineage analyzer at launch, while CTE context bindings are confirmed as worth the investment (leveraging existing schema inference). The remaining implementation sequencing question is how Tier 1 error tracing, context binding checking, and the planner annotation system interact — a phased implementation plan identifying which pieces can ship independently would strengthen the path from paper to product.
 
-## 15. Typing Built-in SQL Functions
+## 16. Typing Built-in SQL Functions
 
 ### Motivation
 
@@ -1121,19 +1127,36 @@ There is also a crossover with the §6 error contract: Tier 1 call-site errors m
 
 If we extend the type system to built-ins, do we do it through a **signature registry** (a table of built-in signatures the checker consults, one per dialect) or by making the checker aware of a small set of **primitive built-in shapes** (CAST-shaped, EXTRACT-shaped, aggregate-with-modifiers-shaped) that it handles specially? The registry approach scales with engines; the primitive-shapes approach keeps the checker simple but requires per-engine code for anything unusual. Both are viable; the choice affects how much work it is to add a new backend.
 
-## 16. Struct Parameters and Row Polymorphism for Values
+## 17. Struct Parameters and Row Polymorphism for Values
 
 ### Motivation
 
-§7 settled on **row polymorphism for `TableExpr` parameters**: bare column names inside a function body resolve structurally against whatever table is passed in, and the compiler checks the required columns exist. That handles the table case. It does not yet handle the *value-level* case: a parameter whose type is a **struct value** where the function needs a specific field but not the whole type.
+§7 settled on **row polymorphism for `TableExpr` parameters**: bare column names inside a function body resolve structurally against whatever table is passed in, and the compiler checks the required columns exist. That handles the table/row case — columns of a relation.
+
+It does not handle the *value-level* case: a parameter whose type is a **struct-typed column** where the function needs specific fields but not the whole struct. In DuckDB (and Spark, BigQuery, etc.), struct columns are first-class: a table might have `event_data STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT, referrer TEXT)` as a single column. Functions that operate on struct columns face the same brittleness problem as functions that operate on tables — if the struct parameter type is closed, adding a field to the struct breaks every function that accepts it.
 
 This case shows up constantly in analytics SQL once struct-typed columns are in play:
 
-- An aggregate helper that needs a `timestamp` field out of an event struct but doesn't care what else the event carries.
-- A session-defining function that needs `{user_id, ts}` out of rows of an arbitrary event type.
+- An aggregate helper that needs a `timestamp` field out of an event struct column but doesn't care what else the struct carries.
 - A scoring function that reads `{amount, currency}` out of a transaction struct and ignores everything else.
+- A normalizer that extracts and reshapes specific fields from a nested struct while passing other fields through.
 
-If struct parameters are **closed** (either nominally or structurally), every such helper is pinned to one concrete struct type. Add a field to the event schema and every helper stops accepting it. That's the same brittleness §7 rejected for table parameters — and the fix is the same: **row variables**.
+If struct parameters are **closed** (either nominally or structurally), every such helper is pinned to one concrete struct type. Add a field to the struct schema and every helper stops accepting it. That's the same brittleness §7 rejected for table parameters — and the fix is the same: **row variables**.
+
+### How this differs from `TableExpr` row polymorphism
+
+`TableExpr` parameters represent **tables** — things that appear in FROM clauses, with columns resolved by name in SQL scope. Row polymorphism for `TableExpr` (§7, plus the Tier 2/2+ annotations) handles "this function works on any table with at least columns X, Y."
+
+`Expr<Struct<{...}>>` parameters represent **struct-typed values** — a single column or expression whose SQL type is a struct. Field access uses dot syntax on the expression (`event_data.ts`), not bare column names in FROM scope. The distinction matters at compilation:
+
+| | `TableExpr` | `Expr<Struct<{...}>>` |
+|---|---|---|
+| What it represents | A table/relation | A single struct-typed expression |
+| Where it appears | FROM clause | Any expression position |
+| Field access | Bare column names (`ts`, `user_id`) | Dot syntax (`event.ts`, `event.user_id`) |
+| Expansion | Table reference substitution | Expression substitution with field access |
+
+The row-variable mechanism (`..r`, `..`) is the same PLT concept in both cases — but the surface types, field-access syntax, and compilation models are distinct.
 
 ### Proposed surface
 
@@ -1143,189 +1166,207 @@ Extend the existing `Struct<{...}>` type with a **row variable** (`..r`) that st
 Struct<{ ts: Timestamp, user_id: Text, ..r }>
 ```
 
-Reads as: a struct with at least `ts: Timestamp` and `user_id: Text`, and any other fields the caller wants to include. `r` is implicitly bound at the function signature — it is not something the caller writes. It exists so that:
+Reads as: a struct with at least `ts: Timestamp` and `user_id: Text`, and any other fields the caller's struct happens to carry. `r` is bound at the function signature — it is not something the caller writes. It exists so that:
 
-1. **Input parameters** can say "I require these fields; pass me anything that has them."
+1. **Input parameters** can say "I require these fields; pass me any struct that has them."
 2. **Return types** can say "I produce at least these fields; the rest pass through from the input."
 
-This is exactly the OCaml object type / PureScript row story, ported to smelt's existing `Struct<T>`. It is the value-level dual of the table-level structural resolution §7 already commits to — one mental model covering both.
+This is exactly the OCaml object type / PureScript row story, ported to smelt's `Struct<T>`.
 
-### Example A — Input parameter reads one field
+### Example A — Reading fields from a struct column
 
-A helper that extracts the hour-of-day from whatever timestamp field lives on an event struct:
+A helper that extracts the hour-of-day from whatever struct has a `ts` field:
 
 ```sql
-smelt.define('event_hour', (
-  event: Struct<{ ts: Timestamp, ..r }>
-) => Expr<Integer> {
-  EXTRACT(HOUR FROM event.ts)
-})
+smelt.define event_hour(
+    event: Expr<Struct<{ts: Timestamp, ..}>>
+) -> Expr<Integer> AS (
+    EXTRACT(HOUR FROM event.ts)
+)
 ```
 
 Call sites:
 
 ```sql
--- event has {ts, user_id, page, referrer}
-SELECT smelt.fn.event_hour(event: e) AS hour
-FROM page_events AS e;
+-- page_events has column: event_data STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT, referrer TEXT)
+SELECT smelt.fn.event_hour(event => event_data) AS hour
+FROM page_events
 
--- event has {ts, device_id, reading, quality_flag}
-SELECT smelt.fn.event_hour(event: s) AS hour
-FROM sensor_readings AS s;
+-- sensor_readings has column: reading STRUCT(ts TIMESTAMP, device_id TEXT, value DOUBLE)
+SELECT smelt.fn.event_hour(event => reading) AS hour
+FROM sensor_readings
 ```
 
-Both are accepted. The checker requires `ts: Timestamp`; it does not require any particular superset. No overloads, no wrapping, no copying into an intermediate struct.
+Both are accepted. The checker requires `ts: Timestamp` in the struct; it does not require any particular superset. No overloads, no wrapping, no constructing an intermediate struct.
 
-### Example B — Input parameter reads multiple fields
+### Example B — Reading multiple fields from a struct column
 
-A session-gap function that needs `user_id` and `ts` and ignores the rest:
+A function that checks whether a session gap has occurred, operating on struct-typed event columns:
 
 ```sql
-smelt.define('is_new_session', (
-  event: Struct<{ user_id: Text, ts: Timestamp, ..r }>,
-  gap: Expr<Interval>
-) => Expr<Boolean> {
-  event.ts - LAG(event.ts) OVER (
-    PARTITION BY event.user_id ORDER BY event.ts
-  ) > gap
-})
+smelt.define is_new_session(
+    event: Expr<Struct<{user_id: Text, ts: Timestamp, ..}>>,
+    gap: Expr<Interval>
+) -> Expr<Boolean> AS (
+    event.ts - LAG(event.ts) OVER (
+        PARTITION BY event.user_id ORDER BY event.ts
+    ) > gap
+)
 ```
 
-The signature encodes the exact contract: "I need these two fields on whatever you hand me." Adding more fields to the caller's event type is forward-compatible — callers don't re-wrap, and the function doesn't need to change.
+The signature encodes the exact contract: "I need these two fields on whatever struct you hand me." Adding more fields to the caller's struct type is forward-compatible.
 
-### Example C — Returning/passing through fields in a SELECT
+### Example C — Returning a struct with pass-through fields
 
-The harder case is **returning** a struct that preserves the caller's extra fields. This comes up when a function enriches a row:
+The harder case is **returning** a struct that preserves the caller's extra fields. This comes up when a function enriches a struct value:
 
 ```sql
-smelt.define('with_hour', (
-  event: Struct<{ ts: Timestamp, ..r }>
-) => Expr<Struct<{ hour: Integer, ..r }>> {
-  { hour: EXTRACT(HOUR FROM event.ts), ..event }
-})
+smelt.define with_hour(
+    event: Expr<Struct<{ts: Timestamp, ..r}>>
+) -> Expr<Struct<{hour: Integer, ..r}>> AS (
+    {hour: EXTRACT(HOUR FROM event.ts), ..event}
+)
 ```
 
 Call site:
 
 ```sql
-SELECT smelt.fn.with_hour(event: e).*
-FROM page_events AS e;
--- result schema: { hour, ts, user_id, page, referrer }
+-- event_data is STRUCT(ts TIMESTAMP, user_id TEXT, page TEXT)
+SELECT smelt.fn.with_hour(event => event_data) AS enriched
+FROM page_events
+-- enriched has type: STRUCT(hour INTEGER, ts TIMESTAMP, user_id TEXT, page TEXT)
 ```
 
-The `..event` spread in the body is the value-level counterpart of the type-level `..r`: it says "carry the remaining fields through unchanged." The same row variable `r` appears in both positions, so the checker knows the output struct's extra fields *are* the input struct's extra fields — not just "some fields."
-
-This is the same idea as TypeScript's rest spread `{ ...e, hour }`, but typed with a row variable so "rest" is tracked through the signature instead of being a runtime-only operation.
+The `..event` spread in the body is the value-level counterpart of the type-level `..r`: it says "carry the remaining fields through unchanged." The same row variable `r` appears in both positions, so the checker knows the output struct's extra fields *are* the input struct's extra fields.
 
 **Projecting specific fields after the call:**
 
 ```sql
 SELECT
-  smelt.fn.with_hour(event: e).hour     AS hour,
-  smelt.fn.with_hour(event: e).user_id  AS user_id
-FROM page_events AS e;
+    smelt.fn.with_hour(event => event_data).hour     AS hour,
+    smelt.fn.with_hour(event => event_data).user_id  AS user_id
+FROM page_events
 ```
 
 Field access on the returned struct works the same as on any other struct value; the checker has the full output row (explicit fields + row variable bound to the caller's extras) to validate against.
 
-### Example D — CTE context binding with derived row type
-
-A session rollup function where the caller passes metric expressions that should be evaluated against an *intermediate* CTE's schema — not just the input table:
-
-```sql
-smelt.define('session_rollup', (
-  events: TableExpr,
-  metrics: SelectItems<sessionized>
-) => TableExpr {
-  WITH sessionized AS (
-    SELECT *,
-           ts - LAG(ts) OVER (PARTITION BY user_id ORDER BY ts) AS gap,
-           SUM(CASE WHEN gap > INTERVAL '30m' THEN 1 ELSE 0 END)
-             OVER (PARTITION BY user_id ORDER BY ts) AS session_id
-    FROM events
-  )
-  SELECT session_id, MIN(ts), MAX(ts), COUNT(*), metrics
-  FROM sessionized
-  GROUP BY session_id
-})
-```
-
-Call site:
-
-```sql
-smelt.fn.session_rollup(
-  events: page_events,
-  metrics: [SUM(revenue) AS total_revenue, COUNT(DISTINCT page) AS pages]
-)
-```
-
-**How the compiler resolves this:**
-
-1. `events` is bare `TableExpr` (Tier 1) — the compiler infers required columns (`user_id`, `ts`) from the body.
-2. The `sessionized` CTE is derived from `events`: its schema is `{..r, gap: Interval, session_id: Integer}`, where `..r` is `events`'s (inferred) row.
-3. The context binding `SelectItems<sessionized>` resolves to `SelectItems<{..r, gap: Interval, session_id: Integer}>` — a concrete row type with an open tail.
-4. From this point forward, checking the caller's `metrics` expressions works **identically** to any other row-typed parameter. `revenue` and `page` resolve via `..r` (from the caller's `page_events` schema); `session_id` resolves from the CTE's computed columns.
-
-The CTE binding is a **derivation mechanism**, not a separate checking path. The compiler derives the row type from the CTE definition, and then the standard row-polymorphic checker takes over. The function author points the compiler at the right scope; the compiler works out the fields.
-
-This means callers can reference:
-- **Source columns** (`revenue`, `page`) — anything `page_events` carries, resolved via the row variable
-- **Computed columns** (`gap`, `session_id`) — anything the CTE adds, known statically from the body
-
-Error messages are scoped to the CTE: "column `nonexistent` not found in `sessionized` (schema: user_id, ts, gap, session_id, + columns from `events`)" — which tells the user both what's available and where it comes from.
-
 ### Compilation model
 
-The critical decision: **row-polymorphic struct parameters erase at expansion**, just like §7's structural column resolution for tables. A call site does not pass a runtime struct value — it compiles to field references against the caller's expression:
+Row-polymorphic struct parameters **erase at expansion**. The compiler knows the concrete struct type at the call site and generates explicit field references:
 
 ```sql
 -- Example A expands to:
-SELECT EXTRACT(HOUR FROM e.ts) AS hour FROM page_events AS e;
+SELECT EXTRACT(HOUR FROM event_data.ts) AS hour
+FROM page_events;
 
 -- Example C expands to:
-SELECT
-  EXTRACT(HOUR FROM e.ts) AS hour,
-  e.ts, e.user_id, e.page, e.referrer
-FROM page_events AS e;
+SELECT {'hour': EXTRACT(HOUR FROM event_data.ts),
+        'ts': event_data.ts,
+        'user_id': event_data.user_id,
+        'page': event_data.page} AS enriched
+FROM page_events;
 ```
 
 Consequences:
 
-- No commitment to a cross-backend struct ABI. The engine never sees a struct being constructed, passed, and destructured at runtime unless the user wrote one explicitly.
 - Row variables are resolved at the **call site**, where the caller's concrete struct type is known. At function-definition time, the body is checked against the *declared* fields only; the row variable is opaque inside the body (you cannot enumerate or reflect on `..r`).
-- `..event` spread in the return type expands to the list of the caller's remaining fields, projected in a deterministic order (proposal: declaration order of the caller's struct, with declared return fields first).
-
-This keeps struct row polymorphism in the same bucket as §7: a **type-level convenience** that produces ordinary SQL, not a runtime feature that requires engine support.
+- `..event` spread in the return struct expands to the list of the caller's remaining fields, projected in a deterministic order (proposal: declaration order of the caller's struct, with declared return fields first).
+- The compiler must support the target engine's struct literal syntax. DuckDB uses `{'field': value, ...}`. If an engine lacks struct literals, `with_hour`-style functions that construct new structs cannot target that engine — the compiler reports this as a backend capability error, not a type error.
 
 ### Interaction with existing design
 
 - **Fragment sorts (§3):** unchanged. `Expr<Struct<{...}>>` is still an `Expr`. Row variables are a refinement of `Struct<T>`, not a new sort.
-- **Scoping (§7):** the mental model unifies. Tables use row polymorphism for bare column names in FROM-scope; structs use row polymorphism for `event.field` access. Same PLT concept, applied at two different scopes.
-- **Planner metadata (§8):** `@provenance` annotations extend naturally — a function that spreads `..event` can declare "output fields `..r` come from input `event` field-for-field." This is what enables join elimination / projection pushdown on functions that preserve input fields.
-- **Error contract (§6):** Tier 1 errors at call sites look like "field `ts` not found on struct passed to `event_hour`." Tier 2 (with full annotations) catches the same error at function-definition boundaries when the caller's struct type is known.
+- **Scoping (§7):** complementary, not overlapping. Tables use row polymorphism for bare column names in FROM-scope; struct-typed expressions use row polymorphism for `.field` access. Same PLT concept, different scopes and compilation models.
+- **Planner metadata (§8):** `@provenance` annotations extend naturally — a function that spreads `..event` can declare "output fields `..r` come from input `event` field-for-field."
+- **Error contract (§6):** Tier 1 errors at call sites look like "field `ts` not found on struct type passed to `event_hour` (struct has: device_id, value, quality_flag)." Tier 2 catches the same error at function-definition boundaries.
 
 ### Decisions (April 16, 2026)
 
-1. **Syntax: `..r` for named row variables, `..` for anonymous.** Keeps symmetry with the value-level spread (`{ hour: ..., ..event }`), so the type-level `..r` visually matches the value-level `..event` that binds it. The union-context syntax (`|`) from §7 is left untouched.
+1. **Syntax: `..r` for named row variables, `..` for anonymous.** Keeps symmetry with the value-level spread (`{hour: ..., ..event}`), so the type-level `..r` visually matches the value-level `..event` that binds it.
 
-2. **Anonymous and named row variables both supported.** `Struct<{ts: Timestamp, ..}>` means "has `ts`, don't care about the rest, and I won't refer to it again." `Struct<{ts: Timestamp, ..r}>` names the row so it can thread through to other parameters or the return type. Anonymous is sugar for a fresh unnamed row variable. This matches OCaml's object-type convention.
+2. **Named row variables are per-function; anonymous `..` is per-parameter.** A named variable like `..r` is bound once at the function signature — if two parameters both declare `..r`, they are constrained to have the same extra fields (useful when two struct arguments must share a shape). Anonymous `..` creates a fresh variable per parameter and can never be referenced elsewhere. This matches OCaml's scoping for object type variables.
 
-3. **One row variable per function in v1.** Multi-row cases like `merge(a: Struct<{..r}>, b: Struct<{..s}>) => Struct<{..r, ..s}>` are deferred. When added later, the semantics will be **disjoint union** (PureScript-style): the checker errors if `r` and `s` have overlapping field names, rather than silently dropping or last-wins-merging. The single-row rule covers essentially all current analytics use cases; the syntax is forward-compatible, so deferring is cheap.
+3. **One named row variable per function in v1.** Multi-row cases like `merge(a: Expr<Struct<{..r}>>, b: Expr<Struct<{..s}>>) -> Expr<Struct<{..r, ..s}>>` are deferred. When added later, the semantics will be **disjoint union** (PureScript-style): the checker errors if `r` and `s` have overlapping field names. The single-named-variable rule covers essentially all current analytics use cases; the syntax is forward-compatible.
 
-4. **Unify row polymorphism across `TableExpr` and `Struct`.** §7 described row polymorphism for tables implicitly (bare column resolution against the passed-in schema). §16 adds explicit annotation for struct values. These are the same PLT concept and will share one surface:
+4. **Row-variable mechanism is shared with `TableExpr`, but the parameter types remain distinct.** `TableExpr<{ts: Timestamp, ..r}>` and `Expr<Struct<{ts: Timestamp, ..r}>>` use the same row-variable syntax and unification algorithm, but represent different things (tables vs. struct-typed expressions) with different compilation models (table reference substitution vs. struct field access). This avoids a false unification that would confuse users who work with both tables and struct columns.
 
-   - **Tier 1 — bare:** `TableExpr` / `Struct<T>` — no field-level constraints declared; the checker **infers** required columns/fields from references in the function body and checks them at expansion. This is the §7 behavior, unchanged — the most common case, and the starting point for any new function.
-   - **Tier 2 — declared fields:** `TableExpr<{ts: Timestamp, user_id: Text}>` / `Struct<{ts: Timestamp, user_id: Text}>` — required fields checked at function-definition and call-site boundaries.
-   - **Tier 2+ — declared fields with row variable:** `TableExpr<{ts: Timestamp, ..r}>` / `Struct<{ts: Timestamp, ..r}>` — required fields plus pass-through of caller's extras via `..r`.
+5. **No defaults on row-polymorphic parameters in v1.** A parameter whose type contains `..r` (or `..`) must be passed explicitly — no default value allowed. This restriction can be relaxed later (the natural rule would be "default binds `..r` to the empty row").
 
-   This aligns with the three-tier gradual-typing story in §6 (bare → annotated → annotated with pass-through) and collapses the mental model to one rule: "row polymorphism is how field/column requirements are expressed; you can leave it implicit or declare it." §7's presentation is superseded on this point — bare `TableExpr` still behaves exactly as §7 described, but annotated forms are now the recommended way to declare requirements.
+### Implementation sequencing
 
-5. **No defaults on row-polymorphic parameters in v1.** A parameter whose type contains `..r` (or `..`) must be passed explicitly — no default value allowed. This keeps the "what does `r` bind to when the default is used?" question off the table. If a monomorphic default is needed, use the Tier 2 form without a row variable. This restriction can be relaxed later (the natural rule would be "default binds `..r` to the empty row") once the design is exercised in practice.
+**v1: Tier 1 only.** Struct parameters with row variables are checked at expansion time — the compiler infers required fields from `.field` references in the body and checks they exist on the caller's concrete struct type. No row-variable unification algorithm needed; the compiler simply substitutes the concrete type and checks field existence. This is the same strategy §7 uses for bare `TableExpr`.
 
-### Where this lands
+**Fast-follow: Tier 2/2+ with explicit row variables.** Adds pre-expansion checking and row-variable threading through return types. Requires implementing local row-variable unification (see §18 for the algorithm choice: bidirectional checking with local unification at row-variable binding sites). The syntax is forward-compatible, so Tier 1 functions gain Tier 2 checking by adding annotations without other changes.
 
-Row polymorphism for struct values is a **small, principled extension** of the system already committed to in §7. It is the difference between "functions that work on *this specific struct type*" and "functions that work on *any struct with these fields*" — which is the difference between a type system that forces wrapping/unwrapping at every boundary and one that lets analytics authors write reusable helpers.
+The open empirical questions are **expressiveness** (do analytics teams actually have struct-typed columns that benefit from this?), **DX** (does the single-named-variable restriction bite?), and **error message quality** (can row-unification failures be explained clearly?). Tier 1 deployment answers the first question before investing in the unification algorithm.
 
-The compilation model (erase at expansion, no runtime struct ABI) keeps the extension cheap and backend-agnostic. The main cost is checker complexity: row-variable unification at call sites is a standard algorithm (see OCaml, PureScript) but it is new machinery compared to the monomorphic checking the §3 design currently assumes.
+## 18. Type Inference Algorithm: Bidirectional Checking with Local Row Unification
 
-**Implementation direction:** build the unified row-polymorphic surface (Tier 1 / Tier 2 / Tier 2+ across both `TableExpr` and `Struct`) into v1 so the design can be exercised end-to-end. The three-tier story is what makes gradual adoption possible — shipping only the bare tier and adding annotations later would mean re-teaching users once the annotated forms arrive. The open empirical questions are **expressiveness** (do these three tiers cover real analytics helpers?), **DX** (does the single-row-variable restriction bite?), and **error message quality** (can row-unification failures be explained clearly?). Those are answerable only by implementing and using it on real models, not by further paper design.
+### The decision (April 16, 2026)
+
+smelt functions will use **bidirectional type checking** as the inference framework, with a **local unification step** at row-variable binding sites. This is a global design decision that shapes how every tier of the gradual typing system (§6) works, how row polymorphism (§7, §17) is checked, and what error messages users see.
+
+### Why bidirectional checking
+
+Three algorithm families were considered:
+
+**Bidirectional checking** (chosen): types flow in two directions — "checking" mode pushes an expected type *down* into an expression, "synthesis" mode computes a type *up* from an expression. At function call sites, the declared parameter type is pushed down; the argument expression is checked against it. At function bodies, parameter types are pushed in, the body synthesizes a result type, and the return annotation (if present) provides a checking target.
+
+**Hindley-Milner / Algorithm W**: collect constraints from the entire function body, solve globally via unification, generalize at let-bindings. Overkill for smelt — there are no higher-order functions, no lambdas, no let-bindings where generalization matters. The only polymorphism is row polymorphism on parameters. Worse, HM's global constraint solving produces *non-local* error messages: when unification fails, the error references two constraints that are individually fine but jointly contradictory, and the source of the conflict may be far from where the error surfaces. This is the famously poor ML/Haskell error experience.
+
+**Constraint-based with ranked heuristics** (TypeScript/Scala 3 style): like HM, but collects constraints and solves with custom ordering to produce better errors by ranking which constraint to blame. Interesting but premature — the error quality advantage comes from ranking complex type relationships (generics with bounds, conditional types, variance). smelt's type relationships are simple enough that bidirectional checking produces good errors without a ranking heuristic.
+
+### How it maps to the three tiers
+
+**Tier 1 (unannotated):** Expand the function, then run the bidirectional checker on the expanded SQL in pure synthesis mode — types flow up from leaves. Errors are mapped back to call-site parameter bindings via the expansion trace. No row variables involved (Tier 1 has no annotations).
+
+**Tier 2 (parameters annotated):** At the call site, push each parameter type into the corresponding argument in checking mode. If the parameter has a row variable (`Struct<{ts: Timestamp, ..r}>`), perform local unification against the concrete argument type — this binds `r` immediately. If a declared field is missing or has the wrong type, report: "expected field `ts: Timestamp` on struct passed to parameter `event`, but struct has: {device_id: Text, value: Double, quality_flag: Boolean}." No deferred constraints. The function body is also checked in isolation: parameter types are pushed in, the body is synthesized bottom-up.
+
+**Tier 2+ (row variable in return type):** After binding `r` at the parameter, substitute into the return type. `Struct<{hour: Integer, ..r}>` becomes `Struct<{hour: Integer, user_id: Text, page: Text}>`. Downstream type checking uses this concrete type. Error messages never mention row variables — the user sees the fully resolved struct type.
+
+**Tier 3 (return type annotated):** Check the function body against the return type in checking mode. Row variables in the return type are still abstract at this point (not bound to a concrete call), so the checker verifies that the body produces *at least* the declared fields. The row variable passes through unchecked — it will be checked at call sites.
+
+### Row unification is local, not global
+
+The critical design property: row-variable unification happens **at the point of use**, not via global constraint solving. When a concrete struct meets a row-polymorphic parameter:
+
+1. Match the declared fields against the concrete fields (check names and types).
+2. Bind the row variable to the *remainder* — the concrete fields not matched by declared fields.
+3. Substitute the binding forward into any other uses of that row variable (return type, other parameters sharing the same variable).
+
+This is strictly simpler than full HM unification:
+- No union-find data structure needed (row variables are solved immediately, not unified incrementally).
+- No occurs-check (row variables can't appear in their own binding — structs are not recursive).
+- No let-generalization (functions are not first-class values).
+- No global constraint propagation (each call site is checked independently).
+
+The main implementation work is step 1 (field matching with subtype checking for compatible types like Text/Varchar) and step 3 (forward substitution into the return type).
+
+### Error message properties
+
+The algorithm guarantees several error-message properties that are worth committing to:
+
+1. **Errors are always local.** Every error references a specific source location where an expected type meets an actual type. There are no "constraint X from line 5 conflicts with constraint Y from line 20" messages.
+
+2. **Row variables never appear in user-facing errors.** By the time an error can occur:
+   - At the call site, the row variable is either successfully bound (and the error shows the concrete type) or the binding failed (and the error shows "expected field X, struct has: {concrete fields}").
+   - In the function body, the row variable is opaque — errors reference only the declared fields.
+
+3. **Errors say "expected X, got Y."** Every type mismatch can be phrased as two things: what was expected (from the annotation or context) and what was found (from the expression). This is the Rust/TypeScript error experience.
+
+4. **Tier escalation improves error locality without changing error format.** Moving from Tier 1 to Tier 2 moves errors from post-expansion (with traces) to pre-expansion (direct call-site errors). The error *format* is the same ("expected X, got Y"); the *location* gets closer to the source of the problem.
+
+### What this rules out (and why that's fine)
+
+- **Type inference across function boundaries.** A Tier 1 function's return type is not inferred from its body and propagated to callers — it's computed at each call site by expansion. This is intentional: cross-boundary inference creates non-local errors. Functions that want callers to see a stable type declare it (Tier 3).
+
+- **Higher-rank polymorphism.** A parameter cannot itself be polymorphic (e.g., "a function that works for any T"). smelt functions are not higher-order, so this never comes up.
+
+- **Implicit subtyping coercions.** The checker does not silently insert casts. If a parameter expects `Expr<Double>` and the caller passes `Expr<Integer>`, this is a type error, not an implicit coercion. The user writes `CAST(x AS DOUBLE)` explicitly. This keeps the checker simple and errors predictable. (The exception is type *compatibility* checking — `Text` and `Varchar` are treated as the same type, since this is an engine alias, not a coercion.)
+
+### References
+
+- Pierce, B.C. (2004), "Local Type Inference" — the foundational paper for bidirectional checking.
+- Dunfield & Krishnaswami (2021), "Bidirectional Typing" — comprehensive survey of the approach.
+- Rémy, D. (1994), "Type Inference for Records in a Natural Extension of ML" — row polymorphism with local unification, the direct precedent for smelt's row-variable handling.
+- Heeren et al. (2003), "Top Quality Type Error Messages" — analysis of why constraint-based systems produce poor errors and how to improve them (relevant as a "what to avoid" reference).
