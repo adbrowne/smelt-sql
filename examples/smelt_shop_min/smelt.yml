@@ -1,0 +1,40 @@
+name: smelt_shop_min
+version: 1
+
+# Minimal workspace that simultaneously triggers the three critical bugs from
+# FINDINGS.md (Phase A2 of docs/plans/20260417-smelt-shop-0.3-followup.md):
+#
+#   Bug #1: `smelt build` is not idempotent. The second `smelt build` against
+#           the same .duckdb file raises a Catalog Error because
+#           `DROP VIEW IF EXISTS` is issued against an existing Table.
+#           (Triggered when stg_orders / mart_revenue have materialization:
+#           table and the run is repeated.)
+#
+#   Bug #2: Seeds are not resolvable via `smelt.ref()` from the CLI dependency
+#           validator. stg_orders does `smelt.ref('order_statuses')`, which is
+#           the seed below — and the validator fails with
+#           "references undefined model/source 'order_statuses'".
+#
+#   Bug #3: The `_smelt_typed` wrapper narrows aggregate types because the CLI
+#           builds an empty TypeContext. SUM(double_col) becomes BIGINT,
+#           silently truncating financial data. mart_revenue exercises this.
+
+model_paths:
+  - models
+
+seed_paths:
+  - seeds
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+models:
+  stg_orders:
+    materialization: table
+  mart_revenue:
+    materialization: table
