@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776407793406,
+  "lastUpdate": 1776409623774,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13441,6 +13441,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 14.309452,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "988124ee5f8f0ce274d0c88352ca245671d7be07",
+          "message": "Fix sdist: include LICENSE file for PyPI upload\n\nPyPI rejected the sdist because LICENSE wasn't included in the archive.\nmaturin sdist needs an explicit include directive since the manifest\npath points to crates/smelt-cli/Cargo.toml, not the repo root.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T17:04:45+10:00",
+          "tree_id": "050bd445a6c72e4c5d410d97b91e2e477590b2f6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/988124ee5f8f0ce274d0c88352ca245671d7be07"
+        },
+        "date": 1776409622532,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.323975,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.999759,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.600883,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.394998,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002796,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 43.959951999999994,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.020358,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.012013,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.009067,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.941721,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.2826880000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.9131800000000005,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.46797,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.267507,
             "unit": "ms"
           }
         ]
