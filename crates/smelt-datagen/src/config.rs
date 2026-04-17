@@ -76,7 +76,12 @@ pub enum GeneratorSpec {
     },
     Geometric {
         p: f64,
-        #[serde(default)]
+        /// Lower bound on the generated value. Defaults to `1` because the
+        /// most common use of `geometric` is positive count-style data
+        /// (quantities, retries, etc.) where zero is an invalid sentinel.
+        /// Pass `min: 0` explicitly to opt back into "may emit zeros" — the
+        /// raw geometric distribution starts at zero.
+        #[serde(default = "default_geometric_min")]
         min: Option<i32>,
     },
     Bool {
@@ -101,6 +106,16 @@ pub enum GeneratorSpec {
     StringPattern {
         template: String,
     },
+}
+
+/// Default for [`GeneratorSpec::Geometric::min`] when the YAML omits it.
+///
+/// Returns `Some(1)` so the common case ("quantity never zero") Just Works;
+/// callers that want zeros must now write `min: 0` explicitly. See the doc
+/// comment on the field for the reasoning, and FINDINGS bug #4 /
+/// `docs/plans/20260417-smelt-shop-0.3-followup.md` Phase B5 for history.
+fn default_geometric_min() -> Option<i32> {
+    Some(1)
 }
 
 impl GeneratorSpec {
