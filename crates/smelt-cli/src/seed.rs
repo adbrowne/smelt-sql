@@ -131,10 +131,17 @@ pub async fn execute_seed(
         .await
         .with_context(|| format!("Failed to create schema '{}'", seed.schema))?;
 
-    // 2. Drop existing table
-    let drop_sql = format!("DROP TABLE IF EXISTS {}", qualified);
+    // 2. Drop existing object (if any). Use the backend's type-aware drop
+    //    helpers so we don't trip over a name collision between a prior
+    //    Table and a prior View (bug #6 — same root cause as bug #1:
+    //    DuckDB rejects `DROP TABLE IF EXISTS` against a View, and vice
+    //    versa).
     backend
-        .execute_sql(&drop_sql)
+        .drop_view_if_exists(&seed.schema, &seed.name)
+        .await
+        .with_context(|| format!("Failed to drop view '{}'", qualified))?;
+    backend
+        .drop_table_if_exists(&seed.schema, &seed.name)
         .await
         .with_context(|| format!("Failed to drop table '{}'", qualified))?;
 
