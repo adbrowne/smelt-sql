@@ -160,6 +160,9 @@ jobs:
       - name: Install maturin
         run: pip install maturin
 
+      - name: Create data directory for maturin
+        run: mkdir -p smelt_sql.data/scripts
+
       - name: Build sdist
         run: maturin sdist --out dist
 
