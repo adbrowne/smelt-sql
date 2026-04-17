@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776409732457,
+  "lastUpdate": 1776409734725,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17807,6 +17807,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.218754359805505,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f8e1ec49da200a51dd61c7a4342470aadf1ec93e",
+          "message": "Fix sdist: include LICENSE file for PyPI upload\n\nPyPI rejected the sdist because LICENSE wasn't included in the archive.\nmaturin sdist needs an explicit include directive since the manifest\npath points to crates/smelt-cli/Cargo.toml, not the repo root.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T17:06:37+10:00",
+          "tree_id": "be4c0c9964f1631ba1683b6f969e5a26453933a3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f8e1ec49da200a51dd61c7a4342470aadf1ec93e"
+        },
+        "date": 1776409734293,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.06630295218104,
             "unit": "MB/s"
           }
         ]
