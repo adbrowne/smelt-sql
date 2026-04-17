@@ -77,7 +77,7 @@ FROM smelt.ref('product_summary')
 
 ### Design Properties
 
-**Functions compile away.** The target database engine never sees `smelt.fn.*` calls. Everything expands to plain SQL before execution. This is one-stage metaprogramming -- the same framing as Terra (Devito et al.) and MetaML (Taha & Sheard), where a high-level composition language generates low-level code.
+**Functions compile away.** The target database engine never sees `smelt.fn.*` calls. Everything expands to plain SQL before execution. This is compile-time macro expansion with a sorted type discipline -- inspired by staged code generation systems like Terra (Devito et al.) and MetaML (Taha & Sheard), though smelt's model is simpler: a single expansion phase, not the multi-stage programming those systems provide.
 
 **Named parameters follow PostgreSQL.** The `param => value` syntax follows PostgreSQL's named notation for function calls (supported since PostgreSQL 9.5). Oracle PL/SQL uses the same `=>` convention.
 
@@ -126,10 +126,11 @@ Any fragment sort that can contain column references may declare a context:
 | Sort | With context binding | Meaning |
 |------|---------------------|---------|
 | `Column<T>` | `Column<source, T>` | A column from `source` of SQL type T |
-| `Expr<Boolean>` | `Expr<Boolean, source>` | Boolean expression whose columns come from `source` |
-| `SelectItems` | `SelectItems<Agg, sessionized>` | Aggregate select items over `sessionized` columns |
 | `Expr<T>` | `Expr<T, source>` | Scalar expression whose columns come from `source` |
+| `SelectItems` | `SelectItems<Agg, sessionized>` | Aggregate select items over `sessionized` columns |
 | `OrderSpec` | `OrderSpec<enriched>` | Ordering expression over `enriched` columns |
+
+The parameterization convention differs by sort: `Expr<SqlType, Context?>`, `Column<Context?, SqlType?>`, `SelectItems<Kind?, Context?>`, `OrderSpec<Context?>`. The compiler disambiguates context names from type names by checking whether the identifier refers to a `TableExpr` parameter or CTE in scope; if it does, it is a context binding, otherwise it is a type. `Column<source>` means "a column from `source`, any type"; `Column<Integer>` means "an integer column, any context"; `Column<source, Integer>` means both.
 
 A context can be:
 1. **A `TableExpr` parameter** -- e.g., `Column<source>` where `source` is a parameter
@@ -192,8 +193,8 @@ smelt.define enrich_order(
         p.category AS product_category,
         extra_cols
     FROM source
-    LEFT JOIN customers c ON source.customer_id_col = c.customer_id
-    LEFT JOIN products p ON source.product_id_col = p.product_id
+    LEFT JOIN customers c ON customer_id_col = c.customer_id
+    LEFT JOIN products p ON product_id_col = p.product_id
 )
 ```
 
@@ -335,7 +336,7 @@ Tier 1 ships first -- it's just expansion plus existing type checking with error
 
 ## 7. Type Inference -- Bidirectional Checking
 
-smelt functions use **bidirectional type checking** (Pierce, 2004; Dunfield & Krishnaswami, 2021) with a local unification step at row-variable binding sites.
+smelt functions use **bidirectional type checking** (Pierce & Turner, 2000; Dunfield & Krishnaswami, 2021) with a local unification step at row-variable binding sites.
 
 ### Why Bidirectional
 
@@ -524,7 +525,7 @@ If functions were expanded to plain SQL before the planner runs, the planner los
 
 ### Level 1: Logical -> Logical (pre-expansion)
 
-Rules rewrite the logical DAG. Functions are nodes with rich typed interfaces. In PLT terms, function types carry **refinement types** (Rondon et al., 2008): structural invariants beyond the basic fragment sort.
+Rules rewrite the logical DAG. Functions are nodes with rich typed interfaces carrying **enriched type annotations** -- structural metadata beyond the basic fragment sort. This is conceptually related to refinement types (Rondon et al., 2008) in that types carry information beyond the basic sort, though the mechanism here is explicit annotation rather than logical predicates verified by a solver.
 
 The compiler analyzes function bodies and attaches structural metadata:
 - **Column provenance map:** Which output columns come from which input tables
@@ -558,9 +559,13 @@ A single physical node becomes one or more concrete SQL statements:
 
 Function properties still matter: `@idempotent` tells Level 3 that retry is safe; `@deterministic` tells it re-execution produces the same result.
 
-### Planner Integration Is Post-MVP
+### What Ships When
 
-v1 is pure expansion -- no Level 1 planner rules. Properties are parsed and stored but not actively used. This lets the function system be validated independently before adding planner complexity.
+**MVP (Steps 1-4):** Pure expansion. No planner rules at any level. Bare keyword annotations (`@deterministic`, `@idempotent`, `@append_only`) are parsed and stored but not acted on.
+
+**Post-MVP (Step 6):** Level 1 planner rules. Structured annotations (`@joins(...)`, `@provenance(...)`) for the functions that benefit from optimization. Levels 2 and 3 build on existing planner infrastructure.
+
+This separation lets the function system be validated as a composition mechanism before adding planner complexity.
 
 ## 11. Built-in Function Typing
 
@@ -676,6 +681,8 @@ Properties flow through all three levels: `@deterministic` tells Level 3 replayi
 
 ### Example 3: Join Elimination via Function-Aware Planning
 
+*Note: This example illustrates a future capability (Step 6 in the roadmap). It requires planner integration with structured annotations (`@provenance`, `@joins`), which are post-MVP.*
+
 This demonstrates why planner-visible functions enable optimizations that blind expansion cannot.
 
 **Setup:** `enrich_order` (defined in section 4) joins a fact table to customer and product dimensions via LEFT JOINs with unique keys (1:1 cardinality).
@@ -759,13 +766,13 @@ These limitations are deliberate. The Jinja use cases that hit them are exactly 
 The design draws from several established PL techniques:
 
 - **Fragment sorts / syntactic categories.** Multi-sorted algebras; Rust `macro_rules!` fragment specifiers. The foundation of safe composition.
-- **Staged metaprogramming.** MetaML (Taha & Sheard); Terra. Functions that "compile away" are one-stage programming.
-- **Hygienic macro expansion.** Kohlbecker et al., 1986. Lexical scoping for parameters prevents C-preprocessor-style surprises.
-- **Row polymorphism.** Remy, 1994; OCaml object types; PureScript row types. Structural column/field resolution for tables and structs.
+- **Compile-time code generation.** MetaML (Taha & Sheard); Terra. Inspiration for typed code generation, though smelt uses single-phase expansion rather than multi-stage programming.
+- **Hygienic macro expansion.** Kohlbecker et al., 1986; Clinger & Rees, 1991. Lexical scoping for parameters prevents C-preprocessor-style surprises. smelt's hygiene is closer to Rust's expansion-context model than to Scheme's full hygiene.
+- **Row polymorphism.** Wand, 1987 (original formulation); Remy, 1994 (extension to ML); OCaml object types; PureScript row types. Structural column/field resolution for tables and structs.
 - **Gradual typing.** Siek & Taha, 2006. Optional annotations with a clean adoption trajectory.
 - **Totality via structural restriction.** Turner, 2004. No recursion guarantees termination.
-- **Refinement types.** Rondon et al., 2008 (liquid types). Function types carry structural invariants (provenance, join graphs) beyond the basic sort.
-- **Bidirectional type checking.** Pierce, 2004; Dunfield & Krishnaswami, 2021. Types flow up (synthesis) and down (checking).
+- **Enriched type annotations.** Conceptually related to refinement types (Rondon et al., 2008), though the mechanism is explicit annotation rather than solver-verified logical predicates. Function types carry structural metadata (provenance, join graphs) beyond the basic sort.
+- **Bidirectional type checking.** Pierce & Turner, 2000; Dunfield & Krishnaswami, 2021. Types flow up (synthesis) and down (checking).
 - **Progressive lowering.** MLIR. Three planner levels with clear contracts at each boundary.
 
 ### Historical Precedents Worth Studying
@@ -865,8 +872,90 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 ```
 Step 1 -> Step 2 -> Step 3 -> Step 4   (sequential: each builds on the previous)
+   |                              |
+   +-> Step 5 (any time)         +-> Step 6 (planner visibility)
                                   |
-Step 5 (independent, any time after Step 1)
-                                  |
-                         Step 6, 7, 8   (independent of each other, all need 1-4)
+                             +-> Step 7 (struct row polymorphism)
+                             +-> Step 8 (built-in typing; soft dep on Step 7 for UNNEST etc.)
 ```
+
+Note: Step 8 introduces generics and variadics, which may require changes to the bidirectional checker from Step 4. Step 4's design must leave room for these extensions.
+
+## 17. Expert Review Notes
+
+**Reviewer:** Claude (prompted as PL/compiler/SQL expert)
+**Date:** April 2026
+
+The following observations are areas where the design is technically coherent but where deeper tensions, underestimated difficulty, or alternative framings deserve attention during experimentation.
+
+### A. Fragment Sort Gaps
+
+**The Predicate removal and AggExpr retention are in tension.** The paper argues `Expr<Boolean>` suffices because SQL syntax already enforces predicate positions. But `AggExpr<T>` exists precisely because aggregate context matters and SQL syntax alone doesn't prevent the confusion. If aggregation context is worth a sort, predicate context might be too -- `WHERE count(*) > 5` vs. `HAVING count(*) > 5` is a common source of confusion that `Expr<Boolean>` cannot distinguish.
+
+**Missing: `WindowExpr<T>`.** Window functions (`ROW_NUMBER() OVER (...)`, `LAG(...) OVER (...)`) are not aggregates and cannot appear in WHERE. The `sessionize` example uses them extensively. Window expressions are one of the most common sources of sort errors in SQL (using them in WHERE, GROUP BY, or nested inside aggregates). A `WindowExpr<T>` sort would catch these at composition time.
+
+**`SelectItems` is under-specified.** The `Agg` kind parameter is never formally defined. Can there be `SelectItems<Scalar, ctx>`? What about mixed select lists (some aggregate, some GROUP BY columns)? Real SELECT clauses regularly mix both.
+
+### B. Scoping Edge Cases
+
+**Name shadowing between parameters and columns.** If the caller passes `user_id` for the `user_col` parameter, and the table also has a literal column named `user_col`, there is no collision after expansion. But *during Tier 2 checking in isolation*, the checker sees `user_col` and must decide: parameter or column? Parameters win, but this means a function body cannot reference a column that shares a name with a parameter. This is a real footgun for `TableExpr` parameters with unknown schemas.
+
+**Tier 1 + unannotated TableExpr is the worst-case error combination.** When the body says `revenue - cost` and the parameter is bare `source: TableExpr`, the checker cannot verify these columns exist without the call site. If the function is called from five models and one lacks `revenue`, the error fires inside expanded code and must be traced back -- possible but confusing. The paper should be explicit that this is the worst error experience the system produces.
+
+**CTE-derived contexts create a forward reference problem.** In `session_rollup`, `metrics: SelectItems<Agg, sessionized>` references the CTE `sessionized` defined later in the body. The compiler must analyze the body to extract CTE schemas, then circle back to validate context bindings. This is not a single-pass analysis and could produce cyclic dependencies if a CTE's schema depends on a parameter that depends on a CTE.
+
+### C. Bidirectional Checking: Right for MVP, Not Necessarily Forever
+
+The argument against HM is sound for the current design. But the claim that "errors are always local" (section 7) is overstated. When a row variable `..r` is bound at one parameter and used at the return type, and the return type does not match downstream expectations, the error must reference both the binding site and the use site -- a two-point error.
+
+Once row polymorphism, context bindings, and struct spread are all in play, the type relationships may not remain "simple enough" for bidirectional checking without heuristics. The paper should frame bidirectional checking as "right for the MVP" rather than "the right algorithm." A constraint-based approach would let row variables be solved globally, which is useful when multiple row-polymorphic parameters interact.
+
+### D. Tier Interaction: A Tier 2 Body Calling a Tier 1 Function
+
+The three-tier system is well-designed in isolation, but what happens when a Tier 2 function (parameters annotated, body checked in isolation) calls a Tier 1 function (unannotated, no declared types)? The Tier 2 body check cannot expand the Tier 1 call without a concrete call site. Options: (a) treat the Tier 1 return as unknown, breaking isolation; (b) refuse the call; (c) require callees to be at least the caller's tier. This interaction needs to be specified.
+
+Separately, upgrading a Tier 1 function to Tier 2 is a potentially breaking change for callers -- adding parameter types may reject arguments that previously worked through expansion. This is the TypeScript `--strict` problem at the function level.
+
+### E. Planner Soundness
+
+**Annotation correctness is unverified.** If an author declares `@joins(dim_customers LEFT 1:1)` but the join is actually 1:N, the planner will produce incorrect optimizations. There is no mechanism described for validating annotations against the function body. The correctness of the planner depends on the correctness of hand-written annotations -- a soundness hole.
+
+**The MLIR analogy needs a stronger contract.** MLIR's progressive lowering has formal specifications and verified lowering passes. The paper's three levels have no formal contract beyond "the output schema must match." Schema preservation is necessary but not sufficient -- a planner rule that preserves the schema but changes row counts or NULL semantics is still wrong.
+
+**Join elimination requires DAG-wide provenance.** Example 3's "no column from dim_products is used by any downstream consumer" requires analysis across the full model DAG, not just the immediate function call. Any model referencing this model via `smelt.ref()` is a downstream consumer.
+
+### F. Block Syntax Ambiguity
+
+**WITH clause collision.** The block syntax reuses `WITH name AS (...)` trailing a function call. But SQL also has `WITH name AS (...) SELECT ...` (CTE syntax). If a function call is followed by a `WITH` clause, the parser must determine whether it is a block parameter or a SQL CTE. This makes parsing function-signature-dependent -- the parser needs to know the function's parameter names, which is unusual and means the parser cannot operate independently of the type checker.
+
+**Block composition is visually confusing.** `WITH metrics AS (metrics)` -- where the inner `metrics` is a parameter reference being passed through -- looks like a circular CTE definition. This is the Gradle/Groovy readability problem: block syntax DSLs are powerful but opaque to newcomers.
+
+### G. SQL Edge Cases
+
+**NULL semantics.** The fragment sorts do not mention nullability. When a parameter is `Expr<Numeric>`, can the caller pass a nullable expression? What is the nullability of the return type? Either nullable/non-nullable should be expressible (`Expr<Numeric NOT NULL>`) or the paper should state nullability tracking is deferred.
+
+**Implicit coercions.** The paper says the checker does not insert casts, and `Text`/`Varchar` are treated as the same type. But what about `Integer`/`Bigint`? `Numeric`/`Decimal`? If `Expr<Numeric>` does not accept `Expr<Integer>`, users need casts everywhere, which is hostile. The numeric tower subtyping rules need specification.
+
+**Dialect differences in expansion.** "Functions compile away" to plain SQL, but plain SQL differs by engine. A function body using `INTERVAL '30 minutes'` (DuckDB syntax) cannot run on Spark. Either functions are engine-agnostic or dialect-tagged.
+
+**Window functions in bodies.** The `sessionize` example uses `LAG(...) OVER (...)` and `SUM(...) OVER (...)`. If a function body contains window functions, the sort system should ensure the result is used where window functions are valid. Neither `Expr<T>` nor `AggExpr<T>` captures "contains a window function."
+
+### H. Implementation Complexity
+
+**Error tracing through expansion** requires maintaining source maps through expansion. For nested calls (A calls B calls C), even the single-level trace (A->C) requires structured expansion tracking -- a meaningful compiler infrastructure investment.
+
+**Salsa integration** needs careful design. When a function body changes, all transitive callers must be re-checked. A `function_signature()` Salsa query separate from `function_body_check()` would ensure that body changes (without signature changes) don't invalidate call sites -- critical for LSP responsiveness.
+
+**File discovery.** The paper says definitions can live alongside models in any `.sql` file, not just under `functions/`. This means the parser must scan every `.sql` file for `smelt.define` directives. If definitions and models coexist, the directory-derived namespace convention needs clarification for functions defined outside `functions/`.
+
+### I. The Hardest Problem
+
+The hardest single implementation challenge is not errors or the type system -- it is **making structural column resolution work reliably across the Tier 1 / Tier 2 boundary with the hybrid scoping model.** When a Tier 1 function with bare `source: TableExpr` references `revenue`, and the function is called from five models with different tables, the system must: expand at each call site, resolve columns against each schema, produce errors at the correct call site if a column is missing, trace errors back through expansion, and do all this incrementally for the LSP. The paper treats this as the simple base case, but it is where the most things can go wrong.
+
+### J. Dhall's Lesson Cuts Both Ways
+
+The paper correctly draws on Dhall's demonstration that totality + modest types can replace complex templating. But Dhall also showed the *limits* of this: users frequently hit the expressiveness ceiling and resort to workarounds. smelt's escape hatch ("drop down to a plain SQL model") is much better than Dhall's, and is worth stating explicitly as a design property.
+
+### K. Function Versioning
+
+Once functions are shared, changing a function's body (even without changing its signature) can break downstream models silently. The planner story makes this worse: changing a body might invalidate planner annotations, leading to incorrect optimizations. Whether function signatures should include a version or hash, or whether the planner should re-verify annotations when bodies change, is worth considering.
