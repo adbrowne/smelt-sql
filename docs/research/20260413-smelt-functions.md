@@ -4,7 +4,7 @@
 **Status:** Research / Design Exploration
 **Author:** Andrew Browne, with design input from Claude
 
-This paper explores a design for **smelt functions**: typed, composable SQL fragments that replace Jinja macros while preserving smelt's static analysis guarantees. The core insight is that if the type system tracks *what kind of SQL fragment* a value is, composition can be free and still statically checked. We describe the type system, scoping model, gradual annotation strategy, planner integration, and an experimentation roadmap where each step teaches something that informs the next.
+This paper explores a design for **smelt functions**: typed, composable SQL fragments that replace Jinja macros while preserving smelt's static analysis guarantees. The core insight is that if the type system tracks *what kind of SQL fragment* a value is, composition can be free and still statically checked. A deeper insight is that **models and functions are the same concept** -- a typed SQL transformation distinguished only by parameter binding style (DAG-default refs vs explicit parameters) and materialization strategy. This unification extends to SQL built-ins and UDFs as "black box" functions with known signatures but no inspectable bodies. We describe the type system, scoping model, unified model/function concept, gradual annotation strategy, planner integration, and an experimentation roadmap where each step teaches something that informs the next.
 
 ## 1. The Problem
 
@@ -117,7 +117,156 @@ smelt.define sessionize(
 
 **Ordering is unrestricted.** A function may call any other function defined anywhere in the project, regardless of file or position within a file. Cycle detection lives in `smelt-db` as a Salsa query over the function-call graph.
 
-## 4. Context Bindings -- Controlling What Callers Can See
+## 4. The Unified Model -- Models as Functions
+
+A smelt model is a SQL file that takes `TableExpr` inputs (via `smelt.ref()` and `smelt.source()`) and produces a `TableExpr` output. A smelt function is a `smelt.define` block that takes typed fragment inputs and produces a typed fragment output. These are the same concept with different defaults.
+
+### The Equivalence
+
+Consider a typical model:
+
+```sql
+-- models/margins.sql
+---
+materialization: table
+---
+SELECT revenue - cost AS margin
+FROM smelt.ref('product_summary')
+```
+
+Under the unified view, this is equivalent to:
+
+```sql
+smelt.define margins(
+    product_summary: TableExpr = smelt.ref('product_summary')
+) -> TableExpr AS (
+    SELECT revenue - cost AS margin
+    FROM product_summary
+)
+```
+
+The model's `smelt.ref()` calls are parameters with default values drawn from the project DAG. The materialization decision (`table`, `view`, `ephemeral`, `materialized_view`) is orthogonal -- a property of how the output is persisted, not what the transformation is.
+
+### Evidence: This Is Already How It Works
+
+**Ephemeral models are transparent inline functions.** An ephemeral model's SQL is inlined as a CTE into every downstream model that references it -- the same expansion mechanics as `smelt.define` functions. The only difference is parameter binding: ephemeral models get their inputs from the DAG; functions get theirs from explicit call sites.
+
+**Testing already subverts refs.** The testing framework provides mock tables with only the columns a model actually touches, proving the model's real dependency is "a table with columns X, Y, Z of compatible types" -- not "specifically the output of model `product_summary`." This is row polymorphism discovered empirically.
+
+### Two Orthogonal Properties
+
+Every SQL transformation in smelt has two independent properties:
+
+**Transparency:** Can smelt see the body?
+- *Transparent* -- body is available for expansion, type checking, and planner optimization across boundaries. All user-authored SQL (models and `smelt.define` functions) is transparent.
+- *Black box* -- only the signature (input types, output type) is known. SQL built-ins (`SUM`, `LOWER`), UDFs, external functions. The planner treats these as atomic nodes.
+
+**Materialization:** How is the output persisted?
+- *Table / View / Materialized view* -- output is stored or computed by the engine. Scheduled in the DAG. Referenceable via `smelt.ref()`.
+- *Inline (ephemeral)* -- expanded at compile time. No persistent output.
+
+### The Taxonomy
+
+| Current concept | Transparency | Materialization | Parameters |
+|---|---|---|---|
+| Table/view model | Transparent | Persisted | DAG-default (refs/sources) |
+| Ephemeral model | Transparent | Inline (CTE) | DAG-default |
+| `smelt.define` function | Transparent | Inline (expansion) | Explicit |
+| SQL built-in | Black box | Inline | Engine-provided signature |
+| UDF | Black box | Inline | User-declared signature |
+| Source | Black box | External | Schema from YAML/catalog |
+
+The model/function distinction reduces to parameter binding style (DAG-default vs explicit) -- sugar, not a fundamental concept. The deeper axes are transparency and materialization.
+
+### Parameterized Models
+
+The unified view makes parameterized models natural. A model that takes explicit `TableExpr` parameters alongside its DAG-default refs allows the same logic to be reused across different source tables (regional variants, A/B test arms, environment-specific sources):
+
+```sql
+-- models/regional_revenue.sql
+---
+materialization: table
+---
+SELECT
+    region, SUM(amount) AS total_revenue
+FROM smelt.ref('orders', default => smelt.source('us_orders'))
+GROUP BY region
+```
+
+A caller (or test) can override the default, providing a different table without changing the model. This is a smooth continuum: at one end, a fully-hardcoded model with all refs; at the other, a fully-parameterized function with no DAG defaults.
+
+### Implications for the Planner
+
+The planner already operates on the model DAG. Under the unified view, this DAG includes all materialized transformations (models) as nodes and all inline transformations (functions, ephemeral models) as expansions within nodes. The planner's optimization boundary aligns with transparency: it can reason across transparent boundaries (rewrite, fuse, push filters) but must treat black box boundaries as atomic.
+
+## 5. Black Box Functions -- Signatures Without Bodies
+
+Black box functions are transformations where smelt knows the type signature but cannot inspect the body. They are the counterpart to transparent functions (where smelt sees and expands the SQL body).
+
+### Why Black Box Matters
+
+Models call SQL built-in functions far more often than user-defined functions. If built-ins carry the same fragment-typed signatures as user functions, every SQL call in every model gets compile-time checking, hover types, and completion. This is not an optional extension -- it is mandatory for useful type checking. A type system that checks `smelt.fn.safe_divide()` but not `SUM()` or `COALESCE()` covers a small fraction of real SQL.
+
+### Categories of Black Box Functions
+
+**SQL built-ins** are provided by the target engine. smelt ships a signature registry per dialect (DuckDB, Spark, PostgreSQL). Most built-ins have simple signatures that fit the existing fragment sort system:
+
+| Built-in shape | Signature |
+|----------------|-----------|
+| Pure scalar (`LOWER`, `ABS`, `LENGTH`) | `Expr<T1> -> Expr<T2>` |
+| Binary scalar (`POWER`, `MOD`) | `(Expr<T>, Expr<T>) -> Expr<T>` |
+| Aggregates (`SUM`, `COUNT`, `AVG`) | `Expr<T> -> AggExpr<T>` |
+| Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Expr<Boolean>` |
+| Simple table functions (`generate_series`) | `(Expr<Int>, Expr<Int>) -> TableExpr` |
+
+**User-declared external functions** (UDFs, Snowflake external functions, Python UDFs) are declared by the user with explicit signatures:
+
+```sql
+smelt.extern my_ml_model(
+    features: Expr<Struct<{age: Integer, income: Double, ..}>>
+) -> Expr<Double>
+```
+
+The function name passes through to the generated SQL unchanged. No expansion, no body analysis -- just signature checking at call sites.
+
+**Sources** are black box `TableExpr` producers with zero parameters and a schema declared in YAML or inferred from a catalog.
+
+### The Signature Language for Black Box Functions
+
+Black box functions are always fully annotated -- there is no body to infer from. This means the signature language must be expressive enough to describe what the ~20% of SQL built-ins that need extensions require:
+
+1. **Type parameters (generics).** `COALESCE<T>(Expr<T>, Expr<T>) -> Expr<T>` returns the common supertype. `ARRAY_AGG<T>(Expr<T>) -> AggExpr<Array<T>>` wraps element type.
+2. **Variadics.** `COALESCE`, `CONCAT`, `GREATEST` accept arbitrary arity. The signature language needs `Expr<T>...` or equivalent.
+3. **Types as arguments.** `CAST(x AS INTEGER)`, `EXTRACT(YEAR FROM ts)`. Not expressible as `Expr<T>`. Options: a `Type` parameter sort, or primitive grammar handling for these specific forms.
+4. **Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`. These are SQL grammar constructs, not function calls in the usual sense. Treated as primitive grammar, not as generic black box signatures.
+5. **Modifier clauses.** `SUM(x) FILTER (WHERE cond)`, `OVER (...)`. Syntactic suffixes on aggregate calls that modify behavior.
+6. **Schema-returning table functions.** `UNNEST(array_col)` depends on element type. `read_csv` with auto-schema is not compile-time typeable.
+
+Categories 1-3 require extensions to the signature language. Categories 4-5 are SQL grammar handled by the parser. Category 6 is untypeable without schema hints.
+
+### What Remains Untypeable
+
+- Auto-schema built-ins without a schema hint (`read_csv('x.csv')`)
+- Dynamic `EXECUTE` / string-templated SQL
+- Untyped JSON navigation (`col->>'foo'`) -- typeable only as unconditional `Text`
+
+### Gradual Typing Interaction
+
+Black box functions do not participate in the three-tier gradual typing system (section 8). They are always "Tier 3" -- fully annotated -- because the signature is all that exists. The gradual typing tiers apply only to transparent functions, where the author can choose how much to annotate.
+
+This means a Tier 1 transparent function (unannotated) calling a black box built-in gets the best of both worlds: the built-in's return type is known from the registry, providing type information that flows into the Tier 1 expansion check. `SUM(revenue)` has a known return type even if the function containing it has no annotations.
+
+### Planner Implications
+
+The planner treats black box functions as optimization barriers -- it cannot rewrite what's inside. However, black box functions can still carry declared properties:
+
+- `@deterministic` -- the planner knows the function produces the same output for the same input
+- `@idempotent` -- safe to retry
+- SQL built-ins inherit properties from the registry (e.g., `SUM` is deterministic, `RANDOM()` is not)
+
+The planner can reason *around* black box functions (push a filter below a black box scalar function, eliminate unused columns before a black box table function) but never *through* them.
+
+## 6. Context Bindings -- Controlling What Callers Can See
 
 When a function takes a fragment-typed parameter that contains column references, a natural question arises: which columns can it reference? The answer is **context bindings** -- optional annotations that declare which table context a fragment's columns resolve against.
 
@@ -208,7 +357,7 @@ CTE context checking is partially call-site-dependent: `SelectItems<Agg, session
 
 Context bindings are **always optional.** Without them, column resolution happens at expansion time (Tier 1 behavior). Authors add them to shift checking earlier and give callers better errors.
 
-## 5. Hybrid Scoping -- Lexical Parameters + Structural Column Resolution
+## 7. Hybrid Scoping -- Lexical Parameters + Structural Column Resolution
 
 When a function body says `user_col`, does it mean the parameter or a literal column named `user_col`?
 
@@ -244,7 +393,7 @@ With the annotation, the compiler checks requirements at the call site before ex
 
 **Why hybrid rather than pure lexical:** Functions are self-contained (readable without knowing the call site). The compiler can check bodies in isolation (when annotated). No surprises from ambient column names shadowing parameters. And the structural part is SQL-native for the parts that are inherently SQL. The two-layer model is more complex to explain than "everything is lexical," but it matches how SQL actually works.
 
-## 6. Gradual Typing -- Three Tiers of Annotation
+## 8. Gradual Typing -- Three Tiers of Annotation
 
 Mandatory type annotations would kill adoption among data analysts and analytics engineers. smelt follows TypeScript's gradual typing trajectory (Siek & Taha, 2006): start untyped, add types as code matures and gets shared.
 
@@ -334,7 +483,7 @@ Tier 2/3 functions retain their signature when the body becomes invalid mid-edit
 
 Tier 1 ships first -- it's just expansion plus existing type checking with error tracing. Tier 2 adds checking-mode verification on bodies. Tier 3 adds return type verification. Each tier is independently shippable. The type inference algorithm (next section) maps directly onto this phasing.
 
-## 7. Type Inference -- Bidirectional Checking
+## 9. Type Inference -- Bidirectional Checking
 
 smelt functions use **bidirectional type checking** (Pierce & Turner, 2000; Dunfield & Krishnaswami, 2021) with a local unification step at row-variable binding sites.
 
@@ -383,7 +532,7 @@ The algorithm guarantees:
 - **Higher-rank polymorphism.** A parameter cannot itself be polymorphic. smelt functions are not higher-order.
 - **Implicit subtyping coercions.** The checker does not silently insert casts. If a parameter expects `Expr<Double>` and the caller passes `Expr<Integer>`, this is a type error. The user writes `CAST(x AS DOUBLE)`. (Exception: engine aliases like `Text`/`Varchar` are treated as the same type.)
 
-## 8. Block Syntax -- Ergonomic Fragment Passing
+## 10. Block Syntax -- Ergonomic Fragment Passing
 
 Passing multi-line SQL fragments as inline function arguments is syntactically awkward. Block syntax provides named `WITH ... AS (...)` clauses trailing a function call:
 
@@ -437,9 +586,9 @@ Block syntax introduces a second grammar layer at the call site. This has worked
 
 The choice to reuse SQL's existing `WITH ... AS (...)` shape mitigates parser complexity vs. inventing a wholly new block syntax. Named parameters with parenthesized fragments (the "ugly" version from the examples) remain available as the fallback -- blocks are pure sugar.
 
-## 9. Row Polymorphism for Struct Values
+## 11. Row Polymorphism for Struct Values
 
-The hybrid scoping model (section 5) handles row polymorphism for `TableExpr` parameters -- "this function works on any table with at least columns X, Y." But struct-typed columns (DuckDB, Spark, BigQuery) face the same brittleness problem at the *value* level: if struct parameters are closed, adding a field to the struct breaks every function that accepts it.
+The hybrid scoping model (section 7) handles row polymorphism for `TableExpr` parameters -- "this function works on any table with at least columns X, Y." But struct-typed columns (DuckDB, Spark, BigQuery) face the same brittleness problem at the *value* level: if struct parameters are closed, adding a field to the struct breaks every function that accepts it.
 
 | | `TableExpr` | `Expr<Struct<{...}>>` |
 |---|---|---|
@@ -515,7 +664,7 @@ If two parameters both declare `..r`, they are constrained to have the same extr
 
 No defaults on row-polymorphic parameters in v1.
 
-## 10. Planner Integration -- Three Levels
+## 12. Planner Integration -- Three Levels
 
 This is where smelt functions differ most fundamentally from Jinja macros. In dbt, macros are expanded to text before anything sees them. In smelt, functions are **visible to the planner as first-class nodes** with typed interfaces and declared properties.
 
@@ -561,17 +710,29 @@ Function properties still matter: `@idempotent` tells Level 3 that retry is safe
 
 ### What Ships When
 
-**MVP (Steps 1-4):** Pure expansion. No planner rules at any level. Bare keyword annotations (`@deterministic`, `@idempotent`, `@append_only`) are parsed and stored but not acted on.
+**MVP (Steps 1-5):** Pure expansion for transparent functions, signature checking for black box functions. No planner rules at any level. Bare keyword annotations (`@deterministic`, `@idempotent`, `@append_only`) are parsed and stored but not acted on.
 
-**Post-MVP (Step 6):** Level 1 planner rules. Structured annotations (`@joins(...)`, `@provenance(...)`) for the functions that benefit from optimization. Levels 2 and 3 build on existing planner infrastructure.
+**Post-MVP (Step 7):** Level 1 planner rules. Structured annotations (`@joins(...)`, `@provenance(...)`) for the functions that benefit from optimization. The transparency rule guides which functions the planner can reason through. Levels 2 and 3 build on existing planner infrastructure.
 
 This separation lets the function system be validated as a composition mechanism before adding planner complexity.
 
-## 11. Built-in Function Typing
+### The Transparency Rule
 
-Models call built-in SQL functions far more often than user functions. If built-ins carry the same fragment-typed signatures, every SQL call gets compile-time checking, hover types, and completion.
+The unified model (section 4) introduces a clean optimization boundary: the planner can reason across **transparent** function boundaries (rewrite, fuse, push filters through) but must treat **black box** functions as atomic nodes. This simplifies the planner story:
 
-### What Fits With No New Machinery (~80%)
+- Transparent functions: the planner sees the body, can analyze joins, trace column provenance, eliminate unused work.
+- Black box functions (SQL built-ins, UDFs): the planner sees only the signature and declared properties. It can reason *around* them (e.g., push a filter below a black box scalar) but never *through* them.
+- The materialization boundary (table/view vs ephemeral/inline) determines which transparent functions are expanded before planning vs. which persist as DAG nodes.
+
+## 13. Built-in Function Typing -- Subsumed by Black Box Functions
+
+*Note: This section is retained for detailed analysis. The conceptual framework has moved to section 5 (Black Box Functions), which treats built-in typing as a special case of the broader black box function concept.*
+
+Built-in SQL function typing is **mandatory for useful type checking**, not an optional extension. Models call built-in SQL functions far more often than user functions. A type system that checks `smelt.fn.safe_divide()` but not `SUM()` or `COALESCE()` covers a small fraction of real SQL.
+
+Under the unified model (sections 4-5), SQL built-ins are black box functions with engine-provided signatures. The analysis below identifies which built-ins fit the existing signature language and which require extensions to the black box signature language.
+
+### What Fits the Existing Signature Language (~80%)
 
 | Built-in shape | Signature |
 |----------------|-----------|
@@ -581,28 +742,30 @@ Models call built-in SQL functions far more often than user functions. If built-
 | Predicate-producing (`IS NULL`, `LIKE`) | `Expr<T> -> Expr<Boolean>` |
 | Simple table functions (`generate_series`) | `(Expr<Int>, Expr<Int>) -> TableExpr` |
 
-### What Needs Extensions (~20%)
+### What Requires Signature Language Extensions (~20%)
 
-1. **Generics / type parameters.** `COALESCE(a, b, c)` returns the common supertype. `ARRAY_AGG(x)` returns `Array<T>`. Requires type parameters on signatures.
-2. **Variadics.** `COALESCE`, `CONCAT`, `GREATEST` accept arbitrary arity. v1 excluded variadic user functions. For built-ins: either a privileged native-variadic form or reintroduce variadics for both.
-3. **Types as arguments.** `CAST(x AS INTEGER)`, `EXTRACT(YEAR FROM ts)`. Not expressible as `Expr<T>`. Options: a `Type`/`Field` parameter sort, or primitive grammar handling.
-4. **Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`. Must be treated as primitive grammar.
+1. **Generics / type parameters.** `COALESCE(a, b, c)` returns the common supertype. `ARRAY_AGG(x)` returns `Array<T>`. Requires type parameters on black box signatures.
+2. **Variadics.** `COALESCE`, `CONCAT`, `GREATEST` accept arbitrary arity. The signature language needs `Expr<T>...` or equivalent.
+3. **Types as arguments.** `CAST(x AS INTEGER)`, `EXTRACT(YEAR FROM ts)`. Not expressible as `Expr<T>`. Options: a `Type` parameter sort, or primitive grammar handling for these specific forms.
+4. **Keyword-argument syntax.** `TRIM(BOTH ' ' FROM x)`, `SUBSTRING(s FROM 1 FOR 3)`. SQL grammar constructs, not generic function calls. Treated as primitive grammar.
 5. **Modifier clauses.** `SUM(x) FILTER (WHERE cond)`, `OVER (...)`. Syntactic suffixes on aggregate calls.
 6. **Schema-returning table functions.** `UNNEST(array_col)` depends on element type. `read_csv` with auto-schema is not compile-time typeable.
 
-### What Is Untypeable
+Categories 1-3 are on the critical path -- the signature language for black box functions must support them. Categories 4-5 are SQL grammar handled by the parser. Category 6 is untypeable without schema hints.
+
+### What Remains Untypeable
 
 - Auto-schema built-ins without a schema hint (`read_csv('x.csv')`)
 - Dynamic `EXECUTE` / string-templated SQL
 - Untyped JSON navigation (`col->>'foo'`) -- typeable only as unconditional `Text`
 
-### Positioning
+### Implementation: Signature Registry per Dialect
 
-v1 types only user functions and leaves built-ins to existing inference. v2 extends coverage. The extension is bounded and does not invalidate the existing design.
+Each target engine provides a signature registry mapping function names to black box signatures. DuckDB's `SUM` returns `HUGEINT` for integer inputs; Spark's returns `BIGINT`. The registry captures these dialect differences. The checker consults the registry for the active target.
 
-Open question: signature registry per dialect vs. primitive built-in shapes in the checker. The registry scales with engines; primitive shapes keep the checker simple.
+Open question: should the registry be a data file (JSON/TOML) or generated from engine introspection? A data file is simpler and version-controllable; introspection handles custom extensions but requires a live connection.
 
-## 12. Concrete Examples
+## 14. Concrete Examples
 
 ### Example 1: safe_divide -- Expression Function
 
@@ -681,11 +844,11 @@ Properties flow through all three levels: `@deterministic` tells Level 3 replayi
 
 ### Example 3: Join Elimination via Function-Aware Planning
 
-*Note: This example illustrates a future capability (Step 6 in the roadmap). It requires planner integration with structured annotations (`@provenance`, `@joins`), which are post-MVP.*
+*Note: This example illustrates a future capability (Step 7 in the roadmap). It requires planner integration with structured annotations (`@provenance`, `@joins`), which are post-MVP.*
 
 This demonstrates why planner-visible functions enable optimizations that blind expansion cannot.
 
-**Setup:** `enrich_order` (defined in section 4) joins a fact table to customer and product dimensions via LEFT JOINs with unique keys (1:1 cardinality).
+**Setup:** `enrich_order` (defined in section 6) joins a fact table to customer and product dimensions via LEFT JOINs with unique keys (1:1 cardinality).
 
 **Model A uses both dimensions:**
 ```sql
@@ -735,7 +898,7 @@ This works because:
 
 With blind expansion, the planner would need to pattern-match raw SQL to identify JOINs, trace column lineage through aliases, check uniqueness constraints, and determine downstream usage. Steps 2-3 are fragile and break with SQL variations. With function-aware planning, the planner reads provenance from the typed interface.
 
-## 13. Limits of the Design
+## 15. Limits of the Design
 
 Even at maximum ambition, some things remain outside scope:
 
@@ -746,7 +909,7 @@ Even at maximum ambition, some things remain outside scope:
 
 These limitations are deliberate. The Jinja use cases that hit them are exactly the ones that produce unmaintainable code.
 
-## 14. Comparisons and Theoretical Foundations
+## 16. Comparisons and Theoretical Foundations
 
 ### Comparison Table
 
@@ -760,6 +923,8 @@ These limitations are deliberate. The Jinja use cases that hit them are exactly 
 | **Malloy** | First-class dimensions, measures, sources | Closest direct competitor. Cleaner semantics by abandoning SQL; smelt is more migration-friendly by extending SQL. Malloy's `dimension`/`measure` = our `Expr<T>`/`AggExpr<T>` with fixed scoping. |
 | **PRQL** | Functions as first-class values, pipeline syntax | Functions over expressions work well. But PRQL is a whole new language. |
 | **Terra** | Staged programming -- generate low-level code from high-level | "Generate SQL from a composition language" is exactly this framing. |
+| **F#** | One-pass left-to-right HM with deliberate limitations | Validates "limit inference for better errors": F# spec constrains type variables specifically to simplify error messages. Type abbreviation preservation in errors as a spec-level requirement. |
+| **Ermine (Kmett, S&P)** | Haskell-like with row types + kind polymorphism for financial reporting | Validates row polymorphism for typed SQL/relational composition at industrial scale (in production since 2008). Shipped without row constraints -- smelt's annotations are more ambitious. `Loc` annotations in type AST for error precision. |
 
 ### Theoretical Underpinnings
 
@@ -774,6 +939,7 @@ The design draws from several established PL techniques:
 - **Enriched type annotations.** Conceptually related to refinement types (Rondon et al., 2008), though the mechanism is explicit annotation rather than solver-verified logical predicates. Function types carry structural metadata (provenance, join graphs) beyond the basic sort.
 - **Bidirectional type checking.** Pierce & Turner, 2000; Dunfield & Krishnaswami, 2021. Types flow up (synthesis) and down (checking).
 - **Progressive lowering.** MLIR. Three planner levels with clear contracts at each boundary.
+- **Polymorphic type inference for relational algebra.** Buneman et al. (1996); Van den Bussche & Waller (2002). Standard HM cannot handle relational algebra operations -- the relationship between a record type and its fields requires row type extensions. smelt's bidirectional checking with local row unification is a pragmatic simplification that works because smelt functions are first-order.
 
 ### Historical Precedents Worth Studying
 
@@ -782,8 +948,10 @@ The design draws from several established PL techniques:
 - **Template Haskell** -- Multi-stage compilation where generated code is type-checked after splicing. Tier 1 is exactly this. TH showed that error messages are the main usability challenge.
 - **Liquid types (Rondon et al., 2008)** -- Refinement types carrying logical predicates. The compiler-derived structural metadata is a domain-specific form.
 - **Heeren et al. (2003), "Top Quality Type Error Messages"** -- Analysis of why constraint-based systems produce poor errors. A "what to avoid" reference justifying bidirectional checking.
+- **Ermine (Kmett et al., 2008-2013)** -- A lazy, pure Haskell-like language with rank-N types, kind polymorphism, and row polymorphism, built at S&P Capital IQ for financial report generation. Reports are specified via relational algebra combinators that compile to SQL. Production validation that row-polymorphic types over relational data work at scale. Notably, Ermine shipped without row constraints -- structural matching by field name/type was sufficient for a decade of financial reporting. The type AST includes `Loc` annotations for source positions, ensuring every type node carries its origin for precise error reporting.
+- **F# type system design** -- F# deliberately constrains its type inference (one-pass, left-to-right) to improve error message quality. The F# spec mandates that "implementations should attempt to preserve type abbreviations when reporting types and errors" -- errors say `UserId`, not `int`. The spec also restricts type variable constraints specifically "to simplify type inference, reduce the size of types shown to users, and help ensure the reporting of useful error messages." This validates smelt's bidirectional checking choice: limiting inference power for error locality is a proven strategy.
 
-## 15. Open Questions
+## 17. Open Questions
 
 ### Specification to Tighten
 
@@ -800,7 +968,14 @@ The design draws from several established PL techniques:
 - **Structured annotations** (`@joins(...)`, `@provenance(...)`) -- deferred until the planner needs them.
 - **Error trace depth for nested calls** -- when A calls B calls C and C errors, Tier 1 shows A->C (call site -> innermost error), skipping intermediates. Full-chain traces are a future improvement.
 
-## 16. Experimentation Roadmap -- What We Learn at Each Step
+### Unified Model
+
+- **`smelt.extern` interaction with gradual typing.** Black box functions are always fully annotated, but what about partial signatures? Can a UDF declaration omit the return type and have it inferred from engine introspection?
+- **Engine-specific overloads for black box signatures.** `SUM` returns `HUGEINT` in DuckDB but `DECIMAL` in Spark. Should the signature registry support per-dialect overloads, or normalize to a common supertype?
+- **Parameterized model syntax.** How does a caller override a model's DAG-default refs? Syntax for call-site binding of model parameters needs specification. Related: how does this interact with the scheduler (a parameterized model may produce multiple outputs)?
+- **Python models in the unified view.** Python models are currently opaque `TableExpr` producers. Under the unified model, they are black box materialized functions with no inspectable body and a schema inferred from execution. Does `smelt.extern` cover this, or does Python model integration need its own declaration mechanism?
+
+## 18. Experimentation Roadmap -- What We Learn at Each Step
 
 This is a research sequence, not a shipping plan. Each step teaches something that informs the next.
 
@@ -812,15 +987,23 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 **How it ladders:** If Tier 1 errors are adequate, the gradual typing thesis holds. If not, we know exactly where the pain is before adding complexity.
 
-### Step 2: TableExpr Functions + Row Polymorphism
+### Step 2: Black Box Signature Language + Built-in Function Typing
+
+**Build:** Signature registry for SQL built-ins (DuckDB first). The ~80% of built-ins with simple signatures (`Expr<T> -> Expr<T>`, `Expr<T> -> AggExpr<T>`). `smelt.extern` for user-declared black box functions. Generics/type parameters for the ~20% that need them (`COALESCE<T>`, `ARRAY_AGG<T>`).
+
+**What we learn:** Can the fragment sort system extend to cover SQL built-ins? Does the signature language need variadics immediately, or can fixed-arity overloads suffice for MVP? Is the `smelt.extern` declaration natural for UDFs? What is the effort/value ratio of each signature language extension (generics, variadics, type-as-arguments)?
+
+**How it ladders:** This is mandatory infrastructure -- every subsequent step benefits from built-in type information flowing through the checker. Generics here also inform the Tier 2 bidirectional checker (Step 5). Black box functions are simpler than transparent functions (no expansion, no body analysis), so this is a good early test of the signature language before applying it to the harder transparent case.
+
+### Step 3: TableExpr Functions + Row Polymorphism
 
 **Build:** `TableExpr` sort. Structural column resolution (bare column names resolving against table schemas). The `sessionize` and `add_margin` examples.
 
 **What we learn:** Does structural column resolution work? How do errors feel when a table is missing required columns? Is the hybrid scoping model (lexical parameters + structural columns) confusing or natural?
 
-**How it ladders:** This validates the row polymorphism thesis. If structural resolution works for tables, the same concept extends to structs (Step 7).
+**How it ladders:** This validates the row polymorphism thesis. If structural resolution works for tables, the same concept extends to structs (Step 8).
 
-### Step 3: Context Bindings
+### Step 4: Context Bindings
 
 **Build:** Context parameters on fragment sorts. `SelectItems<Agg, sessionized>`, `Expr<Boolean, source>`. CTE-derived contexts. Union contexts.
 
@@ -828,15 +1011,15 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 **How it ladders:** Context bindings are what make the error story qualitatively better than "just expand and check." This is the bridge from "it works" to "it works well."
 
-### Step 4: Tier 2 Annotations + Bidirectional Checking
+### Step 5: Tier 2 Annotations + Bidirectional Checking
 
-**Build:** Parameter type annotations. Bidirectional checking in synthesis and checking modes. Pre-expansion call-site checking.
+**Build:** Parameter type annotations. Bidirectional checking in synthesis and checking modes. Pre-expansion call-site checking. The generics from Step 2 must integrate with bidirectional checking here.
 
 **What we learn:** Does pre-expansion checking produce meaningfully better errors? Is bidirectional checking sufficient, or do we hit cases that want constraint-based solving? How much annotation do people actually write?
 
 **How it ladders:** This is the inflection point for library-quality functions. If Tier 2 errors are good, Tier 3 (return type annotations) is a small incremental step.
 
-### Step 5: Block Syntax
+### Step 6: Block Syntax
 
 **Build:** Trailing `WITH name AS (...)` clauses on function calls. Parser integration and error recovery.
 
@@ -844,15 +1027,15 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 **How it ladders:** Block syntax is pure ergonomics. It does not change the type system. It can be added or deferred without affecting anything else. Can happen any time after Step 1.
 
-### Step 6: Planner Visibility
+### Step 7: Planner Visibility
 
-**Build:** Functions as nodes in the logical plan. Explicit property annotations. Column provenance annotations. The join elimination example.
+**Build:** Functions as nodes in the logical plan. Explicit property annotations. Column provenance annotations. The join elimination example. The transparency rule: optimize across transparent boundaries, treat black box as atomic.
 
-**What we learn:** Can planner rules reason about functions effectively? Does join elimination actually fire on real workloads? Is the explicit annotation burden acceptable, or is automatic derivation needed sooner than expected?
+**What we learn:** Can planner rules reason about functions effectively? Does join elimination actually fire on real workloads? Is the explicit annotation burden acceptable, or is automatic derivation needed sooner than expected? Does the transparent/black box boundary give the planner a clean optimization rule?
 
 **How it ladders:** This is where smelt functions become fundamentally different from Jinja macros. Everything before this is "better macros." This is "optimization annotations."
 
-### Step 7: Struct Row Polymorphism
+### Step 8: Struct Row Polymorphism
 
 **Build:** `Expr<Struct<{ts: Timestamp, ..r}>>`. Row variables on struct types. Spread syntax. Value-level erasure at expansion.
 
@@ -860,28 +1043,19 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 **How it ladders:** Validates whether row polymorphism generalizes from tables to values. If it does, the type system has broader reach than initially designed for.
 
-### Step 8: Built-in Function Typing
-
-**Build:** Signature registry or primitive shapes for SQL built-ins. Generics and variadics for the 20% that need extensions.
-
-**What we learn:** Can the fragment sort system extend to cover SQL built-ins? Which extension categories (generics, variadics, type-as-arguments, keyword syntax, modifier clauses) have the best effort/value ratio?
-
-**How it ladders:** This is the second-largest leverage point after the core function system. If it works, every SQL call in every model benefits from the type system.
-
 ### Dependency Graph
 
 ```
-Step 1 -> Step 2 -> Step 3 -> Step 4   (sequential: each builds on the previous)
-   |                              |
-   +-> Step 5 (any time)         +-> Step 6 (planner visibility)
-                                  |
-                             +-> Step 7 (struct row polymorphism)
-                             +-> Step 8 (built-in typing; soft dep on Step 7 for UNNEST etc.)
+Step 1 -> Step 2 -> Step 3 -> Step 4 -> Step 5   (sequential: each builds on the previous)
+   |                                       |
+   +-> Step 6 (any time)                  +-> Step 7 (planner visibility)
+                                           |
+                                      +-> Step 8 (struct row polymorphism)
 ```
 
-Note: Step 8 introduces generics and variadics, which may require changes to the bidirectional checker from Step 4. Step 4's design must leave room for these extensions.
+Note: Step 2 introduces generics for the black box signature language. Step 5's bidirectional checker must integrate with these generics. Designing Step 2's generics with Step 5 in mind avoids rework.
 
-## 17. Expert Review Notes
+## 19. Expert Review Notes
 
 **Reviewer:** Claude (prompted as PL/compiler/SQL expert)
 **Date:** April 2026
@@ -906,7 +1080,7 @@ The following observations are areas where the design is technically coherent bu
 
 ### C. Bidirectional Checking: Right for MVP, Not Necessarily Forever
 
-The argument against HM is sound for the current design. But the claim that "errors are always local" (section 7) is overstated. When a row variable `..r` is bound at one parameter and used at the return type, and the return type does not match downstream expectations, the error must reference both the binding site and the use site -- a two-point error.
+The argument against HM is sound for the current design. But the claim that "errors are always local" (section 9) is overstated. When a row variable `..r` is bound at one parameter and used at the return type, and the return type does not match downstream expectations, the error must reference both the binding site and the use site -- a two-point error.
 
 Once row polymorphism, context bindings, and struct spread are all in play, the type relationships may not remain "simple enough" for bidirectional checking without heuristics. The paper should frame bidirectional checking as "right for the MVP" rather than "the right algorithm." A constraint-based approach would let row variables be solved globally, which is useful when multiple row-polymorphic parameters interact.
 
@@ -959,3 +1133,13 @@ The paper correctly draws on Dhall's demonstration that totality + modest types 
 ### K. Function Versioning
 
 Once functions are shared, changing a function's body (even without changing its signature) can break downstream models silently. The planner story makes this worse: changing a body might invalidate planner annotations, leading to incorrect optimizations. Whether function signatures should include a version or hash, or whether the planner should re-verify annotations when bodies change, is worth considering.
+
+### L. Unified Model Implications
+
+**The refs-as-defaults equivalence is validated by testing but not yet by user experience.** The testing framework's ability to provide mock tables with subset schemas proves the technical equivalence, but the user-facing syntax and mental model need careful design. Making every model a "parameterizable function" risks confusing users who think in terms of a simple DAG. The default experience should remain `smelt.ref('x')` with no visible parameterization; the unified view should be an advanced capability, not the primary teaching model.
+
+**Ephemeral models and transparent functions have different lifecycle expectations.** An ephemeral model is scheduled in the DAG (it has a position in execution order) even though it's inlined. A transparent function is not scheduled -- it's expanded at each call site. Under the unified view, this distinction becomes "materialized ephemeral" (scheduled, inlined) vs "pure inline" (not scheduled, expanded). Whether the scheduler needs to be aware of pure inline functions (e.g., for cycle detection across function calls) needs specification.
+
+**Black box soundness depends on signature correctness.** For SQL built-ins, the signature registry can be validated against engine documentation or introspection. For `smelt.extern` UDFs, the declared signature is unverified -- if the user declares the wrong return type, downstream type checking is unsound. This is the same problem as planner annotation correctness (section E) but more pervasive, since every UDF call depends on it. Runtime schema validation (check actual output against declared type on first execution) could provide a safety net.
+
+**The signature language for generics is on the critical path.** Moving built-in typing from Step 8 to Step 2 means the generics design must be settled early. Getting generics wrong (too simple, too complex, or incompatible with bidirectional checking) has cascading effects on every subsequent step. The design should study TypeScript's approach to generic inference in function calls, which solves a similar problem (infer type parameters from argument types at call sites).
