@@ -1029,160 +1029,225 @@ fn recover_resolved_model_schema(
     })
 }
 
-fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
-    let mut ctx = TypeContext::new();
-    let project_root = db.file_project_root(path.clone());
+/// Provider for upstream `smelt.ref()` schema lookups, used by the pure
+/// `build_type_context` function.
+///
+/// The Salsa version uses [`SalsaRefSchemaProvider`] (delegates to
+/// `db.resolve_ref` + `db.resolved_model_schema` + `db.project_seed_files`).
+/// The CLI batch compiler uses [`StaticRefSchemaProvider`], which is fully
+/// pure and takes pre-computed maps.
+pub trait RefSchemaProvider {
+    /// Returns the typed columns for the model named `model_name`, if known.
+    fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+    /// Returns the typed columns for the seed named `seed_name`, if known.
+    /// Seeds and model refs are looked up separately because the type-context
+    /// loop wants to distinguish them (CSV files don't participate in
+    /// SELECT * schema resolution, etc.).
+    fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+}
 
-    // Get sources config and add source column types
-    let sources_config = db.sources_config(project_root);
+/// `RefSchemaProvider` impl that delegates to the Salsa database. Used by the
+/// `type_context()` Salsa query so the LSP keeps benefiting from
+/// incremental recomputation.
+pub struct SalsaRefSchemaProvider<'a> {
+    db: &'a dyn TypeChecking,
+}
+
+impl<'a> SalsaRefSchemaProvider<'a> {
+    pub fn new(db: &'a dyn TypeChecking) -> Self {
+        Self { db }
+    }
+}
+
+impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
+    fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        let upstream_path = self.db.resolve_ref(model_name.to_string())?;
+        // CSVs are seeds, handled by `seed_columns`.
+        if upstream_path.extension().and_then(|e| e.to_str()) == Some("csv") {
+            return None;
+        }
+        let resolved = self.db.resolved_model_schema(upstream_path);
+        Some(
+            resolved
+                .columns
+                .iter()
+                .map(|col| {
+                    let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
+                        data_type: DataType::Unknown,
+                        nullable: true,
+                    });
+                    (col.name.clone(), typed_col)
+                })
+                .collect(),
+        )
+    }
+
+    fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        let upstream_path = self.db.resolve_ref(seed_name.to_string())?;
+        if upstream_path.extension().and_then(|e| e.to_str()) != Some("csv") {
+            return None;
+        }
+        for project_root in self.db.all_project_roots().iter() {
+            for seed in self.db.project_seed_files(project_root.clone()).iter() {
+                if seed.name == seed_name {
+                    return Some(
+                        seed.columns
+                            .iter()
+                            .map(|(name, dt)| {
+                                (
+                                    name.clone(),
+                                    TypedColumn {
+                                        data_type: dt.clone(),
+                                        nullable: true,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Fully pure `RefSchemaProvider` for batch compilation (CLI, planner). Holds
+/// pre-computed maps of model and seed schemas so it can answer lookups
+/// without touching Salsa.
+pub struct StaticRefSchemaProvider<'a> {
+    pub models: &'a HashMap<String, Vec<(String, TypedColumn)>>,
+    pub seeds: &'a HashMap<String, Vec<(String, TypedColumn)>>,
+}
+
+impl RefSchemaProvider for StaticRefSchemaProvider<'_> {
+    fn resolved_columns(&self, model_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        self.models.get(model_name).cloned()
+    }
+
+    fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>> {
+        self.seeds.get(seed_name).cloned()
+    }
+}
+
+/// Pure (Salsa-free) builder for a `TypeContext` from a parsed AST and the
+/// surrounding source/seed/model schemas.
+///
+/// This is the canonical builder; the `type_context()` Salsa query is now a
+/// thin wrapper that gathers Salsa inputs (sources_config, parsed file,
+/// upstream schemas) and delegates here. The CLI batch compiler can use
+/// `StaticRefSchemaProvider` to call this directly without a `Database`.
+///
+/// See CLAUDE.md "Pure Function Rule" for why this matters.
+pub fn build_type_context(
+    file: &AstFile,
+    sources_config: &SourcesConfig,
+    refs: &dyn RefSchemaProvider,
+) -> TypeContext {
+    let mut ctx = TypeContext::new();
+
+    // Source columns from sources.yml.
     for source in &sources_config.sources {
         for table in &source.tables {
             for col in &table.columns {
-                if let Some(data_type) = &col.data_type {
-                    ctx.add_source_column(
-                        &source.name,
-                        &table.name,
-                        &col.name,
-                        TypedColumn {
-                            data_type: data_type.clone(),
-                            nullable: true, // Assume nullable by default
-                        },
-                    );
-                } else {
-                    ctx.add_source_column(
-                        &source.name,
-                        &table.name,
-                        &col.name,
-                        TypedColumn {
-                            data_type: DataType::Unknown,
-                            nullable: true,
-                        },
-                    );
-                }
+                let data_type = col.data_type.clone().unwrap_or(DataType::Unknown);
+                ctx.add_source_column(
+                    &source.name,
+                    &table.name,
+                    &col.name,
+                    TypedColumn {
+                        data_type,
+                        nullable: true,
+                    },
+                );
             }
         }
     }
 
-    // Get refs from FROM clause and add upstream model column types
-    let parse = db.parse_file(path.clone());
-    let syntax = parse.syntax();
-
-    if let Some(file) = AstFile::cast(syntax) {
-        if let Some(select_stmt) = file.select_stmt() {
-            // Process WITH clause CTEs (in order for forward references)
-            // CTEs must be processed before FROM clause so they're available for column lookup
-            if let Some(with_clause) = select_stmt.with_clause() {
-                for cte in with_clause.ctes() {
-                    if let Some(cte_name) = cte.name() {
-                        // For recursive CTEs with explicit column list, bootstrap with Unknown types first
-                        // This allows the recursive reference to find the columns
-                        if with_clause.is_recursive() {
-                            for col_name in cte.column_names() {
-                                ctx.add_cte_column(
-                                    &cte_name,
-                                    &col_name,
-                                    TypedColumn {
-                                        data_type: DataType::Unknown,
-                                        nullable: true,
-                                    },
-                                );
-                            }
+    if let Some(select_stmt) = file.select_stmt() {
+        // Process WITH clause CTEs first (CTEs shadow outer scope).
+        if let Some(with_clause) = select_stmt.with_clause() {
+            for cte in with_clause.ctes() {
+                if let Some(cte_name) = cte.name() {
+                    // For recursive CTEs with explicit column list, bootstrap
+                    // with Unknown types so the recursive reference can find
+                    // the columns.
+                    if with_clause.is_recursive() {
+                        for col_name in cte.column_names() {
+                            ctx.add_cte_column(
+                                &cte_name,
+                                &col_name,
+                                TypedColumn {
+                                    data_type: DataType::Unknown,
+                                    nullable: true,
+                                },
+                            );
                         }
-
-                        // Pre-process the CTE's FROM clause to resolve smelt.ref() and
-                        // smelt.source() calls, making upstream columns available for
-                        // type inference within the CTE.
-                        if let Some(cte_select) = cte.query().and_then(|q| q.select_stmt()) {
-                            process_from_clause(db, &cte_select, &mut ctx);
-                        }
-
-                        // Infer columns from CTE query
-                        let columns = infer_cte_columns(&cte, &ctx);
-                        for (col_name, typed_col) in columns {
-                            ctx.add_cte_column(&cte_name, &col_name, typed_col);
-                        }
-
-                        // Register CTE name as alias to itself (for qualified lookups like cte_name.col)
-                        ctx.add_alias(&cte_name, &cte_name);
                     }
+
+                    if let Some(cte_select) = cte.query().and_then(|q| q.select_stmt()) {
+                        process_from_clause_pure(&cte_select, refs, &mut ctx);
+                    }
+
+                    let columns = infer_cte_columns(&cte, &ctx);
+                    for (col_name, typed_col) in columns {
+                        ctx.add_cte_column(&cte_name, &col_name, typed_col);
+                    }
+
+                    ctx.add_alias(&cte_name, &cte_name);
                 }
             }
-
-            process_from_clause(db, &select_stmt, &mut ctx);
         }
+
+        process_from_clause_pure(&select_stmt, refs, &mut ctx);
     }
 
-    Arc::new(ctx)
+    ctx
 }
 
-/// Process a SELECT statement's FROM clause, adding all table ref columns to the context.
-fn process_from_clause(
-    db: &dyn TypeChecking,
+/// Pure variant of `process_from_clause` — uses a `RefSchemaProvider` instead
+/// of `&dyn TypeChecking`, so it works in both Salsa and batch contexts.
+fn process_from_clause_pure(
     select_stmt: &smelt_parser::ast::SelectStmt,
+    refs: &dyn RefSchemaProvider,
     ctx: &mut TypeContext,
 ) {
     if let Some(from_clause) = select_stmt.from_clause() {
         for table_ref in from_clause.table_refs() {
-            process_table_ref(db, &table_ref, ctx);
+            process_table_ref_pure(&table_ref, refs, ctx);
         }
         for join in from_clause.joins() {
             if let Some(table_ref) = join.table_ref() {
-                process_table_ref(db, &table_ref, ctx);
+                process_table_ref_pure(&table_ref, refs, ctx);
             }
         }
     }
 }
 
-/// Process a single table reference and add its columns/aliases to the context.
-/// This handles smelt.ref(), smelt.source(), CTE references, and subqueries (including LATERAL).
-fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut TypeContext) {
+/// Pure variant of `process_table_ref` — uses a `RefSchemaProvider`.
+fn process_table_ref_pure(
+    table_ref: &TableRef,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
     // Check for smelt.ref() calls
     if let Some(func) = table_ref.function_call() {
         if let Some(ref_call) = RefCall::from_function_call(func) {
             if let Some(model_name) = ref_call.model_name() {
-                // Resolve upstream model or seed and get its typed schema
-                if let Some(upstream_path) = db.resolve_ref(model_name.clone()) {
-                    // Check if this is a seed (CSV file) or a SQL model
-                    if upstream_path.extension().and_then(|e| e.to_str()) == Some("csv") {
-                        // Seed ref: look up column types from project_seed_files
-                        'seed_search: for project_root in db.all_project_roots().iter() {
-                            for seed in db.project_seed_files(project_root.clone()).iter() {
-                                if seed.name == model_name {
-                                    for (col_name, data_type) in &seed.columns {
-                                        ctx.add_model_column(
-                                            &model_name,
-                                            col_name,
-                                            TypedColumn {
-                                                data_type: data_type.clone(),
-                                                nullable: true,
-                                            },
-                                        );
-                                    }
-                                    if let Some(explicit_alias) = table_ref.alias() {
-                                        ctx.add_alias(&explicit_alias, &model_name);
-                                    }
-                                    break 'seed_search;
-                                }
-                            }
-                        }
-                    } else {
-                        // SQL model ref: use resolved schema to get columns through wildcards
-                        let resolved = db.resolved_model_schema(upstream_path);
-
-                        // Add all resolved columns to context (use Unknown for untyped
-                        // columns so they remain visible for column reference resolution)
-                        for col in &resolved.columns {
-                            let typed_col = col.data_type.clone().unwrap_or(TypedColumn {
-                                data_type: DataType::Unknown,
-                                nullable: true,
-                            });
-                            ctx.add_model_column(&model_name, &col.name, typed_col);
-                        }
-
-                        // Register alias if present
-                        if let Some(explicit_alias) = table_ref.alias() {
-                            ctx.add_alias(&explicit_alias, &model_name);
-                        }
+                // Try as a seed first (the LSP path tries seeds via the seed
+                // CSV check; here we ask the provider both ways).
+                if let Some(cols) = refs.seed_columns(&model_name) {
+                    for (col_name, typed_col) in cols {
+                        ctx.add_model_column(&model_name, &col_name, typed_col);
+                    }
+                    if let Some(explicit_alias) = table_ref.alias() {
+                        ctx.add_alias(&explicit_alias, &model_name);
+                    }
+                } else if let Some(cols) = refs.resolved_columns(&model_name) {
+                    for (col_name, typed_col) in cols {
+                        ctx.add_model_column(&model_name, &col_name, typed_col);
+                    }
+                    if let Some(explicit_alias) = table_ref.alias() {
+                        ctx.add_alias(&explicit_alias, &model_name);
                     }
                 }
             }
@@ -1196,25 +1261,19 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
                 if let Some(table_name) = source_call.table_name() {
                     let qualified_name = format!("{}.{}", source_name, table_name);
 
-                    // Add explicit alias if present (e.g., "t" from "smelt.source('raw.users') t")
                     if let Some(explicit_alias) = table_ref.alias() {
                         ctx.add_alias(&explicit_alias, &qualified_name);
                     }
-
-                    // Also add implicit alias using the table name
                     ctx.add_alias(&table_name, &qualified_name);
                 }
             }
         }
     }
 
-    // Check for CTE references with aliases (e.g., "FROM daily_totals dt")
-    // When a table_ref is just an identifier (not a function call), and that
-    // identifier is a known CTE, register any alias
+    // CTE references with aliases (e.g. "FROM daily_totals dt")
     if table_ref.function_call().is_none() && table_ref.subquery().is_none() {
         if let Some(table_name) = table_ref.identifier() {
             if ctx.is_cte(&table_name) {
-                // Add explicit alias if present (e.g., "dt" from "daily_totals dt")
                 if let Some(explicit_alias) = table_ref.alias() {
                     ctx.add_alias(&explicit_alias, &table_name);
                 }
@@ -1222,30 +1281,20 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
         }
     }
 
-    // Check for subqueries (including LATERAL subqueries)
-    // These create derived tables whose columns should be available via the alias
+    // Subqueries / LATERAL subqueries
     if let Some(subquery) = table_ref.subquery() {
         if let Some(alias) = table_ref.alias() {
-            // Get the SELECT statement from the subquery
             if let Some(select_stmt) = subquery.select_stmt() {
-                // Get the column names from the SELECT list
                 if let Some(select_list) = select_stmt.select_list() {
-                    // Build a subquery-local context by cloning the outer context and
-                    // then processing the subquery's own FROM clause. This allows refs
-                    // like smelt.ref('upstream') inside the subquery to be resolved.
                     let mut subquery_ctx = ctx.clone();
-                    process_from_clause(db, &select_stmt, &mut subquery_ctx);
+                    process_from_clause_pure(&select_stmt, refs, &mut subquery_ctx);
 
-                    // Infer column types using the subquery-local context
                     let column_types = infer_select_column_types(&select_stmt, &subquery_ctx);
 
-                    // Register each column under the subquery's alias
                     for (i, item) in select_list.items().enumerate() {
-                        // Get column name from alias or expression
                         let col_name = if let Some(item_alias) = item.alias() {
                             item_alias
                         } else if let Some(expr) = item.expression() {
-                            // Try to get name from column reference
                             if let Some(col_ref) = expr.as_column_ref() {
                                 col_ref.name().to_string()
                             } else {
@@ -1255,22 +1304,36 @@ fn process_table_ref(db: &dyn TypeChecking, table_ref: &TableRef, ctx: &mut Type
                             format!("col{}", i + 1)
                         };
 
-                        // Get type from inferred types
                         let typed_col = column_types.get(i).cloned().unwrap_or(TypedColumn {
                             data_type: DataType::Unknown,
                             nullable: true,
                         });
 
-                        // Add column under the subquery alias (like a CTE)
                         ctx.add_cte_column(&alias, &col_name, typed_col);
                     }
 
-                    // Register the alias as a known "CTE" for lookup purposes
                     ctx.add_alias(&alias, &alias);
                 }
             }
         }
     }
+}
+
+fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {
+    let project_root = db.file_project_root(path.clone());
+    let sources_config = db.sources_config(project_root);
+
+    let parse = db.parse_file(path.clone());
+    let syntax = parse.syntax();
+
+    let file = match AstFile::cast(syntax) {
+        Some(f) => f,
+        None => return Arc::new(TypeContext::new()),
+    };
+
+    let provider = SalsaRefSchemaProvider::new(db);
+    let ctx = build_type_context(&file, &sources_config, &provider);
+    Arc::new(ctx)
 }
 
 fn typed_model_schema(db: &dyn TypeChecking, path: PathBuf) -> Arc<ModelSchema> {

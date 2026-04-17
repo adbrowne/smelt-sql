@@ -574,11 +574,27 @@ fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedCo
         SqlFunction::Sum => {
             if let Some(arg) = func.arguments().first() {
                 if let Some(arg_type) = infer_expression_type(arg, ctx) {
+                    // DuckDB SUM widening rules:
+                    //   SUM(SMALLINT|INTEGER|BIGINT)   -> BIGINT (HUGEINT in DuckDB,
+                    //                                     but smelt models that as BIGINT)
+                    //   SUM(DOUBLE|FLOAT)              -> DOUBLE
+                    //   SUM(DECIMAL(p, s))             -> DECIMAL(38, s)
+                    //
+                    // The Decimal precision widen-to-38 is critical: real
+                    // pipelines accumulate ~1e6 rows of DECIMAL(10,2) values
+                    // which overflow precision 10 quickly. Keeping the input
+                    // precision silently corrupts results.
                     let result_type = match &arg_type.data_type {
                         DataType::SmallInt | DataType::Integer => DataType::BigInt,
                         DataType::BigInt => DataType::BigInt,
                         DataType::Float | DataType::Double => DataType::Double,
-                        dt @ DataType::Decimal { .. } => dt.clone(),
+                        DataType::Decimal { scale, .. } => DataType::Decimal {
+                            precision: 38,
+                            scale: *scale,
+                        },
+                        // Unknown / mixed: defer to BIGINT (the historical
+                        // fallback) — but the caller is expected to give us
+                        // a populated TypeContext so this path is rare.
                         _ => DataType::BigInt,
                     };
                     return Some(TypedColumn {

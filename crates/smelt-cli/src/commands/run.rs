@@ -3,10 +3,11 @@ use arrow::util::pretty;
 use chrono::{NaiveDate, Utc};
 use smelt_backend::PartitionSpec;
 use smelt_cli::{
-    compute_batches_for_model, compute_incremental_windows, discover_python_models, executor,
-    find_project_root, init_db, inject_time_filter, migration, parse_selector, BackendRegistry,
-    BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery,
-    PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig, TimeRange,
+    compiler::UpstreamSchemas, compute_batches_for_model, compute_incremental_windows,
+    discover_python_models, executor, find_project_root, init_db, inject_time_filter, migration,
+    parse_selector, BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph,
+    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
+    TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -14,6 +15,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
@@ -466,6 +468,18 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .cloned()
         .collect();
     let type_db = init_db(&project_dir, &all_models);
+
+    // Build upstream schemas (model + seed + source columns) once and share
+    // them across every compiler in the registry. Without this, the CLI's
+    // `apply_type_casts` would build an empty TypeContext and aggregates over
+    // `smelt.ref()` columns would silently narrow to BIGINT (bug #3).
+    let upstream_schemas = Arc::new(UpstreamSchemas::from_database(
+        &type_db,
+        &project_dir,
+        &all_models,
+    ));
+    compilers.set_upstream_schemas_all(upstream_schemas);
+
     let file_store = FileStore::new(&project_dir);
 
     info!("{}", "=".repeat(60));
