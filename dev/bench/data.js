@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776407791560,
+  "lastUpdate": 1776407793406,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17561,6 +17561,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.179168003048684,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "cef20a97b4277e3e78a60c518e13087dd99554e7",
+          "message": "Fix sdist build: create data directory before maturin sdist\n\nmaturin sdist fails when the smelt_sql.data directory doesn't exist.\nThe wheel builds create it by pre-building smelt-lsp/smelt-datagen into\nit, but sdist is source-only and doesn't need those binaries.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T16:34:22+10:00",
+          "tree_id": "0ecbc6ea1ff6fc12e5d24b93d6644404d07a7bbf",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/cef20a97b4277e3e78a60c518e13087dd99554e7"
+        },
+        "date": 1776407792971,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.382446791114017,
             "unit": "MB/s"
           }
         ]
