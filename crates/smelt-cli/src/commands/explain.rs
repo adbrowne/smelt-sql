@@ -17,6 +17,9 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
+    // Seeds are valid `smelt.ref()` targets and should appear in the graph.
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let mut models = discovery
         .discover_models()
@@ -48,7 +51,7 @@ pub async fn explain(args: ExplainArgs) -> Result<()> {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target)
+    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target)
         .with_context(|| "Failed to build logical graph")?;
 
     graph

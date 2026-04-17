@@ -656,7 +656,7 @@ mod tests {
         models: Vec<ModelFile>,
         config: &Config,
     ) -> (LogicalGraph, CompilerRegistry, HashMap<String, String>) {
-        let graph = LogicalGraph::build(models, None, config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], config, "dev").unwrap();
         let target_configs: HashMap<String, Target> = config
             .targets
             .iter()

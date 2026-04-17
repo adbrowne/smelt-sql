@@ -59,6 +59,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
         info!("Loaded {} source tables", source_count);
     }
 
+    // Discover seeds so they validate as `smelt.ref()` targets without a
+    // sources.yml workaround (bug #2 in the 20260417 follow-up plan).
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    if !seeds.is_empty() {
+        info!("Discovered {} seed(s) as ref targets", seeds.len());
+    }
+
     // 3. Discover models (SQL + Python)
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let mut models = discovery
@@ -135,7 +142,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 4. Build logical graph (eagerly resolves config per model)
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, &args.target)
+    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
 
     graph

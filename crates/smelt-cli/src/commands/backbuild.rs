@@ -43,6 +43,9 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
+    // Seeds are valid `smelt.ref()` targets too (bug #2 in 20260417 follow-up).
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+
     // 3. Discover models
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let mut models = discovery
@@ -76,7 +79,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     }
 
     // 4. Build logical graph
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, &args.target)
+    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
 
     graph

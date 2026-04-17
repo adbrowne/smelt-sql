@@ -116,7 +116,7 @@ fn test_logical_graph_cross_engine_edges() {
         },
     );
 
-    let graph = LogicalGraph::build(models, None, &config, "duckdb_local")
+    let graph = LogicalGraph::build(models, None, &[], &config, "duckdb_local")
         .expect("Graph build should succeed");
 
     let edges = graph.find_cross_backend_edges();
@@ -139,7 +139,7 @@ fn test_logical_graph_no_cross_engine_edges_same_target() {
 
     let config = make_config_with_targets(targets);
 
-    let graph = LogicalGraph::build(models, None, &config, "duckdb_local")
+    let graph = LogicalGraph::build(models, None, &[], &config, "duckdb_local")
         .expect("Graph build should succeed");
 
     let edges = graph.find_cross_backend_edges();
@@ -482,7 +482,7 @@ fn test_multi_engine_example_parses() {
     );
 
     // Build graph and verify cross-engine edges exist
-    let graph = LogicalGraph::build(models, None, &config, "duckdb_local")
+    let graph = LogicalGraph::build(models, None, &[], &config, "duckdb_local")
         .expect("Graph build should succeed for multi-engine example");
 
     let edges = graph.find_cross_backend_edges();

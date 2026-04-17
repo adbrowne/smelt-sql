@@ -3,7 +3,7 @@ use crate::discovery::ModelFile;
 use anyhow::{anyhow, Result};
 use smelt_core::config::{IncrementalConfig, Materialization};
 use smelt_core::selector::{SelectionMethod, Selector};
-use smelt_core::{GraphError, SourcesConfig};
+use smelt_core::{GraphError, SeedInfo, SourcesConfig};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A node in the logical graph with eagerly-resolved configuration.
@@ -32,13 +32,23 @@ pub struct CrossBackendEdge {
 pub struct LogicalGraph {
     nodes: HashMap<String, LogicalNode>,
     sources: HashSet<String>,
+    /// Top-level seed names (CSV files in `seeds/`). Treated as valid
+    /// `smelt.ref()` targets — they have no upstream node, just exist as
+    /// "sources" populated by `smelt seed`.
+    seeds: HashSet<String>,
 }
 
 impl LogicalGraph {
     /// Build a logical graph from discovered models, resolving config eagerly.
+    ///
+    /// `seeds` is the list of top-level seed CSVs discovered via
+    /// `smelt_core::discover_seed_infos`. Their names become valid
+    /// `smelt.ref()` targets (no upstream node — they're populated by
+    /// `smelt seed` and treated like sources during validation).
     pub fn build(
         models: Vec<ModelFile>,
         sources: Option<&SourcesConfig>,
+        seeds: &[SeedInfo],
         config: &Config,
         default_target: &str,
     ) -> Result<Self> {
@@ -53,6 +63,11 @@ impl LogicalGraph {
                 }
             }
         }
+
+        // Build seed name set so `smelt.ref('<seed>')` validates without a
+        // sources.yml workaround. Mirrors `smelt-db::resolve_ref` (Phase 6),
+        // which the CLI dependency validator was previously missing.
+        let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
         for model in models {
             let deps: Vec<String> = model.refs.iter().map(|r| r.model_name.clone()).collect();
@@ -92,18 +107,19 @@ impl LogicalGraph {
         Ok(Self {
             nodes,
             sources: source_set,
+            seeds: seed_set,
         })
     }
 
     // -- Validation ----------------------------------------------------------
 
-    /// Validate all references exist (either as models or sources).
+    /// Validate all references exist (as models, sources, or seeds).
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
 
         for node in self.nodes.values() {
             for dep in &node.dependencies {
-                if !self.nodes.contains_key(dep) && !self.is_source(dep) {
+                if !self.nodes.contains_key(dep) && !self.is_source(dep) && !self.is_seed(dep) {
                     errors.push(format!(
                         "Model '{}' references undefined model/source '{}'",
                         node.name, dep
@@ -150,6 +166,15 @@ impl LogicalGraph {
                 .sources
                 .iter()
                 .any(|s| s.ends_with(&format!(".{}", name)))
+    }
+
+    fn is_seed(&self, name: &str) -> bool {
+        self.seeds.contains(name)
+    }
+
+    /// Iterate seed names that are valid `smelt.ref()` targets.
+    pub fn iter_seeds(&self) -> impl Iterator<Item = &str> {
+        self.seeds.iter().map(|s| s.as_str())
     }
 
     /// Warn if any ephemeral model has no downstream consumers.
@@ -512,7 +537,7 @@ mod tests {
             make_model("A", vec![]),
         ];
         let config = make_test_config();
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
         graph.validate().unwrap();
 
         let order = graph.execution_order().unwrap();
@@ -533,7 +558,7 @@ mod tests {
             },
         );
 
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
         let node = graph.get_node("A").unwrap();
 
         assert_eq!(node.materialization, Materialization::Table);
@@ -550,7 +575,7 @@ mod tests {
             make_model_with_tags("C", vec!["B"], vec!["revenue", "daily"]),
         ];
         let config = make_test_config();
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let selectors = vec![smelt_core::parse_selector("tag:revenue").unwrap()];
         let selected = graph.select_models(&selectors).unwrap();
@@ -589,7 +614,7 @@ mod tests {
             },
         );
 
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
         let edges = graph.find_cross_backend_edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].upstream, "upstream");
@@ -606,7 +631,7 @@ mod tests {
             make_model("C", vec!["B"]),
         ];
         let config = make_test_config();
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let selectors = vec![smelt_core::parse_selector("+C").unwrap()];
         let selected = graph.select_models(&selectors).unwrap();
@@ -625,10 +650,73 @@ mod tests {
             make_model("C", vec!["B"]),
         ];
         let config = make_test_config();
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
         let result = graph.execution_order();
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Circular dependency"));
+    }
+
+    fn make_seed(name: &str) -> smelt_core::SeedInfo {
+        smelt_core::SeedInfo {
+            name: name.to_string(),
+            path: format!("seeds/{}.csv", name).into(),
+            columns: Vec::new(),
+        }
+    }
+
+    /// Bug #2 regression: top-level seeds referenced via `smelt.ref()` must
+    /// validate without a sources.yml workaround. Mirrors the e2e idempotency
+    /// test (`smelt_shop_idempotency.rs`) but at unit-test speed so the
+    /// resolution path can be iterated quickly.
+    #[test]
+    fn test_seed_as_ref_target_validates() {
+        let models = vec![make_model("stg_orders", vec!["order_statuses"])];
+        let seeds = vec![make_seed("order_statuses")];
+        let config = make_test_config();
+
+        let graph = LogicalGraph::build(models, None, &seeds, &config, "dev").expect("build graph");
+
+        // Validation must succeed: the seed is a valid ref target.
+        graph.validate().expect("seed ref should validate");
+
+        // The seed should appear in `iter_seeds()` so `smelt explain` can
+        // surface it as a graph node.
+        let seed_names: HashSet<&str> = graph.iter_seeds().collect();
+        assert!(
+            seed_names.contains("order_statuses"),
+            "seed should be visible via iter_seeds(): saw {:?}",
+            seed_names
+        );
+
+        // The model must NOT be treated as depending on a model node — only
+        // model-to-model deps participate in the topological execution
+        // order. The seed is materialised by `smelt seed`, not by the
+        // model graph.
+        let upstream = graph.get_upstream("stg_orders");
+        assert!(
+            upstream.is_empty(),
+            "seed ref should not appear as an upstream model node: saw {:?}",
+            upstream
+        );
+    }
+
+    /// A reference that matches neither a model, a source, nor a seed must
+    /// still fail validation (so we don't accidentally swallow real typos).
+    #[test]
+    fn test_unknown_ref_still_fails_validation() {
+        let models = vec![make_model("stg_orders", vec!["does_not_exist"])];
+        let seeds = vec![make_seed("order_statuses")];
+        let config = make_test_config();
+
+        let graph = LogicalGraph::build(models, None, &seeds, &config, "dev").expect("build graph");
+
+        let err = graph
+            .validate()
+            .expect_err("unknown ref must fail validation");
+        assert!(
+            err.to_string().contains("does_not_exist"),
+            "validation error should mention the missing ref name: {err}"
+        );
     }
 }

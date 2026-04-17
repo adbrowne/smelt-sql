@@ -473,7 +473,8 @@ def dynamic_model(project):
         let mut all_models = sql_models;
         all_models.extend(python_models);
         let graph =
-            crate::logical_graph::LogicalGraph::build(all_models, None, &config, "dev").unwrap();
+            crate::logical_graph::LogicalGraph::build(all_models, None, &[], &config, "dev")
+                .unwrap();
         graph.validate().unwrap();
 
         let order = graph.execution_order().unwrap();
@@ -1167,7 +1168,8 @@ def colliding(project):
         );
 
         let graph =
-            crate::logical_graph::LogicalGraph::build(all_models, None, &config, "dev").unwrap();
+            crate::logical_graph::LogicalGraph::build(all_models, None, &[], &config, "dev")
+                .unwrap();
         // Graph silently keeps one (HashMap semantics) - documenting current behavior
         let order = graph.execution_order().unwrap();
         let colliding_in_order = order.iter().filter(|n| *n == "colliding").count();
