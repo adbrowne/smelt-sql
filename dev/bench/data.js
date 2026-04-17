@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776309222205,
+  "lastUpdate": 1776407791560,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -13347,6 +13347,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.288366,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "cef20a97b4277e3e78a60c518e13087dd99554e7",
+          "message": "Fix sdist build: create data directory before maturin sdist\n\nmaturin sdist fails when the smelt_sql.data directory doesn't exist.\nThe wheel builds create it by pre-building smelt-lsp/smelt-datagen into\nit, but sdist is source-only and doesn't need those binaries.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T16:34:22+10:00",
+          "tree_id": "0ecbc6ea1ff6fc12e5d24b93d6644404d07a7bbf",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/cef20a97b4277e3e78a60c518e13087dd99554e7"
+        },
+        "date": 1776407790744,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 37.734952,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 36.326019,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.717896,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.367345,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0031750000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 47.508646,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 0.039399,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.018688,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.01334,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.740585,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 2.654592,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.25721,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.35535,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 14.309452,
             "unit": "ms"
           }
         ]
