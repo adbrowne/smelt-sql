@@ -2,7 +2,7 @@
   "name": "smelt",
   "displayName": "smelt - Modern data transformation framework",
   "description": "Language support for smelt data pipeline models",
-  "version": "0.3.1-rc1",
+  "version": "0.3.1",
   "publisher": "smelt",
   "repository": {
     "type": "git",
