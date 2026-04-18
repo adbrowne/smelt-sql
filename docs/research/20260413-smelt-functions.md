@@ -287,11 +287,13 @@ A context can be:
 
 Context bindings are **optional annotations, not required declarations.** The compiler infers a parameter's context from where it is spliced in the function body. If `filters` appears in `WHERE filters` and the `WHERE` applies to a `FROM source` clause, the compiler infers that `filters` has context `source`.
 
+**When a parameter is spliced in multiple places,** the available columns are the **intersection** of the schemas at each splice point -- only columns that appear in all locations with the same name and compatible type. This is the safe default: the parameter's fragment can only reference columns that are guaranteed to exist everywhere it is used.
+
+For example, if `pred` is spliced into both `WHERE pred` (over a table with columns `{id, name, amount}`) and `HAVING pred` (over a grouped result with columns `{id, total}`), the parameter can only reference `id` -- the one column present in both scopes with the same type.
+
 Explicit context annotations serve two purposes:
 1. **Documentation** -- making the contract visible in the signature
-2. **Validation** -- the compiler checks the annotation matches the inferred context
-
-Explicit annotations are **required** when a parameter is used in multiple scopes (e.g., spliced into two different CTEs with different schemas). In this case the compiler cannot infer a single context, and the annotation disambiguates.
+2. **Validation** -- the compiler checks the annotation matches the inferred context (or intersection)
 
 ### The Key Insight: Asymmetric Access Control
 
@@ -1003,9 +1005,9 @@ Parameter contexts must have unique column names. Union contexts (`Expr<Boolean,
 
 ### 5. Context inference from splice points (§6)
 
-The compiler infers a parameter's context from where it is spliced in the function body. Explicit context annotations are optional (for documentation and validation), required only when a parameter is used in multiple scopes.
+The compiler infers a parameter's context from where it is spliced in the function body. When a parameter is used in multiple places, its context is the **intersection** of the schemas at each splice point — only columns with the same name and compatible type in all locations are available. Explicit context annotations are optional (for documentation and validation).
 
-**Rationale:** Requiring explicit context annotations on every fragment parameter would be a significant annotation burden with diminishing returns — most parameters are used in exactly one place. Inference from the splice point gives the compiler the same information automatically. Explicit annotations remain available for documentation and for the case where a parameter appears in multiple scopes (where inference is ambiguous).
+**Rationale:** Requiring explicit context annotations on every fragment parameter would be a significant annotation burden with diminishing returns — most parameters are used in exactly one place. Inference from the splice point gives the compiler the same information automatically. The intersection rule for multi-splice parameters is the safe default: the parameter can only reference columns guaranteed to exist everywhere it is used. Explicit annotations remain available for documentation and for narrowing the context further.
 
 ### 6. Multiple defines per file; smelt.metric() out of scope (§3)
 
