@@ -1,9 +1,7 @@
-use anyhow::{Context, Result};
-use smelt_cli::{discover_python_models, find_project_root, init_db, Config, ModelDiscovery};
-use smelt_db::TypeChecking;
-
 use crate::helpers::{print_json, print_table};
 use crate::TableArgs;
+use anyhow::{Context, Result};
+use smelt_cli::{discover_python_models, find_project_root, init_db, Config, ModelDiscovery};
 
 pub async fn table(args: TableArgs) -> Result<()> {
     // 1. Find project root
@@ -46,7 +44,11 @@ pub async fn table(args: TableArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", args.model_name))?;
 
     // 5. Get typed schema
-    let schema = db.typed_model_schema(model.path.clone());
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+    let schema = smelt_db::typed_model_schema(&db, ws, file);
 
     // 6. Output
     match args.format.as_str() {

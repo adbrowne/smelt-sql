@@ -80,11 +80,14 @@ impl UpstreamSchemas {
         project_dir: &std::path::Path,
         models: &[crate::discovery::ModelFile],
     ) -> Self {
-        use smelt_db::{Syntax, TypeChecking};
+        let workspace = smelt_db::Workspace::try_get(db).expect("workspace not initialized");
 
         let mut model_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
         for model in models {
-            let resolved = db.resolved_model_schema(model.path.clone());
+            let Some(file) = db.source_file(&model.path) else {
+                continue;
+            };
+            let resolved = smelt_db::resolved_model_schema(db, workspace, file);
             let cols: Vec<(String, TypedColumn)> = resolved
                 .columns
                 .iter()
@@ -99,8 +102,14 @@ impl UpstreamSchemas {
             model_schemas.insert(model.name.clone(), cols);
         }
 
+        // Seeds are CSV files outside the Salsa graph under the 0.26 API; load
+        // them directly via the pure smelt-core helper using the project's
+        // configured seed_paths (defaults to ["seeds"] if no smelt.yml).
+        let seed_paths = smelt_core::Config::load(project_dir)
+            .map(|c| c.seed_paths)
+            .unwrap_or_else(|_| vec!["seeds".to_string()]);
         let mut seed_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
-        for seed in db.project_seed_files(project_dir.to_path_buf()).iter() {
+        for seed in smelt_core::discover_seed_infos(project_dir, &seed_paths) {
             let cols: Vec<(String, TypedColumn)> = seed
                 .columns
                 .iter()
@@ -114,7 +123,7 @@ impl UpstreamSchemas {
                     )
                 })
                 .collect();
-            seed_schemas.insert(seed.name.clone(), cols);
+            seed_schemas.insert(seed.name, cols);
         }
 
         let sources = SourcesConfig::load(project_dir).unwrap_or_default();

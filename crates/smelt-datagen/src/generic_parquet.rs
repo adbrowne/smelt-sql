@@ -564,8 +564,8 @@ mod tests {
     /// `page_events` which is a partitioned dataset.
     #[test]
     fn test_optional_foreign_key_emits_nulls_partitioned() {
-        use arrow::array::Array;
         use crate::config::PartitionConfig;
+        use arrow::array::Array;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         let tmp = TempDir::new().unwrap();
         let output = tmp.path().to_str().unwrap().to_string();
@@ -644,8 +644,8 @@ mod tests {
     /// were unconditionally marked `nullable: false`.
     #[test]
     fn test_optional_entity_column_emits_nulls() {
-        use arrow::array::Array;
         use crate::config::EntityConfig;
+        use arrow::array::Array;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         let tmp = TempDir::new().unwrap();
         let output = tmp.path().to_str().unwrap().to_string();

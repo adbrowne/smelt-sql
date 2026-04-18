@@ -31,7 +31,7 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 
 # Salsa for incremental computation
-salsa = "0.16"
+salsa = "0.26"
 # LSP infrastructure
 tower-lsp = "0.20"
 lsp-types = "0.94"  # Must match tower-lsp's version

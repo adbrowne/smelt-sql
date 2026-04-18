@@ -370,27 +370,23 @@ fn setup_two_model_db(
     upstream_sql: &str,
     downstream_sql: &str,
 ) -> (smelt_db::Database, PathBuf, PathBuf) {
-    use smelt_db::Inputs;
     let mut db = smelt_db::Database::default();
     let upstream_path = PathBuf::from("models/upstream.sql");
     let downstream_path = PathBuf::from("models/downstream.sql");
 
-    db.set_file_text(
+    let root = PathBuf::from(".");
+    let upstream_file = db.set_source_file(
         upstream_path.clone(),
-        std::sync::Arc::new(upstream_sql.to_string()),
+        upstream_sql.to_string(),
+        root.clone(),
     );
-    db.set_file_text(
+    let downstream_file = db.set_source_file(
         downstream_path.clone(),
-        std::sync::Arc::new(downstream_sql.to_string()),
+        downstream_sql.to_string(),
+        root.clone(),
     );
-    db.set_file_project_root(upstream_path.clone(), PathBuf::from("."));
-    db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
-    db.set_all_files(std::sync::Arc::new(vec![
-        upstream_path.clone(),
-        downstream_path.clone(),
-    ]));
-    db.set_project_sources_yaml(PathBuf::from("."), std::sync::Arc::new(String::new()));
-    db.set_all_project_roots(std::sync::Arc::new(vec![PathBuf::from(".")]));
+    let project = db.set_project_input(root, String::new());
+    db.set_workspace(vec![upstream_file, downstream_file], vec![project]);
 
     (db, upstream_path, downstream_path)
 }
@@ -400,8 +396,11 @@ fn run_smelt_multi_model_inference(
     db: &smelt_db::Database,
     downstream_path: &Path,
 ) -> Vec<(String, DataType)> {
-    use smelt_db::TypeChecking;
-    let schema = db.typed_model_schema(downstream_path.to_path_buf());
+    let file = db
+        .source_file(downstream_path)
+        .expect("downstream file not registered");
+    let ws = smelt_db::Workspace::get(db);
+    let schema = smelt_db::typed_model_schema(db, ws, file);
     schema
         .columns
         .iter()
@@ -510,21 +509,17 @@ fn smoke_multi_model_function_on_ref() {
 
 /// Set up a Salsa DB with three models: A → B → C.
 fn setup_three_model_db(a_sql: &str, b_sql: &str, c_sql: &str) -> (smelt_db::Database, PathBuf) {
-    use smelt_db::Inputs;
     let mut db = smelt_db::Database::default();
     let a_path = PathBuf::from("models/model_a.sql");
     let b_path = PathBuf::from("models/model_b.sql");
     let c_path = PathBuf::from("models/model_c.sql");
 
-    db.set_file_text(a_path.clone(), std::sync::Arc::new(a_sql.to_string()));
-    db.set_file_text(b_path.clone(), std::sync::Arc::new(b_sql.to_string()));
-    db.set_file_text(c_path.clone(), std::sync::Arc::new(c_sql.to_string()));
-    db.set_file_project_root(a_path.clone(), PathBuf::from("."));
-    db.set_file_project_root(b_path.clone(), PathBuf::from("."));
-    db.set_file_project_root(c_path.clone(), PathBuf::from("."));
-    db.set_all_files(std::sync::Arc::new(vec![a_path, b_path, c_path.clone()]));
-    db.set_project_sources_yaml(PathBuf::from("."), std::sync::Arc::new(String::new()));
-    db.set_all_project_roots(std::sync::Arc::new(vec![PathBuf::from(".")]));
+    let root = PathBuf::from(".");
+    let a_file = db.set_source_file(a_path.clone(), a_sql.to_string(), root.clone());
+    let b_file = db.set_source_file(b_path.clone(), b_sql.to_string(), root.clone());
+    let c_file = db.set_source_file(c_path.clone(), c_sql.to_string(), root.clone());
+    let project = db.set_project_input(root, String::new());
+    db.set_workspace(vec![a_file, b_file, c_file], vec![project]);
 
     (db, c_path)
 }
@@ -588,28 +583,17 @@ proptest! {
 
 /// Set up a Salsa DB with two upstream models and a downstream JOIN model.
 fn setup_join_db(left_sql: &str, right_sql: &str, join_sql: &str) -> (smelt_db::Database, PathBuf) {
-    use smelt_db::Inputs;
     let mut db = smelt_db::Database::default();
     let left_path = PathBuf::from("models/left_model.sql");
     let right_path = PathBuf::from("models/right_model.sql");
     let join_path = PathBuf::from("models/join_model.sql");
 
-    db.set_file_text(left_path.clone(), std::sync::Arc::new(left_sql.to_string()));
-    db.set_file_text(
-        right_path.clone(),
-        std::sync::Arc::new(right_sql.to_string()),
-    );
-    db.set_file_text(join_path.clone(), std::sync::Arc::new(join_sql.to_string()));
-    db.set_file_project_root(left_path.clone(), PathBuf::from("."));
-    db.set_file_project_root(right_path.clone(), PathBuf::from("."));
-    db.set_file_project_root(join_path.clone(), PathBuf::from("."));
-    db.set_all_files(std::sync::Arc::new(vec![
-        left_path,
-        right_path,
-        join_path.clone(),
-    ]));
-    db.set_project_sources_yaml(PathBuf::from("."), std::sync::Arc::new(String::new()));
-    db.set_all_project_roots(std::sync::Arc::new(vec![PathBuf::from(".")]));
+    let root = PathBuf::from(".");
+    let left_file = db.set_source_file(left_path.clone(), left_sql.to_string(), root.clone());
+    let right_file = db.set_source_file(right_path.clone(), right_sql.to_string(), root.clone());
+    let join_file = db.set_source_file(join_path.clone(), join_sql.to_string(), root.clone());
+    let project = db.set_project_input(root, String::new());
+    db.set_workspace(vec![left_file, right_file, join_file], vec![project]);
 
     (db, join_path)
 }

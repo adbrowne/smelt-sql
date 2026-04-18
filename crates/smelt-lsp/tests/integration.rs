@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use smelt_db::{
     yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
-    Database, DiagnosticSeverity, Inputs, Schema, Semantic, Syntax, TypeChecking,
+    Database, DiagnosticSeverity, SourceFile, Workspace,
 };
 use smelt_parser::is_valid_sql_identifier;
 use tempfile::TempDir;
@@ -73,9 +73,8 @@ impl TestWorkspace {
 
         let project_root = temp_dir.path().to_path_buf();
         let mut db = Database::default();
-        db.set_all_files(Arc::new(Vec::new()));
-        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
-        db.set_all_project_roots(Arc::new(vec![project_root]));
+        db.set_project_input(project_root.clone(), String::new());
+        db.set_workspace(Vec::new(), Vec::new());
 
         Self {
             temp_dir,
@@ -89,6 +88,50 @@ impl TestWorkspace {
         self.temp_dir.path().to_path_buf()
     }
 
+    /// Rebuild the Workspace singleton from current state
+    fn sync_workspace(&mut self) {
+        let files: Vec<SourceFile> = self
+            .model_files
+            .iter()
+            .filter_map(|p| self.db.source_file(p))
+            .collect();
+        let projects: Vec<_> = self
+            .db
+            .project_input(&self.project_root())
+            .into_iter()
+            .collect();
+        self.db.set_workspace(files, projects);
+    }
+
+    /// Look up a SourceFile by path
+    fn lookup_file(&self, path: &std::path::Path) -> Option<SourceFile> {
+        self.db.source_file(path)
+    }
+
+    /// Get file text from the DB
+    fn file_text(&self, path: &std::path::Path) -> String {
+        self.lookup_file(path)
+            .map(|f| f.text(&self.db).clone())
+            .unwrap_or_default()
+    }
+
+    /// Get all file paths
+    fn all_file_paths(&self) -> Vec<PathBuf> {
+        match Workspace::try_get(&self.db) {
+            Some(ws) => ws
+                .files(&self.db)
+                .iter()
+                .map(|f| f.path(&self.db).clone())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Get the workspace singleton
+    fn workspace(&self) -> Option<Workspace> {
+        Workspace::try_get(&self.db)
+    }
+
     /// Add a model file to the workspace
     fn add_model(&mut self, name: &str, sql: &str) {
         let path = self.models_dir.join(format!("{}.sql", name));
@@ -98,11 +141,9 @@ impl TestWorkspace {
 
         // Update database
         self.db
-            .set_file_text(path.clone(), Arc::new(sql.to_string()));
-        self.db
-            .set_file_project_root(path.clone(), self.project_root());
+            .set_source_file(path.clone(), sql.to_string(), self.project_root());
         self.model_files.push(path);
-        self.db.set_all_files(Arc::new(self.model_files.clone()));
+        self.sync_workspace();
     }
 
     /// Update an existing model file
@@ -113,7 +154,8 @@ impl TestWorkspace {
         std::fs::write(&path, sql).expect("Failed to write model file");
 
         // Update database
-        self.db.set_file_text(path, Arc::new(sql.to_string()));
+        self.db
+            .set_source_file(path, sql.to_string(), self.project_root());
     }
 
     /// Set sources.yml content
@@ -121,7 +163,120 @@ impl TestWorkspace {
         let path = self.temp_dir.path().join("sources.yml");
         std::fs::write(&path, content).expect("Failed to write sources.yml");
         self.db
-            .set_project_sources_yaml(self.project_root(), Arc::new(content.to_string()));
+            .set_project_input(self.project_root(), content.to_string());
+        // Re-sync workspace to include the project
+        self.sync_workspace();
+    }
+
+    /// Get diagnostics for a file (combining file_diagnostics + type_diagnostics)
+    fn diagnostics_for(&self, path: &std::path::Path) -> Vec<smelt_db::Diagnostic> {
+        let file = match self.lookup_file(path) {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+        let ws = match self.workspace() {
+            Some(w) => w,
+            None => return Vec::new(),
+        };
+        let mut diags = smelt_db::file_diagnostics(&self.db, ws, file);
+        diags.extend(
+            smelt_db::check_type_diagnostics::accumulated::<smelt_db::DiagnosticAcc>(
+                &self.db, ws, file,
+            )
+            .into_iter()
+            .map(|d| d.0.clone()),
+        );
+        diags
+    }
+
+    /// Get project_sources_yaml text
+    fn project_sources_yaml(&self) -> String {
+        self.db
+            .project_input(&self.project_root())
+            .map(|p| p.sources_yaml(&self.db).clone())
+            .unwrap_or_default()
+    }
+
+    /// Wrapper: parse a model file
+    fn parse_file_by_path(&self, path: &std::path::Path) -> smelt_parser::Parse {
+        let fi = self.lookup_file(path).expect("file not registered");
+        smelt_db::parse_file(&self.db, fi).clone()
+    }
+
+    /// Wrapper: model_refs
+    fn model_refs(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::RefLocation>> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        smelt_db::model_refs(&self.db, fi)
+    }
+
+    /// Wrapper: model_sources
+    fn model_sources(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::SourceLocation>> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        smelt_db::model_sources(&self.db, fi)
+    }
+
+    /// Wrapper: model_schema
+    fn model_schema(&self, path: &std::path::Path) -> Arc<smelt_db::ModelSchema> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        smelt_db::model_schema(&self.db, fi)
+    }
+
+    /// Wrapper: typed_model_schema
+    fn typed_model_schema(&self, path: &std::path::Path) -> Arc<smelt_db::ModelSchema> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        let ws = self.workspace().expect("workspace not set");
+        smelt_db::typed_model_schema(&self.db, ws, fi)
+    }
+
+    /// Wrapper: resolve_ref
+    fn resolve_ref(&self, model_name: &str) -> Option<PathBuf> {
+        let ws = self.workspace()?;
+        smelt_db::resolve_ref(&self.db, ws, model_name.to_string())
+            .map(|f| f.path(&self.db).clone())
+    }
+
+    /// Wrapper: resolve_source
+    fn resolve_source(
+        &self,
+        source_name: &str,
+        table_name: &str,
+    ) -> Option<smelt_db::SourceTableDef> {
+        let project = self.db.project_input(&self.project_root())?;
+        smelt_db::resolve_source(
+            &self.db,
+            project,
+            source_name.to_string(),
+            table_name.to_string(),
+        )
+    }
+
+    /// Wrapper: type_context
+    fn type_context(&self, path: &std::path::Path) -> Arc<smelt_db::TypeContext> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        let ws = self.workspace().expect("workspace not set");
+        smelt_db::type_context(&self.db, ws, fi)
+    }
+
+    /// Wrapper: available_columns
+    fn available_columns(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::Column>> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        let ws = self.workspace().expect("workspace not set");
+        smelt_db::available_columns(&self.db, ws, fi)
+    }
+
+    /// Wrapper: sources_config
+    fn sources_config(&self) -> Arc<smelt_db::SourcesConfig> {
+        match self.db.project_input(&self.project_root()) {
+            Some(p) => smelt_db::sources_config(&self.db, p),
+            None => Arc::new(smelt_db::SourcesConfig::default()),
+        }
+    }
+
+    /// Wrapper: resolved_model_schema
+    fn resolved_model_schema(&self, path: &std::path::Path) -> Arc<smelt_db::ResolvedSchema> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        let ws = self.workspace().expect("workspace not set");
+        smelt_db::resolved_model_schema(&self.db, ws, fi)
     }
 
     /// Get the path for a model
@@ -137,11 +292,10 @@ impl TestWorkspace {
         };
 
         let path = self.model_path(model);
-        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
-        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+        let all_diags = self.diagnostics_for(&path);
 
-        let text = self.db.file_text(path);
-        let sources_yml_content = (*self.db.project_sources_yaml(self.project_root())).clone();
+        let text = self.file_text(&path);
+        let sources_yml_content = self.project_sources_yaml();
 
         // Filter diagnostics to those overlapping the cursor position
         let matching: Vec<_> = all_diags
@@ -204,10 +358,9 @@ impl TestWorkspace {
         col: u32,
     ) -> Vec<smelt_db::code_actions::CodeActionSuggestion> {
         let path = self.model_path(model);
-        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
-        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+        let all_diags = self.diagnostics_for(&path);
 
-        let text = self.db.file_text(path);
+        let text = self.file_text(&path);
 
         // Filter diagnostics to those overlapping the cursor position
         let matching: Vec<_> = all_diags
@@ -235,11 +388,10 @@ impl TestWorkspace {
         col: u32,
     ) -> Vec<smelt_db::code_actions::CodeActionKind> {
         let path = self.model_path(model);
-        let mut all_diags = (*self.db.file_diagnostics(path.clone())).clone();
-        all_diags.extend((*self.db.type_diagnostics(path.clone())).clone());
+        let all_diags = self.diagnostics_for(&path);
 
-        let text = self.db.file_text(path);
-        let sources_yml_content = (*self.db.project_sources_yaml(self.project_root())).clone();
+        let text = self.file_text(&path);
+        let sources_yml_content = self.project_sources_yaml();
 
         // Filter diagnostics to those overlapping the cursor position
         let matching: Vec<_> = all_diags
@@ -269,8 +421,12 @@ impl TestWorkspace {
         use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 
         let path = self.model_path(model);
-        let text = self.db.file_text(path.clone());
-        let parse = self.db.parse_file(path.clone());
+        let text = self.file_text(&path);
+        let fi = match self.lookup_file(&path) {
+            Some(f) => f,
+            None => return vec![],
+        };
+        let parse = smelt_db::parse_file(&self.db, fi);
         let syntax = parse.syntax();
 
         let file = match smelt_parser::ast::File::cast(syntax) {
@@ -281,11 +437,18 @@ impl TestWorkspace {
         let offset = position_to_offset(&text, line, col);
         match symbol_at_cursor(&file, &text, offset) {
             Some(SymbolAtCursor::RefCall { name }) => {
-                let all_file_refs: Vec<_> = self
-                    .db
-                    .all_files()
+                let ws_files = match self.workspace() {
+                    Some(ws) => ws.files(&self.db).clone(),
+                    None => Vec::new(),
+                };
+                let all_file_refs: Vec<_> = ws_files
                     .iter()
-                    .map(|p| (p.clone(), (*self.db.model_refs(p.clone())).clone()))
+                    .map(|f| {
+                        (
+                            f.path(&self.db).clone(),
+                            (*smelt_db::model_refs(&self.db, *f)).clone(),
+                        )
+                    })
                     .collect();
                 smelt_db::references::find_model_references(&name, &all_file_refs)
                     .into_iter()
@@ -297,11 +460,18 @@ impl TestWorkspace {
                 table_name,
             }) => {
                 let qualified = format!("{}.{}", source_name, table_name);
-                let all_file_sources: Vec<_> = self
-                    .db
-                    .all_files()
+                let ws_files = match self.workspace() {
+                    Some(ws) => ws.files(&self.db).clone(),
+                    None => Vec::new(),
+                };
+                let all_file_sources: Vec<_> = ws_files
                     .iter()
-                    .map(|p| (p.clone(), (*self.db.model_sources(p.clone())).clone()))
+                    .map(|f| {
+                        (
+                            f.path(&self.db).clone(),
+                            (*smelt_db::model_sources(&self.db, *f)).clone(),
+                        )
+                    })
                     .collect();
                 smelt_db::references::find_source_references(&qualified, &all_file_sources)
                     .into_iter()
@@ -329,8 +499,9 @@ impl TestWorkspace {
         use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 
         let path = self.model_path(model);
-        let text = self.db.file_text(path.clone());
-        let parse = self.db.parse_file(path);
+        let text = self.file_text(&path);
+        let fi = self.lookup_file(&path)?;
+        let parse = smelt_db::parse_file(&self.db, fi);
         let syntax = parse.syntax();
 
         let file = smelt_parser::ast::File::cast(syntax)?;
@@ -390,8 +561,12 @@ impl TestWorkspace {
         use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 
         let path = self.model_path(model);
-        let text = self.db.file_text(path.clone());
-        let parse = self.db.parse_file(path.clone());
+        let text = self.file_text(&path);
+        let fi = match self.lookup_file(&path) {
+            Some(f) => f,
+            None => return RenameModelResult::default(),
+        };
+        let parse = smelt_db::parse_file(&self.db, fi);
         let syntax = parse.syntax();
 
         let file = match smelt_parser::ast::File::cast(syntax) {
@@ -415,11 +590,18 @@ impl TestWorkspace {
         }
 
         // Collect all ref edits across files
-        let all_file_refs: Vec<_> = self
-            .db
-            .all_files()
+        let ws_files = match self.workspace() {
+            Some(ws) => ws.files(&self.db).clone(),
+            None => Vec::new(),
+        };
+        let all_file_refs: Vec<_> = ws_files
             .iter()
-            .map(|p| (p.clone(), (*self.db.model_refs(p.clone())).clone()))
+            .map(|f| {
+                (
+                    f.path(&self.db).clone(),
+                    (*smelt_db::model_refs(&self.db, *f)).clone(),
+                )
+            })
             .collect();
         let ref_locations =
             smelt_db::references::find_model_references(&model_name, &all_file_refs);
@@ -427,8 +609,12 @@ impl TestWorkspace {
         // For each ref location, we need the content range (inside quotes)
         let mut text_edits: Vec<(PathBuf, u32, u32, u32, u32)> = Vec::new();
         for (ref_path, _) in &ref_locations {
-            let ref_text = self.db.file_text(ref_path.clone());
-            let ref_parse = self.db.parse_file(ref_path.clone());
+            let ref_fi = match self.lookup_file(ref_path) {
+                Some(f) => f,
+                None => continue,
+            };
+            let ref_text = ref_fi.text(&self.db).clone();
+            let ref_parse = smelt_db::parse_file(&self.db, ref_fi);
             let ref_syntax = ref_parse.syntax();
             if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
                 for ref_call in ref_file.refs() {
@@ -476,8 +662,8 @@ impl TestWorkspace {
         use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 
         let path = self.model_path(model);
-        let text = self.db.file_text(path.clone());
-        let parse = self.db.parse_file(path);
+        let text = self.file_text(&path);
+        let parse = smelt_db::parse_file(&self.db, self.lookup_file(&path).unwrap());
         let syntax = parse.syntax();
 
         let file = match smelt_parser::ast::File::cast(syntax) {
@@ -519,8 +705,8 @@ impl TestWorkspace {
         use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 
         let path = self.model_path(model);
-        let text = self.db.file_text(path.clone());
-        let parse = self.db.parse_file(path);
+        let text = self.file_text(&path);
+        let parse = smelt_db::parse_file(&self.db, self.lookup_file(&path).unwrap());
         let syntax = parse.syntax();
 
         let file = match smelt_parser::ast::File::cast(syntax) {
@@ -540,11 +726,18 @@ impl TestWorkspace {
         let qualified = format!("{}.{}", source_name, old_table_name);
 
         // Find all source() call sites across the project
-        let all_file_sources: Vec<_> = self
-            .db
-            .all_files()
+        let ws_files = match self.workspace() {
+            Some(ws) => ws.files(&self.db).clone(),
+            None => Vec::new(),
+        };
+        let all_file_sources: Vec<_> = ws_files
             .iter()
-            .map(|p| (p.clone(), (*self.db.model_sources(p.clone())).clone()))
+            .map(|f| {
+                (
+                    f.path(&self.db).clone(),
+                    (*smelt_db::model_sources(&self.db, *f)).clone(),
+                )
+            })
             .collect();
         let source_locations =
             smelt_db::references::find_source_references(&qualified, &all_file_sources);
@@ -552,8 +745,12 @@ impl TestWorkspace {
         // For each source location, get the table_name_range (inside quotes, after the dot)
         let mut sql_edits = Vec::new();
         for (ref_path, _) in &source_locations {
-            let ref_text = self.db.file_text(ref_path.clone());
-            let ref_parse = self.db.parse_file(ref_path.clone());
+            let ref_fi = match self.lookup_file(ref_path) {
+                Some(f) => f,
+                None => continue,
+            };
+            let ref_text = ref_fi.text(&self.db).clone();
+            let ref_parse = smelt_db::parse_file(&self.db, ref_fi);
             let ref_syntax = ref_parse.syntax();
             if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
                 for source_call in ref_file.sources() {
@@ -576,7 +773,7 @@ impl TestWorkspace {
         }
 
         // Find and update the YAML entry
-        let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
+        let sources_yml = self.project_sources_yaml();
         let yaml_edit = find_source_table_yaml_rename(
             &sources_yml,
             &source_name,
@@ -603,8 +800,8 @@ impl TestWorkspace {
         use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
 
         let path = self.model_path(model);
-        let text = self.db.file_text(path.clone());
-        let parse = self.db.parse_file(path.clone());
+        let text = self.file_text(&path);
+        let parse = smelt_db::parse_file(&self.db, self.lookup_file(&path).unwrap());
         let syntax = parse.syntax();
 
         let file = match smelt_parser::ast::File::cast(syntax) {
@@ -668,8 +865,13 @@ impl TestWorkspace {
 
         // Cross-file column tracing via schema lineage
         let mut cross_file_edits = Vec::new();
-        let schema = self.db.model_schema(path.clone());
-        let ctx = self.db.type_context(path.clone());
+        let fi = self.lookup_file(&path).unwrap();
+        let schema = smelt_db::model_schema(&self.db, fi);
+        let ws = self.workspace();
+        let ctx = match ws {
+            Some(w) => smelt_db::type_context(&self.db, w, fi),
+            None => Arc::new(smelt_db::TypeContext::new()),
+        };
 
         // Check if this column comes from an upstream model (trace upstream)
         let mut upstream_traced = false;
@@ -698,7 +900,7 @@ impl TestWorkspace {
                 }
             } else {
                 // Unqualified: check all models in FROM clause
-                let parse = self.db.parse_file(path.clone());
+                let parse = smelt_db::parse_file(&self.db, self.lookup_file(&path).unwrap());
                 let syntax = parse.syntax();
                 let mut names = Vec::new();
                 if let Some(f) = smelt_parser::ast::File::cast(syntax) {
@@ -747,7 +949,8 @@ impl TestWorkspace {
         while depth < 10 {
             let mut next_batch = Vec::new();
             for exposing_model in &models_exposing_column {
-                for downstream_path in self.db.all_files().iter() {
+                let all_paths = self.all_file_paths();
+                for downstream_path in all_paths.iter() {
                     if *downstream_path == path {
                         continue;
                     }
@@ -760,14 +963,18 @@ impl TestWorkspace {
                         continue;
                     }
 
-                    let down_refs = self.db.model_refs(downstream_path.clone());
+                    let down_fi = match self.lookup_file(downstream_path) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    let down_refs = smelt_db::model_refs(&self.db, down_fi);
                     let refs_exposing = down_refs.iter().any(|r| r.name == *exposing_model);
                     if !refs_exposing {
                         continue;
                     }
 
-                    let down_text = self.db.file_text(downstream_path.clone());
-                    let down_parse = self.db.parse_file(downstream_path.clone());
+                    let down_text = down_fi.text(&self.db).clone();
+                    let down_parse = smelt_db::parse_file(&self.db, down_fi);
                     let down_syntax = down_parse.syntax();
                     if let Some(down_file) = smelt_parser::ast::File::cast(down_syntax) {
                         // Find explicit column references
@@ -792,7 +999,7 @@ impl TestWorkspace {
 
                         // Check if this model passes the column through via SELECT *
                         // (RowExtension). If so, add to next BFS batch.
-                        let down_schema = self.db.model_schema(downstream_path.clone());
+                        let down_schema = smelt_db::model_schema(&self.db, down_fi);
                         let has_passthrough = down_schema
                             .row_extensions
                             .iter()
@@ -829,7 +1036,7 @@ impl TestWorkspace {
         old_column_name: &str,
         new_column_name: &str,
     ) -> Option<(u32, String, String)> {
-        let sources_yml = (*self.db.project_sources_yaml(self.project_root())).clone();
+        let sources_yml = self.project_sources_yaml();
         find_source_column_yaml_rename(&sources_yml, old_column_name, new_column_name)
     }
 
@@ -839,7 +1046,8 @@ impl TestWorkspace {
         column_name: &str,
         edits: &mut Vec<(PathBuf, u32, u32, u32, u32)>,
     ) {
-        for upstream_path in self.db.all_files().iter() {
+        let all_paths = self.all_file_paths();
+        for upstream_path in all_paths.iter() {
             let up_name = upstream_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -861,8 +1069,12 @@ impl TestWorkspace {
         if depth_limit == 0 {
             return false;
         }
-        let up_text = self.db.file_text(model_path.to_path_buf());
-        let up_parse = self.db.parse_file(model_path.to_path_buf());
+        let up_fi = match self.lookup_file(model_path) {
+            Some(f) => f,
+            None => return false,
+        };
+        let up_text = up_fi.text(&self.db).clone();
+        let up_parse = smelt_db::parse_file(&self.db, up_fi);
         let up_syntax = up_parse.syntax();
         if let Some(up_file) = smelt_parser::ast::File::cast(up_syntax) {
             if let Some(def_range) =
@@ -879,9 +1091,13 @@ impl TestWorkspace {
                 return true;
             }
             // Check wildcard extensions (SELECT *)
-            let schema = self.db.model_schema(model_path.to_path_buf());
+            let schema = smelt_db::model_schema(&self.db, up_fi);
             for ext in &schema.row_extensions {
-                if let Some(upstream_path) = self.db.resolve_ref(ext.ref_name.clone()) {
+                let ws = self.workspace();
+                let upstream_file =
+                    ws.and_then(|w| smelt_db::resolve_ref(&self.db, w, ext.ref_name.clone()));
+                if let Some(upstream) = upstream_file {
+                    let upstream_path = upstream.path(&self.db).clone();
                     if self.trace_upstream_column_chain(
                         &upstream_path,
                         column_name,
@@ -909,7 +1125,7 @@ mod diagnostics {
         let mut ws = TestWorkspace::new();
         ws.add_model("broken", "SELEC * FROM table"); // Typo in SELECT
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert!(!diags.is_empty(), "Expected parse error diagnostic");
         assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
@@ -920,7 +1136,7 @@ mod diagnostics {
         let mut ws = TestWorkspace::new();
         ws.add_model("broken", "SELECT * FROM smelt.ref('nonexistent')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
@@ -934,7 +1150,7 @@ mod diagnostics {
         ws.add_model("upstream", "SELECT 1 as id");
         ws.add_model("downstream", "SELECT * FROM smelt.ref('upstream')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("downstream"));
+        let diags = ws.diagnostics_for(&ws.model_path("downstream"));
 
         assert!(
             diags.is_empty(),
@@ -948,7 +1164,7 @@ mod diagnostics {
         let mut ws = TestWorkspace::new();
         ws.add_model("broken", "SELECT * FROM smelt.source('raw.nonexistent')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
@@ -970,7 +1186,7 @@ sources:
         );
         ws.add_model("model", "SELECT * FROM smelt.source('raw.users')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("model"));
+        let diags = ws.diagnostics_for(&ws.model_path("model"));
 
         assert!(
             diags.is_empty(),
@@ -988,7 +1204,7 @@ sources:
             "-- Comment\nSELECT *\nFROM smelt.ref('nonexistent')",
         );
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         // The ref is on line 2 (0-indexed)
@@ -1004,7 +1220,7 @@ sources:
             "SELECT * FROM smelt.ref('missing1') CROSS JOIN smelt.ref('missing2')",
         );
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 2, "Expected 2 undefined ref diagnostics");
         assert!(diags.iter().any(|d| d.message.contains("missing1")));
@@ -1016,7 +1232,7 @@ sources:
         let mut ws = TestWorkspace::new();
         ws.add_model("broken", "SELECT * FROM smelt.ref('nonexistent')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         assert_eq!(
@@ -1055,7 +1271,7 @@ sources:
         );
 
         // type_diagnostics checks cross-model type mismatches
-        let diags = ws.db.type_diagnostics(ws.model_path("bad_sum"));
+        let diags = ws.diagnostics_for(&ws.model_path("bad_sum"));
 
         let type_mismatch = diags
             .iter()
@@ -1074,7 +1290,7 @@ sources:
         let mut ws = TestWorkspace::new();
         ws.add_model("broken", "SELECT * FROM smelt.ref('my_model')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("broken"));
+        let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         assert_eq!(
@@ -1108,7 +1324,7 @@ sources:
         );
 
         // Undeclared column checks are in type_diagnostics
-        let diags = ws.db.type_diagnostics(ws.model_path("model"));
+        let diags = ws.diagnostics_for(&ws.model_path("model"));
 
         let undeclared = diags
             .iter()
@@ -1139,7 +1355,7 @@ mod goto_definition {
         ws.add_model("users", "SELECT 1 as id");
         ws.add_model("orders", "SELECT * FROM smelt.ref('users')");
 
-        let resolved = ws.db.resolve_ref("users".to_string());
+        let resolved = ws.resolve_ref("users");
 
         assert!(resolved.is_some());
         assert_eq!(resolved.unwrap(), ws.model_path("users"));
@@ -1150,7 +1366,7 @@ mod goto_definition {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 as id");
 
-        let resolved = ws.db.resolve_ref("nonexistent".to_string());
+        let resolved = ws.resolve_ref("nonexistent");
 
         assert!(resolved.is_none());
     }
@@ -1165,7 +1381,7 @@ mod goto_definition {
             "SELECT * FROM smelt.ref('upstream1') CROSS JOIN smelt.ref('upstream2')",
         );
 
-        let refs = ws.db.model_refs(ws.model_path("downstream"));
+        let refs = ws.model_refs(&ws.model_path("downstream"));
 
         assert_eq!(refs.len(), 2);
         let ref_names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
@@ -1186,7 +1402,7 @@ mod hover {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT id, name, email FROM raw.users");
 
-        let schema = ws.db.model_schema(ws.model_path("users"));
+        let schema = ws.model_schema(&ws.model_path("users"));
 
         assert_eq!(schema.columns.len(), 3);
         let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
@@ -1203,7 +1419,7 @@ mod hover {
             "SELECT user_id, COUNT(*) as total_count FROM events GROUP BY user_id",
         );
 
-        let schema = ws.db.model_schema(ws.model_path("stats"));
+        let schema = ws.model_schema(&ws.model_path("stats"));
 
         assert_eq!(schema.columns.len(), 2);
         assert_eq!(schema.columns[0].name, "user_id");
@@ -1216,7 +1432,7 @@ mod hover {
         let mut ws = TestWorkspace::new();
         ws.add_model("literals", "SELECT 42 as num, 'hello' as str FROM dual");
 
-        let schema = ws.db.typed_model_schema(ws.model_path("literals"));
+        let schema = ws.typed_model_schema(&ws.model_path("literals"));
 
         assert_eq!(schema.columns.len(), 2);
 
@@ -1239,7 +1455,7 @@ mod hover {
             "SELECT COUNT(*) as cnt, SUM(amount) as total FROM orders",
         );
 
-        let schema = ws.db.typed_model_schema(ws.model_path("aggs"));
+        let schema = ws.typed_model_schema(&ws.model_path("aggs"));
 
         assert_eq!(schema.columns.len(), 2);
 
@@ -1257,7 +1473,7 @@ mod hover {
         ws.add_model("users", "SELECT id, name, email FROM raw.users");
         ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
 
-        let available = ws.db.available_columns(ws.model_path("orders"));
+        let available = ws.available_columns(&ws.model_path("orders"));
 
         // Should include columns from both the current model and upstream
         let col_names: Vec<&str> = available.iter().map(|c| c.name.as_str()).collect();
@@ -1281,14 +1497,14 @@ mod incremental {
 
         // Start with a broken model
         ws.add_model("model", "SELECT * FROM smelt.ref('missing')");
-        let diags1 = ws.db.file_diagnostics(ws.model_path("model"));
+        let diags1 = ws.diagnostics_for(&ws.model_path("model"));
         assert_eq!(diags1.len(), 1, "Should have undefined ref error");
 
         // Add the missing model
         ws.add_model("missing", "SELECT 1 as id");
 
         // Check diagnostics are cleared
-        let diags2 = ws.db.file_diagnostics(ws.model_path("model"));
+        let diags2 = ws.diagnostics_for(&ws.model_path("model"));
         assert!(
             diags2.is_empty(),
             "Diagnostics should be cleared after adding missing model"
@@ -1301,12 +1517,12 @@ mod incremental {
 
         // Create a model with one column
         ws.add_model("model", "SELECT id FROM users");
-        let schema1 = ws.db.model_schema(ws.model_path("model"));
+        let schema1 = ws.model_schema(&ws.model_path("model"));
         assert_eq!(schema1.columns.len(), 1);
 
         // Update to have two columns
         ws.update_model("model", "SELECT id, name FROM users");
-        let schema2 = ws.db.model_schema(ws.model_path("model"));
+        let schema2 = ws.model_schema(&ws.model_path("model"));
         assert_eq!(schema2.columns.len(), 2);
     }
 
@@ -1317,7 +1533,7 @@ mod incremental {
         // Create a downstream model first (with broken ref)
         ws.add_model("downstream", "SELECT * FROM smelt.ref('upstream')");
         assert!(
-            ws.db.resolve_ref("upstream".to_string()).is_none(),
+            ws.resolve_ref("upstream").is_none(),
             "Upstream should not exist yet"
         );
 
@@ -1326,7 +1542,7 @@ mod incremental {
 
         // Verify ref now resolves
         assert!(
-            ws.db.resolve_ref("upstream".to_string()).is_some(),
+            ws.resolve_ref("upstream").is_some(),
             "Upstream should now resolve"
         );
     }
@@ -1337,7 +1553,7 @@ mod incremental {
 
         // Model referencing a source that doesn't exist yet
         ws.add_model("model", "SELECT * FROM smelt.source('raw.users')");
-        let diags1 = ws.db.file_diagnostics(ws.model_path("model"));
+        let diags1 = ws.diagnostics_for(&ws.model_path("model"));
         assert_eq!(diags1.len(), 1, "Should have undefined source error");
 
         // Add the source
@@ -1353,7 +1569,7 @@ sources:
         );
 
         // Diagnostics should clear
-        let diags2 = ws.db.file_diagnostics(ws.model_path("model"));
+        let diags2 = ws.diagnostics_for(&ws.model_path("model"));
         assert!(
             diags2.is_empty(),
             "Diagnostics should clear after adding source"
@@ -1385,9 +1601,7 @@ sources:
 "#,
         );
 
-        let resolved =
-            ws.db
-                .resolve_source(ws.project_root(), "raw".to_string(), "users".to_string());
+        let resolved = ws.resolve_source("raw", "users");
 
         assert!(resolved.is_some());
         let table = resolved.unwrap();
@@ -1414,7 +1628,7 @@ sources:
 "#,
         );
 
-        let config = ws.db.sources_config(ws.project_root());
+        let config = ws.sources_config();
 
         assert_eq!(config.sources.len(), 1);
         let raw = &config.sources[0];
@@ -1432,7 +1646,7 @@ sources:
             "SELECT * FROM smelt.source('raw.users') CROSS JOIN smelt.source('raw.events')",
         );
 
-        let sources = ws.db.model_sources(ws.model_path("model"));
+        let sources = ws.model_sources(&ws.model_path("model"));
 
         assert_eq!(sources.len(), 2);
         let qualified_names: Vec<&str> =
@@ -1447,7 +1661,7 @@ sources:
         // Source call without dot separator (e.g., 'foo' instead of 'raw.users')
         ws.add_model("model", "SELECT * FROM smelt.source('foo')");
 
-        let diags = ws.db.file_diagnostics(ws.model_path("model"));
+        let diags = ws.diagnostics_for(&ws.model_path("model"));
 
         // Should produce an error for malformed/undefined source
         assert!(
@@ -1483,7 +1697,7 @@ sources:
         ws.add_model("model", "SELECT t.id FROM smelt.source('raw.users') AS t");
 
         // The type context should register the alias 't' -> 'raw.users'
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // Verify the alias is registered by looking up a column through it
         let col = ctx.lookup_column(Some("t"), "id");
@@ -1506,7 +1720,7 @@ sources:
         );
         ws.add_model("model", "SELECT t.id FROM smelt.source('raw.users') t");
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // Should find column via implicit alias
         let col = ctx.lookup_column(Some("t"), "id");
@@ -1533,7 +1747,7 @@ sources:
         // Using table name 'users' as qualifier (implicit alias by table name)
         ws.add_model("model", "SELECT users.id FROM smelt.source('raw.users')");
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // Should find column via table name
         let col = ctx.lookup_column(Some("users"), "id");
@@ -1567,7 +1781,7 @@ sources:
         );
 
         // Get sources config and verify columns are available
-        let config = ws.db.sources_config(ws.project_root());
+        let config = ws.sources_config();
         let raw = config.sources.iter().find(|s| s.name == "raw").unwrap();
         let users = raw.tables.iter().find(|t| t.name == "users").unwrap();
 
@@ -1588,7 +1802,7 @@ sources:
         );
 
         // The upstream model schema should have the columns
-        let schema = ws.db.model_schema(ws.model_path("users"));
+        let schema = ws.model_schema(&ws.model_path("users"));
         assert_eq!(schema.columns.len(), 3);
 
         let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
@@ -1622,7 +1836,7 @@ sources:
             "SELECT u.id, o.order_id FROM smelt.source('raw.users') u JOIN smelt.source('raw.orders') o ON u.id = o.user_id",
         );
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // Both aliases should be registered
         let user_col = ctx.lookup_column(Some("u"), "id");
@@ -1660,7 +1874,7 @@ sources:
 SELECT day, total FROM daily_totals WHERE total > 1000"#,
         );
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // CTE name should be registered
         assert!(ctx.is_cte("daily_totals"));
@@ -1710,7 +1924,7 @@ FROM active_users u
 JOIN user_orders o ON u.id = o.user_id"#,
         );
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // Both CTEs should be registered
         assert!(ctx.is_cte("active_users"));
@@ -1740,11 +1954,9 @@ JOIN user_orders o ON u.id = o.user_id"#,
         let sql = "SELECT event_type, COUNT(*) as cnt FROM raw_events GROUP BY event_type";
         std::fs::write(&virtual_path, sql).expect("write virtual sql");
         ws.db
-            .set_file_text(virtual_path.clone(), Arc::new(sql.to_string()));
-        ws.db
-            .set_file_project_root(virtual_path.clone(), ws.project_root());
+            .set_source_file(virtual_path.clone(), sql.to_string(), ws.project_root());
         ws.model_files.push(virtual_path);
-        ws.db.set_all_files(Arc::new(ws.model_files.clone()));
+        ws.sync_workspace();
 
         // Add a SQL model that references the Python model
         ws.add_model(
@@ -1752,7 +1964,7 @@ JOIN user_orders o ON u.id = o.user_id"#,
             "SELECT * FROM smelt.ref('combined_events')",
         );
 
-        let diags = ws.db.file_diagnostics(ws.model_path("event_summary"));
+        let diags = ws.diagnostics_for(&ws.model_path("event_summary"));
         assert!(
             diags.is_empty(),
             "Expected no diagnostics when Python model is registered with <name>.sql path, got: {:?}",
@@ -1770,11 +1982,9 @@ JOIN user_orders o ON u.id = o.user_id"#,
         let sql = "SELECT event_type, COUNT(*) as cnt FROM raw_events GROUP BY event_type";
         std::fs::write(&virtual_path, sql).expect("write virtual sql");
         ws.db
-            .set_file_text(virtual_path.clone(), Arc::new(sql.to_string()));
-        ws.db
-            .set_file_project_root(virtual_path.clone(), ws.project_root());
+            .set_source_file(virtual_path.clone(), sql.to_string(), ws.project_root());
         ws.model_files.push(virtual_path);
-        ws.db.set_all_files(Arc::new(ws.model_files.clone()));
+        ws.sync_workspace();
 
         // A SQL model referencing 'combined_events' should NOT resolve
         ws.add_model(
@@ -1782,7 +1992,7 @@ JOIN user_orders o ON u.id = o.user_id"#,
             "SELECT * FROM smelt.ref('combined_events')",
         );
 
-        let diags = ws.db.file_diagnostics(ws.model_path("event_summary"));
+        let diags = ws.diagnostics_for(&ws.model_path("event_summary"));
         assert!(
             !diags.is_empty(),
             "Expected undefined ref diagnostic with __py_gen__ prefix path"
@@ -1803,7 +2013,7 @@ JOIN user_orders o ON u.id = o.user_id"#,
 SELECT n FROM counter"#,
         );
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
 
         // Recursive CTE should be registered
         assert!(ctx.is_cte("counter"));
@@ -1843,9 +2053,7 @@ sources:
         );
         ws.add_model("model", "SELECT id FROM smelt.source('raw.users')");
 
-        let resolved =
-            ws.db
-                .resolve_source(ws.project_root(), "raw".to_string(), "users".to_string());
+        let resolved = ws.resolve_source("raw", "users");
         assert!(resolved.is_some());
         let table_def = resolved.unwrap();
         assert_eq!(table_def.name, "users");
@@ -1857,7 +2065,7 @@ sources:
         let mut ws = TestWorkspace::new();
         ws.add_model("upstream", "SELECT 1 AS user_id, 'hello' AS user_name");
 
-        let schema = ws.db.model_schema(ws.model_path("upstream"));
+        let schema = ws.model_schema(&ws.model_path("upstream"));
         assert_eq!(schema.columns.len(), 2);
 
         // Each column should have a non-zero range
@@ -1882,12 +2090,12 @@ sources:
         ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
 
         // The downstream model's schema should have user_id with FromModel source
-        let schema = ws.db.model_schema(ws.model_path("orders"));
+        let schema = ws.model_schema(&ws.model_path("orders"));
         assert_eq!(schema.columns.len(), 1);
         assert_eq!(schema.columns[0].name, "user_id");
 
         // The upstream model should have user_id with a valid range
-        let upstream_schema = ws.db.model_schema(ws.model_path("users"));
+        let upstream_schema = ws.model_schema(&ws.model_path("users"));
         let user_id_col = upstream_schema.find_column("user_id");
         assert!(user_id_col.is_some(), "Upstream should have user_id column");
     }
@@ -1898,7 +2106,7 @@ sources:
         ws.add_model("users", "SELECT 1 AS user_id");
         ws.add_model("passthrough", "SELECT * FROM smelt.ref('users')");
 
-        let schema = ws.db.model_schema(ws.model_path("passthrough"));
+        let schema = ws.model_schema(&ws.model_path("passthrough"));
         // SELECT * should create row extensions, not explicit columns
         assert!(
             !schema.row_extensions.is_empty(),
@@ -1913,7 +2121,7 @@ sources:
         ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
         ws.add_model("passthrough", "SELECT * FROM smelt.ref('users')");
 
-        let resolved = ws.db.resolved_model_schema(ws.model_path("passthrough"));
+        let resolved = ws.resolved_model_schema(&ws.model_path("passthrough"));
         assert!(resolved.is_fully_resolved);
         assert_eq!(resolved.columns.len(), 2);
 
@@ -1930,11 +2138,11 @@ sources:
         ws.add_model("top", "SELECT col_a FROM smelt.ref('middle')");
 
         // The 'base' model should have col_a as an explicit column
-        let base_schema = ws.db.model_schema(ws.model_path("base"));
+        let base_schema = ws.model_schema(&ws.model_path("base"));
         assert!(base_schema.find_column("col_a").is_some());
 
         // 'middle' has wildcard, so resolved schema should include col_a
-        let middle_resolved = ws.db.resolved_model_schema(ws.model_path("middle"));
+        let middle_resolved = ws.resolved_model_schema(&ws.model_path("middle"));
         let col_names: Vec<&str> = middle_resolved
             .columns
             .iter()
@@ -1943,7 +2151,7 @@ sources:
         assert!(col_names.contains(&"col_a"));
 
         // 'top' explicitly selects col_a
-        let top_schema = ws.db.model_schema(ws.model_path("top"));
+        let top_schema = ws.model_schema(&ws.model_path("top"));
         assert_eq!(top_schema.columns.len(), 1);
         assert_eq!(top_schema.columns[0].name, "col_a");
     }
@@ -1959,7 +2167,7 @@ sources:
 SELECT total_count FROM totals"#,
         );
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
         assert!(ctx.is_cte("totals"));
 
         let columns = ctx.cte_columns("totals");
@@ -1986,7 +2194,7 @@ sources:
         );
         ws.add_model("model", "SELECT event_id FROM smelt.source('raw.events')");
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
         // Should be able to look up source columns
         let result = ctx.lookup_column(Some("events"), "event_id");
         assert!(result.is_some(), "Should find event_id in source context");
@@ -1997,7 +2205,7 @@ sources:
         let mut ws = TestWorkspace::new();
         ws.add_model("model", "SELECT event_id FROM smelt.source('raw.events') e");
 
-        let sources = ws.db.model_sources(ws.model_path("model"));
+        let sources = ws.model_sources(&ws.model_path("model"));
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_name, "raw");
         assert_eq!(sources[0].table_name, "events");
@@ -2017,7 +2225,7 @@ SELECT user_id FROM user_cte"#,
         );
 
         // The CTE should expose upstream columns through wildcard
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
         assert!(ctx.is_cte("user_cte"), "user_cte should be recognized");
 
         // The final model should resolve user_id
@@ -2037,7 +2245,7 @@ SELECT user_id FROM user_cte"#,
 SELECT col_a, col_c FROM enriched"#,
         );
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
         assert!(ctx.is_cte("enriched"));
 
         // col_c is explicit in the CTE
@@ -2058,7 +2266,7 @@ SELECT col_a, col_c FROM enriched"#,
         ws.add_model("users", "SELECT 1 AS user_id");
         ws.add_model("model", "SELECT u.user_id FROM smelt.ref('users') AS u");
 
-        let ctx = ws.db.type_context(ws.model_path("model"));
+        let ctx = ws.type_context(&ws.model_path("model"));
         // Alias 'u' should resolve to 'users'
         let resolved = ctx.resolve_alias("u");
         assert_eq!(resolved, Some("users".to_string()));
@@ -2128,7 +2336,7 @@ sources:
             "SELECT\n    event_timestamp\nFROM smelt.source('raw.events')",
         );
 
-        let parse = ws.db.parse_file(ws.model_path("model"));
+        let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
         // Cursor on "event_timestamp" (byte offset within the identifier)
@@ -2170,7 +2378,7 @@ sources:
             "SELECT\n    e.event_timestamp\nFROM smelt.source('raw.events') e",
         );
 
-        let parse = ws.db.parse_file(ws.model_path("model"));
+        let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
         let text = "SELECT\n    e.event_timestamp\nFROM smelt.source('raw.events') e";
@@ -2199,7 +2407,7 @@ sources:
         ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
         ws.add_model("model", "SELECT\n    user_id\nFROM smelt.ref('users')");
 
-        let parse = ws.db.parse_file(ws.model_path("model"));
+        let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
         let text = "SELECT\n    user_id\nFROM smelt.ref('users')";
@@ -2220,7 +2428,7 @@ sources:
         assert!(col_ref.qualifier().is_none());
 
         // Also verify the column can be found in the upstream model schema
-        let upstream_schema = ws.db.model_schema(ws.model_path("users"));
+        let upstream_schema = ws.model_schema(&ws.model_path("users"));
         assert!(
             upstream_schema.find_column("user_id").is_some(),
             "Upstream model should have user_id column"
@@ -2250,7 +2458,7 @@ sources:
             "SELECT event_id FROM smelt.source('raw.events') WHERE is_active",
         );
 
-        let parse = ws.db.parse_file(ws.model_path("model"));
+        let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
         let text = "SELECT event_id FROM smelt.source('raw.events') WHERE is_active";
@@ -2434,10 +2642,9 @@ mod find_references {
         ws.add_model("orders", "SELECT * FROM smelt.ref('users')");
 
         let all_file_refs: Vec<_> = ws
-            .db
-            .all_files()
+            .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .map(|p| (p.clone(), (*ws.model_refs(p)).clone()))
             .collect();
 
         let refs = find_model_references("users", &all_file_refs);
@@ -2454,10 +2661,9 @@ mod find_references {
         ws.add_model("c", "SELECT * FROM smelt.ref('users')");
 
         let all_file_refs: Vec<_> = ws
-            .db
-            .all_files()
+            .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .map(|p| (p.clone(), (*ws.model_refs(p)).clone()))
             .collect();
 
         let refs = find_model_references("users", &all_file_refs);
@@ -2471,10 +2677,9 @@ mod find_references {
         ws.add_model("orders", "SELECT 1 as id");
 
         let all_file_refs: Vec<_> = ws
-            .db
-            .all_files()
+            .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.db.model_refs(p.clone())).clone()))
+            .map(|p| (p.clone(), (*ws.model_refs(p)).clone()))
             .collect();
 
         let refs = find_model_references("users", &all_file_refs);
@@ -2498,10 +2703,9 @@ sources:
         ws.add_model("b", "SELECT * FROM smelt.source('raw.users')");
 
         let all_file_sources: Vec<_> = ws
-            .db
-            .all_files()
+            .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.db.model_sources(p.clone())).clone()))
+            .map(|p| (p.clone(), (*ws.model_sources(p)).clone()))
             .collect();
 
         let refs = find_source_references("raw.users", &all_file_sources);

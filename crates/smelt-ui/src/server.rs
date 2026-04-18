@@ -208,7 +208,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use smelt_core::config::Materialization;
     use smelt_core::discovery::ModelFile;
-    use smelt_db::Inputs;
     use std::collections::HashMap;
     use tower::ServiceExt;
 
@@ -227,15 +226,17 @@ mod tests {
 
         let mut db = smelt_db::Database::default();
         let project_root = PathBuf::from("/test");
-        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
-        db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
-        let mut file_paths = Vec::new();
+        let project = db.set_project_input(project_root.clone(), String::new());
+        let mut source_files = Vec::new();
         for model in &models {
-            db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
-            db.set_file_project_root(model.path.clone(), project_root.clone());
-            file_paths.push(model.path.clone());
+            let sf = db.set_source_file(
+                model.path.clone(),
+                model.content.clone(),
+                project_root.clone(),
+            );
+            source_files.push(sf);
         }
-        db.set_all_files(Arc::new(file_paths));
+        db.set_workspace(source_files, vec![project]);
 
         let (change_tx, _) = broadcast::channel(16);
         let (run_event_tx, _) = broadcast::channel(16);

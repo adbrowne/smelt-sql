@@ -1,32 +1,26 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use smelt_bench::model_gen::{generate_workspace, GraphSpec};
-use smelt_db::{Inputs, Semantic, Syntax};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 fn setup_salsa_db(
     workspace: &smelt_bench::model_gen::GeneratedWorkspace,
 ) -> (smelt_db::Database, Vec<PathBuf>) {
     let mut db = smelt_db::Database::default();
+    let project_root = workspace.path().to_path_buf();
+    let mut source_files = Vec::new();
     let mut all_paths = Vec::new();
 
     for (name, content) in &workspace.sql_contents {
         let path = workspace.models_path().join(format!("{}.sql", name));
-        db.set_file_text(path.clone(), Arc::new(content.clone()));
-        all_paths.push(path.clone());
+        let sf = db.set_source_file(path.clone(), content.clone(), project_root.clone());
+        source_files.push(sf);
+        all_paths.push(path);
     }
-
-    db.set_all_files(Arc::new(all_paths.clone()));
-
-    let project_root = workspace.path().to_path_buf();
-    for path in &all_paths {
-        db.set_file_project_root(path.clone(), project_root.clone());
-    }
-    db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
 
     let sources_yml =
         std::fs::read_to_string(workspace.path().join("sources.yml")).unwrap_or_default();
-    db.set_project_sources_yaml(project_root, Arc::new(sources_yml));
+    let project = db.set_project_input(project_root, sources_yml);
+    db.set_workspace(source_files, vec![project]);
 
     (db, all_paths)
 }
@@ -38,7 +32,8 @@ fn bench_initial_load(c: &mut Criterion) {
     c.bench_function("salsa_initial_load_2000", |b| {
         b.iter(|| {
             let (db, _) = setup_salsa_db(&workspace);
-            let _models = db.all_models();
+            let ws = smelt_db::Workspace::try_get(&db).unwrap();
+            let _models = smelt_db::all_models(&db, ws);
         })
     });
 }
@@ -47,11 +42,15 @@ fn bench_leaf_edit(c: &mut Criterion) {
     let spec = GraphSpec::default();
     let workspace = generate_workspace(&spec).expect("Failed to generate workspace");
     let (mut db, all_paths) = setup_salsa_db(&workspace);
+    let project_root = workspace.path().to_path_buf();
 
     // Warm caches
-    let _models = db.all_models();
+    let ws = smelt_db::Workspace::try_get(&db).unwrap();
+    let _models = smelt_db::all_models(&db, ws);
     for path in &all_paths {
-        let _diags = db.file_diagnostics(path.clone());
+        if let Some(file) = db.source_file(path) {
+            let _diags = smelt_db::file_diagnostics(&db, ws, file);
+        }
     }
 
     // Find a layer 1 model
@@ -67,11 +66,15 @@ fn bench_leaf_edit(c: &mut Criterion) {
 
     c.bench_function("salsa_leaf_edit_diagnostics", |b| {
         b.iter(|| {
-            db.set_file_text(
+            db.set_source_file(
                 leaf_path.clone(),
-                Arc::new("SELECT 1 AS bench_col\n".to_string()),
+                "SELECT 1 AS bench_col\n".to_string(),
+                project_root.clone(),
             );
-            let _diags = db.file_diagnostics(leaf_path.clone());
+            let ws = smelt_db::Workspace::try_get(&db).unwrap();
+            if let Some(file) = db.source_file(&leaf_path) {
+                let _diags = smelt_db::file_diagnostics(&db, ws, file);
+            }
         })
     });
 }
@@ -82,12 +85,16 @@ fn bench_full_diagnostics(c: &mut Criterion) {
     let (db, all_paths) = setup_salsa_db(&workspace);
 
     // Warm caches
-    let _models = db.all_models();
+    let ws = smelt_db::Workspace::try_get(&db).unwrap();
+    let _models = smelt_db::all_models(&db, ws);
 
     c.bench_function("salsa_full_diagnostics_2000", |b| {
         b.iter(|| {
+            let ws = smelt_db::Workspace::try_get(&db).unwrap();
             for path in &all_paths {
-                let _diags = db.file_diagnostics(path.clone());
+                if let Some(file) = db.source_file(path) {
+                    let _diags = smelt_db::file_diagnostics(&db, ws, file);
+                }
             }
         })
     });

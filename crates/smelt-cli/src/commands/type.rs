@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use smelt_cli::{discover_python_models, find_project_root, init_db, Config, ModelDiscovery};
-use smelt_db::TypeChecking;
 
 use crate::TypeArgs;
 
@@ -37,6 +36,7 @@ pub async fn show_type(args: TypeArgs) -> Result<()> {
 
     // 3. Initialize Salsa database
     let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
 
     // 4. Show function types
     if let Some(model_name) = &args.model_name {
@@ -45,7 +45,10 @@ pub async fn show_type(args: TypeArgs) -> Result<()> {
             .iter()
             .find(|m| m.name == *model_name)
             .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", model_name))?;
-        let ft = db.model_function_type(model.path.clone());
+        let file = db
+            .source_file(&model.path)
+            .expect("model file not registered");
+        let ft = smelt_db::model_function_type(&db, ws, file);
         println!("{}", ft);
     } else {
         // Show all models sorted by name
@@ -56,7 +59,10 @@ pub async fn show_type(args: TypeArgs) -> Result<()> {
             if i > 0 {
                 println!();
             }
-            let ft = db.model_function_type(model.path.clone());
+            let file = db
+                .source_file(&model.path)
+                .expect("model file not registered");
+            let ft = smelt_db::model_function_type(&db, ws, file);
             println!("{}", ft);
         }
     }
