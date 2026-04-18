@@ -40,38 +40,43 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## Salsa Query Design
+## Salsa Query Design (salsa 0.26)
 
-### Input Queries (Managed by LSP)
+All queries are free `#[salsa::tracked]` functions (no query groups or traits).
+Inputs are `#[salsa::input]` structs; the `Database` provides a path-keyed
+registry for looking up inputs.
+
+### Input Structs (Managed by LSP)
 
 ```rust
-#[salsa::query_group(InputsStorage)]
-trait Inputs {
-    /// File contents - updated when editor changes file
-    #[salsa::input]
-    fn file_text(&self, path: PathBuf) -> Arc<String>;
+#[salsa::input]
+pub struct SourceFile {
+    #[returns(ref)] pub path: PathBuf,
+    #[returns(ref)] pub text: String,
+    #[returns(ref)] pub project_root: PathBuf,
+}
 
-    /// Project configuration
-    #[salsa::input]
-    fn project_config(&self) -> Arc<Config>;
+#[salsa::input]
+pub struct ProjectInput {
+    #[returns(ref)] pub root: PathBuf,
+    #[returns(ref)] pub sources_yaml: String,
+}
+
+#[salsa::input(singleton)]
+pub struct Workspace {
+    #[returns(ref)] pub files: Vec<SourceFile>,
+    #[returns(ref)] pub projects: Vec<ProjectInput>,
 }
 ```
 
 ### Parsing Layer
 
 ```rust
-#[salsa::query_group(SyntaxStorage)]
-trait Syntax: Inputs {
-    /// Parse file into CST (Concrete Syntax Tree)
-    /// Returns tree even if there are parse errors
-    fn parse_file(&self, path: PathBuf) -> Parse;
+#[salsa::tracked(returns(ref))]
+pub fn parse_file(db: &dyn salsa::Database, file: SourceFile) -> Parse;
 
-    /// Extract AST from CST, handling error nodes
-    fn file_ast(&self, path: PathBuf) -> Arc<Ast>;
-
-    /// Get parse errors for diagnostics
-    fn parse_errors(&self, path: PathBuf) -> Vec<SyntaxError>;
-}
+#[salsa::tracked]
+pub fn parse_model(db: &dyn salsa::Database, file: SourceFile) -> Option<Arc<Model>>;
 ```
 
 **Key insight**: `parse_file` always succeeds, producing a CST with error nodes. This enables other queries to work with partial trees.
@@ -79,47 +84,30 @@ trait Syntax: Inputs {
 ### Semantic Layer
 
 ```rust
-#[salsa::query_group(SemanticStorage)]
-trait Semantic: Syntax {
-    /// Resolve all model references in a file
-    fn resolve_refs(&self, path: PathBuf) -> Arc<RefMap>;
+#[salsa::tracked]
+pub fn model_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<RefLocation>>;
 
-    /// Infer schema for a model
-    fn model_schema(&self, model: ModelId) -> Result<Schema, Error>;
+#[salsa::tracked]
+pub fn resolve_ref(db: &dyn salsa::Database, ws: Workspace, name: String) -> Option<SourceFile>;
 
-    /// Build dependency graph across all models
-    fn dependency_graph(&self) -> Arc<DepGraph>;
+pub fn file_diagnostics(db: &dyn salsa::Database, ws: Workspace, file: SourceFile) -> Vec<Diagnostic>;
 
-    /// Type check a model
-    fn type_check(&self, model: ModelId) -> Vec<TypeError>;
-
-    /// Get all diagnostics for a file
-    fn file_diagnostics(&self, path: PathBuf) -> Vec<Diagnostic>;
-}
+#[salsa::tracked(cycle_initial = typed_model_schema_initial)]
+pub fn typed_model_schema(db: &dyn salsa::Database, ws: Workspace, file: SourceFile) -> Arc<ModelSchema>;
 ```
 
-**Key insight**: Each query handles partial/incorrect input gracefully. If `resolve_refs` finds an undefined model, it returns an error in the map but continues resolving other refs.
+**Key insight**: Cycle handling uses salsa 0.26's `cycle_initial` — circular model
+references resolve to empty schemas without panicking (no `catch_unwind` needed).
 
-### Optimization Layer
+### Diagnostics via Accumulator
 
 ```rust
-#[salsa::query_group(OptimizationStorage)]
-trait Optimization: Semantic {
-    /// Convert model to logical plan
-    fn logical_plan(&self, model: ModelId) -> Result<LogicalPlan, Error>;
-
-    /// Detect shared computations across models
-    fn shared_computations(&self) -> Arc<Vec<SharedComputation>>;
-
-    /// Optimize a model into physical plan
-    fn physical_plan(&self, model: ModelId) -> Result<PhysicalPlan, Error>;
-
-    /// Estimate execution cost
-    fn estimated_cost(&self, model: ModelId) -> Cost;
-}
+#[salsa::accumulator]
+pub struct DiagnosticAcc(pub Diagnostic);
 ```
 
-**Key insight**: Optimization queries can access the full semantic info. Salsa ensures they're only recomputed when dependencies change.
+Diagnostics are pushed via `DiagnosticAcc(d).accumulate(db)` inside tracked functions
+and collected at the top level via `check_file_diagnostics::accumulated::<DiagnosticAcc>(db, ws, file)`.
 
 ## Error Recovery Parser with Rowan
 

@@ -345,7 +345,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - Completions: model names, column names, table alias columns
 - Python model awareness: real `ProjectContext` passed to Python models in LSP, valid ref targets, execution error diagnostics
 - `sources.yml` live reload (changes update LSP without restart)
-- Salsa cycle recovery prevents LSP crashes from circular model references
+- Salsa 0.26 with `#[salsa::tracked]` free functions and `cycle_initial` fixpoint iteration (upgraded from 0.16)
 - Find references for models, sources, and CTEs
 - Rename: CTEs (single-file), models (cross-file with file rename), sources (cross-file + YAML), columns (full lineage tracing)
 - Code actions: CAST quick-fixes, create model, add source/column to YAML, extract CTE, inline CTE
@@ -358,6 +358,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ✅ Diagnostics for undeclared column references
 - ✅ Python model LSP integration: real `ProjectContext` enables cross-boundary type inference
 - ✅ Fixed LSP crash from Salsa cycle detection during memo validation
+- ✅ Upgraded Salsa 0.16 → 0.26: `#[salsa::tracked]` free functions, `#[salsa::input]` structs, `#[salsa::accumulator]` diagnostics, `cycle_initial` fixpoint iteration; removed `catch_unwind` workaround (April 18, 2026)
 - ✅ Fixed `sources.yml` changes not updating LSP until reload
 - ✅ Fixed 35 LSP diagnostics across example workspaces + CI verification gate
 - ✅ Fixed Python model `E2BIG` error on large projects and PyO3 `dict_items` extraction

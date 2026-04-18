@@ -1,20 +1,13 @@
 # Salsa Upgrade: 0.16 → 0.26
 
-## Session Status (2026-04-15)
+## Session Status (2026-04-18)
 
-**Phase 1: DONE** (uncommitted, on disk in the `salsa-upgrade` worktree):
-- `Cargo.toml` bumped `salsa = "0.16"` → `salsa = "0.26"` (latest stable — latest at time of work).
-- `cargo update -p salsa` ran; new transitive deps added (`salsa-macro-rules`, `thin-vec`, `boxcar`, `intrusive-collections`, `inventory`, `crossbeam-queue`, `allocator-api2`). Old `parking_lot 0.11` dropped.
-- Toolchain OK with cargo 1.94.1; no `rust-toolchain.toml` changes needed.
+**ALL PHASES COMPLETE.** Upgrade from salsa 0.16 → 0.26 is done. All tests pass, all crates build, clippy clean.
 
 **Pre-upgrade bench baseline** (0.16, `cargo bench -p smelt-bench --bench salsa_incremental -- --quick`):
 - `salsa_initial_load_2000`: **9.13 ms**
 - `salsa_leaf_edit_diagnostics`: **3.11 µs**
 - `salsa_full_diagnostics_2000`: **59.5 µs**
-
-Post-upgrade must be equal or better on all three.
-
-**Phase 2: STARTED, NOT DONE.** `cargo build -p smelt-db` currently fails with 15 errors — expected. Nothing else committed; smelt-db/smelt-lsp/bench still use the 0.16 API.
 
 **API shifts discovered while surveying 0.26:**
 - `#[salsa::database(...)]` macro is **gone**. Replaced by `#[salsa::db]` attribute on the struct AND on `impl salsa::Database for Database {}`.
@@ -117,7 +110,7 @@ fn typed_schema_cycle_fn(...) -> CycleRecoveryAction<ModelSchema> {
 - [x] Phase 3: rewrite `crates/smelt-lsp/src/lib.rs` DB handling and delete panic-catch workaround
 - [x] Phase 4: rewrite `crates/smelt-bench/benches/salsa_incremental.rs`; run `cargo test -p smelt-cli --test example_diagnostics` and `cargo test -p smelt-db --test type_property_tests`
 - [x] Add explicit cycle-regression test under `smelt-db/tests/` using a circular model graph; must return the cycle_initial value without panicking
-- [ ] Phase 5: purge 0.16 references from `docs/architecture_overview.md`, `docs/lsp_architecture.md`, `CLAUDE.md`, update `docs/ROADMAP.md` with completion date
+- [x] Phase 5: purge 0.16 references from `docs/architecture_overview.md`, `docs/lsp_architecture.md`, `CLAUDE.md`, update `docs/ROADMAP.md` with completion date
 
 ## Original Context
 
