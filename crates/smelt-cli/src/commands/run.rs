@@ -111,14 +111,33 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     info!("Found {} models total", models.len());
 
-    // Report any parse errors
+    // Surface parse errors as a hard failure. Previously these were only
+    // warned via tracing — a `smelt run` against a workspace with a parse
+    // error would silently exit 0 if the user had no `RUST_LOG` filter set
+    // (bug #5 in the 20260417 follow-up plan). Failing early gives both
+    // dry-run and live runs the same fail-fast behaviour.
+    let mut parse_error_models: Vec<String> = Vec::new();
     for model in &models {
         if !model.parse_errors.is_empty() {
-            warn!("Parse errors in {}:", model.name);
+            parse_error_models.push(model.name.clone());
+            tracing::error!("Parse errors in {}:", model.name);
             for error in &model.parse_errors {
-                warn!("  - {} at {:?}", error.message, error.range);
+                tracing::error!("  - {} at {:?}", error.message, error.range);
+            }
+            // Mirror to stderr unconditionally so the user sees the failure
+            // even without RUST_LOG configured.
+            eprintln!("error: parse errors in model '{}':", model.name);
+            for error in &model.parse_errors {
+                eprintln!("  - {} at {:?}", error.message, error.range);
             }
         }
+    }
+    if !parse_error_models.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Parse errors in {} model(s): {}",
+            parse_error_models.len(),
+            parse_error_models.join(", "),
+        ));
     }
 
     // Validate materialization configs (e.g. ephemeral + incremental conflicts)
@@ -223,10 +242,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
             .join(" → ")
     );
 
-    if args.dry_run {
-        info!("[DRY RUN] Skipping execution");
-        return Ok(());
-    }
+    // (dry-run no longer returns here — it now runs through compilation so
+    // it can surface diagnostics and print the planned SQL per model. See
+    // the dry-run handler block further down before model execution.)
 
     // 6. Create backends for needed targets
     // Log cross-backend references (supported via Parquet exchange)
@@ -481,6 +499,56 @@ pub async fn run(args: RunArgs) -> Result<()> {
     compilers.set_upstream_schemas_all(upstream_schemas);
 
     let file_store = FileStore::new(&project_dir);
+
+    // --- Dry-run handler --------------------------------------------------
+    //
+    // Bug #5 in the 20260417 follow-up plan: `smelt run --dry-run` used to
+    // return early before this point and print nothing to stdout. With no
+    // `RUST_LOG` set the user got zero output and exit 0 — even when the
+    // equivalent live run would have failed at compilation time.
+    //
+    // Now dry-run runs through compilation for every model in the physical
+    // graph (using the same compiler registry the live run uses), prints a
+    // `Would run: <model>` header followed by the planned SQL to stdout, and
+    // exits non-zero on any compile error via `?`. Stdout (not tracing) is
+    // the contract — the user must see the plan without configuring a log
+    // filter.
+    if args.dry_run {
+        let selected_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
+        let mut planned = 0usize;
+        for phys_node in physical_graph.iter_in_order().filter(|n| {
+            selected_set.contains(n.name.as_str())
+                || n.logical_origins
+                    .iter()
+                    .any(|o| selected_set.contains(o.as_str()))
+        }) {
+            let model_name = &phys_node.name;
+            let model = &phys_node.model_file;
+            let compiler = compilers.get(&phys_node.target);
+            let schema = &registry.target_config(&phys_node.target).schema;
+            let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
+
+            let compiled = compiler
+                .compile_with_ephemerals(model, schema, resolver)
+                .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+            // Stdout, not tracing — dry-run output is part of the CLI
+            // contract and must be visible without a log-level env var.
+            println!(
+                "-- Would run: {} (target={}, materialization={:?})",
+                model_name, phys_node.target, compiled.materialization
+            );
+            println!("{}", compiled.sql.trim_end());
+            println!();
+            planned += 1;
+        }
+
+        info!(
+            "[DRY RUN] Compiled {} model(s); no execution performed.",
+            planned
+        );
+        return Ok(());
+    }
 
     info!("{}", "=".repeat(60));
     info!("Executing models...");
