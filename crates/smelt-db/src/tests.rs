@@ -3460,3 +3460,87 @@ sources:
         undeclared
     );
 }
+
+// ===== Cycle regression tests (salsa 0.26 fixpoint iteration) =====
+
+#[test]
+fn test_circular_refs_do_not_panic() {
+    // Two models that reference each other: a -> b -> a.
+    // With salsa 0.16 this triggered a panic during memo validation;
+    // the LSP had to use catch_unwind as a workaround.
+    // With salsa 0.26's cycle_initial, the cycle should resolve to
+    // empty schemas without panicking.
+    let mut db = TestDb::default();
+
+    let a_path = PathBuf::from("models/a.sql");
+    let b_path = PathBuf::from("models/b.sql");
+
+    db.set_file_text(
+        a_path.clone(),
+        Arc::new("SELECT * FROM smelt.ref('b')".to_string()),
+    );
+    db.set_file_text(
+        b_path.clone(),
+        Arc::new("SELECT * FROM smelt.ref('a')".to_string()),
+    );
+
+    // This must NOT panic — the cycle_initial returns empty defaults.
+    let schema_a = db.typed_model_schema(a_path.clone());
+    let schema_b = db.typed_model_schema(b_path.clone());
+
+    // Schemas should be empty or have only wildcard columns (cycle recovery)
+    // The key assertion is that we reached this point without panic.
+    assert!(
+        schema_a.columns.is_empty() || schema_a.columns.iter().all(|c| c.name == "*"),
+        "Cyclic model a should have empty/wildcard schema, got: {:?}",
+        schema_a.columns
+    );
+    assert!(
+        schema_b.columns.is_empty() || schema_b.columns.iter().all(|c| c.name == "*"),
+        "Cyclic model b should have empty/wildcard schema, got: {:?}",
+        schema_b.columns
+    );
+
+    // Diagnostics should also not panic
+    let diags_a = db.file_diagnostics(a_path);
+    let diags_b = db.file_diagnostics(b_path);
+
+    // Reaching this point proves cycle recovery works without panic.
+    // The cycle_initial returns empty schemas and diagnostics may or may
+    // not contain an explicit "circular reference" message — the important
+    // thing is no memo-validation panic (the old salsa 0.16 failure mode).
+    let _ = (diags_a, diags_b);
+}
+
+#[test]
+fn test_three_way_cycle_recovery() {
+    // a -> b -> c -> a: three-way cycle
+    let mut db = TestDb::default();
+
+    let a_path = PathBuf::from("models/a.sql");
+    let b_path = PathBuf::from("models/b.sql");
+    let c_path = PathBuf::from("models/c.sql");
+
+    db.set_file_text(
+        a_path.clone(),
+        Arc::new("SELECT * FROM smelt.ref('b')".to_string()),
+    );
+    db.set_file_text(
+        b_path.clone(),
+        Arc::new("SELECT * FROM smelt.ref('c')".to_string()),
+    );
+    db.set_file_text(
+        c_path.clone(),
+        Arc::new("SELECT * FROM smelt.ref('a')".to_string()),
+    );
+
+    // Must not panic
+    let _schema_a = db.typed_model_schema(a_path.clone());
+    let _schema_b = db.typed_model_schema(b_path.clone());
+    let _schema_c = db.typed_model_schema(c_path.clone());
+
+    // Diagnostics must not panic
+    let _diags_a = db.file_diagnostics(a_path);
+    let _diags_b = db.file_diagnostics(b_path);
+    let _diags_c = db.file_diagnostics(c_path);
+}
