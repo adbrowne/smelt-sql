@@ -114,7 +114,7 @@ fn typed_schema_cycle_fn(...) -> CycleRecoveryAction<ModelSchema> {
 
 - [x] Phase 1: bump Cargo.toml, baseline bench
 - [x] Phase 2: rewrite `crates/smelt-db/src/lib.rs` (top 165 lines + all 28 query impls + 3 cycle fns + in-file tests)
-- [ ] Phase 3: rewrite `crates/smelt-lsp/src/lib.rs` DB handling and delete panic-catch workaround
+- [x] Phase 3: rewrite `crates/smelt-lsp/src/lib.rs` DB handling and delete panic-catch workaround
 - [ ] Phase 4: rewrite `crates/smelt-bench/benches/salsa_incremental.rs`; run `cargo test -p smelt-cli --test example_diagnostics` and `cargo test -p smelt-db --test type_property_tests`
 - [ ] Add explicit cycle-regression test under `smelt-db/tests/` using a circular model graph; must return the cycle_initial value without panicking
 - [ ] Phase 5: purge 0.16 references from `docs/architecture_overview.md`, `docs/lsp_architecture.md`, `CLAUDE.md`, update `docs/ROADMAP.md` with completion date

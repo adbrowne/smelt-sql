@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Duration, NaiveDate, Weekday as ChronoWeekday};
 use smelt_backend::{Backend, IncrementalStrategy};
 use smelt_core::{Granularity, Weekday};
-use smelt_db::{ColumnSource, ModelSchema, TypeChecking};
+use smelt_db::{ColumnSource, ModelSchema};
 use std::path::{Path, PathBuf};
 
 use tracing::info;
@@ -40,7 +40,11 @@ pub fn infer_deployed_columns(
     db: &smelt_db::Database,
     model: &smelt_cli::ModelFile,
 ) -> Vec<smelt_state::schema_tracking::DeployedColumn> {
-    let schema = db.typed_model_schema(model.path.clone());
+    let ws = smelt_db::Workspace::try_get(db).expect("workspace not initialized");
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+    let schema = smelt_db::typed_model_schema(db, ws, file);
 
     schema
         .columns
