@@ -36,16 +36,15 @@ The design rests on **fragment sorts**: syntactic categories that distinguish di
 | `AggExpr<T>` | Expression containing aggregation | SELECT (with GROUP BY), HAVING |
 | `TableExpr` | Something with a schema | FROM, JOIN, WITH |
 | `SelectItems` | List of (expression, alias) pairs | SELECT clause |
-| `Column<T>` | Column reference of type T | Anywhere Expr<T> is valid |
 | `OrderSpec` | Expression + direction | ORDER BY |
 
 These sorts ensure structural well-formedness: you cannot splice a `TableExpr` into a WHERE clause, or an `Expr<Boolean>` into a FROM clause. The compiler checks sort-correctness at each composition point.
 
-`Column<T>` accepts only bare column references (`user_id`), not computed expressions (`LOWER(user_id)`). Use `Expr<T>` for computed values. This distinction has semantic weight when the parameter is spliced into `PARTITION BY` or `GROUP BY`.
+A bare column reference like `user_id` is a trivial `Expr<T>` -- there is no separate `Column<T>` sort. This keeps the sort system minimal. If a function parameter is spliced into `PARTITION BY` or `GROUP BY`, the author documents the expectation via naming and comments, not via the type system. (A `Column<T>` subtype could be reintroduced later if experience shows the distinction is valuable, but the simpler model is the right starting point.)
 
 A `Predicate` sort was considered and rejected. Use `Expr<Boolean>` instead -- the positional constraint (WHERE, ON, HAVING) is already enforced by SQL syntax, and one fewer concept to learn is worth more than one more sort.
 
-The initial implementation targets a subset: `Expr<T>`, `TableExpr`, and `Column<T>`. The remaining sorts (`AggExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions.
+The initial implementation targets a subset: `Expr<T>` and `TableExpr`. The remaining sorts (`AggExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions.
 
 ### Comparison: Malloy
 
@@ -88,8 +87,8 @@ FROM smelt.ref('product_summary')
 ```sql
 smelt.define sessionize(
     source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
+    user_col: Expr<Text>,
+    ts_col: Expr<Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes'
 ) -> TableExpr AS (
     SELECT source.*,
@@ -268,23 +267,31 @@ The planner can reason *around* black box functions (push a filter below a black
 
 ## 6. Context Bindings -- Controlling What Callers Can See
 
-When a function takes a fragment-typed parameter that contains column references, a natural question arises: which columns can it reference? The answer is **context bindings** -- optional annotations that declare which table context a fragment's columns resolve against.
+When a function takes a fragment-typed parameter that contains column references, a natural question arises: which columns can it reference? The answer is **context bindings** -- annotations that declare which table context a fragment's columns resolve against.
 
 Any fragment sort that can contain column references may declare a context:
 
 | Sort | With context binding | Meaning |
 |------|---------------------|---------|
-| `Column<T>` | `Column<source, T>` | A column from `source` of SQL type T |
 | `Expr<T>` | `Expr<T, source>` | Scalar expression whose columns come from `source` |
 | `SelectItems` | `SelectItems<Agg, sessionized>` | Aggregate select items over `sessionized` columns |
 | `OrderSpec` | `OrderSpec<enriched>` | Ordering expression over `enriched` columns |
 
-The parameterization convention differs by sort: `Expr<SqlType, Context?>`, `Column<Context?, SqlType?>`, `SelectItems<Kind?, Context?>`, `OrderSpec<Context?>`. The compiler disambiguates context names from type names by checking whether the identifier refers to a `TableExpr` parameter or CTE in scope; if it does, it is a context binding, otherwise it is a type. `Column<source>` means "a column from `source`, any type"; `Column<Integer>` means "an integer column, any context"; `Column<source, Integer>` means both.
+The parameterization convention: `Expr<SqlType, Context?>`, `SelectItems<Kind?, Context?>`, `OrderSpec<Context?>`. The compiler disambiguates context names from type names by checking whether the identifier refers to a `TableExpr` parameter or CTE in scope; if it does, it is a context binding, otherwise it is a type.
 
 A context can be:
-1. **A `TableExpr` parameter** -- e.g., `Column<source>` where `source` is a parameter
+1. **A `TableExpr` parameter** -- e.g., `Expr<Integer, source>` where `source` is a parameter
 2. **A CTE defined in the function body** -- e.g., `SelectItems<Agg, sessionized>` where `sessionized` is a `WITH` clause
-3. **A union of contexts** -- e.g., `Expr<Boolean, source | customers>` for fragments referencing columns from multiple tables
+
+### Context Inference from Splice Points
+
+Context bindings are **optional annotations, not required declarations.** The compiler infers a parameter's context from where it is spliced in the function body. If `filters` appears in `WHERE filters` and the `WHERE` applies to a `FROM source` clause, the compiler infers that `filters` has context `source`.
+
+Explicit context annotations serve two purposes:
+1. **Documentation** -- making the contract visible in the signature
+2. **Validation** -- the compiler checks the annotation matches the inferred context
+
+Explicit annotations are **required** when a parameter is used in multiple scopes (e.g., spliced into two different CTEs with different schemas). In this case the compiler cannot infer a single context, and the annotation disambiguates.
 
 ### The Key Insight: Asymmetric Access Control
 
@@ -293,11 +300,11 @@ Consider `session_rollup`:
 ```sql
 smelt.define session_rollup(
     source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
+    user_col: Expr<Text>,
+    ts_col: Expr<Timestamp>,
     gap: Expr<Interval> = INTERVAL '30 minutes',
     metrics: SelectItems<Agg, sessionized> = (),
-    filters: Expr<Boolean, source> = TRUE
+    filters: Expr<Boolean> = TRUE
 ) -> TableExpr @deterministic AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
@@ -313,7 +320,9 @@ smelt.define session_rollup(
 )
 ```
 
-`metrics` binds to `sessionized` (the caller can reference `session_id` in their aggregate expressions), while `filters` binds to `source` (the author restricts filtering to raw source columns only). **The author controls what each caller-provided fragment can see.** This is capability-based access control applied to SQL column namespaces: the function author grants each parameter access to specific table contexts. Narrowing the context is how authors prevent callers from depending on internal implementation details.
+The compiler infers that `metrics` has context `sessionized` (spliced into `SELECT ... FROM sessionized`) and `filters` has context `source` (spliced into `WHERE` on the outer query, which scans `sessionized` -- but `sessionized` is derived from `source`). The `metrics` annotation is explicit here because the caller needs to know they can reference `session_id` in their aggregate expressions. The `filters` annotation is omitted -- the compiler infers it from the splice point.
+
+**The author controls what each caller-provided fragment can see.** This is capability-based access control applied to SQL column namespaces. Narrowing the context prevents callers from depending on internal implementation details.
 
 ### CTE-Derived Contexts
 
@@ -321,51 +330,84 @@ CTE context is computed, not declared. The author references a CTE by name in th
 
 Computing the output schema of a CTE uses the same schema inference the type system already performs for models and function calls. The incremental work is wiring CTE schema computation into the context binding checker, not building a new analysis from scratch.
 
-### Union Contexts for Joins
+### The No-Overlap Rule (Replaces Union Contexts)
 
-When a function joins multiple tables, the author can expose a union context:
+An earlier design allowed union contexts (`Expr<Boolean, source | customers>`) for parameters that reference columns from multiple joined tables. This was rejected because it reintroduces the join ambiguity problem that SQL already struggles with -- two tables with an `id` column require complex disambiguation rules.
+
+Instead, **parameter contexts must have unique column names.** When a function joins multiple tables, the author has three strategies for exposing columns to caller-provided fragments:
+
+**Strategy 1: Explicit SELECT into a CTE.** Create a CTE with the specific columns the caller needs, aliased to avoid collisions:
 
 ```sql
 smelt.define enrich_order(
     source: TableExpr,
-    customer_id_col: Column<source, Integer>,
-    product_id_col: Column<source, Integer>,
-    extra_cols: SelectItems<source | customers | products> = ()
+    customer_id_col: Expr<Integer>,
+    product_id_col: Expr<Integer>,
+    extra_cols: SelectItems<enriched> = ()
 ) -> TableExpr AS (
     WITH
         customers AS (SELECT * FROM smelt.ref('dim_customers')),
-        products AS (SELECT * FROM smelt.ref('dim_products'))
-    SELECT
-        source.*,
-        c.segment AS customer_segment,
-        c.country AS customer_country,
-        p.category AS product_category,
-        extra_cols
-    FROM source
-    LEFT JOIN customers c ON customer_id_col = c.customer_id
-    LEFT JOIN products p ON product_id_col = p.product_id
+        products AS (SELECT * FROM smelt.ref('dim_products')),
+        enriched AS (
+            SELECT
+                source.*,
+                c.segment AS customer_segment,
+                c.country AS customer_country,
+                p.category AS product_category
+            FROM source
+            LEFT JOIN customers c ON customer_id_col = c.customer_id
+            LEFT JOIN products p ON product_id_col = p.product_id
+        )
+    SELECT enriched.*, extra_cols
+    FROM enriched
 )
 ```
 
-Ambiguous column names (present in multiple contexts) require qualification -- the same rule as standard SQL.
+The caller's `extra_cols` fragment sees the `enriched` CTE's flattened, unambiguous schema.
 
-### Open Edge Cases
+**Strategy 2: Typed TableExpr parameter.** Require the caller to pass a pre-joined or pre-selected table:
 
-Union context disambiguation needs further specification. When both `a` and `b` have an `id` column, does the caller write `a.id`? The natural answer is parameter-name qualification, but the rules for parameter-CTE unions need to be made explicit.
+```sql
+smelt.define summarize(
+    source: TableExpr<{region: Text, amount: Numeric, ..}>
+) -> TableExpr AS (...)
+```
+
+**Strategy 3: `smelt.as_struct()` for compile-time namespacing.** When multiple tables need to be accessible without column name collisions, wrap each table's columns into a struct:
+
+```sql
+smelt.as_struct(source EXCEPT customer_id, product_id)
+-- produces: STRUCT(col1, col2, ...) excluding the join keys
+```
+
+`smelt.as_struct()` is a **compile-time construct** with zero runtime cost -- the compiler knows the concrete struct fields at expansion time and generates explicit field references. This provides SQL-safe namespacing (`source_struct.revenue`, `customer_struct.segment`) without runtime struct creation overhead.
+
+### Remaining Edge Cases
 
 CTE context checking is partially call-site-dependent: `SelectItems<Agg, sessionized>` can be structurally checked (is it a select list of aggregates?) at definition time, but column-name validation requires knowing the call-site schema when the CTE includes `source.*`.
 
-Context bindings are **always optional.** Without them, column resolution happens at expansion time (Tier 1 behavior). Authors add them to shift checking earlier and give callers better errors.
-
-## 7. Hybrid Scoping -- Lexical Parameters + Structural Column Resolution
+## 7. Parameters-First Scoping
 
 When a function body says `user_col`, does it mean the parameter or a literal column named `user_col`?
 
-The scoping model has two layers, reflecting the fact that SQL fragments inherently reference columns from table contexts:
+### Resolution Order
 
-**Layer 1 -- Lexical scoping for parameters.** Function parameters are explicit bindings. Inside a function body, `user_col` refers to whatever column the caller passed -- not a literal column in any ambient table. The compiler substitutes the actual column reference during expansion. This is **hygienic expansion** (Kohlbecker et al., 1986) -- like Rust macros, not C preprocessor macros.
+Bare names in a function body resolve in this order:
 
-**Layer 2 -- Structural column resolution within table contexts.** Bare column names in SQL expressions resolve against the schemas of `TableExpr` parameters in scope. This is unavoidable -- SQL is structurally scoped against its FROM clause:
+1. **Parameters first.** If `user_col` is a parameter name, it refers to the parameter -- always.
+2. **SQL FROM scope second.** If no parameter matches, the name resolves against the schemas of `TableExpr` parameters in scope (standard SQL column resolution).
+
+This is a deliberate departure from pure SQL scoping, where all bare names resolve against FROM. Parameters take priority because they are the function's explicit interface -- the author chose the name, and the caller bound a value to it. Letting a table column silently shadow a parameter would be a source of subtle bugs.
+
+### Shadow Warnings
+
+When a parameter name collides with a column from a `TableExpr` in scope, the compiler emits a **warning** (not an error). The parameter still wins, but the author is alerted that a column is being shadowed. This catches the common case where a function names a parameter `user_id` and the source table also has a `user_id` column -- after expansion, the parameter's bound value is spliced in, and the table column is inaccessible by that name.
+
+To access the shadowed column, the author qualifies it: `source.user_id`.
+
+### Bare Columns from TableExpr
+
+Bare column references from `TableExpr` parameters are allowed when **unambiguous** -- consistent with the no-overlap rule (§6). If only one `TableExpr` in scope has a column named `revenue`, the bare reference `revenue` resolves to it:
 
 ```sql
 smelt.define add_margin(source: TableExpr) -> TableExpr AS (
@@ -375,6 +417,8 @@ smelt.define add_margin(source: TableExpr) -> TableExpr AS (
 ```
 
 Here `revenue` and `cost` are not parameters -- they resolve from whatever schema `source` carries. This is **row polymorphism** (Remy, 1994; OCaml object types; PureScript row types): the function body is polymorphic over any table that has columns named `revenue` and `cost` of compatible types.
+
+Qualification is required only when a bare column name overlaps with a parameter name (in which case the parameter wins by default, and `source.column_name` accesses the column).
 
 Column requirements can be declared explicitly:
 
@@ -389,9 +433,7 @@ smelt.define add_margin(
 
 With the annotation, the compiler checks requirements at the call site before expansion -- the caller gets "table passed to `source` is missing required column `revenue: Numeric`" rather than a post-expansion SQL error. Adding `..r` (`TableExpr<{revenue: Numeric, cost: Numeric, ..r}>`) further allows threading the caller's extra columns through to the return type.
 
-**The honest description:** "Parameters are lexically scoped; column resolution within table-typed parameters is structural (schema-checked but not name-bound). Annotations make the structural requirements explicit."
-
-**Why hybrid rather than pure lexical:** Functions are self-contained (readable without knowing the call site). The compiler can check bodies in isolation (when annotated). No surprises from ambient column names shadowing parameters. And the structural part is SQL-native for the parts that are inherently SQL. The two-layer model is more complex to explain than "everything is lexical," but it matches how SQL actually works.
+**The honest description:** "Parameters resolve first; bare column names resolve against SQL FROM scope when no parameter matches. Annotations make structural column requirements explicit. Shadow warnings catch collisions."
 
 ## 8. Gradual Typing -- Three Tiers of Annotation
 
@@ -534,7 +576,7 @@ The algorithm guarantees:
 
 ## 10. Block Syntax -- Ergonomic Fragment Passing
 
-Passing multi-line SQL fragments as inline function arguments is syntactically awkward. Block syntax provides named `WITH ... AS (...)` clauses trailing a function call:
+Passing multi-line SQL fragments as inline function arguments is syntactically awkward. Block syntax uses the `PASSING` keyword with named `name AS (...)` clauses trailing a function call:
 
 ```sql
 SELECT * FROM smelt.fn.session_rollup(
@@ -543,17 +585,17 @@ SELECT * FROM smelt.fn.session_rollup(
     ts_col => event_timestamp,
     gap => INTERVAL '20 minutes'
 )
-WITH metrics AS (
+PASSING metrics AS (
     SUM(revenue) AS total_revenue,
     COUNT(DISTINCT page_url) AS unique_pages,
     smelt.fn.safe_divide(SUM(revenue), COUNT(*)) AS revenue_per_event
 )
-WITH filters AS (
+PASSING filters AS (
     event_type != 'bot' AND user_id IS NOT NULL
 )
 ```
 
-Each `WITH name AS (...)` clause binds a fragment-typed parameter by name. The compiler treats it identically to inline arguments. The syntax reuses SQL's existing `WITH ... AS (...)` shape -- no significant whitespace, no nested mini-grammar, and the parser already knows how to handle parenthesized expressions after `AS`. Block clauses must trail the function call's closing `)` directly.
+Each `PASSING name AS (...)` clause binds a fragment-typed parameter by name. The compiler treats it identically to inline arguments. `PASSING` is borrowed from SQL/XML (`XMLTABLE ... PASSING ...`), where it serves the same purpose: binding values into a parameterized context. Using a distinct keyword avoids the CTE collision problem -- `WITH name AS (...)` would be ambiguous with SQL's CTE syntax. Block clauses must trail the function call's closing `)` directly.
 
 ### Blocks Compose
 
@@ -562,14 +604,14 @@ A function can receive blocks from its caller and pass them through:
 ```sql
 smelt.define monitored_session_rollup(
     source: TableExpr,
-    user_col: Column<source>,
-    ts_col: Column<source, Timestamp>,
+    user_col: Expr<Text>,
+    ts_col: Expr<Timestamp>,
     metrics: SelectItems<Agg> = (),
     alerts: SelectItems<Agg, base> = ()
 ) -> TableExpr AS (
     WITH base AS (
         smelt.fn.session_rollup(source, user_col, ts_col)
-        WITH metrics AS (metrics)
+        PASSING metrics AS (metrics)
     )
     SELECT base.*,
         alerts
@@ -584,11 +626,11 @@ Block syntax introduces a second grammar layer at the call site. This has worked
 - Error recovery inside blocks requires nested parsing contexts (SQL -> function call -> block -> SQL inside block).
 - LSP contextual completion inside blocks depends on partial expansion -- one of the hardest LSP problems.
 
-The choice to reuse SQL's existing `WITH ... AS (...)` shape mitigates parser complexity vs. inventing a wholly new block syntax. Named parameters with parenthesized fragments (the "ugly" version from the examples) remain available as the fallback -- blocks are pure sugar.
+Using `PASSING` instead of `WITH` eliminates the CTE ambiguity entirely -- the parser can distinguish `PASSING` from `WITH` without knowing the function's parameter names, which means the parser operates independently of the type checker. Named parameters with parenthesized fragments (the "ugly" version from the examples) remain available as the fallback -- blocks are pure sugar.
 
 ## 11. Row Polymorphism for Struct Values
 
-The hybrid scoping model (section 7) handles row polymorphism for `TableExpr` parameters -- "this function works on any table with at least columns X, Y." But struct-typed columns (DuckDB, Spark, BigQuery) face the same brittleness problem at the *value* level: if struct parameters are closed, adding a field to the struct breaks every function that accepts it.
+The parameters-first scoping model (section 7) handles row polymorphism for `TableExpr` parameters -- "this function works on any table with at least columns X, Y." But struct-typed columns (DuckDB, Spark, BigQuery) face the same brittleness problem at the *value* level: if struct parameters are closed, adding a field to the struct breaks every function that accepts it.
 
 | | `TableExpr` | `Expr<Struct<{...}>>` |
 |---|---|---|
@@ -840,12 +882,12 @@ SELECT * FROM smelt.fn.session_rollup(
     ts_col => event_timestamp,
     gap => INTERVAL '20 minutes'
 )
-WITH metrics AS (
+PASSING metrics AS (
     SUM(revenue) AS total_revenue,
     COUNT(DISTINCT page_url) AS unique_pages,
     smelt.fn.safe_divide(SUM(revenue), COUNT(*)) AS revenue_per_event
 )
-WITH filters AS (
+PASSING filters AS (
     event_type != 'bot' AND user_id IS NOT NULL
 )
 ```
@@ -931,7 +973,53 @@ Even at maximum ambition, some things remain outside scope:
 
 These limitations are deliberate. The Jinja use cases that hit them are exactly the ones that produce unmaintainable code.
 
-## 16. Comparisons and Theoretical Foundations
+## 16. Design Decisions (April 18, 2026)
+
+The following decisions resolve open questions from earlier drafts. Each is applied throughout the paper; this section documents the rationale in one place.
+
+### 1. Parameters-first scoping (§7)
+
+Bare names in a function body resolve to parameters first, then SQL FROM scope. Shadow warning on collisions.
+
+**Rationale:** The earlier "hybrid scoping" model said parameters were lexical and columns were structural, but left the priority ambiguous during Tier 2 body checking. Parameters-first is the unambiguous rule: the author chose the parameter name, so it wins. The shadow warning catches the common footgun where a parameter name accidentally matches a column. Qualification (`source.column_name`) provides the escape hatch.
+
+### 2. Column\<T\> dropped — use Expr\<T\> everywhere (§2)
+
+A bare column reference like `user_id` is a trivial `Expr<T>`. There is no separate `Column<T>` sort.
+
+**Rationale:** The distinction between "bare column reference" and "scalar expression" added complexity without proportional value. `Column<T>` existed to prevent computed expressions in `PARTITION BY` / `GROUP BY` positions, but SQL handles this fine — the engine reports an error if needed. One fewer sort means one fewer concept for function authors to learn. `Column<T>` can be reintroduced as a subtype of `Expr<T>` later if experience shows the distinction is valuable.
+
+### 3. PASSING keyword for block syntax (§10)
+
+Block syntax uses `PASSING name AS (...)` instead of `WITH name AS (...)` or curly braces.
+
+**Rationale:** `WITH` collides with SQL's CTE syntax — a function call followed by `WITH` was ambiguous, requiring the parser to know function parameter names (coupling parser to type checker). `PASSING` is unambiguous (the parser distinguishes it without function metadata), has SQL/XML precedent (`XMLTABLE ... PASSING ...`), and reads naturally: "call this function, passing these fragments as parameters." Curly braces were rejected as too foreign to SQL.
+
+### 4. No-overlap rule replaces union contexts (§6)
+
+Parameter contexts must have unique column names. Union contexts (`Expr<Boolean, source | customers>`) are removed.
+
+**Rationale:** Union contexts reintroduced SQL's join ambiguity problem — two tables with an `id` column required complex disambiguation rules that were never fully specified. The no-overlap rule eliminates this by construction. When multiple tables need to be accessible, authors use one of three strategies: (1) explicit SELECT into a CTE with unambiguous aliases, (2) typed `TableExpr` parameter requiring the caller to pre-join, or (3) `smelt.as_struct(alias EXCEPT ...)` for compile-time struct namespacing with zero runtime cost.
+
+### 5. Context inference from splice points (§6)
+
+The compiler infers a parameter's context from where it is spliced in the function body. Explicit context annotations are optional (for documentation and validation), required only when a parameter is used in multiple scopes.
+
+**Rationale:** Requiring explicit context annotations on every fragment parameter would be a significant annotation burden with diminishing returns — most parameters are used in exactly one place. Inference from the splice point gives the compiler the same information automatically. Explicit annotations remain available for documentation and for the case where a parameter appears in multiple scopes (where inference is ambiguous).
+
+### 6. Multiple defines per file; smelt.metric() out of scope (§3)
+
+A `.sql` file may contain multiple `smelt.define` definitions. `smelt.metric()` is independent from functions and not addressed by this design.
+
+**Rationale:** Multiple defines per file is consistent with how models already work — a file is a compilation unit, not a one-definition container. `smelt.metric()` doesn't work today and has different design constraints (it's a semantic layer concept, not a composition mechanism); conflating the two would complicate both designs.
+
+### 7. Bare columns from TableExpr allowed when unambiguous (§7)
+
+Bare column references from `TableExpr` parameters resolve through standard SQL column resolution when no parameter name matches. Qualification is required only when a bare column name overlaps with a parameter name.
+
+**Rationale:** Consistent with the no-overlap rule (§6) and parameters-first scoping. SQL developers expect bare column names to work — requiring qualification everywhere would be hostile. The parameters-first rule means parameters shadow columns, and the shadow warning catches accidental collisions. Qualification is the author's escape hatch, not a default burden.
+
+## 17. Comparisons and Theoretical Foundations
 
 ### Comparison Table
 
@@ -965,7 +1053,7 @@ The design draws from several established PL techniques:
 
 ### Historical Precedents Worth Studying
 
-- **SML Functors / OCaml modules** -- Parameterized modules that produce types based on input types. `Column<source, T>` is a simplified version.
+- **SML Functors / OCaml modules** -- Parameterized modules that produce types based on input types. Context bindings like `Expr<T, source>` are a simplified version.
 - **Scala's path-dependent types** -- `source.Column` where the type depends on a specific value. Context bindings are more constrained, avoiding Scala's complexity.
 - **Template Haskell** -- Multi-stage compilation where generated code is type-checked after splicing. Tier 1 is exactly this. TH showed that error messages are the main usability challenge.
 - **Liquid types (Rondon et al., 2008)** -- Refinement types carrying logical predicates. The compiler-derived structural metadata is a domain-specific form.
@@ -973,11 +1061,11 @@ The design draws from several established PL techniques:
 - **Ermine (Kmett et al., 2008-2013)** -- A lazy, pure Haskell-like language with rank-N types, kind polymorphism, and row polymorphism, built at S&P Capital IQ for financial report generation. Reports are specified via relational algebra combinators that compile to SQL. Production validation that row-polymorphic types over relational data work at scale. Notably, Ermine shipped without row constraints -- structural matching by field name/type was sufficient for a decade of financial reporting. The type AST includes `Loc` annotations for source positions, ensuring every type node carries its origin for precise error reporting.
 - **F# type system design** -- F# deliberately constrains its type inference (one-pass, left-to-right) to improve error message quality. The F# spec mandates that "implementations should attempt to preserve type abbreviations when reporting types and errors" -- errors say `UserId`, not `int`. The spec also restricts type variable constraints specifically "to simplify type inference, reduce the size of types shown to users, and help ensure the reporting of useful error messages." This validates smelt's bidirectional checking choice: limiting inference power for error locality is a proven strategy.
 
-## 17. Open Questions
+## 18. Open Questions
 
 ### Specification to Tighten
 
-- **Union context disambiguation.** For `Column<a | b, Integer>` when both have an `id` column, does the caller write `a.id`? Parameter-name qualification is the natural answer but needs explicit specification, including parameter-CTE union cases.
+- ~~**Union context disambiguation.**~~ **Resolved (April 18, 2026):** Union contexts replaced by no-overlap rule. See §6.
 - **CTE context checking boundary.** `SelectItems<Agg, sessionized>` can be structurally checked at definition time, but column-name validation is call-site-dependent when the CTE includes `source.*`. The split needs clear documentation.
 - **`AggExpr<T>` -- keep or collapse into `Expr<T>`?** Same argument as the Predicate removal: aggregation context is enforced by SQL syntax. Counter-argument: "this parameter expects an aggregate" is a common source of confusion. Deferred to implementation -- not in MVP scope either way.
 
@@ -997,13 +1085,13 @@ The design draws from several established PL techniques:
 - **Parameterized model syntax.** How does a caller override a model's DAG-default refs? Syntax for call-site binding of model parameters needs specification. Related: how does this interact with the scheduler (a parameterized model may produce multiple outputs)?
 - **Python models in the unified view.** Python models are currently opaque `TableExpr` producers. Under the unified model, they are black box materialized functions with no inspectable body and a schema inferred from execution. Does `smelt.extern` cover this, or does Python model integration need its own declaration mechanism?
 
-## 18. Experimentation Roadmap -- What We Learn at Each Step
+## 19. Experimentation Roadmap -- What We Learn at Each Step
 
 This is a research sequence, not a shipping plan. Each step teaches something that informs the next.
 
 ### Step 1: Fragment Sorts + Expr<T> Functions
 
-**Build:** `smelt.define` for expression-level functions. `Expr<T>` and `Column<T>` sorts. Tier 1 checking (expand, check, trace errors back). The `safe_divide` example end-to-end.
+**Build:** `smelt.define` for expression-level functions. `Expr<T>` sort. Tier 1 checking (expand, check, trace errors back). The `safe_divide` example end-to-end.
 
 **What we learn:** Does the fragment sort concept work in practice? Does expansion + type checking produce errors good enough for Tier 1? Is the `smelt.define` / `smelt.fn.*` syntax natural?
 
@@ -1043,7 +1131,7 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 ### Step 6: Block Syntax
 
-**Build:** Trailing `WITH name AS (...)` clauses on function calls. Parser integration and error recovery.
+**Build:** Trailing `PASSING name AS (...)` clauses on function calls. Parser integration and error recovery.
 
 **What we learn:** Is the parser complexity manageable? Does the syntax actually improve readability over inline arguments? How does error recovery work inside blocks?
 
@@ -1077,7 +1165,7 @@ Step 1 -> Step 2 -> Step 3 -> Step 4 -> Step 5   (sequential: each builds on the
 
 Note: Step 2 introduces generics for the black box signature language. Step 5's bidirectional checker must integrate with these generics. Designing Step 2's generics with Step 5 in mind avoids rework.
 
-## 19. Expert Review Notes
+## 20. Expert Review Notes
 
 **Reviewer:** Claude (prompted as PL/compiler/SQL expert)
 **Date:** April 2026
@@ -1094,7 +1182,7 @@ The following observations are areas where the design is technically coherent bu
 
 ### B. Scoping Edge Cases
 
-**Name shadowing between parameters and columns.** If the caller passes `user_id` for the `user_col` parameter, and the table also has a literal column named `user_col`, there is no collision after expansion. But *during Tier 2 checking in isolation*, the checker sees `user_col` and must decide: parameter or column? Parameters win, but this means a function body cannot reference a column that shares a name with a parameter. This is a real footgun for `TableExpr` parameters with unknown schemas.
+**Name shadowing between parameters and columns.** *(Partially addressed — April 18, 2026: parameters-first resolution with shadow warnings. See §7. The parameter always wins; the compiler warns on collisions; authors qualify with `source.column_name` to access shadowed columns. The footgun remains for Tier 2 checking with unknown schemas, but the warning makes it visible.)*
 
 **Tier 1 + unannotated TableExpr is the worst-case error combination.** When the body says `revenue - cost` and the parameter is bare `source: TableExpr`, the checker cannot verify these columns exist without the call site. If the function is called from five models and one lacks `revenue`, the error fires inside expanded code and must be traced back -- possible but confusing. The paper should be explicit that this is the worst error experience the system produces.
 
@@ -1122,9 +1210,11 @@ Separately, upgrading a Tier 1 function to Tier 2 is a potentially breaking chan
 
 ### F. Block Syntax Ambiguity
 
-**WITH clause collision.** The block syntax reuses `WITH name AS (...)` trailing a function call. But SQL also has `WITH name AS (...) SELECT ...` (CTE syntax). If a function call is followed by a `WITH` clause, the parser must determine whether it is a block parameter or a SQL CTE. This makes parsing function-signature-dependent -- the parser needs to know the function's parameter names, which is unusual and means the parser cannot operate independently of the type checker.
+*(Substantially addressed — April 18, 2026: PASSING keyword replaces WITH. See §10.)*
 
-**Block composition is visually confusing.** `WITH metrics AS (metrics)` -- where the inner `metrics` is a parameter reference being passed through -- looks like a circular CTE definition. This is the Gradle/Groovy readability problem: block syntax DSLs are powerful but opaque to newcomers.
+**~~WITH clause collision.~~** Resolved by using `PASSING name AS (...)` instead of `WITH name AS (...)`. The `PASSING` keyword is unambiguous — the parser distinguishes it from SQL CTEs without needing to know the function's parameter names. The parser operates independently of the type checker.
+
+**Block composition is visually improved.** `PASSING metrics AS (metrics)` is still somewhat opaque (a parameter reference being passed through), but no longer looks like a circular CTE definition. The `PASSING` keyword signals "binding values into a parameterized context" (following SQL/XML precedent).
 
 ### G. SQL Edge Cases
 
