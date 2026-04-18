@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776478793431,
+  "lastUpdate": 1776478795850,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -17930,6 +17930,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.06630295218104,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1a82efbb80eae2feb90fe111f1fb30fe7749fad1",
+          "message": "Merge pull request #107 from adbrowne/worktree-salsa-upgrade\n\nSalsa upgrade: 0.16 → 0.26",
+          "timestamp": "2026-04-18T11:47:32+09:30",
+          "tree_id": "80ef6ecb41e6f7377abac80cb9d1dcb19c3c7d49",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/1a82efbb80eae2feb90fe111f1fb30fe7749fad1"
+        },
+        "date": 1776478795264,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.854752094294586,
             "unit": "MB/s"
           }
         ]
