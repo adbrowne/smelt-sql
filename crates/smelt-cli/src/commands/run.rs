@@ -1034,5 +1034,15 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let total_duration: std::time::Duration = results.iter().map(|(r, _)| r.duration).sum();
     info!("Total time: {:?}", total_duration);
 
+    // Mirror a one-line summary to stderr unconditionally so users without
+    // `RUST_LOG` configured see something on success. Previously the only
+    // visible output was an empty stdout — making it indistinguishable from
+    // "did nothing", "hung", or "succeeded".
+    eprintln!(
+        "smelt: built {} model(s) in {:.2}s",
+        results.len(),
+        total_duration.as_secs_f64(),
+    );
+
     Ok(())
 }
