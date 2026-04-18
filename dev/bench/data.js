@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776516360801,
+  "lastUpdate": 1776516363047,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18299,6 +18299,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.927035948764292,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "28ed17bff94d0e52c968c69e57cd84aa5b4c4404",
+          "message": "Bump version to 0.3.1\n\nStable release. Validated v0.3.1-rc1 wheel in clean-room install:\nsmelt build of examples/smelt_shop_min was idempotent (bug #1),\nseeds resolved via smelt.ref (bug #2), and aggregate types stayed\nDOUBLE with values matching expected sums (bug #3).\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-04-18T22:43:41+10:00",
+          "tree_id": "43adceb5cac57d34ff5d448ac11facea64e59780",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/28ed17bff94d0e52c968c69e57cd84aa5b4c4404"
+        },
+        "date": 1776516362314,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.16105700954532,
             "unit": "MB/s"
           }
         ]
