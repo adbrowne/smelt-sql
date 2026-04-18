@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776506380757,
+  "lastUpdate": 1776506383347,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18176,6 +18176,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.012701090634202,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "61178b2f9f2be23230aeb15ab5e08746223ee53f",
+          "message": "Bump version to 0.3.1-rc1\n\nPre-release candidate for 0.3.1. Pushing the v0.3.1-rc1 tag\npublishes to TestPyPI for clean-room validation; a subsequent\nv0.3.1 tag will publish to PyPI.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-04-18T19:57:18+10:00",
+          "tree_id": "f724b7d4035974601d7521c4c97fd3f8a94418e5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/61178b2f9f2be23230aeb15ab5e08746223ee53f"
+        },
+        "date": 1776506382601,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.927035948764292,
             "unit": "MB/s"
           }
         ]
