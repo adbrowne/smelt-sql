@@ -1317,3 +1317,49 @@ Once functions are shared, changing a function's body (even without changing its
 **Black box soundness depends on signature correctness.** For SQL built-ins, the signature registry can be validated against engine documentation or introspection. For `smelt.extern` UDFs, the declared signature is unverified -- if the user declares the wrong return type, downstream type checking is unsound. This is the same problem as planner annotation correctness (section E) but more pervasive, since every UDF call depends on it. Runtime schema validation (check actual output against declared type on first execution) could provide a safety net.
 
 **The signature language for generics is on the critical path.** Moving built-in typing from Step 8 to Step 2 means the generics design must be settled early. Getting generics wrong (too simple, too complex, or incompatible with bidirectional checking) has cascading effects on every subsequent step. The design should study TypeScript's approach to generic inference in function calls, which solves a similar problem (infer type parameters from argument types at call sites).
+
+## 21. Pre-Implementation Design Checklist
+
+*Added April 19, 2026. Items that need discussion/decision before creating an implementation plan. Check off items as they are resolved and add decisions to §16.*
+
+### Must resolve (blocks implementation)
+
+- [ ] **`smelt.define` grammar.** The paper shows examples but never gives a formal grammar. What tokens delimit a definition? How does the parser recover from errors mid-definition? Is `smelt.define` a statement or an expression? What's the interaction with frontmatter? How are multiple definitions in one file separated?
+
+- [ ] **Expansion mechanics.** Textual substitution or AST-level rewriting? AST-level preserves source positions for error tracing but is harder to implement. Textual is simpler but makes Tier 1 error mapping fragile. This is the biggest architectural fork — it determines the shape of the compiler pipeline.
+
+- [ ] **Tier 1 error tracing.** The paper commits to mapping errors back through expansion with parameter bindings shown. That requires source map infrastructure. What data structure tracks the expansion? How deep does the trace go for nested calls (A calls B calls C)? What's the minimum viable version for Step 1?
+
+### Must resolve (blocks Step 2 — built-in typing)
+
+- [ ] **`Ordered` constraint specification.** The numeric tower (§16 decision 9) deferred `Ordered`. It's needed for MIN/MAX/GREATEST/LEAST — which types satisfy it? Presumably `Numeric + Text + Date + Timestamp + Time`. Needs to be enumerated.
+
+- [ ] **Generics syntax and inference.** `MIN<T: Ordered>(T) → T` and `COALESCE<T>(T, T, ...) → T` need a concrete syntax for declaring type parameters on black box signatures. How does the checker infer `T` at call sites? How does this interact with the LUB computation for multi-argument functions?
+
+- [ ] **Variadics.** `COALESCE`, `CONCAT`, `GREATEST` accept arbitrary arity. Does the signature language need `Expr<T>...`? Or can fixed-arity overloads cover the common cases? The paper deferred variadic *user* functions (§3) but built-ins need them.
+
+### Must resolve (blocks Step 3 — TableExpr functions)
+
+- [ ] **Tier interaction: Tier 2 calling Tier 1.** A Tier 2 function (parameters annotated, body checked in isolation) calls a Tier 1 function (unannotated). What's the return type of the Tier 1 call during isolation checking? Options: (a) treat as unknown/Any, (b) refuse the call, (c) require callees to be at least the caller's tier. See §20D.
+
+### Should resolve (reduces risk)
+
+- [ ] **`smelt.extern` full syntax.** Shown once in §5. Where do declarations live? Same file as models? Separate directory? Can they go in `functions/`? What about engine-specific overloads (the `@backends` annotation)?
+
+- [ ] **`smelt.as_struct()` semantics.** Introduced as a no-overlap strategy (§6) but barely specified. What's the full syntax? What does EXCEPT do with nested structs? What does the compiled output look like per backend? Is this v1 or deferred?
+
+- [ ] **PASSING keyword parsing details.** Is `PASSING` a reserved keyword everywhere, or context-sensitive (only after `)` in a function call)? Could it conflict with existing SQL in model bodies? Precedent: SQL/XML reserves it but few analytics queries use it.
+
+- [ ] **Default value expansion for fragment sorts.** `= ()` for SelectItems, `= TRUE` for predicates — what does the expansion look like when the default is used vs. when an argument is provided? Are defaults expanded at the call site or in the function body?
+
+- [ ] **Dialect differences in function bodies.** §20G flags this: `INTERVAL '30 minutes'` is DuckDB syntax, not Spark. Are function bodies engine-agnostic (written in smelt's canonical SQL, translated by the dialect printer)? Or dialect-tagged (function declares which engine it targets)? This connects to the `@backends` portability model.
+
+### Can defer (resolve during implementation)
+
+- [ ] **CTE forward reference / cycle detection.** `metrics: SelectItems<Agg, sessionized>` references a CTE defined later in the body. The compiler must handle forward references without creating cycles in its own analysis. Solvable but needs care.
+
+- [ ] **Function file discovery.** Definitions can live alongside models in any `.sql` file. The parser must scan every `.sql` file for `smelt.define`. How does this interact with the directory-derived namespace convention for functions defined outside `functions/`?
+
+- [ ] **`AggExpr<T>` — keep or collapse?** §18 flags this. Same argument as the Predicate removal: aggregation context is enforced by SQL syntax. Counter-argument: the linear subtyping chain (§16 decision 8) gives AggExpr a clear role. Probably keep, but can decide during implementation.
+
+- [ ] **Upgrade path: Tier 1 → Tier 2 breaking changes.** Adding parameter types to a Tier 1 function may reject arguments that previously worked. This is the TypeScript `--strict` problem at the function level. Needs a migration story but not blocking for v1.
