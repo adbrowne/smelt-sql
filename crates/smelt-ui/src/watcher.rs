@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, notify, DebouncedEventKind};
 use smelt_core::discovery::ModelDiscovery;
 use smelt_core::graph::DependencyGraph;
-use smelt_db::Inputs;
+use smelt_db::SourceFile;
 
 use crate::server::{AppState, ChangeEvent};
 
@@ -113,14 +113,12 @@ async fn refresh_state(state: &AppState, project_dir: &Path, model_paths: &[Stri
     // Update Salsa database
     {
         let mut db = state.db.lock().await;
-        let mut file_paths = Vec::with_capacity(models.len());
+        let mut source_files: Vec<SourceFile> = Vec::with_capacity(models.len());
         for model in &models {
             let content = std::fs::read_to_string(&model.path).unwrap_or_default();
-            db.set_file_text(model.path.clone(), Arc::new(content));
-            db.set_file_project_root(model.path.clone(), project_dir.to_path_buf());
-            file_paths.push(model.path.clone());
+            let sf = db.set_source_file(model.path.clone(), content, project_dir.to_path_buf());
+            source_files.push(sf);
         }
-        db.set_all_files(Arc::new(file_paths));
 
         // Re-read sources.yml
         let sources_yaml = smelt_core::find_config_file(project_dir, "sources")
@@ -128,7 +126,8 @@ async fn refresh_state(state: &AppState, project_dir: &Path, model_paths: &[Stri
             .flatten()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default();
-        db.set_project_sources_yaml(project_dir.to_path_buf(), Arc::new(sources_yaml));
+        let project = db.set_project_input(project_dir.to_path_buf(), sources_yaml);
+        db.set_workspace(source_files, vec![project]);
     }
 
     // Rebuild dependency graph

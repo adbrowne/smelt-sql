@@ -5,7 +5,7 @@ use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
 use smelt_core::SourcesConfig;
-use smelt_db::{ColumnSource, DiagnosticSeverity, Semantic, TypeChecking};
+use smelt_db::{ColumnSource, DiagnosticSeverity};
 
 use crate::types::*;
 
@@ -105,14 +105,20 @@ pub fn build_model_details(
 ) -> HashMap<String, ModelDetailResponse> {
     let mut model_details: HashMap<String, ModelDetailResponse> = HashMap::new();
 
+    let ws = smelt_db::Workspace::try_get(db);
+
     for (name, model) in graph.iter_models() {
         let metadata = model.metadata.as_deref();
         let tags = config.get_tags(name, metadata);
 
-        let schema = db.typed_model_schema(model.path.clone());
-        let function_type = {
-            let ft = db.model_function_type(model.path.clone());
-            Some(ft.to_string())
+        let file = db.source_file(&model.path);
+        let schema = match (ws, file) {
+            (Some(w), Some(f)) => smelt_db::typed_model_schema(db, w, f),
+            _ => std::sync::Arc::new(smelt_db::ModelSchema::empty()),
+        };
+        let function_type = match (ws, file) {
+            (Some(w), Some(f)) => Some(smelt_db::model_function_type(db, w, f).to_string()),
+            _ => None,
         };
         let columns: Vec<ColumnInfo> = schema
             .columns
@@ -205,7 +211,10 @@ pub fn build_model_details(
         });
 
         // Build diagnostics
-        let diags = db.file_diagnostics(model.path.clone());
+        let diags = match (ws, file) {
+            (Some(w), Some(f)) => smelt_db::file_diagnostics(db, w, f),
+            _ => Vec::new(),
+        };
         let diagnostics: Vec<DiagnosticInfo> = diags
             .iter()
             .map(|d| DiagnosticInfo {
@@ -513,8 +522,7 @@ mod tests {
     use smelt_core::discovery::ModelFile;
     use smelt_core::refs::RefInfo;
     use smelt_core::{SourceColumnDef, SourceDef, SourceTableDef};
-    use smelt_db::Inputs;
-    use std::sync::Arc;
+    use smelt_db::SourceFile;
 
     fn make_model(name: &str, deps: Vec<&str>) -> ModelFile {
         let refs = deps
@@ -677,16 +685,18 @@ mod tests {
 
         let mut db = smelt_db::Database::default();
         let project_root = std::path::PathBuf::from("/test");
-        db.set_project_sources_yaml(project_root.clone(), Arc::new(String::new()));
-        db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
+        let project = db.set_project_input(project_root.clone(), String::new());
 
-        let mut file_paths = Vec::new();
+        let mut source_files: Vec<SourceFile> = Vec::new();
         for model in &models {
-            db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
-            db.set_file_project_root(model.path.clone(), project_root.clone());
-            file_paths.push(model.path.clone());
+            let sf = db.set_source_file(
+                model.path.clone(),
+                model.content.clone(),
+                project_root.clone(),
+            );
+            source_files.push(sf);
         }
-        db.set_all_files(Arc::new(file_paths));
+        db.set_workspace(source_files, vec![project]);
 
         let details = build_model_details(&graph, &config, &db);
 
