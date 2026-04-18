@@ -759,11 +759,33 @@ Categories 1-3 are on the critical path -- the signature language for black box 
 - Dynamic `EXECUTE` / string-templated SQL
 - Untyped JSON navigation (`col->>'foo'`) -- typeable only as unconditional `Text`
 
-### Implementation: Signature Registry per Dialect
+### Implementation: One Canonical Registry, Not Per-Dialect (decided April 18, 2026)
 
-Each target engine provides a signature registry mapping function names to black box signatures. DuckDB's `SUM` returns `HUGEINT` for integer inputs; Spark's returns `BIGINT`. The registry captures these dialect differences. The checker consults the registry for the active target.
+Built-in SQL functions use a **single canonical signature registry** with backend compatibility expressed as a function property — not per-dialect registries.
 
-Open question: should the registry be a data file (JSON/TOML) or generated from engine introspection? A data file is simpler and version-controllable; introspection handles custom extensions but requires a live connection.
+**Three tiers of function portability:**
+
+| Tier | Description | Backend handling | Example |
+|------|-------------|-----------------|---------|
+| **1: Fully portable** | Identical semantics across backends; at most name/syntax differences | Backend translation layer remaps names and minor syntax (`EVERY` → `BOOL_AND` on DuckDB) | `COUNT`, `SUM`, `UPPER`, `COALESCE`, `ROW_NUMBER` |
+| **2: Portable with translation** | Same concept but argument conventions or format strings differ | Backend translation rewrites arguments, translates format strings | `STRING_AGG`/`LISTAGG`, `DATE_ADD`/`DATEADD`, JSON functions |
+| **3: Engine-specific** | Only exists on one backend, or semantics diverge too far | Namespaced — `duckdb.read_parquet()`, `spark.from_json()` — model is pinned to a backend | `read_parquet`, `explode_outer`, `list_transform` |
+
+**Canonical types enforced with CAST.** The canonical return type is always enforced via CAST in generated SQL. `SUM(Integer)` has canonical return type `BigInt`; on PostgreSQL (which natively returns `Decimal(38,0)`), the generated SQL is `CAST(SUM(col) AS BIGINT)`. This prevents backend-specific precision from silently leaking into downstream table schemas — critical for ETL where output schemas are a contract.
+
+**Backend namespace for native precision.** If a user wants the higher precision a specific backend offers, they use the backend namespace: `postgres.sum(col)` returns `Decimal(38,0)` with no enforced cast. This is an explicit opt-in to backend-specific behavior that marks the model as non-portable. The same namespace mechanism handles UDFs, which are inherently backend-specific.
+
+**`@backends` as a function property.** Backend compatibility uses the same `@annotation` system as `@deterministic` and `@idempotent`:
+
+```sql
+COALESCE(a, b)                    -- @deterministic @backends(all)
+MEDIAN(col)                       -- @deterministic @backends(duckdb, postgres)
+duckdb.read_parquet('*.parquet')  -- @backends(duckdb)
+```
+
+This means the planner can answer "can I move this model to Spark?" with the same query pattern as "is this model deterministic?" — check whether all functions have the required property. Diagnostics like "MEDIAN is not available on Spark" use the same machinery as other type errors.
+
+**Why not per-dialect registries:** A per-dialect registry would require models to be associated with a dialect to resolve function signatures, tying models to backends even when they use only portable functions. The canonical registry keeps models backend-agnostic by default — backend-specificity is an explicit choice (via namespace) that the planner can see and reason about.
 
 ## 14. Concrete Examples
 
@@ -971,7 +993,7 @@ The design draws from several established PL techniques:
 ### Unified Model
 
 - **`smelt.extern` interaction with gradual typing.** Black box functions are always fully annotated, but what about partial signatures? Can a UDF declaration omit the return type and have it inferred from engine introspection?
-- **Engine-specific overloads for black box signatures.** `SUM` returns `HUGEINT` in DuckDB but `DECIMAL` in Spark. Should the signature registry support per-dialect overloads, or normalize to a common supertype?
+- ~~**Engine-specific overloads for black box signatures.** `SUM` returns `HUGEINT` in DuckDB but `DECIMAL` in Spark. Should the signature registry support per-dialect overloads, or normalize to a common supertype?~~ **Resolved (April 18, 2026):** One canonical registry with canonical return types enforced via CAST. Backend-native precision available through backend namespace (`postgres.sum()`). See §13.
 - **Parameterized model syntax.** How does a caller override a model's DAG-default refs? Syntax for call-site binding of model parameters needs specification. Related: how does this interact with the scheduler (a parameterized model may produce multiple outputs)?
 - **Python models in the unified view.** Python models are currently opaque `TableExpr` producers. Under the unified model, they are black box materialized functions with no inspectable body and a schema inferred from execution. Does `smelt.extern` cover this, or does Python model integration need its own declaration mechanism?
 
@@ -989,11 +1011,11 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 ### Step 2: Black Box Signature Language + Built-in Function Typing
 
-**Build:** Signature registry for SQL built-ins (DuckDB first). The ~80% of built-ins with simple signatures (`Expr<T> -> Expr<T>`, `Expr<T> -> AggExpr<T>`). `smelt.extern` for user-declared black box functions. Generics/type parameters for the ~20% that need them (`COALESCE<T>`, `ARRAY_AGG<T>`).
+**Build:** Canonical signature registry for SQL built-ins (one registry, not per-dialect). The ~80% of built-ins with simple signatures (`Expr<T> -> Expr<T>`, `Expr<T> -> AggExpr<T>`). `smelt.extern` for user-declared black box functions. Generics/type parameters for the ~20% that need them (`COALESCE<T>`, `ARRAY_AGG<T>`). `@backends` annotations for portability tracking. Backend namespace (`duckdb.*`, `postgres.*`) for engine-specific functions and native-precision opt-in. CAST enforcement for canonical return types.
 
-**What we learn:** Can the fragment sort system extend to cover SQL built-ins? Does the signature language need variadics immediately, or can fixed-arity overloads suffice for MVP? Is the `smelt.extern` declaration natural for UDFs? What is the effort/value ratio of each signature language extension (generics, variadics, type-as-arguments)?
+**What we learn:** Can the fragment sort system extend to cover SQL built-ins? Does the signature language need variadics immediately, or can fixed-arity overloads suffice for MVP? Is the `smelt.extern` declaration natural for UDFs? What is the effort/value ratio of each signature language extension (generics, variadics, type-as-arguments)? Does the canonical-type-with-CAST approach produce correct schemas across backends? Is the backend namespace natural for opting into engine-specific behavior?
 
-**How it ladders:** This is mandatory infrastructure -- every subsequent step benefits from built-in type information flowing through the checker. Generics here also inform the Tier 2 bidirectional checker (Step 5). Black box functions are simpler than transparent functions (no expansion, no body analysis), so this is a good early test of the signature language before applying it to the harder transparent case.
+**How it ladders:** This is mandatory infrastructure -- every subsequent step benefits from built-in type information flowing through the checker. Generics here also inform the Tier 2 bidirectional checker (Step 5). Black box functions are simpler than transparent functions (no expansion, no body analysis), so this is a good early test of the signature language before applying it to the harder transparent case. The `@backends` property establishes the portability model that the planner needs for multi-backend execution.
 
 ### Step 3: TableExpr Functions + Row Polymorphism
 
