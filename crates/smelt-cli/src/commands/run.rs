@@ -3,10 +3,11 @@ use arrow::util::pretty;
 use chrono::{NaiveDate, Utc};
 use smelt_backend::PartitionSpec;
 use smelt_cli::{
-    compute_batches_for_model, compute_incremental_windows, discover_python_models, executor,
-    find_project_root, init_db, inject_time_filter, migration, parse_selector, BackendRegistry,
-    BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery,
-    PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig, TimeRange,
+    compiler::UpstreamSchemas, compute_batches_for_model, compute_incremental_windows,
+    discover_python_models, executor, find_project_root, init_db, inject_time_filter, migration,
+    parse_selector, BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph,
+    Materialization, ModelDiscovery, PhysicalGraphBuilder, PhysicalStrategy, SourcesConfig,
+    TimeRange,
 };
 use smelt_core::metadata::SchemaEvolutionStrategy;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -14,6 +15,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::{generate_run_id, ModelRunRecord, RunManifest, TimeRangeRecord};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
@@ -59,6 +61,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
         info!("Loaded {} source tables", source_count);
     }
 
+    // Discover seeds so they validate as `smelt.ref()` targets without a
+    // sources.yml workaround (bug #2 in the 20260417 follow-up plan).
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    if !seeds.is_empty() {
+        info!("Discovered {} seed(s) as ref targets", seeds.len());
+    }
+
     // 3. Discover models (SQL + Python)
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let mut models = discovery
@@ -102,14 +111,33 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     info!("Found {} models total", models.len());
 
-    // Report any parse errors
+    // Surface parse errors as a hard failure. Previously these were only
+    // warned via tracing — a `smelt run` against a workspace with a parse
+    // error would silently exit 0 if the user had no `RUST_LOG` filter set
+    // (bug #5 in the 20260417 follow-up plan). Failing early gives both
+    // dry-run and live runs the same fail-fast behaviour.
+    let mut parse_error_models: Vec<String> = Vec::new();
     for model in &models {
         if !model.parse_errors.is_empty() {
-            warn!("Parse errors in {}:", model.name);
+            parse_error_models.push(model.name.clone());
+            tracing::error!("Parse errors in {}:", model.name);
             for error in &model.parse_errors {
-                warn!("  - {} at {:?}", error.message, error.range);
+                tracing::error!("  - {} at {:?}", error.message, error.range);
+            }
+            // Mirror to stderr unconditionally so the user sees the failure
+            // even without RUST_LOG configured.
+            eprintln!("error: parse errors in model '{}':", model.name);
+            for error in &model.parse_errors {
+                eprintln!("  - {} at {:?}", error.message, error.range);
             }
         }
+    }
+    if !parse_error_models.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Parse errors in {} model(s): {}",
+            parse_error_models.len(),
+            parse_error_models.join(", "),
+        ));
     }
 
     // Validate materialization configs (e.g. ephemeral + incremental conflicts)
@@ -135,7 +163,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     // 4. Build logical graph (eagerly resolves config per model)
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, &args.target)
+    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
 
     graph
@@ -214,10 +242,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
             .join(" → ")
     );
 
-    if args.dry_run {
-        info!("[DRY RUN] Skipping execution");
-        return Ok(());
-    }
+    // (dry-run no longer returns here — it now runs through compilation so
+    // it can surface diagnostics and print the planned SQL per model. See
+    // the dry-run handler block further down before model execution.)
 
     // 6. Create backends for needed targets
     // Log cross-backend references (supported via Parquet exchange)
@@ -459,7 +486,69 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .cloned()
         .collect();
     let type_db = init_db(&project_dir, &all_models);
+
+    // Build upstream schemas (model + seed + source columns) once and share
+    // them across every compiler in the registry. Without this, the CLI's
+    // `apply_type_casts` would build an empty TypeContext and aggregates over
+    // `smelt.ref()` columns would silently narrow to BIGINT (bug #3).
+    let upstream_schemas = Arc::new(UpstreamSchemas::from_database(
+        &type_db,
+        &project_dir,
+        &all_models,
+    ));
+    compilers.set_upstream_schemas_all(upstream_schemas);
+
     let file_store = FileStore::new(&project_dir);
+
+    // --- Dry-run handler --------------------------------------------------
+    //
+    // Bug #5 in the 20260417 follow-up plan: `smelt run --dry-run` used to
+    // return early before this point and print nothing to stdout. With no
+    // `RUST_LOG` set the user got zero output and exit 0 — even when the
+    // equivalent live run would have failed at compilation time.
+    //
+    // Now dry-run runs through compilation for every model in the physical
+    // graph (using the same compiler registry the live run uses), prints a
+    // `Would run: <model>` header followed by the planned SQL to stdout, and
+    // exits non-zero on any compile error via `?`. Stdout (not tracing) is
+    // the contract — the user must see the plan without configuring a log
+    // filter.
+    if args.dry_run {
+        let selected_set: HashSet<&str> = execution_order.iter().map(|s| s.as_str()).collect();
+        let mut planned = 0usize;
+        for phys_node in physical_graph.iter_in_order().filter(|n| {
+            selected_set.contains(n.name.as_str())
+                || n.logical_origins
+                    .iter()
+                    .any(|o| selected_set.contains(o.as_str()))
+        }) {
+            let model_name = &phys_node.name;
+            let model = &phys_node.model_file;
+            let compiler = compilers.get(&phys_node.target);
+            let schema = &registry.target_config(&phys_node.target).schema;
+            let resolver = physical_graph.ephemeral_resolver(&phys_node.target);
+
+            let compiled = compiler
+                .compile_with_ephemerals(model, schema, resolver)
+                .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+            // Stdout, not tracing — dry-run output is part of the CLI
+            // contract and must be visible without a log-level env var.
+            println!(
+                "-- Would run: {} (target={}, materialization={:?})",
+                model_name, phys_node.target, compiled.materialization
+            );
+            println!("{}", compiled.sql.trim_end());
+            println!();
+            planned += 1;
+        }
+
+        info!(
+            "[DRY RUN] Compiled {} model(s); no execution performed.",
+            planned
+        );
+        return Ok(());
+    }
 
     info!("{}", "=".repeat(60));
     info!("Executing models...");
@@ -944,6 +1033,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     let total_duration: std::time::Duration = results.iter().map(|(r, _)| r.duration).sum();
     info!("Total time: {:?}", total_duration);
+
+    // Mirror a one-line summary to stderr unconditionally so users without
+    // `RUST_LOG` configured see something on success. Previously the only
+    // visible output was an empty stdout — making it indistinguishable from
+    // "did nothing", "hung", or "succeeded".
+    eprintln!(
+        "smelt: built {} model(s) in {:.2}s",
+        results.len(),
+        total_duration.as_secs_f64(),
+    );
 
     Ok(())
 }

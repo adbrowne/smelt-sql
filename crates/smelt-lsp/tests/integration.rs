@@ -4077,7 +4077,7 @@ fn apply_text_edits(text: &str, edits: &[smelt_db::code_actions::TextEditSuggest
             (start, end, &edit.new_text)
         })
         .collect();
-    edits_with_offsets.sort_by(|a, b| b.0.cmp(&a.0)); // reverse order
+    edits_with_offsets.sort_by_key(|e| std::cmp::Reverse(e.0)); // reverse order
 
     let mut result = text.to_string();
     for (start, end, new_text) in edits_with_offsets {

@@ -65,6 +65,7 @@ fn test_workspace_no_undefined_refs() {
     }
 
     let sources = SourcesConfig::load(&project_dir).ok();
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
 
     let default_target = config
         .targets
@@ -72,7 +73,8 @@ fn test_workspace_no_undefined_refs() {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target).unwrap();
+    let graph =
+        LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target).unwrap();
     graph.validate().expect(
         "All refs in test_workspace models should resolve.\n\
          If this fails, a model references an undefined model or source.",

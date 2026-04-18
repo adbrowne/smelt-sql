@@ -282,21 +282,41 @@ impl<'a> Lexer<'a> {
         // Consume opening quote
         self.advance();
 
-        // Consume until closing quote or EOF
-        while self.current_char() != quote && self.current_char() != '\0' {
-            if self.current_char() == '\\' {
-                // Skip escaped character
+        // Consume until an unmatched closing quote or EOF.
+        //
+        // Standard SQL: a doubled quote inside the string (`''` inside a
+        // single-quoted string, or `""` inside a double-quoted identifier) is
+        // an escape for a literal quote character — both characters are
+        // consumed as part of the string and scanning continues. Only a
+        // single, unmatched quote terminates.
+        loop {
+            let c = self.current_char();
+            if c == '\0' {
+                // EOF without closing quote — terminate; the parser will
+                // emit a diagnostic for the unterminated string later.
+                break;
+            }
+            if c == quote {
+                if self.peek_char() == Some(quote) {
+                    // Doubled quote: consume both as a literal quote and
+                    // keep scanning the same string.
+                    self.advance();
+                    self.advance();
+                    continue;
+                }
+                // Single closing quote — consume it and stop.
+                self.advance();
+                break;
+            }
+            if c == '\\' {
+                // Backslash escape: skip the backslash and one more
+                // character if present. Preserves prior behaviour.
                 self.advance();
                 if self.current_char() != '\0' {
                     self.advance();
                 }
-            } else {
-                self.advance();
+                continue;
             }
-        }
-
-        // Consume closing quote if present
-        if self.current_char() == quote {
             self.advance();
         }
 

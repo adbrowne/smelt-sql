@@ -15,6 +15,9 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
+    // Seeds are valid `smelt.ref()` targets (bug #2 in 20260417 follow-up).
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let mut models = discovery
         .discover_models()
@@ -45,8 +48,14 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(models.clone(), sources.as_ref(), &config, default_target)
-        .with_context(|| "Failed to build logical graph")?;
+    let graph = LogicalGraph::build(
+        models.clone(),
+        sources.as_ref(),
+        &seeds,
+        &config,
+        default_target,
+    )
+    .with_context(|| "Failed to build logical graph")?;
 
     graph
         .validate()
@@ -65,8 +74,14 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
             .into_iter()
             .filter(|m| selected.contains(&m.name))
             .collect();
-        LogicalGraph::build(filtered_models, sources.as_ref(), &config, default_target)
-            .with_context(|| "Failed to build filtered logical graph")?
+        LogicalGraph::build(
+            filtered_models,
+            sources.as_ref(),
+            &seeds,
+            &config,
+            default_target,
+        )
+        .with_context(|| "Failed to build filtered logical graph")?
     } else {
         graph
     };

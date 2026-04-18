@@ -156,6 +156,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             msg = socket.recv() => {
+                #[allow(clippy::collapsible_match)]
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {

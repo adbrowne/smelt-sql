@@ -114,6 +114,7 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let models = discovery.discover_models()?;
     let sources = SourcesConfig::load(&project_dir).ok();
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
 
     let default_target = config
         .targets
@@ -123,7 +124,13 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
         .unwrap_or("dev");
 
     // Build the logical graph and get execution order
-    let graph = LogicalGraph::build(models.clone(), sources.as_ref(), &config, default_target)?;
+    let graph = LogicalGraph::build(
+        models.clone(),
+        sources.as_ref(),
+        &seeds,
+        &config,
+        default_target,
+    )?;
     let exec_order = graph.execution_order()?;
 
     // Set up DuckDB

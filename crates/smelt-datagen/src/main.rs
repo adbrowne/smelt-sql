@@ -10,10 +10,19 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(name = "smelt-datagen")]
 #[command(about = "Deterministic data generation for smelt")]
+#[command(after_help = "Run `smelt-datagen --list-generators` to see every \
+                        generator type and its parameters (including the \
+                        `min` parameter on the geometric generator).")]
 struct Args {
     /// Path to YAML config file (replaces all other flags when provided)
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// List every generator type and its YAML parameters, then exit. Use this
+    /// to discover parameters like `min` on the geometric generator without
+    /// digging through the docs.
+    #[arg(long)]
+    list_generators: bool,
 
     /// Output directory for Hive-partitioned Parquet files
     #[arg(short, long, default_value = "output")]
@@ -44,8 +53,82 @@ struct Args {
     quiet: bool,
 }
 
+/// Per-generator help printed by `--list-generators`. Kept as a single string
+/// constant so it lives next to the CLI help text and is easy to keep in sync
+/// with `GeneratorSpec` in `config.rs`. See FINDINGS bug #4.
+const GENERATOR_HELP: &str = "\
+smelt-datagen YAML generator reference
+======================================
+
+Each column entry in a datagen YAML has a `generator` block with a `type` and
+zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
+
+  uuid                    Random UUID v4 string.
+
+  constant
+    value: <any>          Emit the same value for every row.
+
+  weighted_choice
+    values: { k: w, ... } Pick a key with probability proportional to its
+                          weight.
+
+  one_of
+    values: [a, b, ...]   Uniform random choice from the list.
+
+  uniform_int
+    min: <i32>            Inclusive lower bound.
+    max: <i32>            Exclusive upper bound.
+
+  uniform_float
+    min: <f64>            Inclusive lower bound.
+    max: <f64>            Exclusive upper bound.
+
+  log_normal
+    median: <f64>         Median of the distribution.
+    sigma: <f64>          Spread parameter (log-space std dev).
+    max: <i32>            Cap applied to each sample.
+
+  geometric
+    p: <f64>              Success probability for the underlying geometric
+                          distribution.
+    min: <i32>            Lower bound clamp on the generated value.
+                          (default: 1; pass `min: 0` explicitly to allow
+                          zeros — the raw geometric distribution starts at 0.)
+
+  bool
+    prob: <f64>           Probability of `true`.
+
+  optional
+    prob: <f64>           Probability of emitting the inner value (else null).
+    inner: <generator>    Nested generator spec.
+
+  sequential_id           1-based row index.
+
+  foreign_key
+    dataset: <name>       Random id in [1, num_rows] of the named dataset
+                          (must already be defined earlier in the YAML).
+
+  date
+    start: YYYY-MM-DD     Inclusive lower bound.
+    end: YYYY-MM-DD       Exclusive upper bound.
+
+  timestamp
+    start: YYYY-MM-DDTHH:MM:SS
+    end: YYYY-MM-DDTHH:MM:SS
+
+  string_pattern
+    template: <str>       Template with `{sequential_id}`, `{uuid}`,
+                          `{uniform_int:MIN-MAX}`, `{one_of:a,b,c}`
+                          placeholders.
+";
+
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.list_generators {
+        print!("{GENERATOR_HELP}");
+        return Ok(());
+    }
 
     if let Some(config_path) = args.config {
         let text = std::fs::read_to_string(&config_path)

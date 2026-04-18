@@ -2,11 +2,14 @@ use crate::config::{BackendType, Config, Materialization, Target};
 use crate::discovery::ModelFile;
 use crate::errors::{extract_snippet, text_range_to_line_col, CliError};
 use anyhow::Result;
-use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+use smelt_core::SourcesConfig;
+use smelt_db::type_inference::infer_select_column_types;
+use smelt_db::{build_type_context, StaticRefSchemaProvider};
 use smelt_dialect::{wrap_with_type_casts, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::ast::File;
-use smelt_types::DataType;
+use smelt_types::{DataType, TypedColumn};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct CompiledModel {
@@ -43,6 +46,94 @@ pub struct SqlCompiler {
     /// Cross-engine refs: model_name -> parquet read expression.
     /// Set externally before compilation when cross-engine references exist.
     cross_engine_refs: HashMap<String, String>,
+    /// Upstream model and seed schemas, used by `apply_type_casts` to build a
+    /// populated `TypeContext` so aggregate widening rules apply correctly to
+    /// `smelt.ref()` and `smelt.source()` columns.
+    ///
+    /// Without this, `apply_type_casts` would build an empty `TypeContext`,
+    /// causing column types from refs/sources to resolve as `Unknown` and
+    /// SUM/COUNT/etc. to silently narrow to BIGINT. See bug #3 in
+    /// `docs/research/20260417-0.3-regression-triage.md`.
+    upstream_schemas: Arc<UpstreamSchemas>,
+}
+
+/// Pre-computed upstream model and seed column schemas, plus the project's
+/// sources config. Built once per project (e.g. from a populated Salsa
+/// `Database`) and shared across all `SqlCompiler` instances in a registry.
+#[derive(Default, Clone)]
+pub struct UpstreamSchemas {
+    pub models: HashMap<String, Vec<(String, TypedColumn)>>,
+    pub seeds: HashMap<String, Vec<(String, TypedColumn)>>,
+    pub sources: SourcesConfig,
+}
+
+impl UpstreamSchemas {
+    /// Build an `UpstreamSchemas` from a populated Salsa `Database` and the
+    /// list of model files registered in it. The CLI passes this into every
+    /// `SqlCompiler` so `apply_type_casts` can resolve `smelt.ref()` columns
+    /// without going through Salsa itself (the batch compiler is pure).
+    ///
+    /// `models` is the same list that was passed to `init_db` — we use it to
+    /// know which paths to query, and to recover each model's user-facing name.
+    pub fn from_database(
+        db: &smelt_db::Database,
+        project_dir: &std::path::Path,
+        models: &[crate::discovery::ModelFile],
+    ) -> Self {
+        let workspace = smelt_db::Workspace::try_get(db).expect("workspace not initialized");
+
+        let mut model_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
+        for model in models {
+            let Some(file) = db.source_file(&model.path) else {
+                continue;
+            };
+            let resolved = smelt_db::resolved_model_schema(db, workspace, file);
+            let cols: Vec<(String, TypedColumn)> = resolved
+                .columns
+                .iter()
+                .map(|c| {
+                    let typed = c.data_type.clone().unwrap_or(TypedColumn {
+                        data_type: DataType::Unknown,
+                        nullable: true,
+                    });
+                    (c.name.clone(), typed)
+                })
+                .collect();
+            model_schemas.insert(model.name.clone(), cols);
+        }
+
+        // Seeds are CSV files outside the Salsa graph under the 0.26 API; load
+        // them directly via the pure smelt-core helper using the project's
+        // configured seed_paths (defaults to ["seeds"] if no smelt.yml).
+        let seed_paths = smelt_core::Config::load(project_dir)
+            .map(|c| c.seed_paths)
+            .unwrap_or_else(|_| vec!["seeds".to_string()]);
+        let mut seed_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
+        for seed in smelt_core::discover_seed_infos(project_dir, &seed_paths) {
+            let cols: Vec<(String, TypedColumn)> = seed
+                .columns
+                .iter()
+                .map(|(name, dt)| {
+                    (
+                        name.clone(),
+                        TypedColumn {
+                            data_type: dt.clone(),
+                            nullable: true,
+                        },
+                    )
+                })
+                .collect();
+            seed_schemas.insert(seed.name, cols);
+        }
+
+        let sources = SourcesConfig::load(project_dir).unwrap_or_default();
+
+        Self {
+            models: model_schemas,
+            seeds: seed_schemas,
+            sources,
+        }
+    }
 }
 
 impl SqlCompiler {
@@ -53,12 +144,19 @@ impl SqlCompiler {
             dialect,
             capabilities,
             cross_engine_refs: HashMap::new(),
+            upstream_schemas: Arc::new(UpstreamSchemas::default()),
         }
     }
 
     /// Set cross-engine ref mappings (model_name -> parquet read expression).
     pub fn set_cross_engine_refs(&mut self, refs: HashMap<String, String>) {
         self.cross_engine_refs = refs;
+    }
+
+    /// Provide upstream model/seed/source schemas so `apply_type_casts` can
+    /// resolve `smelt.ref()` and `smelt.source()` column types correctly.
+    pub fn set_upstream_schemas(&mut self, schemas: Arc<UpstreamSchemas>) {
+        self.upstream_schemas = schemas;
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -125,7 +223,17 @@ impl SqlCompiler {
             None => return sql.to_string(),
         };
 
-        let ctx = TypeContext::new();
+        // Build a populated TypeContext from upstream model/seed/source schemas
+        // so SUM/COUNT/AVG over `smelt.ref('upstream').col` resolve correctly.
+        // Without this populated context, every ref column resolves to Unknown
+        // and SUM falls through to BIGINT — silently corrupting financial
+        // aggregates. See bug #3 in
+        // `docs/research/20260417-0.3-regression-triage.md`.
+        let provider = StaticRefSchemaProvider {
+            models: &self.upstream_schemas.models,
+            seeds: &self.upstream_schemas.seeds,
+        };
+        let ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
         let column_types = infer_select_column_types(&select_stmt, &ctx);
 
         let select_list = match select_stmt.select_list() {
@@ -753,6 +861,17 @@ impl CompilerRegistry {
     pub fn set_cross_engine_refs(&mut self, target_name: &str, refs: HashMap<String, String>) {
         if let Some(compiler) = self.compilers.get_mut(target_name) {
             compiler.set_cross_engine_refs(refs);
+        }
+    }
+
+    /// Set the upstream model/seed/source schemas on every compiler in the
+    /// registry. Schemas are computed once per project and shared across
+    /// targets, since `apply_type_casts` only needs to know what columns each
+    /// `smelt.ref()` / `smelt.source()` provides — it doesn't care which
+    /// backend ultimately materialises the upstream model.
+    pub fn set_upstream_schemas_all(&mut self, schemas: Arc<UpstreamSchemas>) {
+        for compiler in self.compilers.values_mut() {
+            compiler.set_upstream_schemas(schemas.clone());
         }
     }
 }

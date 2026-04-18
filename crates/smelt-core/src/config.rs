@@ -65,6 +65,12 @@ impl Serialize for Materialization {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub name: String,
+    /// Schema version of the smelt.yml file format. Optional — defaults to 1.
+    /// Made optional to remove a confusing trip-hazard where new users
+    /// instinctively wrote a semver string (`version: "0.1.0"`, mirroring
+    /// pyproject.toml) and got a parse error. The field is decorative today
+    /// and only printed in run logs. (iter-4 issue #1.)
+    #[serde(default = "default_config_version")]
     pub version: u32,
     #[serde(default = "default_model_paths")]
     pub model_paths: Vec<String>,
@@ -78,6 +84,10 @@ pub struct Config {
     /// Path to Python interpreter (overridden by SMELT_PYTHON env var)
     #[serde(default)]
     pub python: Option<String>,
+}
+
+fn default_config_version() -> u32 {
+    1
 }
 
 fn default_model_paths() -> Vec<String> {
@@ -576,6 +586,41 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// iter-4 issue #1: a smelt.yml without a `version` field must parse
+    /// (defaulting to 1) so new users don't trip over a required field that
+    /// is decorative today and only appears in run logs.
+    #[test]
+    fn config_version_defaults_to_one_when_omitted() {
+        let yaml = r#"
+name: test_project
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("config without version must parse");
+        assert_eq!(config.version, 1);
+    }
+
+    /// A semver-style string in `version` (the natural mistake — mirrors
+    /// pyproject.toml) must still produce a parse error rather than
+    /// silently coercing. The error is the user-visible signal.
+    #[test]
+    fn config_version_rejects_semver_string() {
+        let yaml = r#"
+name: test_project
+version: "0.1.0"
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        serde_yaml::from_str::<Config>(yaml)
+            .expect_err("semver-string version must be rejected (use integer)");
+    }
 
     #[test]
     fn test_materialization_deserialization() {

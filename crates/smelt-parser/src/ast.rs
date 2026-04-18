@@ -653,6 +653,20 @@ impl Expr {
             return Some("*".to_string());
         }
 
+        // CAST(<inner> AS <type>) — propagate the inner expression's name so
+        // an aliased SELECT like `SUM(x)::DOUBLE AS revenue` keeps `revenue`,
+        // and a bare `CAST(line_gross AS DOUBLE)` keeps `line_gross`. Without
+        // this branch, callers fall through to the IDENT fallback below and
+        // pick up the type-spec identifier ("DOUBLE"), or to the SELECT-list
+        // numeric placeholder (`_col1`) — both wrong.
+        if let Some(cast) = self.as_cast() {
+            if let Some(inner) = cast.expression() {
+                if let Some(name) = inner.infer_name() {
+                    return Some(name);
+                }
+            }
+        }
+
         // Check if this is a function call
         if let Some(_func) = self.as_function_call() {
             // For function calls without alias, use the full function text

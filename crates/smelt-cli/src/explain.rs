@@ -271,7 +271,7 @@ mod tests {
             ),
         ];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let output = build_explain_output(&graph).unwrap();
 
@@ -317,7 +317,7 @@ mod tests {
                 target: None,
             },
         )]);
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let output = build_explain_output(&graph).unwrap();
 
@@ -335,7 +335,7 @@ mod tests {
     fn test_explain_json_serialization() {
         let models = vec![make_model("a", vec![], "SELECT 1")];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let output = build_explain_output(&graph).unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
@@ -358,7 +358,7 @@ mod tests {
             ),
         ];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let target_schemas: HashMap<String, String> = config
             .targets
@@ -414,7 +414,7 @@ mod tests {
                 target: None,
             });
 
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let target_schemas: HashMap<String, String> = config
             .targets
@@ -440,7 +440,7 @@ mod tests {
 
         let models = vec![make_model("a", vec![], "SELECT 1")];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let target_schemas: HashMap<String, String> = config
             .targets
@@ -472,7 +472,7 @@ mod tests {
 
         let models = vec![model];
         let config = make_config(vec![]);
-        let graph = LogicalGraph::build(models, None, &config, "dev").unwrap();
+        let graph = LogicalGraph::build(models, None, &[], &config, "dev").unwrap();
 
         let output = build_explain_output(&graph).unwrap();
         assert_eq!(

@@ -9,7 +9,13 @@ use std::collections::HashMap;
 /// the target dimension size without storing any generated values.
 pub type FkCounts = HashMap<String, usize>;
 
+// `deny_unknown_fields` on every top-level config struct: a typo'd or
+// plausible-but-wrong key (e.g. `partition_by:` instead of `partition:`) used
+// to silently parse and produce subtly wrong output. Failing parse with a
+// clear "unknown field" error is the right ergonomic. (iter-4 issue #3.)
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatagenConfig {
     pub seed: Option<u64>,
     pub scale_factor: Option<f64>,
@@ -17,6 +23,7 @@ pub struct DatagenConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatasetConfig {
     pub name: String,
     pub output: String,
@@ -28,6 +35,7 @@ pub struct DatasetConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartitionConfig {
     pub column: String,
     /// Start date in "YYYY-MM-DD" format.
@@ -36,6 +44,7 @@ pub struct PartitionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntityConfig {
     /// Entity count = num_rows * pool_ratio.
     pub pool_ratio: f64,
@@ -43,6 +52,7 @@ pub struct EntityConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnConfig {
     pub name: String,
     pub generator: GeneratorSpec,
@@ -76,7 +86,12 @@ pub enum GeneratorSpec {
     },
     Geometric {
         p: f64,
-        #[serde(default)]
+        /// Lower bound on the generated value. Defaults to `1` because the
+        /// most common use of `geometric` is positive count-style data
+        /// (quantities, retries, etc.) where zero is an invalid sentinel.
+        /// Pass `min: 0` explicitly to opt back into "may emit zeros" — the
+        /// raw geometric distribution starts at zero.
+        #[serde(default = "default_geometric_min")]
         min: Option<i32>,
     },
     Bool {
@@ -101,6 +116,16 @@ pub enum GeneratorSpec {
     StringPattern {
         template: String,
     },
+}
+
+/// Default for [`GeneratorSpec::Geometric::min`] when the YAML omits it.
+///
+/// Returns `Some(1)` so the common case ("quantity never zero") Just Works;
+/// callers that want zeros must now write `min: 0` explicitly. See the doc
+/// comment on the field for the reasoning, and FINDINGS bug #4 /
+/// `docs/plans/20260417-smelt-shop-0.3-followup.md` Phase B5 for history.
+fn default_geometric_min() -> Option<i32> {
+    Some(1)
 }
 
 impl GeneratorSpec {
@@ -131,5 +156,58 @@ impl GeneratorSpec {
     /// Whether this generator can produce nulls (i.e. is Optional).
     pub fn is_nullable(&self) -> bool {
         matches!(self, GeneratorSpec::Optional { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// iter-4 issue #3 regression: a plausible-but-wrong YAML key like
+    /// `partition_by:` (instead of `partition:`) used to silently parse —
+    /// serde dropped the unknown field and the dataset was written
+    /// un-partitioned. With `deny_unknown_fields` the parse must fail.
+    #[test]
+    fn dataset_config_rejects_unknown_top_level_field() {
+        let yaml = r#"
+name: page_events
+output: data/page_events
+num_rows: 1000
+partition_by:
+  column: event_date
+  start: "2024-01-01"
+  days: 5
+columns:
+  - name: id
+    generator:
+      type: uuid
+"#;
+        let err = serde_yaml::from_str::<DatasetConfig>(yaml)
+            .expect_err("partition_by (typo for partition) must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("partition_by") || msg.contains("unknown field"),
+            "error must name the offending field; got: {msg}"
+        );
+    }
+
+    /// The correct `partition:` key still parses cleanly — the deny rule
+    /// only catches genuine mistakes, not the documented schema.
+    #[test]
+    fn dataset_config_accepts_partition_key() {
+        let yaml = r#"
+name: page_events
+output: data/page_events
+num_rows: 1000
+partition:
+  column: event_date
+  start: "2024-01-01"
+  days: 5
+columns:
+  - name: id
+    generator:
+      type: uuid
+"#;
+        serde_yaml::from_str::<DatasetConfig>(yaml).expect("valid config must parse");
     }
 }

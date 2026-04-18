@@ -92,5 +92,12 @@ pub async fn run_seed(args: SeedArgs) -> Result<()> {
     info!("Total rows: {}", total_rows);
     info!("Total time: {:?}", total_duration);
 
+    eprintln!(
+        "smelt: loaded {} seed(s) ({} rows) in {:.2}s",
+        results.len(),
+        total_rows,
+        total_duration.as_secs_f64(),
+    );
+
     Ok(())
 }
