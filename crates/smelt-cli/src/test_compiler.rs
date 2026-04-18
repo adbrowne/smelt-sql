@@ -309,7 +309,7 @@ pub fn compile_whole_model_test(
     }
 
     // Sort by start position descending so replacements don't shift offsets
-    ref_replacements.sort_by(|a, b| b.0.cmp(&a.0));
+    ref_replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
 
     // Replace smelt.ref('name') with bare name in the SQL
     let mut result_sql = clean.clone();

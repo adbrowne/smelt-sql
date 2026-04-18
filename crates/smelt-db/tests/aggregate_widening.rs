@@ -11,6 +11,7 @@
 //! Each expected type is verified against DuckDB via the `DuckDbOracle`
 //! (canonical oracle for "what type does this expression actually have").
 
+#[allow(dead_code)]
 mod prop_helpers;
 
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
