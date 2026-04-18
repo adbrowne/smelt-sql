@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776506188427,
+  "lastUpdate": 1776506190104,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18053,6 +18053,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.854752094294586,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ee802853d33175b287d567a3d2967305408d9257",
+          "message": "Merge pull request #109 from adbrowne/smelt-shop-0.3-followup\n\nsmelt-shop 0.3 follow-up: idempotent build, seed refs, aggregate types",
+          "timestamp": "2026-04-18T19:24:33+09:30",
+          "tree_id": "292bd9f0643c35c8bb3e477c6491c62a4fb128cb",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ee802853d33175b287d567a3d2967305408d9257"
+        },
+        "date": 1776506189665,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.012701090634202,
             "unit": "MB/s"
           }
         ]
