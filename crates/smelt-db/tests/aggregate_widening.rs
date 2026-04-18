@@ -200,6 +200,63 @@ fn avg_int_is_double() {
 }
 
 #[test]
+fn case_double_then_decimal_else_widens_to_double() {
+    // B9 regression. Iter-2 of smelt-shop validation hit:
+    //   CASE WHEN flag THEN double_col ELSE 0.0 END
+    // narrowing to DECIMAL(2,1), then DuckDB throwing
+    //   Conversion Error: Could not cast value 74.260000 to DECIMAL(2,1)
+    // at runtime when a THEN value exceeded 9.9.
+    //
+    // The literal `0.0` is typed as DECIMAL(2,1) (smallest-fit decimal).
+    // promote_types must widen Double + Decimal to Double, not narrow.
+    let ctx = ctx_with_model(
+        "upstream",
+        &[("flag", DataType::Boolean), ("rev", DataType::Double)],
+    );
+    let sql = "SELECT CASE WHEN flag THEN rev ELSE 0.0 END AS x FROM upstream";
+    let types = infer(sql, &ctx);
+    assert_eq!(
+        types[0].data_type,
+        DataType::Double,
+        "CASE(DOUBLE, decimal-literal) must widen to DOUBLE (was narrowed to \
+         DECIMAL(2,1) at runtime), got {:?}",
+        types[0].data_type,
+    );
+
+    // Oracle check
+    let oracle = DuckDbOracle::new();
+    let oracle_types = oracle
+        .query_types(
+            "SELECT CASE WHEN flag THEN rev ELSE 0.0 END AS x FROM \
+             (SELECT TRUE AS flag, CAST(74.26 AS DOUBLE) AS rev) upstream",
+        )
+        .expect("oracle query");
+    assert_eq!(oracle_types[0].1, DataType::Double);
+}
+
+#[test]
+fn coalesce_double_with_decimal_literal_widens_to_double() {
+    // B9 cousin: COALESCE(double_col, 0.0) must yield DOUBLE.
+    let ctx = ctx_with_model("upstream", &[("rev", DataType::Double)]);
+    let sql = "SELECT COALESCE(rev, 0.0) AS x FROM upstream";
+    let types = infer(sql, &ctx);
+    assert_eq!(
+        types[0].data_type,
+        DataType::Double,
+        "COALESCE(DOUBLE, decimal-literal) must yield DOUBLE, got {:?}",
+        types[0].data_type,
+    );
+
+    let oracle = DuckDbOracle::new();
+    let oracle_types = oracle
+        .query_types(
+            "SELECT COALESCE(rev, 0.0) AS x FROM (SELECT CAST(74.26 AS DOUBLE) AS rev) upstream",
+        )
+        .expect("oracle query");
+    assert_eq!(oracle_types[0].1, DataType::Double);
+}
+
+#[test]
 fn sum_with_alias_through_cast_preserves_alias_and_type() {
     // Bug #3 sub-issue: `infer_name()` didn't recognise CAST expressions, so
     // when `apply_type_casts` wrapped a model output and tried to derive a

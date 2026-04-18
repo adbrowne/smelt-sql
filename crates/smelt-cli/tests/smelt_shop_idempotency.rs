@@ -280,4 +280,31 @@ fn smelt_shop_min_idempotency_and_types() {
         "B8: SUM(o.gross_amount) where o aliases a bare upstream MODEL was \
          narrowed (expected DOUBLE, got {qualified_gross_rev_type})"
     );
+
+    // B9: CASE WHEN ... THEN <upstream DOUBLE> ELSE 0.0 END — without B8
+    // resolving o.line_revenue to DOUBLE, the CASE collapsed to the
+    // ELSE branch's DECIMAL(2,1), and DuckDB threw a runtime CAST error
+    // the moment a THEN value exceeded 9.9. The wrapper must cast to
+    // DOUBLE.
+    let qualified_returned_rev_type = duckdb_string(
+        &conn,
+        "SELECT typeof(qualified_returned_revenue) FROM main.mart_revenue_qualified LIMIT 1",
+    )
+    .expect("typeof(qualified_returned_revenue)");
+    assert_eq!(
+        qualified_returned_rev_type, "DOUBLE",
+        "B9: SUM(CASE ... ELSE 0.0) over qualified DOUBLE was narrowed \
+         (expected DOUBLE, got {qualified_returned_rev_type})"
+    );
+
+    let qualified_coalesced_rev_type = duckdb_string(
+        &conn,
+        "SELECT typeof(qualified_coalesced_revenue) FROM main.mart_revenue_qualified LIMIT 1",
+    )
+    .expect("typeof(qualified_coalesced_revenue)");
+    assert_eq!(
+        qualified_coalesced_rev_type, "DOUBLE",
+        "B9: SUM(COALESCE(.., 0.0)) over qualified DOUBLE was narrowed \
+         (expected DOUBLE, got {qualified_coalesced_rev_type})"
+    );
 }

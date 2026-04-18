@@ -12,5 +12,12 @@
 -- bug for source columns does not apply.
 SELECT
     SUM(o.line_revenue) AS qualified_line_revenue,
-    SUM(o.gross_amount) AS qualified_gross_revenue
+    SUM(o.gross_amount) AS qualified_gross_revenue,
+    -- B9 regression: CASE WHEN ... THEN <DOUBLE upstream col> ELSE 0.0 END
+    -- previously narrowed to DECIMAL(2,1) at runtime when iter-2 of the
+    -- smelt-shop loop hit values > 9.9 (chain consequence of B8 — fixed
+    -- now that o.line_revenue resolves to DOUBLE).
+    SUM(CASE WHEN o.status_code = 'RT' THEN o.line_revenue ELSE 0.0 END)
+        AS qualified_returned_revenue,
+    SUM(COALESCE(o.line_revenue, 0.0)) AS qualified_coalesced_revenue
 FROM smelt.ref('stg_orders') AS o
