@@ -1271,12 +1271,33 @@ fn process_table_ref_pure(
     }
 
     // CTE references with aliases (e.g. "FROM daily_totals dt")
+    // OR bare upstream MODEL/seed references (e.g. "FROM main.stg_orders AS o"
+    // — produced by the dialect printer after `smelt.ref('stg_orders')` is
+    // resolved). Without this branch, the alias `o` is never bound and
+    // `o.line_revenue` resolves to Unknown, which silently narrows
+    // `SUM(o.line_revenue)` to BIGINT in `_smelt_typed`. See B8.
     if table_ref.function_call().is_none() && table_ref.subquery().is_none() {
-        if let Some(table_name) = table_ref.identifier() {
+        if let Some(raw_name) = table_ref.identifier() {
+            // Strip an optional leading schema qualifier (`schema.table`).
+            // The dialect printer emits `<schema>.<model_name>`; we want the
+            // last segment to look up against the schema provider.
+            let table_name = bare_table_name(table_ref).unwrap_or(raw_name.clone());
+
             if ctx.is_cte(&table_name) {
                 if let Some(explicit_alias) = table_ref.alias() {
                     ctx.add_alias(&explicit_alias, &table_name);
                 }
+            } else if let Some(cols) = refs
+                .resolved_columns(&table_name)
+                .or_else(|| refs.seed_columns(&table_name))
+            {
+                for (col_name, typed_col) in cols {
+                    ctx.add_model_column(&table_name, &col_name, typed_col);
+                }
+                // Bind the alias (or the table name itself, so qualified
+                // refs like `stg_orders.col` also resolve).
+                let bind_to = table_ref.alias().unwrap_or_else(|| table_name.clone());
+                ctx.add_alias(&bind_to, &table_name);
             }
         }
     }
@@ -1317,6 +1338,53 @@ fn process_table_ref_pure(
             }
         }
     }
+}
+
+/// Extract the table-name segment from a bare `TableRef` like `schema.table`,
+/// stripping an optional schema qualifier. Used by `process_table_ref_pure`
+/// to look up upstream MODEL/seed schemas after the dialect printer has
+/// resolved `smelt.ref('foo')` to `<schema>.foo`.
+///
+/// Returns `None` for function calls and subqueries (those have their own
+/// handling paths).
+fn bare_table_name(table_ref: &TableRef) -> Option<String> {
+    use smelt_parser::SyntaxKind::{AS_KW, DOT, IDENT};
+
+    if table_ref.function_call().is_some() || table_ref.subquery().is_some() {
+        return None;
+    }
+
+    // Walk tokens and collect the IDENTs that come BEFORE any AS keyword.
+    // The last such IDENT (after any DOT segments) is the table name.
+    let mut idents: Vec<String> = Vec::new();
+    let mut last_was_dot = false;
+    let mut started = false;
+    for tok in table_ref
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        match tok.kind() {
+            AS_KW => break,
+            IDENT => {
+                if !started || last_was_dot {
+                    idents.push(tok.text().to_string());
+                } else {
+                    // Implicit alias (no AS keyword): bail out, take what
+                    // we have so far.
+                    break;
+                }
+                started = true;
+                last_was_dot = false;
+            }
+            DOT => {
+                last_was_dot = true;
+            }
+            _ => {}
+        }
+    }
+
+    idents.last().cloned()
 }
 
 fn type_context(db: &dyn TypeChecking, path: PathBuf) -> Arc<TypeContext> {

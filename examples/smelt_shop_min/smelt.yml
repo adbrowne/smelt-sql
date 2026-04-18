@@ -38,3 +38,5 @@ models:
     materialization: table
   mart_revenue:
     materialization: table
+  mart_revenue_qualified:
+    materialization: table

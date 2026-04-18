@@ -251,4 +251,33 @@ fn smelt_shop_min_idempotency_and_types() {
         actual_unique_orders, SEED_ROW_COUNT as i64,
         "unique_orders should equal the number of distinct seeded order ids"
     );
+
+    // B8: qualified column refs over a bare upstream MODEL table. After
+    // `smelt.ref('stg_orders')` is resolved to `main.stg_orders AS o`, the
+    // alias `o` was not registered in the TypeContext, so `o.line_revenue`
+    // (a derived column in the upstream model — not in sources.yml)
+    // resolved to Unknown and SUM was narrowed to BIGINT. This is what
+    // iter-2 of the smelt-shop validation loop hit on every monetary
+    // aggregate.
+    let qualified_line_rev_type = duckdb_string(
+        &conn,
+        "SELECT typeof(qualified_line_revenue) FROM main.mart_revenue_qualified LIMIT 1",
+    )
+    .expect("typeof(qualified_line_revenue)");
+    assert_eq!(
+        qualified_line_rev_type, "DOUBLE",
+        "B8: SUM(o.line_revenue) where o aliases a bare upstream MODEL was \
+         narrowed (expected DOUBLE, got {qualified_line_rev_type})"
+    );
+
+    let qualified_gross_rev_type = duckdb_string(
+        &conn,
+        "SELECT typeof(qualified_gross_revenue) FROM main.mart_revenue_qualified LIMIT 1",
+    )
+    .expect("typeof(qualified_gross_revenue)");
+    assert_eq!(
+        qualified_gross_rev_type, "DOUBLE",
+        "B8: SUM(o.gross_amount) where o aliases a bare upstream MODEL was \
+         narrowed (expected DOUBLE, got {qualified_gross_rev_type})"
+    );
 }
