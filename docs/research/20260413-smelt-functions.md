@@ -34,17 +34,30 @@ The design rests on **fragment sorts**: syntactic categories that distinguish di
 |------|-------------------|-------------------|
 | `Expr<T>` | Scalar expression of SQL type T | SELECT, WHERE, ON, HAVING, CASE, QUALIFY |
 | `AggExpr<T>` | Expression containing aggregation | SELECT (with GROUP BY), HAVING |
+| `WindowExpr<T>` | Expression containing a window function | SELECT, ORDER BY (not WHERE, GROUP BY, HAVING) |
 | `TableExpr` | Something with a schema | FROM, JOIN, WITH |
 | `SelectItems` | List of (expression, alias) pairs | SELECT clause |
 | `OrderSpec` | Expression + direction | ORDER BY |
 
 These sorts ensure structural well-formedness: you cannot splice a `TableExpr` into a WHERE clause, or an `Expr<Boolean>` into a FROM clause. The compiler checks sort-correctness at each composition point.
 
+### Expression Sort Subtyping
+
+The expression-level sorts form a **linear subtyping chain**:
+
+```
+Expr<T>  <:  AggExpr<T>  <:  WindowExpr<T>
+```
+
+Anywhere a `WindowExpr<T>` is accepted, an `AggExpr<T>` or plain `Expr<T>` is also valid. Anywhere an `AggExpr<T>` is accepted, a plain `Expr<T>` is valid. This matches SQL's actual restriction rules: a window context (SELECT with OVER) accepts aggregates and scalars; an aggregate context (SELECT with GROUP BY) accepts scalars but not window functions; a scalar context (WHERE) accepts only scalars.
+
+This subtyping is the *only* subtyping relationship between sorts. `TableExpr`, `SelectItems`, and `OrderSpec` are unrelated to the expression chain.
+
 A bare column reference like `user_id` is a trivial `Expr<T>` -- there is no separate `Column<T>` sort. This keeps the sort system minimal. If a function parameter is spliced into `PARTITION BY` or `GROUP BY`, the author documents the expectation via naming and comments, not via the type system. (A `Column<T>` subtype could be reintroduced later if experience shows the distinction is valuable, but the simpler model is the right starting point.)
 
 A `Predicate` sort was considered and rejected. Use `Expr<Boolean>` instead -- the positional constraint (WHERE, ON, HAVING) is already enforced by SQL syntax, and one fewer concept to learn is worth more than one more sort.
 
-The initial implementation targets a subset: `Expr<T>` and `TableExpr`. The remaining sorts (`AggExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions.
+The initial implementation targets a subset: `Expr<T>` and `TableExpr`. The remaining sorts (`AggExpr<T>`, `WindowExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions. The linear subtyping chain (`Expr <: AggExpr <: WindowExpr`) is implemented when `AggExpr` is introduced.
 
 ### Comparison: Malloy
 
@@ -574,7 +587,7 @@ The algorithm guarantees:
 
 - **Cross-boundary inference.** A Tier 1 function's return type is computed at each call site by expansion, not inferred from the body and propagated. Cross-boundary inference creates non-local errors. Functions that want stable types declare them (Tier 3).
 - **Higher-rank polymorphism.** A parameter cannot itself be polymorphic. smelt functions are not higher-order.
-- **Implicit subtyping coercions.** The checker does not silently insert casts. If a parameter expects `Expr<Double>` and the caller passes `Expr<Integer>`, this is a type error. The user writes `CAST(x AS DOUBLE)`. (Exception: engine aliases like `Text`/`Varchar` are treated as the same type.)
+- **No implicit coercion for concrete parameter types.** If a user function parameter expects `Expr<Double>` and the caller passes `Expr<Integer>`, this is a type error. The user writes `CAST(x AS DOUBLE)`. (Exception: engine aliases like `Text`/`Varchar` are treated as the same type.) However, **type constraints** (`Numeric`, `Ordered`) accept any type that satisfies them -- this is constraint satisfaction, not coercion. And **built-in operators/functions** that accept multiple numeric arguments compute the least upper bound (LUB) of the argument types via the promotion chain (§16, decision 9) -- e.g., `COALESCE(Integer, Double)` returns `Double`.
 
 ## 10. Block Syntax -- Ergonomic Fragment Passing
 
@@ -1021,6 +1034,53 @@ Bare column references from `TableExpr` parameters resolve through standard SQL 
 
 **Rationale:** Consistent with the no-overlap rule (§6) and parameters-first scoping. SQL developers expect bare column names to work — requiring qualification everywhere would be hostile. The parameters-first rule means parameters shadow columns, and the shadow warning catches accidental collisions. Qualification is the author's escape hatch, not a default burden.
 
+### 8. WindowExpr\<T\> sort with linear subtyping (§2)
+
+`WindowExpr<T>` is added as a third expression-level sort. The three sorts form a linear subtyping chain: `Expr<T> <: AggExpr<T> <: WindowExpr<T>`.
+
+**Rationale:** Window functions in WHERE is one of the most common SQL errors. Neither `Expr<T>` nor `AggExpr<T>` captures "contains a window function." The linear chain makes the sort system enforce SQL's actual restriction rules naturally: a window context accepts all three, an aggregate context accepts `Expr` and `AggExpr` but rejects `WindowExpr`, and a scalar context accepts only `Expr`. No branching in the subtype relationship — just a line.
+
+### 9. Numeric type system: linear promotion chain (§9, §13)
+
+`Numeric` is a **type constraint** (not a concrete type), meaning "any type in the numeric family." The concrete numeric types form a linear promotion chain for computing the least upper bound (LUB) when types mix:
+
+```
+SmallInt < Integer < BigInt < Double
+```
+
+- `Float` maps to `Double` everywhere (not a distinct point in the chain).
+- `Decimal` sits between `BigInt` and `Double` in the chain (`SmallInt < Integer < BigInt < Decimal < Double`) but **Decimal precision/scale tracking is deferred** to post-v1. In v1, `Decimal` is treated as a single type without precision parameters.
+
+**Type constraints vs. concrete types:**
+- `Expr<Numeric>` accepts `Expr<Integer>`, `Expr<BigInt>`, `Expr<Double>`, etc. — this is constraint satisfaction, not coercion.
+- `Expr<Double>` does NOT accept `Expr<Integer>` — these are different concrete types. The user writes `CAST(x AS DOUBLE)`.
+- Built-in operators and multi-argument functions (COALESCE, GREATEST, `+`, `-`, etc.) compute the LUB of their argument types using the promotion chain. `COALESCE(Integer, BigInt)` returns `BigInt`. `Integer + Double` returns `Double`.
+
+**Built-in function return types use a canonical mapping table**, not generics:
+
+| Function | Integer family input | Double input | Pattern |
+|----------|---------------------|--------------|---------|
+| SUM | BigInt | Double | Type-dependent return |
+| AVG | Double | Double | Type-dependent return |
+| MIN / MAX | same type T | same type T | Type-preserving (generic) |
+| COUNT | BigInt (always) | BigInt | Fixed return |
+| ABS | same type T | same type T | Type-preserving (generic) |
+| SQRT, LOG, LN | Double (always) | Double | Fixed return |
+
+Type-preserving functions use generics: `MIN<T: Ordered>(T) → T`. Type-dependent and fixed-return functions use hard-coded mappings in the canonical registry. This is consistent with the canonical CAST enforcement decision (§13) — smelt says `SUM(Integer) → BigInt`, enforces it with CAST, and if the user wants engine-native precision they use the backend namespace.
+
+**Deferred:**
+- Decimal precision/scale tracking (`Decimal(10,2) + Decimal(10,2) → Decimal(11,2)`). This is a refinement within the Decimal type, not a structural change to the type system. Can be added later without breaking anything.
+- `Ordered` constraint (needed for MIN/MAX/GREATEST/LEAST — includes Numeric + Text + Date + Timestamp). Defined but not formally specified in v1.
+
+**Rationale:** The linear chain matches what SQL engines actually do for the integer and float families. The hard problem — Decimal precision arithmetic — is orthogonal to the chain and can be deferred without affecting the rest of the type system. Treating `Numeric` as a constraint rather than a concrete type preserves the input type through generic functions (MIN returns Integer if given Integer, not an abstract Numeric), which is essential for the canonical CAST enforcement to produce precise output schemas.
+
+### 10. Nullability tracking deferred
+
+Nullability (`Expr<Integer NOT NULL>` vs. `Expr<Integer>`) is not tracked in v1. All expressions are implicitly nullable.
+
+**Rationale:** Nullability tracking is valuable but orthogonal to the fragment sort system and numeric tower. Adding it later is non-breaking — it refines existing types rather than changing them. The main cost of deferral is that function return types can't distinguish "definitely not null" from "might be null," which means the LSP can't show nullability on hover. This is acceptable for v1 given the other priorities.
+
 ## 17. Comparisons and Theoretical Foundations
 
 ### Comparison Table
@@ -1220,13 +1280,13 @@ Separately, upgrading a Tier 1 function to Tier 2 is a potentially breaking chan
 
 ### G. SQL Edge Cases
 
-**NULL semantics.** The fragment sorts do not mention nullability. When a parameter is `Expr<Numeric>`, can the caller pass a nullable expression? What is the nullability of the return type? Either nullable/non-nullable should be expressible (`Expr<Numeric NOT NULL>`) or the paper should state nullability tracking is deferred.
+**NULL semantics.** *(Explicitly deferred — April 19, 2026. See §16, decision 10. Nullability tracking is not in v1; all expressions are implicitly nullable.)*
 
-**Implicit coercions.** The paper says the checker does not insert casts, and `Text`/`Varchar` are treated as the same type. But what about `Integer`/`Bigint`? `Numeric`/`Decimal`? If `Expr<Numeric>` does not accept `Expr<Integer>`, users need casts everywhere, which is hostile. The numeric tower subtyping rules need specification.
+**Implicit coercions.** *(Resolved — April 19, 2026. See §16, decision 9. `Numeric` is a type constraint, not a concrete type — `Expr<Numeric>` accepts `Expr<Integer>` via constraint satisfaction. Concrete types don't implicitly widen — `Expr<Double>` rejects `Expr<Integer>`. Built-in operators compute LUB via linear promotion chain.)*
 
 **Dialect differences in expansion.** "Functions compile away" to plain SQL, but plain SQL differs by engine. A function body using `INTERVAL '30 minutes'` (DuckDB syntax) cannot run on Spark. Either functions are engine-agnostic or dialect-tagged.
 
-**Window functions in bodies.** The `sessionize` example uses `LAG(...) OVER (...)` and `SUM(...) OVER (...)`. If a function body contains window functions, the sort system should ensure the result is used where window functions are valid. Neither `Expr<T>` nor `AggExpr<T>` captures "contains a window function."
+**Window functions in bodies.** *(Resolved — April 19, 2026. See §16, decision 8. `WindowExpr<T>` added as a third expression sort with linear subtyping: `Expr<T> <: AggExpr<T> <: WindowExpr<T>`.)*
 
 ### H. Implementation Complexity
 
