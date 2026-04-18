@@ -1071,7 +1071,7 @@ Type-preserving functions use generics: `MIN<T: Ordered>(T) → T`. Type-depende
 
 **Deferred:**
 - Decimal precision/scale tracking (`Decimal(10,2) + Decimal(10,2) → Decimal(11,2)`). This is a refinement within the Decimal type, not a structural change to the type system. Can be added later without breaking anything.
-- `Ordered` constraint (needed for MIN/MAX/GREATEST/LEAST — includes Numeric + Text + Date + Timestamp). Defined but not formally specified in v1.
+- `Ordered` constraint specified in §16 decision 13.
 
 **Rationale:** The linear chain matches what SQL engines actually do for the integer and float families. The hard problem — Decimal precision arithmetic — is orthogonal to the chain and can be deferred without affecting the rest of the type system. Treating `Numeric` as a constraint rather than a concrete type preserves the input type through generic functions (MIN returns Integer if given Integer, not an abstract Numeric), which is essential for the canonical CAST enforcement to produce precise output schemas.
 
@@ -1080,6 +1080,180 @@ Type-preserving functions use generics: `MIN<T: Ordered>(T) → T`. Type-depende
 Nullability (`Expr<Integer NOT NULL>` vs. `Expr<Integer>`) is not tracked in v1. All expressions are implicitly nullable.
 
 **Rationale:** Nullability tracking is valuable but orthogonal to the fragment sort system and numeric tower. Adding it later is non-breaking — it refines existing types rather than changing them. The main cost of deferral is that function return types can't distinguish "definitely not null" from "might be null," which means the LSP can't show nullability on hover. This is acceptable for v1 given the other priorities.
+
+### 11. `smelt.define` grammar (§3, §21)
+
+A `smelt.define` declaration is a **top-level statement** in a `.sql` file with this shape:
+
+```
+smelt.define <name>(<param-list>) [-> <return-type>] AS (<body>) [;]
+```
+
+- **Parameter list:** balanced `(...)`. Each param is `name [: <Type>] [= <default>]`. Trailing commas allowed.
+- **Return arrow:** optional `-> <Type>` (present only in Tier 3, per §8).
+- **Body marker:** required `AS` keyword (case-insensitive, matching SQL keyword convention).
+- **Body:** balanced `(...)` containing one SQL expression or one SELECT statement. The outer parens are required — they make termination unambiguous without lookahead into SQL.
+- **Terminator:** `;` is optional. The closing `)` of the body already terminates the declaration.
+
+**File structure.** A `.sql` file is parsed as a sequence of top-level items: optional frontmatter (at most one, must be first), zero or more `smelt.define` declarations, and at most one bare model `SELECT`. Items are separated by whitespace only; no separator token required. Defines and a model `SELECT` may interleave freely.
+
+**Frontmatter interaction.** Frontmatter applies to the file's model `SELECT` only. It does not apply to `smelt.define` bodies. Per-define attributes are out of scope for v1; if introduced later they attach to the define itself, not via frontmatter.
+
+**Nesting.** `smelt.define` may not appear inside a SELECT, CTE, or another function body. Local/nested defines are not part of v1 and can be added later without breaking changes.
+
+**Error recovery.** `smelt.define` is a top-level-only keyword path, which makes it a safe resync token. Recovery cases:
+- Malformed parameter list: emit diagnostic, synthesize end of list at the next `AS` or `AS`-after-newline, continue to body.
+- Missing `AS`: emit diagnostic, treat the next `(` as the body opener.
+- Errors inside body `(...)`: standard Rowan SQL error recovery.
+- Unrecoverable: skip tokens until the next top-level `smelt.define`, the frontmatter fence `---`, or EOF.
+
+**Rationale:** The parenthesized body is the key decision. It gives the parser single-token termination (scan forward to balance parens) and eliminates ambiguity when multiple defines interleave with a model `SELECT` in one file. The alternative — ending a body at `;`, EOF, or the next `smelt.define` — creates real ambiguity and fragile error recovery for a minor cosmetic win. Every example in the paper already uses `AS (...)`, so this ratifies the surface syntax rather than changing it. Statement-only (not expression) keeps Tier 1 expansion straightforward: each call site expands against a fixed top-level declaration, with no scope-capture question for nested defines.
+
+### 12. Expansion mechanics: AST-level with structured provenance (§8, §9, §12)
+
+Function expansion operates on the CST, not on source text. The compiler clones the callee's body, substitutes argument subtrees into parameter placeholder nodes, and attaches a provenance trace to every resulting node. Expansion is **lazy**: calls remain symbolic through Level 1 planning and materialize at Level 2. Tier 1 type checking does not require materializing an expanded CST at all — it binds parameter names to argument types in the type context and checks the body under that context.
+
+**Two senses of "expansion", different mechanisms.**
+
+| Use | Trigger | Mechanism |
+|---|---|---|
+| Type-check expansion (Tier 1) | Checking a call to an unannotated function | Bind parameter names to argument types in the type context and re-check the body. No AST rewrite. |
+| Codegen expansion (all tiers) | Level 2 strategy lowering | Clone the body CST, substitute arguments, attach provenance. Produces SQL. |
+
+Tier 2/3 calls are never expanded for type checking — the declared signature is sufficient.
+
+**Provenance trace.** Each node in an expanded CST carries an origin tag:
+
+- `Caller(span)` — node came from the caller (argument subtree or surrounding call site).
+- `Callee(fn_id, span)` — node came from the callee's body.
+- `Synthesized(fn_id, reason)` — generated by the compiler (row-variable erasure, default-value insertion, strategy injection).
+
+Nested calls push frames: `ExpansionFrame { callee_fn_id, callsite_span, param_bindings: [(param_name, arg_span)] }`. A → B → C produces a frame stack that the diagnostic reporter walks to render "in expansion of `B`, parameter `x` was bound to …" at any depth. The frame stack also answers the Tier 1 error-tracing data-structure question raised in §21.
+
+**Hygiene.** The parameters-first rule (§7) is resolved at type-check time via the type context, not via token-level rewriting. At codegen time, parameter placeholders are already distinct CST node kinds, so there is nothing to collide with. CTE names introduced inside a function body can still collide with caller CTE names structurally — v1 emits a diagnostic on collision; v2 alpha-renames at expansion. Alpha-rename is mechanical once expansion is AST-level.
+
+**Rationale.** Textual substitution was rejected for four reasons:
+
+1. §8's Tier 1 error contract requires mapping errors back through expansion with parameter bindings. That is a source map — which a textual implementation would have to build anyway — at which point AST-level is strictly simpler.
+2. Row-variable erasure (§11) synthesizes new field-access nodes, and default values (§21) inject fragments into parameter positions. Both construct AST; textual expansion would have to reparse its own output.
+3. The parameters-first scoping rule (§7) is an AST-level semantic. Resolving it from tokens requires rebuilding scope information the CST already carries.
+4. smelt-parser emits a lossless CST with position tracking as its primary output. AST-level expansion reuses that; textual discards it and rebuilds source maps by hand.
+
+Textual's only real advantage is prototype simplicity, and that advantage disappears the moment the Tier 1 error contract is enforced. AST-level is the biggest architectural fork in the pipeline, and it lands clearly on the structured side.
+
+**Deferred.**
+- CTE alpha-renaming at expansion (v1 uses a collision diagnostic).
+- Expansion caching for repeated calls with identical argument shapes (performance tuning, not correctness).
+- Span-based deduplication of errors reported against the same callee body from many call sites (diagnostic polish).
+
+### 13. `Ordered` constraint membership (§9, §21)
+
+`Ordered` is the type constraint that gates `MIN`, `MAX`, `GREATEST`, `LEAST`, comparison operators (`<`, `<=`, `>`, `>=`), and `ORDER BY`. A concrete type `T` satisfies `Ordered` iff every v1 backend supports a total order on `T` natively.
+
+**Members in v1:**
+
+- All `Numeric` types: `SmallInt`, `Integer`, `BigInt`, `Float`, `Double`, `Decimal`
+- `Text` (= `Varchar`)
+- `Date`, `Time`, `Timestamp` (and `TimestampTz` if it exists as a distinct concrete type — orthogonal decision)
+- `Boolean` (`FALSE < TRUE` on DuckDB, Postgres, Spark)
+- `Interval`
+- `Binary` (= `Blob`) — lexicographic
+
+**Non-members in v1:** `Struct`, `Array`, `Map`. Ordering semantics diverge across backends (Spark orders arrays lexicographically; Postgres does not order arrays by default; DuckDB orders structs only if every field is itself orderable). Excluding them keeps the constraint backend-portable. If added later, they become derived: `Array<T>: Ordered where T: Ordered`, `Struct<fs>: Ordered where every field in fs: Ordered`.
+
+**Collation for `Text` is unspecified.** `Ordered` is a pure membership predicate; it does not pin down the collation used to compare strings. v1 uses each engine's default collation, which means string ordering is not guaranteed to agree across backends. Collation tracking is deferred as a separate typed property, analogous to nullability (decision 10) — it refines existing types rather than changing the constraint surface.
+
+**Relationship to `Numeric`.** `Numeric ⊂ Ordered`. Whether this is expressed as constraint subsumption in the signature language or as duplicated enumeration is a signature-language question, deferred to the generics-syntax item in §21.
+
+**Rationale.** The membership table matches what every v1 backend already supports natively, so `MIN`/`MAX`/`ORDER BY` over these types compiles to native SQL without casts. Adding a type to `Ordered` later is non-breaking (old programs keep compiling, new ones gain an option); removing one is breaking. When in doubt, a type is included. Composite types are excluded because their cross-backend semantics genuinely differ — including them would force smelt to either pick a winner (breaking two of three backends) or emit verbose lexicographic-comparison scaffolding.
+
+**Deferred.**
+- Collation as a tracked property of `Text`.
+- Decimal precision/scale in comparisons (follows whatever decision 9 eventually lands for Decimal arithmetic).
+- `Ordered` membership for composite types (`Array`, `Struct`, `Map`) once their element/field constraints are formalized.
+
+### 14. Generics syntax and inference (§9, §21)
+
+Built-in signatures and `smelt.extern` declarations may be polymorphic via angle-bracket type parameters on the function name:
+
+```
+MIN<T: Ordered>(T) → T
+COALESCE<T: Ordered>(T, T, ...) → T
+DATE_ADD<T: Temporal>(T, Interval) → T
+ABS<T: Numeric>(T) → T
+```
+
+Multiple parameters are comma-separated (`<T: Ordered, U: Numeric>`). An unconstrained parameter is `<T>`. No SQL conflict arises because signatures are a declaration form, never parsed as expressions.
+
+**Scope in v1.** Generics are available only in built-in signatures and `smelt.extern` declarations. `smelt.define` (user-defined functions) stays monomorphic in v1; authors who want polymorphism write overloads. Generic user functions open higher-rank, variance, and constraint-inference questions the tier system (§8) was designed to avoid, and are deferred.
+
+**Inference algorithm.** For each type parameter `T` in a signature, the checker collects every position where `T` appears: argument positions, and — in checking mode — the expected return type from context. It then resolves `T` by a single rule per constraint class:
+
+- If `T`'s constraint has a **promotion chain** (in v1, only `Numeric` — see decision 9), bind `T` to the LUB of the positions under that chain.
+- Otherwise, every position must unify to the same concrete type (engine aliases like `Text`/`Varchar` treated as equal). A mismatch is a type error at the call site.
+
+After binding, the checker discharges the declared constraint: if `T: Ordered` and inferred `T = Map<…, …>`, the call fails because `Map` is not in `Ordered` (decision 13).
+
+**Multi-position consequences.**
+
+- `MIN(revenue)` where `revenue: Expr<Decimal>` → positions `{Decimal}` → `T = Decimal` → return `Expr<Decimal>`.
+- `COALESCE(int_col, bigint_col)` → positions `{Integer, BigInt}` → LUB = `BigInt` → return `Expr<BigInt>`.
+- `COALESCE(date_col, timestamp_col)` → `Ordered` has no chain between `Date` and `Timestamp` → error, explicit CAST required.
+- `DATE_ADD(ts, interval)` → `T` appears in arg 1 and return; `T = Timestamp`.
+
+**Bidirectional interaction.** When the call occurs in checking mode and `T` appears in the return position, the expected type is added as an additional position for `T`. It participates in the LUB / unification step like any other position. Example: context expects `Expr<Double>`, call is `COALESCE(1, 2)` with integer literals; positions for `T` become `{Integer, Integer, Double}`; LUB under the numeric chain = `Double`; literals type-check as `Double`. If the expected type cannot be reconciled with the argument-derived binding, the error is local and shows both sides.
+
+**Error surface.** Generic-inference errors point to the specific argument (or context) position that forced the inconsistent binding and include the accumulated history of `T`: "`T` inferred as `Integer` from arg 1 (line 5); cannot unify with `Text` at arg 2 (line 6)." No "unresolved type variable" or "constraint unsatisfied in the prelude" style messages — these fail the Tier 1 error contract (§8).
+
+**Constraint subsumption.** `Numeric ⊂ Ordered` (and any other subsumption relations the signature language acquires) is expressed directly as declared constraints. A signature `f<T: Numeric>(T) → T` accepts any `Numeric` concrete; since every `Numeric` is also `Ordered`, the caller can pass it to any `<U: Ordered>` position. The subsumption check is structural and does not require the user to restate constraints.
+
+**Variadic positions** (e.g. `COALESCE<T>(T, T, ...)`) are represented abstractly as "some number of positions for `T`"; the concrete mechanism depends on the variadics decision (still open in §21). The inference rule above references "all positions for `T`" without committing to how variadic arity is spelled, so decision 14 is stable under either outcome.
+
+**Rationale.** The syntax choice is optimized for reader recognition: anyone familiar with Rust, TypeScript, Scala, or C# reads `MIN<T: Ordered>(T) → T` correctly on first sight. Constraining generics to signatures in v1 preserves the tier architecture's property that user functions never introduce global inference obligations. The LUB-vs-unification split (keyed on whether the constraint has a promotion chain) prevents ad-hoc promotions from sneaking into non-numeric type families: if we ever want `Date + Timestamp → Timestamp` promotion, it becomes a deliberate extension of decision 9, not an emergent consequence of `COALESCE`'s signature.
+
+**Deferred.**
+- Generics in `smelt.define` (user-defined polymorphic functions).
+- Higher-kinded constraints (`Array<T>: Ordered where T: Ordered`) — depends on composite-type handling.
+- Multi-parameter constraint relationships (e.g. `f<T, U>(T, U) where T: CoercibleTo<U>`). Not needed for built-ins in v1.
+- Bounded LUB widening for user-declared families beyond `Numeric`.
+
+### 15. Variadics in built-in signatures (§9, §21)
+
+Built-in signatures and `smelt.extern` declarations may mark the final argument position as variadic with a trailing `...`. The minimum arity of the call is the number of required positions preceding the rest:
+
+```
+COALESCE<T: Ordered>(T, T...) → T         -- 1 or more args
+GREATEST<T: Ordered>(T, T...) → T         -- 1 or more args
+LEAST<T: Ordered>(T, T...) → T            -- 1 or more args
+CONCAT(Text...) → Text                     -- 0 or more args
+CONCAT_WS(Text, T, T...) → Text            -- 2 or more args (separator + at least one payload)
+```
+
+A variadic position expands to N positions for inference, one per actual argument, all sharing the same type parameter (if one is declared). Decision 14's inference rule applies unchanged: positions under a promotion-chain constraint take the LUB, positions under any other constraint must unify. `COALESCE(int_col, bigint_col, double_col)` therefore binds `T = Double` and returns `Expr<Double>`; `COALESCE(text_col, int_col)` fails because `Text` and `Integer` have no common position under `Ordered`.
+
+**Restrictions.**
+
+- **Argument positions only.** Variadic return types are not permitted — SQL functions return a single column per call.
+- **Built-ins and `smelt.extern` only.** `smelt.define` stays monomorphic in v1 (decision 14) and also stays non-variadic. Users write fixed-arity wrappers where needed.
+- **Positional only.** Arguments passed to a variadic position use positional syntax; `name => value` named-argument syntax does not apply to variadics.
+- **At most one variadic per signature, in final position.** Forms like `f(T..., U, V...)` are not expressible; they are not needed for any v1 built-in.
+
+**Zero-arg edge case.** If a type parameter `T` appears only in a variadic position and the caller supplies zero actual arguments, inference has no positions for `T` from the call. Two fallbacks apply, in order:
+
+1. In checking mode, the expected return type contributes a position for any `T` that appears in the return; use it.
+2. Otherwise, the call is rejected with an error local to the call site: "cannot infer type parameter `T` — variadic position received no arguments and no return type is expected from context."
+
+In practice this case is rare because zero-or-more variadics typically use a concrete element type (`CONCAT(Text...) → Text`), not a type parameter. Signatures that combine a zero-lower-bound variadic with a free type parameter are a signature-design smell; the error at least localizes it rather than producing an unresolved-variable leak across the module.
+
+**Interaction with `PASSING`.** The `PASSING` clauses from §10 are structured fragment passes, not variadic arguments. They attach to named parameters declared with fragment sorts (`SelectItems`, `Predicate`, etc.) and are orthogonal to `...` in the inline argument list. A signature may use both mechanisms, but they do not overlap syntactically.
+
+**Rationale.** Trailing `...` with a leading-required-positions floor is the most compact way to express all of COALESCE-family, CONCAT-family, and fixed+variadic cases without a new syntactic device per arity class. Folding variadic positions into decision 14's "collect all positions for `T`" keeps the inference algorithm single-rule. Rejecting variadics in user-defined functions in v1 preserves the property that user code never introduces unbounded inference obligations, matching the tier architecture's design target.
+
+**Deferred.**
+- Explicit minimum-arity notation (`T...2+`). Leading required positions cover every built-in we've encountered; revisit only if a use case appears.
+- Variadics in `smelt.define` — follows decision 14's deferral of user-defined generics.
+- Heterogeneous variadic tuples (TypeScript-style `...args: [Text, Integer, Date]`). Not needed for SQL built-ins.
+- Named-argument syntax for variadic positions. Keeps the positional/named boundary clean in v1.
 
 ## 17. Comparisons and Theoretical Foundations
 
@@ -1324,19 +1498,19 @@ Once functions are shared, changing a function's body (even without changing its
 
 ### Must resolve (blocks implementation)
 
-- [ ] **`smelt.define` grammar.** The paper shows examples but never gives a formal grammar. What tokens delimit a definition? How does the parser recover from errors mid-definition? Is `smelt.define` a statement or an expression? What's the interaction with frontmatter? How are multiple definitions in one file separated?
+- [x] **`smelt.define` grammar.** Resolved April 19, 2026 — see §16 decision 11. Top-level statement with the shape `smelt.define <name>(<params>) [-> <type>] AS (<body>) [;]`. Parenthesized body is required (single-token termination). Files are a sequence of top-level items; frontmatter applies only to the model `SELECT`. `smelt.define` is the sync token for error recovery.
 
-- [ ] **Expansion mechanics.** Textual substitution or AST-level rewriting? AST-level preserves source positions for error tracing but is harder to implement. Textual is simpler but makes Tier 1 error mapping fragile. This is the biggest architectural fork — it determines the shape of the compiler pipeline.
+- [x] **Expansion mechanics.** Resolved April 19, 2026 — see §16 decision 12. AST-level rewriting on the CST with structured provenance tags per node. Lazy: calls stay symbolic through Level 1, expand at Level 2. Tier 1 type checking uses a type-context binding rather than materializing an expanded CST. Textual substitution rejected: it would rebuild source maps, reparse synthesized fragments, and lose CST position tracking.
 
-- [ ] **Tier 1 error tracing.** The paper commits to mapping errors back through expansion with parameter bindings shown. That requires source map infrastructure. What data structure tracks the expansion? How deep does the trace go for nested calls (A calls B calls C)? What's the minimum viable version for Step 1?
+- [ ] **Tier 1 error tracing: Step 1 MVP scope.** Data structure and trace depth resolved by §16 decision 12 (origin tags per node, frame stack for nested calls). Open: what is the minimum viable version for Step 1 of §19? Specifically, does Step 1 ship full nested-frame rendering, or only single-level traces (caller → callee) with nested traces following in Step 2? Ties into the `safe_divide` end-to-end target.
 
 ### Must resolve (blocks Step 2 — built-in typing)
 
-- [ ] **`Ordered` constraint specification.** The numeric tower (§16 decision 9) deferred `Ordered`. It's needed for MIN/MAX/GREATEST/LEAST — which types satisfy it? Presumably `Numeric + Text + Date + Timestamp + Time`. Needs to be enumerated.
+- [x] **`Ordered` constraint specification.** Resolved April 19, 2026 — see §16 decision 13. Members: `Numeric ∪ {Text, Date, Time, Timestamp, Boolean, Interval, Binary}`. Composites (`Struct`, `Array`, `Map`) excluded in v1 due to cross-backend divergence. Collation for `Text` deferred as a separate typed property.
 
-- [ ] **Generics syntax and inference.** `MIN<T: Ordered>(T) → T` and `COALESCE<T>(T, T, ...) → T` need a concrete syntax for declaring type parameters on black box signatures. How does the checker infer `T` at call sites? How does this interact with the LUB computation for multi-argument functions?
+- [x] **Generics syntax and inference.** Resolved April 19, 2026 — see §16 decision 14. Angle-bracket generics on signatures only (`MIN<T: Ordered>(T) → T`); `smelt.define` stays monomorphic in v1. Inference collects positions for each type parameter; bound by LUB where the constraint has a promotion chain (Numeric), otherwise by unification. Expected return type in checking mode participates as an additional position.
 
-- [ ] **Variadics.** `COALESCE`, `CONCAT`, `GREATEST` accept arbitrary arity. Does the signature language need `Expr<T>...`? Or can fixed-arity overloads cover the common cases? The paper deferred variadic *user* functions (§3) but built-ins need them.
+- [x] **Variadics.** Resolved April 19, 2026 — see §16 decision 15. Trailing `...` on the final argument position; minimum arity = number of preceding required positions. Variadics in argument positions only, built-ins and `smelt.extern` only, positional-only. Variadic expansion feeds decision 14's inference rule unchanged.
 
 ### Must resolve (blocks Step 3 — TableExpr functions)
 
