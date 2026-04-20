@@ -33,7 +33,7 @@ The design rests on **fragment sorts**: syntactic categories that distinguish di
 | Sort | What it represents | Where it can appear |
 |------|-------------------|-------------------|
 | `Expr<T>` | Scalar expression of SQL type T | SELECT, WHERE, ON, HAVING, CASE, QUALIFY |
-| `AggExpr<T>` | Expression containing aggregation | SELECT (with GROUP BY), HAVING |
+| `AggExpr<T>` | Expression containing aggregation | SELECT (aggregate context), HAVING |
 | `WindowExpr<T>` | Expression containing a window function | SELECT, ORDER BY (not WHERE, GROUP BY, HAVING) |
 | `TableExpr` | Something with a schema | FROM, JOIN, WITH |
 | `SelectItems` | List of (expression, alias) pairs | SELECT clause |
@@ -49,7 +49,7 @@ The expression-level sorts form a **linear subtyping chain**:
 Expr<T>  <:  AggExpr<T>  <:  WindowExpr<T>
 ```
 
-Anywhere a `WindowExpr<T>` is accepted, an `AggExpr<T>` or plain `Expr<T>` is also valid. Anywhere an `AggExpr<T>` is accepted, a plain `Expr<T>` is valid. This matches SQL's actual restriction rules: a window context (SELECT with OVER) accepts aggregates and scalars; an aggregate context (SELECT with GROUP BY) accepts scalars but not window functions; a scalar context (WHERE) accepts only scalars.
+Anywhere a `WindowExpr<T>` is accepted, an `AggExpr<T>` or plain `Expr<T>` is also valid. Anywhere an `AggExpr<T>` is accepted, a plain `Expr<T>` is valid. This matches SQL's actual restriction rules: a window context (a plain SELECT, where windows are legal) accepts aggregates and scalars; an **aggregate context** (a SELECT with `GROUP BY`, or a SELECT with no `GROUP BY` whose projected expressions are all aggregated — the implicit single-group case — plus `HAVING` in either case) accepts scalars but not window functions; a scalar context (WHERE) accepts only scalars.
 
 This subtyping is the *only* subtyping relationship between sorts. `TableExpr`, `SelectItems`, and `OrderSpec` are unrelated to the expression chain.
 
@@ -57,7 +57,27 @@ A bare column reference like `user_id` is a trivial `Expr<T>` -- there is no sep
 
 A `Predicate` sort was considered and rejected. Use `Expr<Boolean>` instead -- the positional constraint (WHERE, ON, HAVING) is already enforced by SQL syntax, and one fewer concept to learn is worth more than one more sort.
 
-The initial implementation targets a subset: `Expr<T>` and `TableExpr`. The remaining sorts (`AggExpr<T>`, `WindowExpr<T>`, `SelectItems`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions. The linear subtyping chain (`Expr <: AggExpr <: WindowExpr`) is implemented when `AggExpr` is introduced.
+The initial implementation targets a subset: `Expr<T>` and `TableExpr`. The remaining sorts (`AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K, ctx>`, `OrderSpec`) are added once basic function composition is validated. Each sort is independently addable without breaking existing functions. The linear subtyping chain (`Expr <: AggExpr <: WindowExpr`) is implemented when `AggExpr` is introduced.
+
+### SelectItems Kind
+
+`SelectItems<K, ctx>` carries a **kind** `K` that is the ceiling of the expression sorts contained in the list. The three kinds parallel the expression chain:
+
+- `SelectItems<Scalar, ctx>` — every item is an `Expr<T>`.
+- `SelectItems<Agg, ctx>` — items are `Expr<T>` or `AggExpr<T>`.
+- `SelectItems<Window, ctx>` — items are `Expr<T>`, `AggExpr<T>`, or `WindowExpr<T>`.
+
+These sorts subtype linearly, mirroring the expression chain:
+
+```
+SelectItems<Scalar, ctx>  <:  SelectItems<Agg, ctx>  <:  SelectItems<Window, ctx>
+```
+
+A list whose ceiling is `Scalar` also satisfies an `Agg` or `Window` expectation; a list containing a window function does not satisfy an `Agg` expectation. Splice positions require a kind based on the surrounding query shape: `SELECT ${items} FROM t` with no `GROUP BY` and no other aggregates accepts `SelectItems<Window, ctx>` (any kind); `SELECT ${items} FROM t GROUP BY ...` accepts `SelectItems<Agg, ctx>` and rejects `<Window, ctx>`; a position restricted to pure scalars accepts only `<Scalar, ctx>`.
+
+The kind is the *ceiling* of what the list contains, not a uniform property of every element. A list mixing `user_id` (scalar) and `COUNT(*) AS n` (aggregate) has kind `Agg`. Real `SELECT` clauses regularly combine scalars with aggregates under a `GROUP BY`; the ceiling captures this without forcing a per-element tag.
+
+Without this kind parameter, a `SelectItems` value carrying a window function could be spliced into a `GROUP BY` query and the sort system would silently lose the restriction the expression chain was designed to preserve. The kind extends that protection across the list boundary.
 
 ### Comparison: Malloy
 
@@ -1532,6 +1552,25 @@ smelt.define safe_divide(
 - Warning policy when an inferred `backends` set collapses to empty (i.e., a body mixing calls from incompatible backend namespaces). Likely a hard error, but the diagnostic design lives with the planner work.
 - Whether `backends` affects callers transitively via a join/meet rule, and how cross-backend calls are blocked or bridged. Tied to the exchange/materialization story, already outside this paper's scope.
 
+### 24. SelectItems\<Kind, ctx\> parallel to the expression chain (§2, §20A)
+
+`SelectItems<K, ctx>` carries a kind parameter `K ∈ {Scalar, Agg, Window}` that is the ceiling of the expression sorts in the list. The three kinds form a linear subtyping chain that mirrors the expression chain: `SelectItems<Scalar, ctx> <: SelectItems<Agg, ctx> <: SelectItems<Window, ctx>`.
+
+**Rationale.** Without a kind parameter, a `SelectItems` carrying a `WindowExpr` could be spliced into a `GROUP BY` query and the sort system would silently lose the restriction — the same class of error `WindowExpr<T>` was introduced (decision 8) to prevent at the expression level. The kind parameter extends that protection across the list boundary. Using the ceiling (not a per-element tag, not a uniform kind) matches SQL's reality — real `SELECT` clauses mix scalars and aggregates under a single `GROUP BY` — without adding structure beyond what the expression chain already provides.
+
+**Splice-point rules.**
+
+1. A plain `SELECT ${items} FROM t` with no `GROUP BY` and no other aggregates accepts `SelectItems<Window, ctx>` — any kind.
+2. `SELECT ${items} FROM t GROUP BY ...` accepts `SelectItems<Agg, ctx>` and rejects `<Window, ctx>`.
+3. A position restricted to pure scalars (rare in practice) accepts only `<Scalar, ctx>`.
+4. The implicit-single-group case (a SELECT with no `GROUP BY` whose items are all aggregated) fits naturally: the items have ceiling `Agg`, the splice point accepts `<Window, ctx>`, and the subtyping check passes. This is the same SQL shape that §2 adds to the aggregate-context definition.
+
+**Mixed lists.** A list mixing `user_id` (scalar) and `COUNT(*) AS n` (aggregate) has kind `Agg`. The author does not tag items; the kind is computed from the contents.
+
+**Context binding** (the `ctx` parameter) is orthogonal to `K` and follows §6 unchanged: column-name validation against a CTE context that includes `source.*` still defers to call-site expansion.
+
+**Resolves.** §20A "`SelectItems` is under-specified" — the `Agg` kind parameter now has a formal definition (ceiling of contained expression sorts), a subtype relationship to `Scalar` and `Window`, and a specified answer for mixed lists.
+
 ## 17. Comparisons and Theoretical Foundations
 
 ### Comparison Table
@@ -1691,7 +1730,7 @@ The following observations are areas where the design is technically coherent bu
 
 **Missing: `WindowExpr<T>`.** Window functions (`ROW_NUMBER() OVER (...)`, `LAG(...) OVER (...)`) are not aggregates and cannot appear in WHERE. The `sessionize` example uses them extensively. Window expressions are one of the most common sources of sort errors in SQL (using them in WHERE, GROUP BY, or nested inside aggregates). A `WindowExpr<T>` sort would catch these at composition time.
 
-**`SelectItems` is under-specified.** The `Agg` kind parameter is never formally defined. Can there be `SelectItems<Scalar, ctx>`? What about mixed select lists (some aggregate, some GROUP BY columns)? Real SELECT clauses regularly mix both.
+**~~`SelectItems` is under-specified.~~** *(Resolved — April 21, 2026. See §16 decision 24. `SelectItems<K, ctx>` carries a kind parameter `K ∈ {Scalar, Agg, Window}` defined as the ceiling of the contained expression sorts, with linear subtyping `SelectItems<Scalar, ctx> <: SelectItems<Agg, ctx> <: SelectItems<Window, ctx>` parallel to the expression chain. Mixed lists — e.g., a `GROUP BY` column alongside a `COUNT(*)` — have kind `Agg` by ceiling, without any per-element tag.)*
 
 ### B. Scoping Edge Cases
 
@@ -1806,6 +1845,8 @@ Once functions are shared, changing a function's body (even without changing its
 - [x] **Default value expansion for fragment sorts.** Resolved April 20, 2026 — see §16 decision 20. Defaults are explicit (no implicit empty for list sorts), type-checked at definition time, bound at call resolution, cloned into placeholder positions at Level 2 with `Synthesized` provenance per decision 12. List splices elide adjacent commas syntactically when a splice contributes zero elements; non-empty context-bound defaults share §6's call-site-deferred column-name validation.
 
 - [x] **Dialect differences in function bodies.** Resolved April 19, 2026 — see §16 decision 23. Engine-agnostic canonical SQL bodies; engine-specific features reached only through backend namespace (`duckdb.*` etc.); `backends:` frontmatter is inferred as the intersection of call-site backends and may be narrowed but not widened; no per-function dialect tag; translation is a single pass at final expansion. "Canonical SQL" is defined pragmatically as whatever the translation layer can emit faithfully across supported backends.
+
+- [x] **SelectItems kind parameter.** Resolved April 21, 2026 — see §16 decision 24. `SelectItems<K, ctx>` carries a kind parameter (Scalar / Agg / Window = ceiling of contained expression sorts) with linear subtyping parallel to the expression chain, preserving sort information across list-valued parameters and splice points. Also tightens §2's aggregate-context definition to cover the implicit single-group case (a SELECT with no `GROUP BY` whose items are all aggregated).
 
 ### Can defer (resolve during implementation)
 
