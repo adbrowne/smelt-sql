@@ -270,10 +270,10 @@ This means a Tier 1 transparent function (unannotated) calling a black box built
 
 ### Planner Implications
 
-The planner treats black box functions as optimization barriers -- it cannot rewrite what's inside. However, black box functions can still carry declared properties:
+The planner treats black box functions as optimization barriers -- it cannot rewrite what's inside. However, black box functions can still carry declared properties (in frontmatter, per §16 decision 22):
 
-- `@deterministic` -- the planner knows the function produces the same output for the same input
-- `@idempotent` -- safe to retry
+- `deterministic: true` -- the planner knows the function produces the same output for the same input
+- `idempotent: true` -- safe to retry
 - SQL built-ins inherit properties from the registry (e.g., `SUM` is deterministic, `RANDOM()` is not)
 
 The planner can reason *around* black box functions (push a filter below a black box scalar function, eliminate unused columns before a black box table function) but never *through* them.
@@ -313,6 +313,9 @@ Explicit context annotations serve two purposes:
 Consider `session_rollup`:
 
 ```sql
+---
+deterministic: true
+---
 smelt.define session_rollup(
     source: TableExpr,
     user_col: Expr<Text>,
@@ -320,7 +323,7 @@ smelt.define session_rollup(
     gap: Expr<Interval> = INTERVAL '30 minutes',
     metrics: SelectItems<Agg, sessionized> = (),
     filters: Expr<Boolean> = TRUE
-) -> TableExpr @deterministic AS (
+) -> TableExpr AS (
     WITH sessionized AS (
         smelt.fn.sessionize(source, user_col, ts_col, gap)
     )
@@ -388,14 +391,14 @@ smelt.define summarize(
 ) -> TableExpr AS (...)
 ```
 
-**Strategy 3: `smelt.as_struct()` for compile-time namespacing.** When multiple tables need to be accessible without column name collisions, wrap each table's columns into a struct:
+**Strategy 3: `smelt.as_struct()` for compile-time namespacing (deferred to post-v1 — see §16 decision 19).** When multiple tables need to be accessible without column name collisions, a future `smelt.as_struct()` construct would wrap each table's columns into a struct:
 
 ```sql
 smelt.as_struct(source EXCEPT customer_id, product_id)
 -- produces: STRUCT(col1, col2, ...) excluding the join keys
 ```
 
-`smelt.as_struct()` is a **compile-time construct** with zero runtime cost -- the compiler knows the concrete struct fields at expansion time and generates explicit field references. This provides SQL-safe namespacing (`source_struct.revenue`, `customer_struct.segment`) without runtime struct creation overhead.
+This is intended as a **compile-time construct** with zero runtime cost -- the compiler would know the concrete struct fields at expansion time and generate explicit field references, providing SQL-safe namespacing (`source_struct.revenue`, `customer_struct.segment`) without runtime struct creation overhead. In v1, use Strategy 1 or Strategy 2; `smelt.as_struct()` is revisited alongside Step 8 (struct row polymorphism, §11) so the two surfaces can be designed together.
 
 ### Remaining Edge Cases
 
@@ -736,13 +739,13 @@ Rules rewrite the logical DAG. Functions are nodes with rich typed interfaces ca
 The compiler analyzes function bodies and attaches structural metadata:
 - **Column provenance map:** Which output columns come from which input tables
 - **Join graph:** Which tables are joined, join type, cardinality
-- **Declared properties:** `@deterministic`, `@idempotent`, `@append_only`
+- **Declared properties:** `deterministic`, `idempotent`, `append_only` (frontmatter keys per §16 decision 22)
 
 This metadata enables filter pushdown, function fusion, join elimination, and semantic validation -- all by reasoning about the typed interface, never pattern-matching on SQL.
 
-In v1, metadata is **explicitly annotated** by function authors (`@joins(dim_customers LEFT 1:1)`, `@provenance(customer_segment -> dim_customers.segment)`) rather than automatically derived. Automatic derivation requires a full lineage analyzer -- a substantial compiler component. Explicit annotations let the planner integration ship without this, while keeping the door open to add automatic derivation later as a DX improvement. In practice, only "model template" functions benefit from planner-level optimization, so the annotation burden is concentrated on a small number of high-value functions.
+In v1, metadata is **explicitly declared** by function authors (`joins:` / `provenance:` keys in frontmatter, shape TBD when they land) rather than automatically derived. Automatic derivation requires a full lineage analyzer -- a substantial compiler component. Explicit declarations let the planner integration ship without this, while keeping the door open to add automatic derivation later as a DX improvement. In practice, only "model template" functions benefit from planner-level optimization, so the declaration burden is concentrated on a small number of high-value functions.
 
-However: v1 annotations are bare keywords only (`@deterministic`, `@idempotent`, `@append_only`). Structured annotations (`@joins(...)`, `@provenance(...)`) are deferred until the planner actually needs them. Annotations appear after the type, before `=` (for parameters) or before `AS` (for return types).
+However: v1 frontmatter properties are simple booleans and lists only (`deterministic`, `idempotent`, `append_only`, `backends`). Structured properties (`joins`, `provenance`) are deferred until the planner actually needs them. Per decision 22, all properties live in the frontmatter block that immediately precedes the declaration.
 
 The three-level planner architecture parallels MLIR's (Multi-Level IR) progressive lowering through dialect levels, where each level carries different semantic information and rewrites happen at the appropriate abstraction.
 
@@ -763,13 +766,13 @@ A single physical node becomes one or more concrete SQL statements:
 - Cross-engine: `Run query on Spark -> Write Parquet -> Read in DuckDB`
 - Validated write: `Run query -> Check invariants -> Swap target table`
 
-Function properties still matter: `@idempotent` tells Level 3 that retry is safe; `@deterministic` tells it re-execution produces the same result.
+Function properties still matter: `idempotent: true` tells Level 3 that retry is safe; `deterministic: true` tells it re-execution produces the same result.
 
 ### What Ships When
 
-**MVP (Steps 1-5):** Pure expansion for transparent functions, signature checking for black box functions. No planner rules at any level. Bare keyword annotations (`@deterministic`, `@idempotent`, `@append_only`) are parsed and stored but not acted on.
+**MVP (Steps 1-5):** Pure expansion for transparent functions, signature checking for black box functions. No planner rules at any level. Simple frontmatter properties (`deterministic`, `idempotent`, `append_only`) are parsed and stored but not acted on.
 
-**Post-MVP (Step 7):** Level 1 planner rules. Structured annotations (`@joins(...)`, `@provenance(...)`) for the functions that benefit from optimization. The transparency rule guides which functions the planner can reason through. Levels 2 and 3 build on existing planner infrastructure.
+**Post-MVP (Step 7):** Level 1 planner rules. Structured frontmatter properties (`joins`, `provenance`) for the functions that benefit from optimization. The transparency rule guides which functions the planner can reason through. Levels 2 and 3 build on existing planner infrastructure.
 
 This separation lets the function system be validated as a composition mechanism before adding planner complexity.
 
@@ -832,12 +835,12 @@ Built-in SQL functions use a **single canonical signature registry** with backen
 
 **Backend namespace for native precision.** If a user wants the higher precision a specific backend offers, they use the backend namespace: `postgres.sum(col)` returns `Decimal(38,0)` with no enforced cast. This is an explicit opt-in to backend-specific behavior that marks the model as non-portable. The same namespace mechanism handles UDFs, which are inherently backend-specific.
 
-**`@backends` as a function property.** Backend compatibility uses the same `@annotation` system as `@deterministic` and `@idempotent`:
+**`backends` as a function property.** Backend compatibility is a frontmatter property (per §16 decision 22), the same mechanism that carries `deterministic` and `idempotent`. The canonical built-in registry stores each entry's properties in its own data format, but the conceptual shape is identical to a user-declaration's frontmatter:
 
-```sql
-COALESCE(a, b)                    -- @deterministic @backends(all)
-MEDIAN(col)                       -- @deterministic @backends(duckdb, postgres)
-duckdb.read_parquet('*.parquet')  -- @backends(duckdb)
+```
+COALESCE(a, b)                   # deterministic: true, backends: all
+MEDIAN(col)                      # deterministic: true, backends: [duckdb, postgres]
+duckdb.read_parquet('*.parquet') # backends: [duckdb]   (implied by the duckdb.* namespace)
 ```
 
 This means the planner can answer "can I move this model to Spark?" with the same query pattern as "is this model deterministic?" — check whether all functions have the required property. Diagnostics like "MEDIAN is not available on Spark" use the same machinery as other type errors.
@@ -919,11 +922,11 @@ PASSING filters AS (
 3. `INSERT INTO web_sessions SELECT * FROM __staging`
 4. Update watermark
 
-Properties flow through all three levels: `@deterministic` tells Level 3 replaying a failed batch is safe; `@append_only` on `source` tells Level 2 incremental processing is valid.
+Properties flow through all three levels: `deterministic: true` tells Level 3 replaying a failed batch is safe; `append_only: true` on `source` tells Level 2 incremental processing is valid.
 
 ### Example 3: Join Elimination via Function-Aware Planning
 
-*Note: This example illustrates a future capability (Step 7 in the roadmap). It requires planner integration with structured annotations (`@provenance`, `@joins`), which are post-MVP.*
+*Note: This example illustrates a future capability (Step 7 in the roadmap). It requires planner integration with structured frontmatter properties (`provenance`, `joins`), which are post-MVP.*
 
 This demonstrates why planner-visible functions enable optimizations that blind expansion cannot.
 
@@ -1097,7 +1100,7 @@ smelt.define <name>(<param-list>) [-> <return-type>] AS (<body>) [;]
 
 **File structure.** A `.sql` file is parsed as a sequence of top-level items: optional frontmatter (at most one, must be first), zero or more `smelt.define` declarations, and at most one bare model `SELECT`. Items are separated by whitespace only; no separator token required. Defines and a model `SELECT` may interleave freely.
 
-**Frontmatter interaction.** Frontmatter applies to the file's model `SELECT` only. It does not apply to `smelt.define` bodies. Per-define attributes are out of scope for v1; if introduced later they attach to the define itself, not via frontmatter.
+**Frontmatter interaction.** *Superseded April 20, 2026 by §16 decision 22.* The original rule was "frontmatter applies to the file's model `SELECT` only; it does not apply to `smelt.define` bodies." Decision 22 generalises this: a frontmatter block attaches to the immediately following declaration (model, `smelt.define`, or `smelt.extern`), and each declaration may carry its own optional frontmatter. The rest of decision 11 — file-structure rules, error-recovery sync tokens, top-level-only nesting — is unchanged.
 
 **Nesting.** `smelt.define` may not appear inside a SELECT, CTE, or another function body. Local/nested defines are not part of v1 and can be added later without breaking changes.
 
@@ -1255,6 +1258,280 @@ In practice this case is rare because zero-or-more variadics typically use a con
 - Heterogeneous variadic tuples (TypeScript-style `...args: [Text, Integer, Date]`). Not needed for SQL built-ins.
 - Named-argument syntax for variadic positions. Keeps the positional/named boundary clean in v1.
 
+### 16. Tier 1 error tracing: single-level traces in Step 1 (§8, §19, §21)
+
+Step 1 of the experimentation roadmap ships Tier 1 error tracing with **single-level traces only** — call site → innermost error, with the parameter binding that triggered the failure. Nested-frame rendering (walking a frame stack of arbitrary depth to produce "in expansion of B, parameter x was bound to …" at every level) is added in Step 2 as diagnostic polish. The frame-stack data structure from decision 12 is built from day one; only the renderer is single-level.
+
+**What ships in Step 1:**
+
+- A frame stack is pushed on every call expansion, as specified by decision 12. One frame or many, the structure is the same.
+- The diagnostic reporter reads only the innermost frame and the outermost call site. The rendered error shows the call site (outer), the failing subexpression (inner), and the parameter binding that produced the failure.
+- For a single-level call (`safe_divide(x, y)` where `x` is wrong type), this is the full trace.
+- For a nested call (A → B → C), the user sees the outermost call site in A and the type error inside C, with the parameter binding at the innermost frame. Intermediate frames (the call from A to B, from B to C) are not rendered. The error is still local and actionable; it just doesn't narrate the full path.
+
+**What lands in Step 2:**
+
+- Full frame-stack rendering: every frame contributes a "in expansion of `fn`, parameter `p` was bound to ..." line, call-site first.
+- This upgrade is purely a change to the diagnostic reporter. The frame stack is already populated correctly in Step 1; Step 2 reads more of it.
+
+**Rationale.** Step 1's canonical target is the `safe_divide` end-to-end example, which is one level deep. Single-level traces cover it completely and prove the Tier 1 error contract from §8 (errors map back through expansion with parameter bindings). The multi-level renderer is mechanical to add once the single-level renderer exists and the frame stack is populated, so deferring it to Step 2 is low-cost and low-risk. The alternative — holding Step 1 until the full nested renderer is built — delays validation of the fragment-sort expansion model on a diagnostic feature that has no bearing on whether the model works.
+
+Shipping single-level first also generates real data on nesting depth before polishing the renderer: if `safe_divide`-style calls are the dominant Tier 1 pattern and deep nesting is rare, the Step 2 upgrade becomes a small win rather than the other way around.
+
+**Deferred.**
+
+- Full nested-frame rendering — lands in Step 2, using the frame stack already maintained in Step 1.
+- Span-based deduplication of errors reported against the same callee body from many call sites — diagnostic polish, already flagged under decision 12.
+- Rendering strategies for very deep expansions (truncation, collapse of repeated frames) — only relevant once nesting is common enough to need ergonomics.
+
+### 17. Tier 2 calling Tier 1: inline expansion at the Tier 2 body check (§8, §20D, §21)
+
+A Tier 2 function (parameters annotated, body checked in isolation) may call a Tier 1 function (unannotated). The Tier 1 callee's body is **expanded inline during the Tier 2 body check**, using the Tier 2 function's declared parameter types as the concrete argument types at that expansion site. Errors in the expansion are reported against the Tier 2 body, with the frame-stack trace from decisions 12 and 16 rooted at the Tier 2 call site.
+
+**Why not the three options from §20D.**
+
+- *(a) Tier 1 return as `Any`/unknown.* Breaks isolation in a way the Tier 2 author cannot see: a typo in the Tier 1 helper silently erodes the Tier 2 caller's type safety. The whole point of Tier 2 is that body errors are caught at definition time.
+- *(b) Refuse the call.* Eliminates a real use case. Library-quality Tier 2/3 functions often want to call small unannotated helpers. Refusing breaks the gradual-typing thesis (§8): you'd have to annotate every callee before writing the caller.
+- *(c) Require callees ≥ caller's tier.* TypeScript `--strict` at the function level. Migration-hostile: any existing Tier 1 helper becomes an obstacle the moment a Tier 2 function wants to call it.
+
+**The mechanism.** Tier 2 body check already knows its own parameter types. At a Tier 1 call inside that body, the checker collects argument types from the Tier 2 context, then runs Tier 1's standard expand-and-check routine (decision 12, Tier 1 column of the expansion table) with those types as the call site's concrete types. The Tier 1 body is checked under a type context binding its parameter names to the Tier 2–supplied argument types. The result is a synthesized return type, which flows back into the Tier 2 body check at the call position.
+
+Transitive Tier 1 → Tier 1 chains compose: every level's Tier 1 callee is expanded with types derived from the Tier 2 root. No recursion (guaranteed by §3's cycle rule), so expansion terminates.
+
+**Signature stability is preserved.** Decision 17 does not change what Tier 2's callers see. A Tier 2 function exposes only its declared parameter and (in Tier 3) return types. If a Tier 1 callee's body is temporarily broken mid-edit, the Tier 2 body check fails — but the Tier 2 signature is unchanged, so Tier 2's callers continue to type-check. This matches the §8 LSP-stability contract and is why Tier 2/3 is the right tier for shared code even under tier mixing.
+
+**Cost.** Tier 2 body check is no longer zero-expansion — it expands each Tier 1 callee it reaches. Expansion is bounded by the call graph and cached via Salsa. The cost is paid only when the Tier 2 author chose to call an unannotated helper; Tier 2 → Tier 2/3 calls remain signature-only, no expansion.
+
+**Edge case: unconstrained TableExpr parameters.** If the Tier 2 function has a bare `TableExpr` parameter (no column annotations) and passes it into a Tier 1 callee that does structural column resolution, some checks cannot fire during the Tier 2 body check — the schema is unknown until the Tier 2 function's own call sites bind a concrete table. These checks defer to Tier 2's call-site expansion, the same way Tier 2's own structural references against a bare `TableExpr` defer (§7, §20B). Decision 17 does not introduce a new deferral class; it extends the existing one through Tier 1 callees.
+
+**Upgrade story.** Upgrading a Tier 1 helper to Tier 2 does not break Tier 2 callers that were relying on decision 17: once the helper is Tier 2, its declared signature is used at the call site instead of expansion, which is strictly more information. The only way an upgrade breaks a caller is if the author annotates a parameter type that excludes something the caller was passing — the same risk as §20D's upgrade-path note and the deferred "Tier 1 → Tier 2 breaking changes" item in §21.
+
+**Rationale.** Decision 17 reuses mechanisms already specified. Tier 1's expand-and-check routine exists (decision 12). The frame-stack error tracer exists (decisions 12, 16). The type-context-binding approach to Tier 1 checking does not require a materialized expanded CST. Treating a Tier 1 call inside a Tier 2 body as "just another Tier 1 call site, with concrete types from the surrounding body" is the simplest rule that preserves isolation as Tier 2 promises it (definition-time error surface, stable signature), honours the gradual-typing thesis (mixing tiers is allowed and natural), and doesn't introduce a new concept (no `Any`, no tier-ordering invariant, no refusal rule).
+
+**Deferred.**
+
+- Tier 1 → Tier 2 upgrade-path breaking-change story (kept as an open item in §21).
+- Caching of Tier 1 expansion checks across multiple Tier 2 body re-checks — performance tuning, orthogonal to correctness.
+- Diagnostic polish when a Tier 1 expansion error fires inside a Tier 2 body that is itself reached via a long Tier 3 → Tier 2 → Tier 1 chain; covered by the deep-expansion rendering item under decision 16.
+
+### 18. `PASSING` is a context-sensitive keyword (§10, §21)
+
+`PASSING` is reserved **only** at the syntactic position immediately following the `)` that closes a `smelt.fn.*` call or a call to a `smelt.define`-declared function. Everywhere else in the grammar — column names, aliases, CTE names, ordinary SQL identifiers — `PASSING` is a regular identifier and parses unchanged.
+
+**Trigger rule.** The parser identifies a smelt function call by its namespace-prefixed path (`smelt.fn.<...>` or a user-defined function reachable through the same resolution). After the closing `)` of such a call, the parser peeks one token:
+
+- If the next token is `PASSING`, it begins a block-clause sequence (`PASSING <name> AS (<body>)`, repeated). Clauses continue until the next token is no longer `PASSING`.
+- Any other token: `)` has ended the call expression, and normal SQL parsing resumes with `PASSING` treated as an identifier if it appears.
+
+The check is uniform in expression position and FROM position — `SELECT smelt.fn.foo(...) PASSING ...` and `SELECT * FROM smelt.fn.foo(...) PASSING ...` use the same rule.
+
+**What the parser does not need.** No consultation with the type checker, no knowledge of the callee's parameter list, no awareness of which fragment-sort parameters accept `PASSING` clauses. Those are type-checker concerns and run after parsing. The parser produces a CST with `PASSING` clauses attached to the call node; the type checker validates names, sort compatibility, and binding during the usual call-site check.
+
+**What is not covered.** PASSING does not attach to plain SQL function calls (`UPPER(...)`, `SUM(...)`), aggregates, or arbitrary parenthesized expressions. If an author writes `SELECT UPPER(x) PASSING y AS (...)`, the parser treats `PASSING` as an identifier following `UPPER(x)`, which produces a normal SQL syntax error downstream — the right outcome. Black box functions declared via `smelt.extern` do **not** receive `PASSING` clauses in v1; they have no fragment-sort parameters (see §5 — externs carry typed signatures over `Expr<T>` / `TableExpr`, not `SelectItems` or `OrderSpec`). If externs ever grow fragment-sort parameters, extending the trigger rule is mechanical.
+
+**Rationale.** Reserving `PASSING` globally would break any schema with a `passing` column or alias — rare but present in real analytics codebases (audit flags, test-result tables). Context-sensitivity eliminates that risk at the cost of a one-token lookahead after `)`, which the parser already performs for other purposes (e.g., distinguishing `)` terminating a subquery from `)` terminating a CAST). The trigger is purely syntactic — a namespaced function-call path — so the parser stays independent of the type checker, preserving the same layering decision 3 achieved (§10: "the parser operates independently of the type checker"). This also matches how Rust, Kotlin, and Swift handle context-sensitive keywords (`dyn`, `async`, `where` in specific grammar slots) without making them global reserved words.
+
+**Deferred.**
+
+- Extending the trigger rule to `smelt.extern` calls if externs ever acquire fragment-sort parameters. Not in v1.
+- Whether PASSING can attach to chained calls (`smelt.fn.a(...).b(...) PASSING ...`). Method chaining on function return values isn't in the surface syntax today; revisit if it lands.
+- Pretty-printer / formatter conventions for PASSING clauses (line breaks, indentation). Style concern, not grammar.
+
+### 19. `smelt.as_struct()` deferred to post-v1 (§6, §21)
+
+`smelt.as_struct()` — introduced in §6 as Strategy 3 for exposing multiple joined tables to caller-provided fragments without column-name collisions — is **not in v1**. The no-overlap rule stands on Strategies 1 (explicit SELECT into a CTE with aliases) and 2 (typed `TableExpr<{...}>` parameter requiring the caller to pre-join).
+
+**What ships in v1.** §6's Strategy 1 and Strategy 2 remain fully specified and are the v1 options for multi-join functions that need to expose columns to caller fragments. Strategy 1 is the SQL-native approach — verbose but universal and immediately recognisable to SQL authors. Strategy 2 pushes the disambiguation responsibility onto the caller, which is appropriate when the function author wants to require a specific shape.
+
+**What defers.** The full `smelt.as_struct()` design: surface syntax, `EXCEPT` resolution (including nested-struct paths), per-backend struct-literal generation, splice-context rules for where the generated struct expression can appear, and the interaction with backends that lack native struct literals (Postgres composite types are the awkward case).
+
+**Rationale.**
+
+1. The motivating use case — multi-table joins with overlapping column names — is real but not universal. In the analytics functions likely to ship in early smelt projects, Strategy 1 covers it with mechanical SQL that every reviewer can parse at a glance.
+2. Compile-time struct generation is not architecturally lightweight. It requires schema extraction from `TableExpr` positions (ties into the "hardest problem" from §20I when the context involves unconstrained `TableExpr` parameters), backend-specific emission (DuckDB `{'f': v}`, Spark `struct(v AS f)`, Postgres requires row constructors or composite-type declarations — which is not a drop-in substitute), and splice-position rules that interact with the fragment-sort system in ways that deserve dedicated analysis rather than being folded into Step 3.
+3. `smelt.as_struct()` conceptually overlaps with struct-value row polymorphism (§11, Step 8 of the experimentation roadmap: `Expr<Struct<{ts: Timestamp, ..r}>>`). Both concepts produce a named-field view over column-like data; designing them together once both are concrete avoids a two-stage surface where the first mechanism shapes the second in ways we'd want to revisit. Deferring `as_struct` to a revisit alongside Step 8 lets the two land with a coherent story.
+4. Deferral is purely additive. Adding `smelt.as_struct()` later introduces a new expression form; it does not invalidate any v1 program. Strategies 1 and 2 remain the idiomatic options even after `as_struct` lands; they do not become deprecated.
+
+**Cost of deferral.** §6 Strategy 3 drops out of the v1 surface. Authors writing multi-join functions with overlapping column names in caller fragments must reach for Strategy 1 or Strategy 2. The paper's §6 example that uses `smelt.as_struct(source EXCEPT customer_id, product_id)` is retained as an illustration of a future capability; v1 readers should treat Strategy 3 as "design sketch, deferred" rather than "available today".
+
+**What a minimal v1 would look like (rejected).** A `smelt.as_struct(source)` form without `EXCEPT` was considered and rejected. `EXCEPT` is the reason the feature exists — join keys must be excluded so the remaining columns form a clean namespace. A variant that cannot exclude fields does not solve the motivating use case; it would ship syntax that serves no purpose until the full form arrives.
+
+**When to revisit.** Coupled with Step 8 of the experimentation roadmap (struct row polymorphism). When Step 8 concretises the `Struct<{..r}>` surface, re-open `smelt.as_struct()` with the Step 8 vocabulary in hand and design them together.
+
+**Deferred.**
+
+- The full surface syntax: `smelt.as_struct(<table-expr> [EXCEPT <col-list>])` is the working sketch; confirm at revisit.
+- `EXCEPT` semantics over nested struct columns (`EXCEPT event.meta.user_id`).
+- Per-backend emission and the question of whether to support backends that lack struct literals via synthesised composite-type scaffolding or to emit a backend-capability error.
+- Splice-context rules: can `smelt.as_struct()` appear in `SelectItems`? In an `Expr` position as a struct-typed scalar? Both, with constraints?
+- Interaction with caller-provided fragments that reference synthesised struct fields — specifically, whether the type checker validates field references inside caller fragments at definition time or defers to call-site expansion.
+
+### 20. Default value expansion for fragment sorts (§3, §21)
+
+Defaults are attached to parameters by writing `= <fragment>` in the signature. The rules for how they are declared, checked, and expanded are as follows.
+
+**Explicit defaults only — no implicit empty.** A parameter without a `=` clause is required; the caller must supply an argument. List-valued fragment sorts (`SelectItems`, `OrderSpec`) do **not** acquire an implicit empty default; an author who wants "splice nothing" writes `= ()` explicitly. This keeps the signature self-documenting — the reader sees either "required" or "default is `X`" and never has to reason about sort-specific implicit rules. It also matches the scalar sorts (`Expr<T>`, `TableExpr`, `AggExpr<T>`, `WindowExpr<T>`), which have no meaningful empty value and therefore always need an explicit default if one is intended. The surface syntax is uniform across sorts: explicitness at the signature, no hidden behaviour.
+
+**Type-check at definition time.** Each default's CST is checked against the parameter's declared sort, and (in Tier 2/3) against its declared concrete type. Examples:
+
+- `= TRUE` on `Expr<Boolean>` — literal checks as `Expr<Boolean>`.
+- `= INTERVAL '30 minutes'` on `Expr<Interval>` — interval literal checks.
+- `= smelt.ref('fallback_orders')` on `TableExpr` — ref resolves to a table, checks as `TableExpr`.
+- `= ()` on `SelectItems<Agg, sessionized>` — empty list trivially satisfies any list sort, context-binding included.
+- `= (COUNT(*) AS n)` on `SelectItems<Agg, sessionized>` — structural sort check at definition time (is it a list of aggregates?); column-name validation against the CTE context defers to call-site expansion, same deferral §6 flags for `source.*`-bearing CTE schemas.
+
+Tier 1 functions have no declared parameter types, so the default's synthesised type becomes the parameter's type for any call site that omits that argument — the same mechanism Tier 1 uses for any other argument (decision 12's type-context binding).
+
+**Expansion is call-resolution-time binding; CST cloning is at Level 2.** When a caller omits an argument, the parameter binding resolves to the default's declaration-site CST. No cloning happens at call resolution — the binding refers to the declaration-site subtree. At Level 2 materialisation (decision 12), the CST is cloned into the parameter's placeholder positions with `Synthesized(fn_id, "default for <param>")` provenance per decision 12's provenance model. This is identical to how an explicitly-passed argument is materialised, differing only in the provenance tag.
+
+Tier 1 type checking does not materialise an expanded CST at all (decision 12), so defaults participate in the type-context binding: the parameter name binds to the default's type, and the body is re-checked under that context. No CST cloning, no extra work.
+
+**List-splice comma elision.** List-valued fragment parameters can expand to zero elements (when the default or argument is `()`). The expander treats list-splice points as list-join nodes — adjacent commas surrounding a zero-element splice are elided. `SELECT id, name, metrics` with `metrics = ()` becomes `SELECT id, name`. This rule is general for list-valued fragment sorts (it applies to explicitly-passed `()` arguments just as it applies to defaults); defaults just make the empty case common. The rule is syntactic, runs at Level 2 materialisation, and does not consult the type checker.
+
+**Self-containment (from §3) reaffirmed.** A default expression cannot reference other parameters. This keeps evaluation order trivial and means each default can be resolved independently at call resolution without solving a dependency graph among parameters. A caller that wants a default "relative to another argument" writes the relationship at the call site instead.
+
+**Interaction with `PASSING` clauses.** A caller can omit a `PASSING` clause the same way as an inline argument — the parameter's default applies. No special handling in the parser or the type checker beyond what decision 18 already specifies: `PASSING` clauses attach to the call node at parse time, and defaults fill any parameter whose binding is still empty after both inline arguments and `PASSING` clauses are resolved.
+
+**Rationale.** The bulk of the specification here is "defaults are just another source of argument fragments, pipe them through decision 12's machinery." The choices that required explicit decisions were (i) whether list sorts get an implicit empty default (no — explicitness over magic), (ii) where comma elision lives (Level 2, syntactic, general list-splice rule), and (iii) how context-bound defaults handle column-name validation (same call-site deferral §6 already uses). None of these introduce new mechanisms — they specify the boundary between existing ones.
+
+**Deferred.**
+
+- Column-name validation for non-empty context-bound defaults at definition time, once the CTE-schema extractor is call-site-agnostic enough to run without a concrete call (ties into §6's "Remaining Edge Cases" and §20B's forward-reference concern).
+- Defaults that reference other parameters (`= b + 1` where `b` is a parameter). Deliberately excluded in v1; revisit only if a motivating use case appears and only after specifying the evaluation-order rule.
+- Default values on row-polymorphic parameters (§11 already notes "No defaults on row-polymorphic parameters in v1"). Consistent with decision 20.
+- Diagnostics for defaults that produce valid fragments but semantically-surprising SQL (e.g., `= TRUE` in an `OR` context, where `X OR TRUE` is always `TRUE`). Style linting, not correctness.
+
+### 21. `smelt.extern` full syntax (§5, §13, §21)
+
+`smelt.extern` declares a black-box function — a transformation where smelt knows the signature but cannot inspect the body. The declaration form and surrounding rules are as follows.
+
+**Grammar.** `smelt.extern <name>(<param-list>) -> <return-type> [;]`. No `AS (...)` body — there is no body. Return type is mandatory. Externs are always "Tier 3 equivalent"; gradual typing (§8) does not apply. Bare-keyword `@annotation` syntax is not used — see decision 22.
+
+**File placement.** Same rules as `smelt.define` from decision 11: any `.sql` file may contain any number of `smelt.extern` declarations, interleaved with `smelt.define` declarations, a model `SELECT`, and at-most-one file-level concept. `smelt.extern` is a safe resync token for parser error recovery, same status as `smelt.define`.
+
+**Per-declaration frontmatter.** An optional YAML frontmatter block (`---` ... `---`) may immediately precede a `smelt.extern` declaration, carrying structured metadata — primarily per-backend emission rules, plus any properties that elsewhere would have been annotations (see decision 22). Shape:
+
+```yaml
+---
+deterministic: true
+idempotent: true
+backends:
+  duckdb:
+    emit: read_parquet
+  spark:
+    emit: spark_read_parquet
+---
+smelt.extern read_parquet(path: Expr<Text>) -> TableExpr
+```
+
+The declared name (`read_parquet`) is the smelt-facing name — what callers write in model bodies. Each backend's emission is controlled by its `emit` entry in frontmatter. If `backends` is absent, the default is `backends: all` with `emit` equal to the declared name verbatim.
+
+**Call surface is bare-name, not via `smelt.fn.*`.** Calling `read_parquet(x)` in a model body compiles to whatever the active backend's `emit` specifies — for DuckDB, `read_parquet(x)`; for Spark, `spark_read_parquet(x)`. This is consistent with §5's "the function name passes through to the generated SQL" principle, generalised so the passed-through name can differ per backend.
+
+**Backend namespace is sugar.** `smelt.extern duckdb.read_parquet(...)` is equivalent to declaring `smelt.extern read_parquet(...)` with frontmatter `backends: { duckdb: { emit: read_parquet } }`. Authors can use whichever form is clearer: the namespace prefix for simple "engine-native name, one backend" cases; explicit frontmatter for "different emitted name per backend" or more complex configuration. Namespaced declarations may still carry frontmatter for other properties; the namespace is shorthand for the backend-emission subset only.
+
+**Type-checker treatment.** Identical to SQL built-ins in the canonical registry (§13). The checker looks up externs by name in a namespace shared with built-ins, verifies argument types against the signature, and treats each call as an atomic planner node. The only difference between an extern and a built-in is provenance (shipped vs. user-declared), which is invisible to the caller and the type checker.
+
+**Name collisions with the canonical registry.** An extern's smelt-facing name cannot collide with any entry in the canonical built-in registry. Shadowing a built-in with a user extern invites silent semantic divergence; a declaration-time diagnostic rejects it. Emitted names (in frontmatter) are the author's problem — smelt does not verify that the emitted name exists on the target backend (that's a runtime error at query execution time).
+
+**Multiple externs per file.** Permitted. Each carries its own optional preceding frontmatter. Frontmatter placement follows the general rule from decision 22: a frontmatter block attaches to the immediately following declaration.
+
+**Rationale.** Most of the specification reuses decisions already made: decision 11's file-structure rules extend verbatim; decision 13's canonical registry treatment applies identically to externs; decision 22's frontmatter-over-annotations choice applies here too. The one novel piece — per-declaration frontmatter for backend-specific emission — replaces what earlier drafts showed as `@backends(...)` annotations. Decoupling the declared (smelt-facing) name from the emitted (backend-facing) name is what lets one author-facing API dispatch to differently-named backend functions, which is common in practice (e.g., `read_parquet` vs. `spark.read.parquet`).
+
+**Deferred.**
+
+- Full schema for per-backend emission (currently just `emit: <name>`). Future extensions might include argument-position rewriting, required-import declarations for Python UDFs, or emission templates with placeholders. None are needed for v1.
+- Runtime schema validation (checking actual output of an extern against the declared return type on first execution) — noted in §20L as a soundness safety net. Valuable but post-v1.
+- `smelt.extern` interaction with partial signatures or introspection-driven signature inference (noted as an open question in §18). Defer until a concrete use case appears.
+- Cross-file name collision rules for externs declared in multiple files with the same name. The simplest rule — forbidden, declaration-time diagnostic — matches how smelt-define works (decision 11) and is assumed here; a more sophisticated scope mechanism can come later if needed.
+
+### 22. Unified frontmatter; annotations removed (§3, §5, §6, §12, §13, §21)
+
+All previously-proposed `@annotation` syntax (`@deterministic`, `@idempotent`, `@append_only`, `@backends(...)`, and the deferred `@joins(...)` / `@provenance(...)`) is **removed from the language**. Every property that would have been an annotation is now a frontmatter key. Frontmatter applies to all three declaration kinds — models, `smelt.define`, and `smelt.extern` — with a single placement rule.
+
+**The placement rule.** A frontmatter block (`---` ... `---`) attaches to the declaration immediately following it. A file is a sequence of top-level items; each declaration may optionally be preceded by a frontmatter block carrying that declaration's metadata. There is no file-level frontmatter scope separate from the declarations; frontmatter is always "the next declaration's frontmatter."
+
+Example — one file with a frontmatter-bearing model and a frontmatter-bearing function:
+
+```sql
+---
+materialization: table
+---
+SELECT * FROM smelt.ref('orders');
+
+---
+deterministic: true
+---
+smelt.define safe_divide(
+    numerator: Expr<Numeric>,
+    denominator: Expr<Numeric>
+) -> Expr<Double> AS (
+    CASE WHEN denominator = 0 OR denominator IS NULL THEN NULL
+         ELSE CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE)
+    END
+)
+```
+
+**Supersedes decision 11's frontmatter rule.** Decision 11 said "frontmatter applies to the file's model `SELECT` only." That restriction is lifted. Decision 11's file-structure rules (multiple items per file, optional trailing `;`, `smelt.define` as resync token) remain in force; only the frontmatter-scoping clause is revised.
+
+**Property-to-key mapping.** The annotations we had mentioned map to frontmatter keys as follows:
+
+| Former annotation | Frontmatter key | Value shape |
+|---|---|---|
+| `@deterministic` | `deterministic` | `true` / `false` (default `false`) |
+| `@idempotent` | `idempotent` | `true` / `false` (default `false`) |
+| `@append_only` | `append_only` | `true` / `false` (default `false`) |
+| `@backends(all)` | `backends` | `all` (string) or list of backend names |
+| `@backends(duckdb, postgres)` | `backends` | `[duckdb, postgres]` |
+| `@joins(...)` (deferred) | `joins` (deferred) | Structured map (shape TBD when it lands) |
+| `@provenance(...)` (deferred) | `provenance` (deferred) | Structured map (shape TBD) |
+
+**Rationale.**
+
+1. **Single mechanism.** Smelt already parses YAML frontmatter for model configuration. Introducing `@annotation` syntax adds a second mechanism carrying the same class of data. Consolidating to frontmatter removes the second parser, the grammar question of where annotations attach, and the "which syntax do I use for this property?" cognitive cost.
+2. **Structured data works naturally.** `backends: { duckdb: { emit: read_parquet } }` (from decision 21) is awkward to spell in annotation syntax without inventing a structured-argument grammar that duplicates YAML. Frontmatter handles it directly.
+3. **Separation of concerns.** The signature line answers "what are the types and sorts?" Metadata answers "how does this behave?" Keeping them syntactically separate is a readability win once declarations carry more than one property.
+4. **Migration-friendly for deferred properties.** When `joins` / `provenance` land, they're just new YAML keys. In the annotation model, they'd require grammar extensions for structured arguments — a source of churn we avoid by starting uniformly.
+5. **Annotations can return later as pure sugar.** If ergonomic evidence shows inline `@deterministic` is genuinely better for single-property declarations, annotations can be added back as literal desugaring into frontmatter keys. Decision 22 keeps that door open — starting with only frontmatter means adding annotations later is additive, not a redesign.
+
+**Cost acknowledged.** A declaration with a single simple property (e.g., `deterministic: true`) costs three lines of YAML framing one line of content, versus an inline `@deterministic` of zero overhead lines. For files with many one-property declarations, this is visibly noisier. The trade is accepted because declarations are written once and called many times, the structured-data case dominates as more properties land, and the "one mechanism" win is large.
+
+**Built-in registry note.** SQL built-ins in smelt's canonical registry (§13) are shipped with smelt, not written in user `.sql` files. Their properties (deterministic, backends, etc.) live in the registry's data format, not in `.sql` frontmatter. Decision 22 governs user-authored declarations — models, `smelt.define`, and `smelt.extern`. The canonical registry's internal format is orthogonal and unchanged by this decision.
+
+**Deferred.**
+
+- Full frontmatter schema per declaration kind (what's valid on a model vs. a `smelt.define` vs. a `smelt.extern`). Covered case-by-case as properties are specified; no single schema document in this paper.
+- Annotations-as-sugar. Not in v1; revisit only if ergonomic evidence demands it.
+- Validation of cross-cutting property relationships (e.g., a function with `deterministic: true` calling a function with `deterministic: false` — should that be a warning?). Property semantics beyond the basic "what does this mean?" question are planner-integration concerns, deferred to Step 7.
+
+### 23. Engine-agnostic function bodies; backend specificity via namespace and `backends:` (§20G, §21)
+
+**Decision.** Function bodies are written in smelt's **canonical SQL** — engine-agnostic by construction. Engine-specific features are reached only through the backend namespace (`duckdb.*`, `postgres.*`, `spark.*`). The `backends:` frontmatter property, introduced in decision 9 and carried by decision 22, is the sole mechanism for declaring engine restrictions; there is no per-function dialect tag.
+
+**Rules.**
+
+1. **Canonical-SQL bodies.** A function body with no backend-namespace references is portable: it type-checks against the canonical signature registry (§13) and emits on any supported backend. `INTERVAL '30 minutes'`, backend-specific cast syntaxes, and similar dialect idioms are *not* canonical — they must go through a canonical construct (e.g., `smelt.interval(30, "minutes")` in the canonical registry) or through a backend namespace call.
+2. **Backend namespace is the escape hatch.** A function that genuinely needs DuckDB-only behavior calls `duckdb.read_parquet(...)` etc. The backend-namespace reference is a visible, typeable commitment — not a hidden dialect assumption in a string literal.
+3. **`backends:` is inferred, narrow-only.** The planner infers a function's `backends` set as the intersection of the `backends` of every call in its body (backend-namespace calls contribute their single backend; canonical calls contribute the universal set). A declared `backends:` in frontmatter *narrows* inference — it may remove backends the body supports, but may not add backends the body does not support. Widening is an error.
+4. **No dialect tag on functions.** A function is not "a DuckDB function" or "a Spark function." Its backend compatibility is a derived property, visible in tooling, not a sort or a declared attribute beyond the narrowing `backends:` set.
+5. **Translation happens once, at final expansion.** After Level 3 lowering (§12), the canonical SQL tree is handed to the chosen backend's printer, which translates canonical constructs to that backend's surface syntax. Functions don't translate themselves; they produce canonical SQL, and translation is a single pass over the fully-expanded tree.
+
+**What "canonical SQL" means, pragmatically.** Canonical SQL is whatever smelt's translation layer can emit faithfully on every supported backend. The set grows as the translation layer matures — early versions may restrict canonical SQL to a conservative common subset and reach into backend namespaces for anything non-portable; over time, more constructs migrate into canonical as translation rules are written. This is intentionally a moving, implementation-driven boundary rather than a fixed spec: it tracks the engineering reality of "what do we actually know how to translate?"
+
+**Rationale.**
+
+1. **Composes with decision 22's `backends:` inference.** A body that mentions only canonical calls and `duckdb.read_parquet` has inferred `backends: [duckdb]`. A body using only canonical calls has the universal set. The rule falls out of frontmatter semantics — no extra machinery.
+2. **Visibility.** An `INTERVAL '30 minutes'` string literal hides its DuckDB-ness from the type system. A `duckdb.interval(...)` call surfaces the commitment where the planner, LSP, and reader can all see it.
+3. **Avoids the "function is a DuckDB function" framing.** Tagging functions by dialect bifurcates the library ecosystem — users wonder whether to write a DuckDB version and a Spark version of the same logic. Canonical-by-default keeps the library single-sourced; specialization happens only when a backend genuinely has a feature no other backend does.
+4. **Narrow-only declared `backends`** prevents the declaration from lying about portability. If the body calls `duckdb.read_parquet`, declaring `backends: [duckdb, spark]` doesn't make it run on Spark — the inference ceiling bounds what the declaration can claim.
+5. **Single translation pass** matches the existing planner shape (§12): expansion is a tree rewrite in canonical form; backend printing is a separate downstream phase. No per-function translation state.
+
+**Deferred.**
+
+- Full enumeration of canonical SQL constructs. Which date/time functions, which interval spellings, which cast forms are canonical is a translation-layer implementation concern, specified as translation rules are written, not in this paper.
+- Warning policy when an inferred `backends` set collapses to empty (i.e., a body mixing calls from incompatible backend namespaces). Likely a hard error, but the diagnostic design lives with the planner work.
+- Whether `backends` affects callers transitively via a join/meet rule, and how cross-backend calls are blocked or bridged. Tied to the exchange/materialization story, already outside this paper's scope.
+
 ## 17. Comparisons and Theoretical Foundations
 
 ### Comparison Table
@@ -1311,7 +1588,7 @@ The design draws from several established PL techniques:
 - **Function tests** -- functions remain testable through models that use them. First-class function-test workflow is a follow-up.
 - **Package ecosystem / registry** -- not in initial scope.
 - **Python model interaction** -- functions are SQL-only; Python models are opaque table producers reachable via `smelt.ref()`.
-- **Structured annotations** (`@joins(...)`, `@provenance(...)`) -- deferred until the planner needs them.
+- **Structured frontmatter properties** (`joins`, `provenance`) -- deferred until the planner needs them. Per §16 decision 22 these live in frontmatter alongside the simple boolean properties.
 - **Error trace depth for nested calls** -- when A calls B calls C and C errors, Tier 1 shows A->C (call site -> innermost error), skipping intermediates. Full-chain traces are a future improvement.
 
 ### Unified Model
@@ -1335,11 +1612,11 @@ This is a research sequence, not a shipping plan. Each step teaches something th
 
 ### Step 2: Black Box Signature Language + Built-in Function Typing
 
-**Build:** Canonical signature registry for SQL built-ins (one registry, not per-dialect). The ~80% of built-ins with simple signatures (`Expr<T> -> Expr<T>`, `Expr<T> -> AggExpr<T>`). `smelt.extern` for user-declared black box functions. Generics/type parameters for the ~20% that need them (`COALESCE<T>`, `ARRAY_AGG<T>`). `@backends` annotations for portability tracking. Backend namespace (`duckdb.*`, `postgres.*`) for engine-specific functions and native-precision opt-in. CAST enforcement for canonical return types.
+**Build:** Canonical signature registry for SQL built-ins (one registry, not per-dialect). The ~80% of built-ins with simple signatures (`Expr<T> -> Expr<T>`, `Expr<T> -> AggExpr<T>`). `smelt.extern` for user-declared black box functions. Generics/type parameters for the ~20% that need them (`COALESCE<T>`, `ARRAY_AGG<T>`). `backends` frontmatter property for portability tracking (per §16 decision 22). Backend namespace (`duckdb.*`, `postgres.*`) for engine-specific functions and native-precision opt-in. CAST enforcement for canonical return types.
 
 **What we learn:** Can the fragment sort system extend to cover SQL built-ins? Does the signature language need variadics immediately, or can fixed-arity overloads suffice for MVP? Is the `smelt.extern` declaration natural for UDFs? What is the effort/value ratio of each signature language extension (generics, variadics, type-as-arguments)? Does the canonical-type-with-CAST approach produce correct schemas across backends? Is the backend namespace natural for opting into engine-specific behavior?
 
-**How it ladders:** This is mandatory infrastructure -- every subsequent step benefits from built-in type information flowing through the checker. Generics here also inform the Tier 2 bidirectional checker (Step 5). Black box functions are simpler than transparent functions (no expansion, no body analysis), so this is a good early test of the signature language before applying it to the harder transparent case. The `@backends` property establishes the portability model that the planner needs for multi-backend execution.
+**How it ladders:** This is mandatory infrastructure -- every subsequent step benefits from built-in type information flowing through the checker. Generics here also inform the Tier 2 bidirectional checker (Step 5). Black box functions are simpler than transparent functions (no expansion, no body analysis), so this is a good early test of the signature language before applying it to the harder transparent case. The `backends` frontmatter property establishes the portability model that the planner needs for multi-backend execution.
 
 ### Step 3: TableExpr Functions + Row Polymorphism
 
@@ -1438,7 +1715,7 @@ Separately, upgrading a Tier 1 function to Tier 2 is a potentially breaking chan
 
 ### E. Planner Soundness
 
-**Annotation correctness is unverified.** If an author declares `@joins(dim_customers LEFT 1:1)` but the join is actually 1:N, the planner will produce incorrect optimizations. There is no mechanism described for validating annotations against the function body. The correctness of the planner depends on the correctness of hand-written annotations -- a soundness hole.
+**Property correctness is unverified.** If an author declares `joins: { dim_customers: { type: LEFT, cardinality: 1:1 } }` (structured frontmatter, shape TBD per §16 decision 22) but the join is actually 1:N, the planner will produce incorrect optimizations. There is no mechanism described for validating declared properties against the function body. The correctness of the planner depends on the correctness of hand-written property declarations -- a soundness hole.
 
 **The MLIR analogy needs a stronger contract.** MLIR's progressive lowering has formal specifications and verified lowering passes. The paper's three levels have no formal contract beyond "the output schema must match." Schema preservation is necessary but not sufficient -- a planner rule that preserves the schema but changes row counts or NULL semantics is still wrong.
 
@@ -1502,7 +1779,7 @@ Once functions are shared, changing a function's body (even without changing its
 
 - [x] **Expansion mechanics.** Resolved April 19, 2026 — see §16 decision 12. AST-level rewriting on the CST with structured provenance tags per node. Lazy: calls stay symbolic through Level 1, expand at Level 2. Tier 1 type checking uses a type-context binding rather than materializing an expanded CST. Textual substitution rejected: it would rebuild source maps, reparse synthesized fragments, and lose CST position tracking.
 
-- [ ] **Tier 1 error tracing: Step 1 MVP scope.** Data structure and trace depth resolved by §16 decision 12 (origin tags per node, frame stack for nested calls). Open: what is the minimum viable version for Step 1 of §19? Specifically, does Step 1 ship full nested-frame rendering, or only single-level traces (caller → callee) with nested traces following in Step 2? Ties into the `safe_divide` end-to-end target.
+- [x] **Tier 1 error tracing: Step 1 MVP scope.** Resolved April 19, 2026 — see §16 decision 16. Step 1 ships single-level traces (call site → innermost error with the parameter binding that triggered it). The frame stack from decision 12 is populated from day one; the multi-level renderer is added in Step 2 as mechanical diagnostic polish.
 
 ### Must resolve (blocks Step 2 — built-in typing)
 
@@ -1514,19 +1791,21 @@ Once functions are shared, changing a function's body (even without changing its
 
 ### Must resolve (blocks Step 3 — TableExpr functions)
 
-- [ ] **Tier interaction: Tier 2 calling Tier 1.** A Tier 2 function (parameters annotated, body checked in isolation) calls a Tier 1 function (unannotated). What's the return type of the Tier 1 call during isolation checking? Options: (a) treat as unknown/Any, (b) refuse the call, (c) require callees to be at least the caller's tier. See §20D.
+- [x] **Tier interaction: Tier 2 calling Tier 1.** Resolved April 19, 2026 — see §16 decision 17. The Tier 1 callee is expanded inline during the Tier 2 body check, using the Tier 2 function's declared parameter types as the concrete argument types at that expansion site. Errors surface against the Tier 2 body with the frame-stack trace from decisions 12/16; Tier 2's signature is unaffected.
 
 ### Should resolve (reduces risk)
 
-- [ ] **`smelt.extern` full syntax.** Shown once in §5. Where do declarations live? Same file as models? Separate directory? Can they go in `functions/`? What about engine-specific overloads (the `@backends` annotation)?
+- [x] **`smelt.extern` full syntax.** Resolved April 20, 2026 — see §16 decision 21. Grammar is `smelt.extern <name>(<params>) -> <return-type> [;]` with optional per-declaration frontmatter for per-backend emission rules. File placement follows decision 11 (any `.sql` file, coexists with models and defines). Call surface is bare-name, not via `smelt.fn.*`. Backend namespace (`duckdb.foo`) is sugar for frontmatter-based emission. Type-checker treatment is identical to SQL built-ins.
 
-- [ ] **`smelt.as_struct()` semantics.** Introduced as a no-overlap strategy (§6) but barely specified. What's the full syntax? What does EXCEPT do with nested structs? What does the compiled output look like per backend? Is this v1 or deferred?
+- [x] **Unify property mechanism on frontmatter; remove inline annotations.** Resolved April 20, 2026 — see §16 decision 22. All `@annotation` syntax is removed; properties live in a frontmatter block that attaches to the immediately following declaration (model, `smelt.define`, or `smelt.extern`). Supersedes decision 11's scoping of frontmatter to the model `SELECT` only. Single mechanism, structured data works naturally, annotations can return later as pure sugar if ergonomic evidence demands it.
 
-- [ ] **PASSING keyword parsing details.** Is `PASSING` a reserved keyword everywhere, or context-sensitive (only after `)` in a function call)? Could it conflict with existing SQL in model bodies? Precedent: SQL/XML reserves it but few analytics queries use it.
+- [x] **`smelt.as_struct()` semantics.** Resolved April 19, 2026 — see §16 decision 19. Deferred to post-v1. §6 Strategy 3 drops out of the v1 surface; Strategies 1 (explicit CTE with aliases) and 2 (typed `TableExpr<{...}>`) remain as the v1 options for multi-join functions. Revisit alongside Step 8 (struct row polymorphism).
 
-- [ ] **Default value expansion for fragment sorts.** `= ()` for SelectItems, `= TRUE` for predicates — what does the expansion look like when the default is used vs. when an argument is provided? Are defaults expanded at the call site or in the function body?
+- [x] **PASSING keyword parsing details.** Resolved April 19, 2026 — see §16 decision 18. Context-sensitive: `PASSING` is reserved only immediately after the `)` closing a `smelt.fn.*` call or `smelt.define`-declared call; everywhere else it is a regular identifier. The trigger is purely syntactic (namespace-prefixed call path), so the parser stays independent of the type checker.
 
-- [ ] **Dialect differences in function bodies.** §20G flags this: `INTERVAL '30 minutes'` is DuckDB syntax, not Spark. Are function bodies engine-agnostic (written in smelt's canonical SQL, translated by the dialect printer)? Or dialect-tagged (function declares which engine it targets)? This connects to the `@backends` portability model.
+- [x] **Default value expansion for fragment sorts.** Resolved April 20, 2026 — see §16 decision 20. Defaults are explicit (no implicit empty for list sorts), type-checked at definition time, bound at call resolution, cloned into placeholder positions at Level 2 with `Synthesized` provenance per decision 12. List splices elide adjacent commas syntactically when a splice contributes zero elements; non-empty context-bound defaults share §6's call-site-deferred column-name validation.
+
+- [x] **Dialect differences in function bodies.** Resolved April 19, 2026 — see §16 decision 23. Engine-agnostic canonical SQL bodies; engine-specific features reached only through backend namespace (`duckdb.*` etc.); `backends:` frontmatter is inferred as the intersection of call-site backends and may be narrowed but not widened; no per-function dialect tag; translation is a single pass at final expansion. "Canonical SQL" is defined pragmatically as whatever the translation layer can emit faithfully across supported backends.
 
 ### Can defer (resolve during implementation)
 
