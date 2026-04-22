@@ -468,7 +468,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 |---|---|---|---|---|
 | 1 | Parser: `smelt.define` top-level grammar | done | 996c27d | 2026-04-22 |
 | 2 | Parser: `smelt.fn.*` call syntax | done | e3db6fb | 2026-04-22 |
-| 3 | Salsa function signature index | pending | — | — |
+| 3 | Salsa function signature index | done | 936233d | 2026-04-22 |
 | 4 | `Expr<T>` type-reference resolution | pending | — | — |
 | 5 | Tier 1 body check with parameter binding | pending | — | — |
 | 6 | Call-site expansion + single-level frame trace (Step 1 complete) | pending | — | — |
