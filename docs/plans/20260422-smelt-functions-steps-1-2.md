@@ -86,6 +86,15 @@ The plan is executed autonomously after approval:
 3. **Course corrections.** If a phase surfaces an unresolvable problem, the main session pauses and asks the user. The user may interrupt at any phase boundary.
 4. **CI gates per phase (implementer must ensure all pass before handoff to reviewer):** `cargo fmt --all`, `cargo clippy --all-targets` (zero warnings), `cargo test`, `cargo test -p smelt-cli --test example_diagnostics`.
 
+## Example project strategy
+
+Every phase must exercise its feature in real SQL fixtures, not just unit-test ASTs. Two workspaces back this:
+
+- **`examples/functions_demo/`** (new, created in Phase 1) — the green end-to-end workspace. Each phase extends it with fixtures that demonstrate the feature just landed. The workspace must stay diagnostic-clean under `cargo test -p smelt-cli --test example_diagnostics` — which is the standing CI gate, so regressions fail the build automatically. Layout mirrors `examples/test_workspace/`: `smelt.yml`, `sources.yml`, `models/`, plus a new `functions/` directory holding `smelt.define` and `smelt.extern` files.
+- **`examples/broken/models/`** (existing) — negative fixtures. Each phase that introduces a new diagnostic code adds a file here named `fn_<what-is-broken>.sql`. Because `example_diagnostics` skips `broken/`, these fixtures need a companion assertion: a new integration test `crates/smelt-cli/tests/broken_function_diagnostics.rs` (introduced in Phase 6 alongside the first user-facing function diagnostic) asserts the expected `DiagnosticCode` + message substring for each broken fixture. New phases append rows, not new test files.
+
+A phase's review must confirm both (a) `functions_demo` is still green and (b) every broken fixture the phase added is matched by an assertion in `broken_function_diagnostics.rs` (or, for Phases 1–5 which predate it, a dedicated integration test in the corresponding crate).
+
 ## Cross-phase design choices
 
 | Decision | Choice | Rationale |
@@ -135,6 +144,8 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - New `parse_smelt_define`, `parse_param_list`, `parse_type_ref`. TypeRef is a flat tree in this phase; structured parsing is Phase 4.
 - `crates/smelt-parser/src/ast.rs`: wrappers `SmeltDefine`, `Param`, `TypeRef`, `DefineBody`, `File::defines()`.
 
+**Example fixtures.** Create `examples/functions_demo/` with `smelt.yml`, `sources.yml`, `models/` (one trivial passthrough model), and `functions/trivial.sql` containing a single `smelt.define trivial(x) AS (x + 1)`. The directory must register in the example-diagnostics test harness so CI exercises it from Phase 1 onward.
+
 **Review checklist.**
 - `parse_file` handles mixed top-level items without panics.
 - `smelt.define` in expression/column position is NOT a declaration.
@@ -142,6 +153,7 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - All new SyntaxKind variants appear in the debug printer.
 - AST wrappers follow the `cast`/`syntax` pattern.
 - No existing parser tests regress.
+- `examples/functions_demo/` is registered with `cargo test -p smelt-cli --test example_diagnostics` and stays clean.
 
 **Commit.** `parser: add smelt.define top-level grammar (Phase 1, smelt-functions Step 1)`
 
@@ -160,7 +172,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 
 **Implementation.** `parse_smelt_fn_call` branching from `parse_primary_expression`; peek `smelt.fn.` prefix. CST node `SMELT_FN_CALL` with `CALL_PATH` + `ARG_LIST`.
 
-**Review checklist.** Only recognised in expression position. `FROM smelt` still works if user has a table called `smelt`. Reuses `parse_argument`. No existing function-call regressions.
+**Example fixtures.** Add `examples/functions_demo/models/uses_trivial.sql` that selects `smelt.fn.trivial(1)` to prove the call parses (no type-checking yet — that's Phases 5–6). The model's FROM clause should still target a source so downstream phases can extend it.
+
+**Review checklist.** Only recognised in expression position. `FROM smelt` still works if user has a table called `smelt`. Reuses `parse_argument`. No existing function-call regressions. `uses_trivial.sql` parses without error in the demo workspace.
 
 **Commit.** `parser: add smelt.fn.* call syntax (Phase 2, Step 1)`
 
@@ -180,7 +194,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - `smelt-db::lib`: queries `functions_in_file`, `function_signature`, `function_body`, `resolve_function`. Collision detection at workspace scope.
 - New `DiagnosticCode::DuplicateFunctionDefinition`.
 
-**Review checklist.** Body edits don't invalidate `function_signature` (prove with event counter). Duplicate diagnostic points only at the second file. PathBuf used consistently.
+**Example fixtures.** Add `examples/functions_demo/functions/identity.sql` (a second `smelt.define`) so the registry sees more than one entry. Create a negative fixture `examples/broken/models/fn_duplicate_define.sql` + sibling file that share a name, exercising `DuplicateFunctionDefinition`. Since the broken integration-test harness arrives in Phase 6, Phase 3 asserts the diagnostic via a temporary `crates/smelt-db/tests/function_registry.rs` workspace fixture — the Phase 6 harness later absorbs the assertion.
+
+**Review checklist.** Body edits don't invalidate `function_signature` (prove with event counter). Duplicate diagnostic points only at the second file. PathBuf used consistently. `functions_demo` stays clean; `broken/models/fn_duplicate_define.sql` produces exactly the expected diagnostic.
 
 **Commit.** `db: index smelt.define signatures with split signature/body queries (Phase 3)`
 
@@ -199,7 +215,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 
 **Implementation.** `smelt-types/src/signatures.rs` with `SmeltType`, `TypeConstraint { Numeric, Any }` (Ordered in Phase 7). Pure `parse_smelt_type`. Wire into Phase 3's `FunctionSig` construction.
 
-**Review checklist.** `smelt-types` stays dependency-free. Numeric membership matches §16 #9 exactly (SmallInt, Integer, BigInt, Float, Double, Decimal). Everything pure and unit-testable.
+**Example fixtures.** Upgrade `examples/functions_demo/functions/trivial.sql` to `smelt.define add_one(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)` and add `functions/abs_numeric.sql` with a `Expr<Numeric>` parameter. Add a broken fixture `examples/broken/models/fn_bad_type_ref.sql` declaring a function with `TableExpr<T>` to exercise the "unsupported sort" diagnostic (asserted via a targeted unit test in Phase 4 until the Phase 6 harness arrives).
+
+**Review checklist.** `smelt-types` stays dependency-free. Numeric membership matches §16 #9 exactly (SmallInt, Integer, BigInt, Float, Double, Decimal). Everything pure and unit-testable. `functions_demo` still diagnostic-clean after signature tightening.
 
 **Commit.** `types: parse Expr<T> signatures with numeric constraint (Phase 4)`
 
@@ -220,7 +238,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - New Salsa query `check_function_body(path, name)`; `file_diagnostics` aggregates.
 - New codes: `FunctionBodyTypeMismatch`, `UnknownIdentifier`.
 
-**Review checklist.** `type_inference.rs` stays pure. Params resolve before SQL FROM scope. Test 2's diagnostic range is the *inner* bad subexpression. Zero-error bodies don't allocate an empty frame stack.
+**Example fixtures.** Add `examples/functions_demo/functions/safe_divide.sql` (the canonical end-to-end example from §2) with a correct body — body now checks clean. Add broken fixtures `examples/broken/models/fn_body_type_mismatch.sql` (adding Text to Integer inside the body) and `examples/broken/models/fn_unknown_param.sql` (body references `z` when only `x, y` declared). These are asserted via a temporary fixture-driven test in `function_body_check.rs`; Phase 6 migrates them into the unified `broken_function_diagnostics.rs` harness.
+
+**Review checklist.** `type_inference.rs` stays pure. Params resolve before SQL FROM scope. Test 2's diagnostic range is the *inner* bad subexpression. Zero-error bodies don't allocate an empty frame stack. `functions_demo` remains clean with the new `safe_divide.sql`.
 
 **Commit.** `db: Tier 1 body type-check with parameter binding (Phase 5)`
 
@@ -247,7 +267,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - LSP `to_lsp_diagnostic` appends a single-line "in expansion of `X`, `p` was bound to <type>" using the innermost frame.
 - New `DiagnosticCode::UnknownSmeltFn`.
 
-**Review checklist.** Frame stack populated for arbitrary depth (assert via unit test). `DiagnosticData` change is backward-compatible. `safe_divide` example fixture registered with CI. LSP e2e test confirms diagnostic reaches client.
+**Example fixtures.** Update `examples/functions_demo/models/uses_trivial.sql` → `models/uses_safe_divide.sql` that successfully calls `smelt.fn.safe_divide(revenue, clicks)` against a source. Add broken fixtures `examples/broken/models/fn_call_wrong_arg_type.sql` (pass Text to `Expr<Numeric>`), `fn_call_missing_arg.sql`, and `fn_call_unknown.sql` (call `smelt.fn.does_not_exist`). **Introduce** `crates/smelt-cli/tests/broken_function_diagnostics.rs` as the unified harness: it iterates the `examples/broken/models/fn_*.sql` files, runs `file_diagnostics`, and asserts each fixture produces its expected `DiagnosticCode` + message substring. Migrate the Phase 3/4/5 ad-hoc assertions into this harness so there is one place to extend from Phase 7 onward.
+
+**Review checklist.** Frame stack populated for arbitrary depth (assert via unit test). `DiagnosticData` change is backward-compatible. `safe_divide` example fixture registered with CI. LSP e2e test confirms diagnostic reaches client. `broken_function_diagnostics.rs` covers every `fn_*.sql` in `examples/broken/models/` — no orphan fixtures.
 
 **Commit.** `db+lsp: smelt.fn.* call checking with single-level frame trace (Phase 6, Step 1 complete)`
 
@@ -270,7 +292,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 
 **Implementation.** `smelt-types::signatures::{BuiltinRegistry, Signature, TypeConstraint::Ordered}`. Registry is `once_cell::Lazy<HashMap<&str, Signature>>` or `phf_map`. No generics here.
 
-**Review checklist.** Registry is pure, no Salsa dep. Ordered list exhaustive. ASCII-lowercase case-insensitivity (SQL convention).
+**Example fixtures.** Extend `examples/functions_demo/models/uses_safe_divide.sql` with `LOWER(name)`, `UPPER(code)`, `LENGTH(description)`, `ABS(balance)` calls to exercise registry lookup. No broken fixtures this phase — Phase 7 adds data only.
+
+**Review checklist.** Registry is pure, no Salsa dep. Ordered list exhaustive. ASCII-lowercase case-insensitivity (SQL convention). `functions_demo` models typecheck against the new registry entries.
 
 **Commit.** `types: Ordered constraint and canonical built-in registry skeleton (Phase 7)`
 
@@ -290,7 +314,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 
 **Implementation.** `Signature { type_params, params: Vec<ParamSpec>, return: TypeExpr }` where `ParamSpec` is `Concrete | Var | Variadic(Box)`. `unify_call` routine. Seed ~30 most-used built-ins (SUM, AVG, MIN, MAX, COUNT, COALESCE, GREATEST, LEAST, ABS, POWER, SQRT, LOG, LN, LOWER, UPPER, LENGTH, SUBSTRING, TRIM, CONCAT, IS NULL, NULLIF, CAST, date/time basics).
 
-**Review checklist.** LUB reuses `promote_types`. Variadic zero-args error is local (§16 #15). No silent coercion between concrete numeric types (§16 #9). Inert hook for bidirectional expected-return (Step 5 hook).
+**Example fixtures.** Add `examples/functions_demo/models/uses_generics.sql` calling `MIN(event_time)`, `COALESCE(revenue, 0)`, `GREATEST(a, b, c)`, `CONCAT(first_name, ' ', last_name)` — each exercising a different generic/variadic form. Add broken fixtures `examples/broken/models/fn_coalesce_text_int.sql` (mixed Text/Integer args) and `fn_greatest_no_args.sql` (zero-arity variadic). Append rows to `broken_function_diagnostics.rs`.
+
+**Review checklist.** LUB reuses `promote_types`. Variadic zero-args error is local (§16 #15). No silent coercion between concrete numeric types (§16 #9). Inert hook for bidirectional expected-return (Step 5 hook). `functions_demo/models/uses_generics.sql` types clean; both broken fixtures asserted.
 
 **Commit.** `types: generics and variadics for built-in signatures (Phase 8)`
 
@@ -309,7 +335,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 
 **Implementation.** `infer_function_type` becomes a thin wrapper: registry first, fall back to legacy match for anything not yet migrated. Delete hardcoded entries as they migrate. Spike first to confirm coverage before starting the rewrite.
 
-**Review checklist.** Property tests pass. Any `SqlFunction` variant removed from the legacy match has a registry entry. Diagnostic messages at least as good as before.
+**Example fixtures.** No new fixtures — this phase's test is that every existing `examples/functions_demo/` model still types cleanly after rewire, and that `examples/timeseries/` and `examples/retail_analytics/` (which exercise many built-ins) remain diagnostic-clean. This is the phase where the existing example workspaces become load-bearing regression coverage. If any of them regress, the rewrite is incomplete.
+
+**Review checklist.** Property tests pass. Any `SqlFunction` variant removed from the legacy match has a registry entry. Diagnostic messages at least as good as before. `cargo test -p smelt-cli --test example_diagnostics` passes across all non-broken workspaces.
 
 **Commit.** `db: route SQL built-in inference through canonical registry (Phase 9)`
 
@@ -331,7 +359,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - Extend Phase 3's `functions_in_file` to collect externs. Unified resolver `builtin || user_extern`.
 - Collision enforced at index time.
 
-**Review checklist.** Externs reuse Phase 3 Salsa. Collision spans built-ins AND user externs. Frontmatter in this phase uses legacy single-block rule (Phase 11 upgrade point).
+**Example fixtures.** Add `examples/functions_demo/functions/externs.sql` declaring a `smelt.extern regex_match(text: Expr<Text>, pattern: Expr<Text>) -> Expr<Boolean>` and call it from a new model. Add broken fixtures `examples/broken/models/fn_extern_collides_with_builtin.sql` (extern named `LOWER`) and `fn_extern_duplicate.sql`. Append rows to `broken_function_diagnostics.rs`.
+
+**Review checklist.** Externs reuse Phase 3 Salsa. Collision spans built-ins AND user externs. Frontmatter in this phase uses legacy single-block rule (Phase 11 upgrade point). `functions_demo` model calling the extern types clean.
 
 **Commit.** `parser+db: smelt.extern declarations and signature indexing (Phase 10)`
 
@@ -355,7 +385,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - `smelt-db`: `function_backends(path, name)` query. Narrow-only check.
 - New `DiagnosticCode::BackendsWideningNotAllowed`.
 
-**Review checklist.** LSP line numbers still correct post multi-block frontmatter. Existing single-block fixtures unaffected. `backends:` schema strict but extensible. Backend namespace resolution is syntactic — no special type-checker codepath.
+**Example fixtures.** Add `examples/functions_demo/functions/multi_decl.sql` with two declarations each preceded by their own `---/---` frontmatter block (one `smelt.define` with `backends: [duckdb]`, one `smelt.extern duckdb.read_parquet(...)` demonstrating the namespace-sugar form). Upgrade `functions_demo/functions/safe_divide.sql` to include a per-decl frontmatter block. Add broken fixture `examples/broken/models/fn_backends_widening.sql` that declares a caller with broader `backends` than its body allows. Append row to `broken_function_diagnostics.rs`. Keep an existing single-block fixture (e.g. `examples/timeseries/` models) untouched to prove backwards compat.
+
+**Review checklist.** LSP line numbers still correct post multi-block frontmatter. Existing single-block fixtures unaffected. `backends:` schema strict but extensible. Backend namespace resolution is syntactic — no special type-checker codepath. `functions_demo/functions/multi_decl.sql` both types and resolves backends correctly.
 
 **Commit.** `parser+db: per-declaration frontmatter, backends inference, backend namespace (Phase 11)`
 
@@ -377,7 +409,9 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - `Signature` gains `canonical_return: DataType` plus `engine_native: HashMap<BackendId, DataType>`. Checker flags `needs_cast` on divergence.
 - CAST emission itself deferred — documented.
 
-**Review checklist.** Single-level cases unchanged. `relatedInformation` URIs resolve in LSP client. `needs_cast` computed but not emitted — clearly documented. All example projects still diagnostic-clean.
+**Example fixtures.** Add `examples/functions_demo/functions/nested_helpers.sql` with a chain `smelt.define outer(x) AS (smelt.fn.middle(x))`, `middle(x) AS (smelt.fn.safe_divide(x, 0))` to exercise multi-level expansion on the happy path. Add broken fixture `examples/broken/models/fn_nested_call_error.sql` that calls `outer("bad_text")` — asserts the full multi-frame renderer and is appended to `broken_function_diagnostics.rs` with a check that the diagnostic's rendered message includes all three frame names (outer-to-inner). This is the final fixture and the full-stack renderer's canonical test.
+
+**Review checklist.** Single-level cases unchanged. `relatedInformation` URIs resolve in LSP client. `needs_cast` computed but not emitted — clearly documented. All example projects still diagnostic-clean. Nested broken fixture's rendered output matches §16 #16's Step 2 example in the research.
 
 **Commit.** `lsp+db: multi-level frame rendering and CAST canonical-return tracking (Phase 12, Step 2 complete)`
 
@@ -403,12 +437,14 @@ Still blocked (for Step 3+): CTE forward reference, function file discovery poli
 - `crates/smelt-lsp/src/lib.rs::to_lsp_diagnostic` — frame rendering (Phase 6 single-level, Phase 12 full).
 
 **Examples.**
-- `examples/` — add `safe_divide` fixture in Phase 6.
+- `examples/functions_demo/` **(new, Phase 1)** — green end-to-end workspace; extended each phase with fixtures listed under that phase's "Example fixtures" bullet. Registered with `cargo test -p smelt-cli --test example_diagnostics`.
+- `examples/broken/models/fn_*.sql` — negative fixtures added per phase.
 
 **Tests.**
 - `crates/smelt-db/tests/function_registry.rs` (Phase 3, new).
 - `crates/smelt-db/tests/function_body_check.rs` (Phase 5, new).
 - `crates/smelt-db/tests/smelt_fn_call_check.rs` (Phase 6, new).
+- `crates/smelt-cli/tests/broken_function_diagnostics.rs` **(new, Phase 6)** — asserts `DiagnosticCode` + message substring for every `examples/broken/models/fn_*.sql` fixture. Phases 7–12 append rows here rather than creating new test files.
 - `crates/smelt-parser/src/parser.rs` unit tests (Phases 1, 2).
 
 ## Verification
