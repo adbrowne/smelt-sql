@@ -471,7 +471,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 3 | Salsa function signature index | done | 936233d | 2026-04-22 |
 | 4 | `Expr<T>` type-reference resolution | done | 0bd42b7 | 2026-04-22 |
 | 5 | Tier 1 body check with parameter binding | done | 05a96f4 | 2026-04-22 |
-| 6 | Call-site expansion + single-level frame trace (Step 1 complete) | pending | — | — |
+| 6 | Call-site expansion + single-level frame trace (Step 1 complete) | done | a25f44f | 2026-04-22 |
 | 7 | `Ordered` constraint + canonical registry skeleton | pending | — | — |
 | 8 | Generics + variadics | pending | — | — |
 | 9 | Rewire built-in inference through the registry | pending | — | — |
