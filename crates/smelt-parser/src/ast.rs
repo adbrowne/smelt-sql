@@ -202,6 +202,118 @@ impl DefineBody {
     }
 }
 
+// ===== smelt.fn.* user-declared function call (Phase 2) =====
+
+/// `smelt.fn.<path>(args)` call node. Distinct from `FUNCTION_CALL` — this
+/// node is only produced for calls that start with the literal `smelt.fn.`
+/// prefix, which names user-declared functions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltFnCall(SyntaxNode);
+
+impl SmeltFnCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_FN_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The dotted call path node (`smelt.fn.<...>.name`), if present.
+    pub fn call_path(&self) -> Option<CallPath> {
+        self.0.children().find_map(CallPath::cast)
+    }
+
+    /// The argument list node (`(args)`), if present.
+    pub fn arg_list(&self) -> Option<ArgList> {
+        self.0.children().find_map(ArgList::cast)
+    }
+
+    /// The full dotted path text including the `smelt.fn.` prefix, joined
+    /// with `.` and with whitespace/trivia stripped — e.g.
+    /// `smelt.fn.core.safe_divide`.
+    pub fn path_text(&self) -> String {
+        match self.call_path() {
+            Some(p) => {
+                p.0.children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == IDENT)
+                    .map(|t| t.text().to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            }
+            None => String::new(),
+        }
+    }
+}
+
+/// The dotted path inside a `SMELT_FN_CALL` — includes the literal
+/// `smelt.fn.` prefix tokens as well as all subsequent namespace / name
+/// segments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallPath(SyntaxNode);
+
+impl CallPath {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == CALL_PATH {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The logical path segments AFTER the `smelt.fn.` prefix. For
+    /// `smelt.fn.core.math.safe_divide` this returns
+    /// `["core", "math", "safe_divide"]`.
+    pub fn segments(&self) -> Vec<String> {
+        let idents: Vec<String> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .collect();
+        // Drop the leading `smelt` and `fn` tokens (the prefix). If for some
+        // reason the path is shorter than expected (e.g. an error-recovery
+        // case) we just return whatever remains.
+        idents.into_iter().skip(2).collect()
+    }
+}
+
+/// Argument list node (`(arg, arg, ...)`) used by both `FUNCTION_CALL` and
+/// `SMELT_FN_CALL`. Minimal wrapper in this phase — callers that need the
+/// richer `FunctionCall::named_params` helper can continue to use that
+/// wrapper directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArgList(SyntaxNode);
+
+impl ArgList {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARG_LIST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over the direct `NAMED_PARAM` children of this argument list.
+    pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
+        self.0.children().filter_map(NamedParam::cast)
+    }
+}
+
 /// SELECT statement
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SelectStmt(SyntaxNode);

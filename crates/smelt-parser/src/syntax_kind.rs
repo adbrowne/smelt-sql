@@ -214,6 +214,10 @@ pub enum SyntaxKind {
     RETURN_ARROW,  // Return type arrow: -> <TypeRef>
     DEFAULT_VALUE, // Default value of a parameter: = <expression>
 
+    // smelt.fn.* user-declared function call (Phase 2)
+    SMELT_FN_CALL, // smelt.fn.namespace.name(args)
+    CALL_PATH,     // The dotted call path inside a SMELT_FN_CALL (incl. `smelt.fn.` prefix)
+
     // Error handling
     ERROR, // Invalid syntax
 

@@ -334,6 +334,57 @@ impl<'a> Parser<'a> {
         text.eq_ignore_ascii_case("define")
     }
 
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a `smelt.fn.<path>(...)` call. Does not consume any tokens.
+    /// The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("fn")
+    /// The path segments after `fn` and the `(...)` are validated by
+    /// `parse_smelt_fn_call`.
+    fn at_smelt_fn_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "fn".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        // Compute the starting offset of this lookahead token so we can read
+        // its text without consuming.
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("fn")
+    }
+
     /// Sync forward to EOF or the start of the next top-level `smelt.define`.
     /// Anything skipped is wrapped in ERROR nodes (one per token).
     fn sync_to_top_level(&mut self) {
@@ -588,6 +639,106 @@ impl<'a> Parser<'a> {
         }
 
         self.finish_node();
+    }
+
+    /// Parse a `smelt.fn.<segment>(.<segment>)*(args)` call as a `SMELT_FN_CALL`.
+    ///
+    /// The caller must have verified `at_smelt_fn_trigger()` first. The minimal
+    /// valid form is `smelt.fn.<name>(...)` — the three prefix tokens
+    /// `smelt . fn` must be followed by at least one `.<IDENT>` segment and
+    /// then `(`. Intermediate namespace segments (`smelt.fn.core.math.name`)
+    /// are legal and all captured inside a single `CALL_PATH` node including
+    /// the `smelt.fn.` prefix.
+    fn parse_smelt_fn_call(&mut self) {
+        self.start_node(SMELT_FN_CALL);
+        self.start_node(CALL_PATH);
+
+        // Consume the three trigger tokens: `smelt`, `.`, `fn`.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "fn"
+
+        // Require at least one `.<IDENT>` segment after `smelt.fn`.
+        self.skip_trivia();
+        if !self.at(DOT) {
+            self.error("Expected '.' after 'smelt.fn'".to_string());
+            self.finish_node(); // CALL_PATH
+            self.finish_node(); // SMELT_FN_CALL
+            return;
+        }
+        self.advance(); // DOT
+        self.skip_trivia();
+        if !self.at(IDENT) {
+            self.error("Expected identifier after 'smelt.fn.'".to_string());
+            self.finish_node(); // CALL_PATH
+            self.finish_node(); // SMELT_FN_CALL
+            return;
+        }
+        self.advance(); // IDENT (first path segment after smelt.fn.)
+
+        // Continue consuming `.<IDENT>` segments as long as more follow. Stop
+        // when the next non-trivia token is `(` (start of the arg list) or
+        // anything else (which is an error).
+        loop {
+            // Peek past any trivia to the next non-trivia token.
+            let mut lookahead = 0;
+            while let Some(t) = self.tokens.get(self.pos + lookahead) {
+                if t.kind.is_trivia() {
+                    lookahead += 1;
+                } else {
+                    break;
+                }
+            }
+            let next_kind = self
+                .tokens
+                .get(self.pos + lookahead)
+                .map(|t| t.kind)
+                .unwrap_or(EOF);
+            if next_kind != DOT {
+                break;
+            }
+
+            // There is a `.` after the last IDENT. Peek past the DOT to see
+            // what follows — we only extend the path if it's an IDENT.
+            let mut lookahead2 = lookahead + 1;
+            while let Some(t) = self.tokens.get(self.pos + lookahead2) {
+                if t.kind.is_trivia() {
+                    lookahead2 += 1;
+                } else {
+                    break;
+                }
+            }
+            let after_dot = self
+                .tokens
+                .get(self.pos + lookahead2)
+                .map(|t| t.kind)
+                .unwrap_or(EOF);
+            if after_dot != IDENT {
+                break;
+            }
+
+            // Consume `.<IDENT>`.
+            self.skip_trivia();
+            self.advance(); // DOT
+            self.skip_trivia();
+            self.advance(); // IDENT
+        }
+
+        self.finish_node(); // CALL_PATH
+
+        // Argument list is required. Reuse parse_arg_list (handles named
+        // params `x => y` for free).
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_arg_list();
+        } else {
+            self.error("Expected '(' after smelt.fn.<path>".to_string());
+        }
+
+        self.finish_node(); // SMELT_FN_CALL
     }
 
     fn parse_select_stmt(&mut self) {
@@ -1618,6 +1769,14 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.advance(); // string literal
             self.finish_node();
+        } else if self.at(IDENT) && self.at_smelt_fn_trigger() {
+            // smelt.fn.<path>(args) — user-declared function call. Must be
+            // checked BEFORE the generic IDENT / namespaced-function branch so
+            // that smelt.fn.* calls produce a SMELT_FN_CALL node rather than a
+            // FUNCTION_CALL. smelt.ref(...) / smelt.source(...) remain on the
+            // FUNCTION_CALL path because the trigger requires the second
+            // segment to be exactly `fn`.
+            self.parse_smelt_fn_call();
         } else if self.at(IDENT) {
             // Could be column reference, qualified name, or function call
             let checkpoint = self.builder.checkpoint();
@@ -5382,5 +5541,222 @@ LIMIT 100
                 err
             );
         }
+    }
+
+    // ===== Phase 2: smelt.fn.* call syntax =====
+
+    use crate::ast::{ArgList, CallPath, Expr, SmeltFnCall};
+    use crate::syntax_kind::SyntaxNode;
+
+    /// Helper: collect all SMELT_FN_CALL descendants of a node.
+    fn smelt_fn_calls(root: &SyntaxNode) -> Vec<SmeltFnCall> {
+        root.descendants().filter_map(SmeltFnCall::cast).collect()
+    }
+
+    /// Helper: collect all FUNCTION_CALL descendants of a node.
+    fn function_calls(root: &SyntaxNode) -> Vec<FunctionCall> {
+        root.descendants().filter_map(FunctionCall::cast).collect()
+    }
+
+    #[test]
+    fn parses_smelt_fn_call_simple() {
+        let input = "SELECT smelt.fn.safe_divide(a, b) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected exactly one SMELT_FN_CALL");
+
+        // The old FUNCTION_CALL path must not fire for smelt.fn.*. There are
+        // zero FUNCTION_CALL nodes in this input.
+        let fcalls = function_calls(file.syntax());
+        assert!(
+            fcalls.is_empty(),
+            "expected no FUNCTION_CALL nodes for smelt.fn.* calls, got {}",
+            fcalls.len()
+        );
+
+        let call = &calls[0];
+        let path = call.call_path().expect("should have CALL_PATH");
+        let path_text_compact: String = path
+            .syntax()
+            .text()
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(path_text_compact, "smelt.fn.safe_divide");
+
+        let args = call.arg_list().expect("should have ARG_LIST");
+        // Two arguments, zero named params.
+        let named: Vec<_> = args.named_params().collect();
+        assert!(
+            named.is_empty(),
+            "simple positional args should produce no NAMED_PARAM"
+        );
+        // Count expression arguments.
+        let expr_args = args
+            .syntax()
+            .children()
+            .filter(|n| Expr::cast(n.clone()).is_some())
+            .count();
+        assert_eq!(expr_args, 2, "expected two positional arguments");
+    }
+
+    #[test]
+    fn parses_smelt_fn_call_named_args() {
+        let input = "SELECT smelt.fn.safe_divide(numerator => a, denominator => b) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+        let args: ArgList = calls[0].arg_list().expect("should have ARG_LIST");
+        let named: Vec<_> = args.named_params().collect();
+        assert_eq!(named.len(), 2, "expected two NAMED_PARAM children");
+        assert_eq!(named[0].name().as_deref(), Some("numerator"));
+        assert_eq!(named[1].name().as_deref(), Some("denominator"));
+    }
+
+    #[test]
+    fn parses_smelt_fn_call_nested_namespace() {
+        let input = "SELECT smelt.fn.core.math.safe_divide(a, b) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+
+        let call = &calls[0];
+        let path: CallPath = call.call_path().expect("CALL_PATH should be present");
+        // The full path including the `smelt.fn.` prefix should be captured
+        // inside CALL_PATH — joining IDENT tokens with `.` gives the logical
+        // dotted name.
+        let joined = call.path_text();
+        assert_eq!(joined, "smelt.fn.core.math.safe_divide");
+
+        // The raw text of the CALL_PATH node (whitespace stripped) also
+        // contains the nested namespace.
+        let raw_compact: String = path
+            .syntax()
+            .text()
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            raw_compact.contains("core.math.safe_divide"),
+            "CALL_PATH text should contain nested namespace, got {:?}",
+            raw_compact
+        );
+
+        // The logical segments (stripped of the smelt.fn prefix) are
+        // `["core", "math", "safe_divide"]`.
+        assert_eq!(path.segments(), vec!["core", "math", "safe_divide"]);
+    }
+
+    #[test]
+    fn smelt_fn_without_parens_is_error() {
+        let input = "SELECT smelt.fn.foo FROM t";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for smelt.fn.foo with no '('"
+        );
+    }
+
+    #[test]
+    fn smelt_fn_inside_where() {
+        let input = "SELECT * FROM t WHERE smelt.fn.is_valid(x)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+
+        // The call must sit under a WHERE_CLAUSE ancestor.
+        let in_where = calls[0]
+            .syntax()
+            .ancestors()
+            .any(|n| n.kind() == WHERE_CLAUSE);
+        assert!(in_where, "SMELT_FN_CALL must be inside WHERE_CLAUSE");
+    }
+
+    #[test]
+    fn smelt_ref_still_parses_as_function_call() {
+        // Regression: smelt.ref() must continue to parse as FUNCTION_CALL,
+        // not as SMELT_FN_CALL. The Phase 2 trigger requires the second
+        // segment to be exactly `fn`, so `smelt.ref` is unaffected.
+        let input = "SELECT * FROM smelt.ref('model')";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        assert!(
+            smelt_fn_calls(file.syntax()).is_empty(),
+            "smelt.ref should NOT be parsed as SMELT_FN_CALL"
+        );
+
+        let fcalls = function_calls(file.syntax());
+        assert!(
+            !fcalls.is_empty(),
+            "smelt.ref should parse as FUNCTION_CALL"
+        );
+        // At least one FunctionCall has namespace == smelt and name == ref.
+        let has_ref = fcalls.iter().any(|f| {
+            f.namespace()
+                .map(|ns| ns.eq_ignore_ascii_case("smelt"))
+                .unwrap_or(false)
+                && f.name()
+                    .map(|n| n.eq_ignore_ascii_case("ref"))
+                    .unwrap_or(false)
+        });
+        assert!(
+            has_ref,
+            "expected a FUNCTION_CALL for smelt.ref(...), none found"
+        );
+    }
+
+    #[test]
+    fn smelt_fn_call_inside_define_body() {
+        // Phase 2 integrates with Phase 1 grammar: a smelt.fn.* call appears
+        // inside a smelt.define body expression.
+        let input = "smelt.define wrap(x) AS (smelt.fn.safe_divide(x, 1))";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 1);
+        let body = defines[0].body().expect("smelt.define should have body");
+
+        let calls_under_body = smelt_fn_calls(body.syntax());
+        assert_eq!(
+            calls_under_body.len(),
+            1,
+            "expected exactly one SMELT_FN_CALL inside DEFINE_BODY"
+        );
     }
 }
