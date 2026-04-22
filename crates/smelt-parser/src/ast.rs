@@ -75,6 +75,16 @@ impl SmeltDefine {
             .map(|t| t.text().to_string())
     }
 
+    /// The text range of the DEFINE_NAME node (the function name identifier).
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let ident = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)?;
+        Some(ident.text_range())
+    }
+
     /// The parameter list, if parsed successfully.
     pub fn param_list(&self) -> Option<ParamList> {
         self.0.children().find_map(ParamList::cast)

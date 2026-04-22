@@ -899,6 +899,7 @@ impl Backend {
                 DbCode::AmbiguousColumn => "ambiguous-column",
                 DbCode::UnknownCastType => "unknown-cast-type",
                 DbCode::UnrecognizedFunction => "unrecognized-function",
+                DbCode::DuplicateFunctionDefinition => "duplicate-function-definition",
             };
             NumberOrString::String(code_str.to_string())
         });
