@@ -240,6 +240,12 @@ pub enum DiagnosticCode {
     /// Anchored at the *second* (sorted-by-path) declaration's name span; the
     /// first declaration wins. Introduced in Phase 3 of smelt-functions.
     DuplicateFunctionDefinition,
+    /// Emitted when a `smelt.define` parameter or return-type annotation
+    /// can't be parsed into a structured [`smelt_types::signatures::SmeltType`]
+    /// — e.g. `Expr<Foo>`, `Expr<Expr<Integer>>`, or `TableExpr<T>` (the latter
+    /// is reserved for Step 3). Anchored at the `TypeRef` span. Introduced in
+    /// Phase 4 of smelt-functions.
+    InvalidFunctionTypeRef,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -701,6 +707,45 @@ pub fn duplicate_function_diagnostics_for_file(
         .collect()
 }
 
+/// Per-file diagnostics for malformed `smelt.define` parameter / return type
+/// annotations (Phase 4). Iterates `functions_in_file(file)` and emits a
+/// diagnostic for each [`ParamSpec::type_ref`] or
+/// [`FunctionSig::return_type`] that carries a parse error.
+///
+/// Pure-function-rule note: the heavy lifting lives on
+/// `smelt_types::signatures` — this helper is just a thin reader over the
+/// signature query's cached output.
+pub fn invalid_function_type_ref_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let sigs = file_signature_inputs(db, file);
+    let mut out = Vec::new();
+    for sig in sigs.iter() {
+        for param in &sig.params {
+            if let (Some(Err(err)), Some(range)) = (&param.type_ref, param.type_ref_range) {
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!("Invalid type for parameter `{}`: {}", param.name, err),
+                    range,
+                    code: Some(DiagnosticCode::InvalidFunctionTypeRef),
+                    data: None,
+                });
+            }
+        }
+        if let (Some(Err(err)), Some(range)) = (&sig.return_type, sig.return_type_range) {
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("Invalid return type for function `{}`: {}", sig.name, err),
+                range,
+                code: Some(DiagnosticCode::InvalidFunctionTypeRef),
+                data: None,
+            });
+        }
+    }
+    out
+}
+
 // ============================================================================
 // Semantic queries
 // ============================================================================
@@ -775,6 +820,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Duplicate-function diagnostics (Phase 3): emitted at the second
     // `smelt.define` declaration's name span; workspace-wide check.
     for diag in duplicate_function_diagnostics_for_file(db, workspace, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Invalid-type-ref diagnostics (Phase 4): emitted at each malformed
+    // `Expr<T>` / unsupported-sort annotation on parameters or return types.
+    for diag in invalid_function_type_ref_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

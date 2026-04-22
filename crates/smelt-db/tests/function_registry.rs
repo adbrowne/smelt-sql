@@ -220,6 +220,47 @@ fn function_body_invalidation_separate_from_signature() {
     let _ = body_after;
 }
 
+/// Phase 4 fixture-backed test: `examples/broken/models/fn_bad_type_ref.sql`
+/// declares a function with an unsupported sort (`TableExpr<T>`) and must
+/// surface exactly one `InvalidFunctionTypeRef` diagnostic, anchored at the
+/// `TypeRef` span. The plan explicitly flags this as "asserted via a targeted
+/// unit test in Phase 4 until the Phase 6 harness arrives" — Phase 6 migrates
+/// the assertion into `crates/smelt-cli/tests/broken_function_diagnostics.rs`.
+#[test]
+fn broken_fixture_bad_type_ref_emits_diagnostic() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let broken_dir = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("broken")
+        .join("models");
+    let path = broken_dir.join("fn_bad_type_ref.sql");
+    let content = std::fs::read_to_string(&path).expect("fn_bad_type_ref.sql exists");
+
+    let root = broken_dir.parent().unwrap().to_path_buf();
+    let (db, ws, files) = build_db(root, &[(path.clone(), &content)]);
+    let file = files[0];
+
+    let diags = file_diagnostics(&db, ws, file);
+    let invalid: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::InvalidFunctionTypeRef))
+        .collect();
+    assert_eq!(
+        invalid.len(),
+        1,
+        "fn_bad_type_ref.sql should emit exactly one InvalidFunctionTypeRef diagnostic, got {diags:?}"
+    );
+    assert!(
+        invalid[0].message.contains("TableExpr"),
+        "diagnostic should name the unsupported sort, got: {}",
+        invalid[0].message
+    );
+}
+
 /// Fixture-backed test: the `examples/broken/` duplicate-define pair produces
 /// the expected `DuplicateFunctionDefinition` diagnostic end-to-end. Phase 6
 /// will migrate this assertion into the unified

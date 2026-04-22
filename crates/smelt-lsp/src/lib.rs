@@ -900,6 +900,7 @@ impl Backend {
                 DbCode::UnknownCastType => "unknown-cast-type",
                 DbCode::UnrecognizedFunction => "unrecognized-function",
                 DbCode::DuplicateFunctionDefinition => "duplicate-function-definition",
+                DbCode::InvalidFunctionTypeRef => "invalid-function-type-ref",
             };
             NumberOrString::String(code_str.to_string())
         });

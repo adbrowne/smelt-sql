@@ -17,7 +17,7 @@ pub use functions::{FunctionCategory, SqlFunction};
 pub use parse::{parse_type, TypeParseError};
 pub use signatures::{
     extract_function_signature_by_name, extract_function_signatures, extract_signature,
-    FunctionSig, ParamSpec, Tier,
+    parse_smelt_type, FunctionSig, ParamSpec, SmeltType, SmeltTypeParseError, Tier, TypeConstraint,
 };
 
 /// SQL data types supported by smelt

@@ -1,1 +1,1 @@
-smelt.define trivial(x) AS (x + 1)
+smelt.define add_one(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)
