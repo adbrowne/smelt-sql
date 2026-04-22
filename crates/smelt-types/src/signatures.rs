@@ -265,6 +265,34 @@ pub struct ParamSpec {
     pub has_default: bool,
 }
 
+/// A single frame of expansion context attached to a body/call-site
+/// diagnostic.
+///
+/// Phase 6 populates a 0-or-1-element `Vec<FrameInfo>` on every
+/// `smelt.fn.*`-originated diagnostic:
+///
+/// - When the body's own type-check surfaces an error (no expansion
+///   happened), the vec is empty.
+/// - When the error fires *inside* an expanded body, the vec contains
+///   one frame for each nested expansion, innermost-first → outermost-last
+///   (Phase 12 upgrades the renderer to emit multi-level; Phase 6 only renders
+///   the innermost).
+///
+/// `bound_type` is the concrete type that the parameter was bound to at the
+/// call site, rendered via `DataType::to_string()` for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameInfo {
+    /// Name of the function whose expansion is responsible for this frame
+    /// (e.g. `"safe_divide"`).
+    pub function: String,
+    /// Name of the parameter inside that function whose binding produced
+    /// the inner error (e.g. `"numerator"`).
+    pub param: String,
+    /// Textual rendering of the type that `param` was bound to at this
+    /// call site (e.g. `"INTEGER"`, `"VARCHAR"`).
+    pub bound_type: String,
+}
+
 /// Tier of a function, derived from annotation completeness.
 ///
 /// - `Tier::Three`: every parameter annotated AND return type annotated.

@@ -5,8 +5,9 @@
 use rowan::TextRange;
 use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, StructLiteral, Subquery,
+    SelectStmt, SmeltFnCall, StructLiteral, Subquery,
 };
+use smelt_types::signatures::{FunctionSig, SmeltType, TypeConstraint};
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -32,6 +33,12 @@ pub struct TypeContext {
     /// body. Unqualified lookups via [`TypeContext::lookup_identifier`]
     /// check this map first.
     function_params: HashMap<String, TypedColumn>,
+    /// Workspace function-signature index (name → signature), populated by
+    /// Phase 6 callers so `infer_expression_type` can resolve the return
+    /// type of a `smelt.fn.<name>(...)` call site. Empty for non-call
+    /// contexts — pure type inference doesn't care whether the resolver
+    /// came from Salsa or an in-memory map.
+    function_signatures: HashMap<String, FunctionSig>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -44,6 +51,7 @@ impl PartialEq for TypeContext {
             && self.cte_names == other.cte_names
             && self.aliases == other.aliases
             && self.function_params == other.function_params
+            && self.function_signatures == other.function_signatures
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -59,6 +67,7 @@ impl Clone for TypeContext {
             cte_names: self.cte_names.clone(),
             aliases: self.aliases.clone(),
             function_params: self.function_params.clone(),
+            function_signatures: self.function_signatures.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -260,6 +269,20 @@ impl TypeContext {
         self.function_params.contains_key(name)
     }
 
+    /// Register a resolved [`FunctionSig`] so `smelt.fn.<name>` call-site
+    /// type inference can look up the declared return type.
+    ///
+    /// Pure — no Salsa interaction. Phase 6 callers build the map by
+    /// asking Salsa for each unique name that appears in the file.
+    pub fn add_function_signature(&mut self, name: &str, sig: FunctionSig) {
+        self.function_signatures.insert(name.to_string(), sig);
+    }
+
+    /// Resolve a `smelt.fn.<name>` reference to its [`FunctionSig`].
+    pub fn lookup_function_signature(&self, name: &str) -> Option<&FunctionSig> {
+        self.function_signatures.get(name)
+    }
+
     /// Unqualified-or-qualified identifier lookup that honours the
     /// function-parameter scope.
     ///
@@ -318,6 +341,16 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
+    }
+
+    // Try smelt.fn.<name>(...) user-function call site. Returns the declared
+    // return type of the resolved signature, or Unknown if the function
+    // cannot be resolved / lacks a return annotation. Diagnostics for
+    // unresolved functions / arg mismatches are emitted elsewhere
+    // (`function_body_check::check_smelt_fn_call`), so this path is
+    // type-only.
+    if let Some(call) = expr.as_smelt_fn_call() {
+        return infer_smelt_fn_call_type(&call, ctx);
     }
 
     // Try binary expression
@@ -586,6 +619,35 @@ pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext
     }
 
     ctx
+}
+
+/// Infer the return type of a `smelt.fn.<name>(...)` call site.
+///
+/// Uses the workspace function-signature index seeded on [`TypeContext`]
+/// (via [`TypeContext::add_function_signature`]) — no Salsa access. Returns:
+///   - `Some(TypedColumn)` with the declared return type when the signature
+///     resolves and carries a `-> Expr<Concrete(T)>` annotation.
+///   - `Some(TypedColumn { data_type: Double, .. })` when the return is
+///     `Expr<Numeric>` — matches `param_binding_type`'s widening rule in
+///     `function_body_check.rs` so callers doing `CAST(... AS DOUBLE) /
+///     safe_divide(...)` stay well-typed.
+///   - `Some(TypedColumn { data_type: Unknown, .. })` for `Expr<Any>`,
+///     malformed annotations, or missing annotations — diagnostic emission
+///     is the call-site checker's job, not inference's.
+///   - `None` only when the function cannot be resolved in this context.
+fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<TypedColumn> {
+    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+    let name = segments.last()?;
+    let sig = ctx.lookup_function_signature(name)?;
+
+    let dt = match &sig.return_type {
+        Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(dt)))) => dt.clone(),
+        Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => DataType::Double,
+        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
+        Some(Err(_)) => DataType::Unknown,
+        None => DataType::Unknown,
+    };
+    Some(TypedColumn::nullable(dt))
 }
 
 /// Infer the type of a function call (aggregates, etc.)

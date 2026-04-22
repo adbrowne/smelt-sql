@@ -15,13 +15,13 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Expr};
+use smelt_parser::ast::{BinaryExpr, Expr, SmeltFnCall};
 use smelt_parser::offset_to_position;
-use smelt_types::signatures::{FunctionSig, ParamSpec, SmeltType, TypeConstraint};
+use smelt_types::signatures::{FrameInfo, FunctionSig, ParamSpec, SmeltType, TypeConstraint};
 use smelt_types::{DataType, TypedColumn};
 
 use crate::type_inference::{infer_expression_type, TypeContext};
-use crate::{Diagnostic, DiagnosticCode, DiagnosticSeverity, Range};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
 /// Check a single `smelt.define` body, producing Phase-5 diagnostics.
 ///
@@ -299,6 +299,289 @@ fn is_arithmetic_compatible(left: &DataType, right: &DataType, op: &str) -> bool
 /// `walk_expression_columns_with_visitor` for the leaf-detection heuristic.
 fn has_expr_children(expr: &Expr) -> bool {
     expr.syntax().children().any(|c| Expr::cast(c).is_some())
+}
+
+/// Check a single `smelt.fn.<path>(args)` call site.
+///
+/// Arguments:
+/// - `call`: the parsed `SMELT_FN_CALL` node.
+/// - `ctx`: the call-site [`TypeContext`] — used to infer the types of
+///   positional / named argument expressions. Must not be a body-context
+///   (the caller composes this during expansion).
+/// - `text`: the stripped source text of the *file containing the call*,
+///   needed for span → line/column conversion.
+/// - `sig_lookup`: resolves a bare function name to its
+///   [`FunctionSig`]. Pure dependency — in Salsa it is a thin closure over
+///   `resolve_function`; in unit tests it is an in-memory `HashMap` lookup.
+/// - `body_lookup`: given a resolved function, produces the stripped source
+///   text and the body [`Expr`] so the checker can re-walk the body with
+///   the call-site-derived bindings. Pure — the closure owns any I/O.
+///
+/// Returns a list of diagnostics:
+///   - [`DiagnosticCode::UnknownSmeltFn`] at the call-path span.
+///   - [`DiagnosticCode::MissingArgument`] at the call-path span.
+///   - [`DiagnosticCode::ArgTypeMismatch`] at the offending argument's span.
+///   - Any [`DiagnosticCode::FunctionBodyTypeMismatch`] /
+///     [`DiagnosticCode::UnknownIdentifier`] surfaced by re-walking the
+///     callee's body with the call-site bindings; these carry
+///     `DiagnosticData::ExpansionFrames(Vec<FrameInfo>)` with the outermost
+///     entry describing this call site's bindings.
+///
+/// Diagnostics from deeply nested calls already carry a frame stack — this
+/// function appends its frame to the *end* so callers rendering innermost-only
+/// (Phase 6) or full-stack (Phase 12) get a deterministic ordering.
+///
+/// Pure: no Salsa access. Callers in `smelt-db/src/lib.rs` build the closures.
+#[allow(clippy::type_complexity)]
+pub fn check_smelt_fn_call(
+    call: &SmeltFnCall,
+    ctx: &TypeContext,
+    text: &str,
+    sig_lookup: &dyn Fn(&str) -> Option<FunctionSig>,
+    body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, Expr)>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // 1. Resolve the function. The path segments after `smelt.fn.` join with
+    //    `.`; only the trailing leaf name is what the workspace signature
+    //    index keys on (namespace segments are informational until Step 2's
+    //    backend namespace work).
+    let path_range = match call.call_path_range() {
+        Some(r) => to_range(r, text),
+        None => to_range(call.text_range(), text),
+    };
+    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+    let Some(name) = segments.last().cloned() else {
+        // Parser already flagged the missing-name error; nothing more to do.
+        return diagnostics;
+    };
+
+    let Some(sig) = sig_lookup(&name) else {
+        diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!("Unknown function `smelt.fn.{}`", name),
+            range: path_range,
+            code: Some(DiagnosticCode::UnknownSmeltFn),
+            data: None,
+        });
+        return diagnostics;
+    };
+
+    // 2. Bind arguments to parameters. Positional first, then named.
+    let arg_list = call.arg_list();
+    let positional: Vec<Expr> = arg_list
+        .as_ref()
+        .map(|al| al.positional_args())
+        .unwrap_or_default();
+    let named: Vec<smelt_parser::ast::NamedParam> = arg_list
+        .as_ref()
+        .map(|al| al.named_params().collect())
+        .unwrap_or_default();
+
+    // Build the name → (arg Expr, span TextRange) map. A positional slot
+    // populates `sig.params[i]`; a named slot looks up `sig.params` by name.
+    let mut bindings: std::collections::HashMap<String, (Expr, TextRange)> =
+        std::collections::HashMap::new();
+
+    for (i, arg) in positional.iter().enumerate() {
+        if let Some(p) = sig.params.get(i) {
+            bindings.insert(p.name.clone(), (arg.clone(), arg.text_range()));
+        }
+        // Extra positional args beyond declared params — Phase 6 silently
+        // ignores (Step 2+ will emit an arity diagnostic).
+    }
+
+    for np in &named {
+        let Some(nm) = np.name() else { continue };
+        // If there's no parseable expression on the RHS we leave the binding
+        // absent — the missing-arg check will fire below. Otherwise use the
+        // span of the value expression for arg-type-mismatch diagnostics so
+        // the squiggle lands on the bad value, not the whole `name => value`
+        // pair.
+        if let Some(value_expr) = np.value_expr() {
+            bindings.insert(nm.clone(), (value_expr.clone(), value_expr.text_range()));
+        }
+    }
+
+    // 3. Build call-site binding types + detect missing / type-mismatched args.
+    let mut body_ctx = TypeContext::new();
+    let mut frame_bindings: Vec<(String, String)> = Vec::new(); // (param, bound_type_str)
+
+    for param in &sig.params {
+        if param.name.is_empty() {
+            continue;
+        }
+
+        match bindings.get(&param.name) {
+            Some((arg_expr, arg_range)) => {
+                // Infer the argument's type in the *call-site* context.
+                let arg_type = infer_expression_type(arg_expr, ctx)
+                    .map(|t| t.data_type)
+                    .unwrap_or(DataType::Unknown);
+
+                // Type-check against the parameter's declared constraint (if
+                // any). Unknown / malformed annotations skip the check —
+                // Phase 4's `InvalidFunctionTypeRef` already fired.
+                let constraint_violation = match &param.type_ref {
+                    Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(expected)))) => {
+                        !matches!(arg_type, DataType::Unknown | DataType::Null)
+                            && !types_assignment_compatible(expected, &arg_type)
+                    }
+                    Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => {
+                        !matches!(arg_type, DataType::Unknown | DataType::Null)
+                            && !arg_type.is_numeric()
+                    }
+                    Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => false,
+                    _ => false,
+                };
+
+                if constraint_violation {
+                    let expected_text = match &param.type_ref {
+                        Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(dt)))) => dt.to_string(),
+                        Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => "Numeric".to_string(),
+                        _ => "<unknown>".to_string(),
+                    };
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument `{}` has type `{}`, which does not satisfy parameter `{}: {}` of `{}`",
+                            arg_expr.text().trim(),
+                            arg_type,
+                            param.name,
+                            expected_text,
+                            sig.name
+                        ),
+                        range: to_range(*arg_range, text),
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                    // Still bind the param to Unknown so downstream body walks
+                    // don't cascade into spurious errors from the bad arg.
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), arg_type.to_string()));
+                    continue;
+                }
+
+                body_ctx.add_function_param(&param.name, TypedColumn::nullable(arg_type.clone()));
+                frame_bindings.push((param.name.clone(), arg_type.to_string()));
+            }
+            None => {
+                if !param.has_default {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Missing required argument `{}` for `smelt.fn.{}`",
+                            param.name, sig.name
+                        ),
+                        range: path_range,
+                        code: Some(DiagnosticCode::MissingArgument),
+                        data: None,
+                    });
+                    // Bind Unknown so the body walk doesn't cascade.
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), "<missing>".to_string()));
+                } else {
+                    // Default value is present — infer its type and bind.
+                    // Phase 6 only handles expression-shaped defaults.
+                    // `param.has_default` is always true when the parser saw
+                    // `= expr`, so we can locate the DEFAULT_VALUE expression
+                    // directly off the AST — but `ParamSpec` doesn't carry
+                    // the AST. We fall back to `Unknown` if we can't infer,
+                    // which lets the body walk proceed.
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), "<default>".to_string()));
+                }
+            }
+        }
+    }
+
+    // If there were any call-site diagnostics (unknown/missing/type-mismatch),
+    // stop here — re-walking the body would cascade errors that are already
+    // subsumed by the call-site issue.
+    if !diagnostics.is_empty() {
+        return diagnostics;
+    }
+
+    // 4. Re-walk the body with the call-site-bound context. Errors surfaced
+    //    here are re-anchored to the call site so the user sees the issue
+    //    where they wrote the call, not inside the function they imported.
+    //    The original span is preserved on the diagnostic — only the message
+    //    range is rewritten — and a FrameInfo is attached.
+    let Some((body_text, body_expr)) = body_lookup(&sig) else {
+        return diagnostics;
+    };
+
+    let inner = check_function_body(&sig, &body_expr, &body_text);
+
+    // Build the frames list. For each *inner* diagnostic we push:
+    //   - any frames it already carried (from nested calls), unchanged
+    //   - plus one new frame for `this` call site, appended to the end so
+    //     the last element is the outermost (current) call — matching the
+    //     renderer contract in `smelt-lsp::to_lsp_diagnostic`.
+    for mut d in inner {
+        // Re-anchor the range to the call-site call-path span. Phase 6's
+        // single-level renderer shows only the outermost site; future phases
+        // can walk the frame stack to reconstruct inner spans.
+        d.range = path_range;
+
+        // Merge any pre-existing ExpansionFrames with this call's frame.
+        let mut frames: Vec<FrameInfo> = match d.data.take() {
+            Some(DiagnosticData::ExpansionFrames(existing)) => existing,
+            _ => Vec::new(),
+        };
+        // Phase 6 packs all this call's (param, bound_type) pairs into a
+        // single frame keyed on the function name. The renderer only shows
+        // one binding per frame — pick the first parameter (innermost-bound)
+        // for determinism. Future phases can extend FrameInfo with a full
+        // binding list.
+        if let Some((param_name, bound_type)) = frame_bindings.first().cloned() {
+            frames.push(FrameInfo {
+                function: sig.name.clone(),
+                param: param_name,
+                bound_type,
+            });
+        } else {
+            frames.push(FrameInfo {
+                function: sig.name.clone(),
+                param: String::new(),
+                bound_type: String::new(),
+            });
+        }
+        d.data = Some(DiagnosticData::ExpansionFrames(frames));
+        diagnostics.push(d);
+    }
+
+    diagnostics
+}
+
+/// Minimal assignment-compatibility check used by `ArgTypeMismatch`.
+///
+/// For Phase 6 we want:
+///   - Exact match: always OK.
+///   - Unknown / Null: skip (caller handles).
+///   - Integer-family promotion is allowed in one direction only — passing an
+///     Integer where a BigInt is expected is accepted (a SUM of Ints → BigInt
+///     path), but passing a BigInt where Integer is expected is flagged.
+///   - Text / Varchar: interchangeable (normalize() maps them).
+///   - Anything else: strict equality.
+fn types_assignment_compatible(expected: &DataType, actual: &DataType) -> bool {
+    if expected == actual {
+        return true;
+    }
+    // Normalize both via DataType::normalize() to collapse Text ↔ Varchar.
+    if expected.normalize() == actual.normalize() {
+        return true;
+    }
+    // Allow widening an Integer-family actual into a wider Integer-family
+    // expected. Do NOT accept Double → BigInt (lossy) or Numeric → Text.
+    use DataType::*;
+    matches!(
+        (expected, actual),
+        (BigInt, SmallInt) | (BigInt, Integer) | (Integer, SmallInt)
+    )
 }
 
 #[cfg(test)]

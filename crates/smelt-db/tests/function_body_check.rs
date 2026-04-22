@@ -242,55 +242,7 @@ fn duplicate_param_name_is_error() {
     );
 }
 
-/// Fixture-backed assertion: the Phase 5 broken fixtures emit the expected
-/// diagnostics. This test is temporary — Phase 6 migrates these rows into the
-/// unified `crates/smelt-cli/tests/broken_function_diagnostics.rs` harness.
-#[test]
-fn broken_fixtures_emit_expected_diagnostics() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let broken_dir = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join("broken")
-        .join("models");
-
-    // 1. fn_body_type_mismatch.sql → FunctionBodyTypeMismatch.
-    {
-        let path = broken_dir.join("fn_body_type_mismatch.sql");
-        let content = std::fs::read_to_string(&path).expect("fn_body_type_mismatch.sql must exist");
-        let root = broken_dir.parent().unwrap().to_path_buf();
-        let (db, ws, files) = build_db(root, &[(path, &content)]);
-        let file = files[0];
-
-        let mismatches = body_diags(&db, ws, file, DiagnosticCode::FunctionBodyTypeMismatch);
-        assert_eq!(
-            mismatches.len(),
-            1,
-            "fn_body_type_mismatch.sql should emit one FunctionBodyTypeMismatch, got {mismatches:?}"
-        );
-    }
-
-    // 2. fn_unknown_param.sql → UnknownIdentifier for `z`.
-    {
-        let path = broken_dir.join("fn_unknown_param.sql");
-        let content = std::fs::read_to_string(&path).expect("fn_unknown_param.sql must exist");
-        let root = broken_dir.parent().unwrap().to_path_buf();
-        let (db, ws, files) = build_db(root, &[(path, &content)]);
-        let file = files[0];
-
-        let unknowns = body_diags(&db, ws, file, DiagnosticCode::UnknownIdentifier);
-        assert_eq!(
-            unknowns.len(),
-            1,
-            "fn_unknown_param.sql should emit one UnknownIdentifier, got {unknowns:?}"
-        );
-        assert!(
-            unknowns[0].message.contains('z'),
-            "fn_unknown_param.sql diagnostic should name `z`, got: {}",
-            unknowns[0].message
-        );
-    }
-}
+// Phase 5 fixture-backed assertions migrated to
+// `crates/smelt-cli/tests/broken_function_diagnostics.rs` in Phase 6.
+// New `fn_*.sql` fixtures added in later phases should add a row to
+// that harness rather than adding another file-backed test here.

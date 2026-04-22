@@ -264,6 +264,19 @@ pub enum DiagnosticCode {
     /// Anchored at the *second* occurrence's name span. Introduced in Phase 5
     /// of smelt-functions.
     DuplicateParameterName,
+    /// Emitted when a `smelt.fn.<path>(...)` call references a function name
+    /// that is not registered in the workspace. Anchored at the CALL_PATH
+    /// span. Introduced in Phase 6 of smelt-functions.
+    UnknownSmeltFn,
+    /// Emitted when a `smelt.fn.*` call omits a required parameter (one that
+    /// has no default value). Anchored at the call-path span. Introduced in
+    /// Phase 6 of smelt-functions.
+    MissingArgument,
+    /// Emitted when a `smelt.fn.*` call passes an argument whose type does not
+    /// satisfy the corresponding declared parameter's `TypeConstraint`.
+    /// Anchored at the offending argument's span. Introduced in Phase 6 of
+    /// smelt-functions.
+    ArgTypeMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -289,6 +302,17 @@ pub enum DiagnosticData {
         actual_type: String,
         expected_type: String,
     },
+    /// Single-level (Phase 6) or multi-level (Phase 12) expansion trace
+    /// attached to diagnostics emitted at or inside a `smelt.fn.*` call. Frames
+    /// are ordered innermost-first → outermost-last; Phase 6's LSP renderer
+    /// reads only `frames.last()` (the outermost call site the user wrote) to
+    /// produce a single trailing "in expansion of `X`, `p` was bound to
+    /// <type>" line, while Phase 12 will iterate the whole vector.
+    ///
+    /// Existing LSP clients that don't know this variant simply drop the
+    /// `data` payload — the diagnostic's primary `message` and `range` are
+    /// unaffected.
+    ExpansionFrames(Vec<smelt_types::FrameInfo>),
 }
 
 /// Represents a diagnostic (error, warning, info)
@@ -771,6 +795,113 @@ pub fn function_body_diagnostics_for_file(
     out
 }
 
+/// Per-file diagnostics for `smelt.fn.<name>(...)` call sites (Phase 6).
+///
+/// For every `SMELT_FN_CALL` AST node in `file`, runs the pure
+/// [`function_body_check::check_smelt_fn_call`] with closures over
+/// [`resolve_function`] (for signature lookup) and [`parse_file`] (for
+/// body lookup). Call-site diagnostics emitted:
+///   - [`DiagnosticCode::UnknownSmeltFn`]
+///   - [`DiagnosticCode::MissingArgument`]
+///   - [`DiagnosticCode::ArgTypeMismatch`]
+///   - Any body-cascading [`DiagnosticCode::FunctionBodyTypeMismatch`] /
+///     [`DiagnosticCode::UnknownIdentifier`] with
+///     [`DiagnosticData::ExpansionFrames`] attached.
+///
+/// Pure-function-rule note: the analysis lives in
+/// `function_body_check::check_smelt_fn_call`; this wrapper builds the
+/// call-site [`TypeContext`] (seeded with the workspace's signatures so
+/// nested `smelt.fn.*` calls can resolve) and threads Salsa-backed
+/// closures through for signature / body lookup.
+pub fn smelt_fn_call_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_parser::ast::SmeltFnCall;
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let text_raw = file.text(db);
+    let clean_text = smelt_parser::strip_frontmatter(text_raw).to_string();
+
+    // Collect every SMELT_FN_CALL node in the file. These can appear in
+    // SELECT expressions or (post-Phase-8) nested inside a `smelt.define`
+    // body. Phase 6 covers both cases uniformly.
+    let call_nodes: Vec<SmeltFnCall> = syntax
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SMELT_FN_CALL)
+        .filter_map(SmeltFnCall::cast)
+        .collect();
+
+    if call_nodes.is_empty() {
+        return Vec::new();
+    }
+
+    // Build the call-site type context. For model-files we reuse the
+    // model's TypeContext (source/CTE/model columns all in scope) and
+    // layer the workspace's FunctionSig map on top. For pure function-only
+    // files there is no SELECT, so `type_context` returns an empty TC —
+    // that's fine, the body walk doesn't need SQL scope.
+    let mut ctx: TypeContext = (*type_context(db, workspace, file)).clone();
+
+    // Seed every workspace-visible `FunctionSig` so
+    // `infer_smelt_fn_call_type` can resolve nested `smelt.fn.*` returns.
+    // Iterating all files is O(N) but only runs when a call site is
+    // present — pure function files with no calls skip this entirely.
+    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
+    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    for f in &files {
+        let sigs = file_signature_inputs(db, *f);
+        for sig in sigs.iter() {
+            ctx.add_function_signature(&sig.name, sig.clone());
+        }
+    }
+
+    // Closures for pure checker. `sig_lookup` wraps `resolve_function`;
+    // `body_lookup` re-parses the declaring file and locates the matching
+    // `smelt.define` body.
+    let sig_lookup = |name: &str| -> Option<FunctionSig> {
+        resolve_function(db, workspace, name.to_string()).map(|arc| (*arc).clone())
+    };
+
+    let body_lookup = |sig: &FunctionSig| -> Option<(String, smelt_parser::ast::Expr)> {
+        // Find the file declaring this function.
+        for f in &files {
+            let sigs = file_signature_inputs(db, *f);
+            if sigs.iter().any(|s| s.name == sig.name) {
+                let f_text = f.text(db);
+                let f_clean = smelt_parser::strip_frontmatter(f_text).to_string();
+                let f_parse = parse_file(db, *f);
+                let f_syntax = f_parse.syntax();
+                if let Some(ast) = AstFile::cast(f_syntax) {
+                    for define in ast.defines() {
+                        if define.name().as_deref() == Some(&sig.name) {
+                            if let Some(body_expr) = define.body().and_then(|b| b.expression()) {
+                                return Some((f_clean, body_expr));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let mut out = Vec::new();
+    for call in &call_nodes {
+        out.extend(function_body_check::check_smelt_fn_call(
+            call,
+            &ctx,
+            &clean_text,
+            &sig_lookup,
+            &body_lookup,
+        ));
+    }
+    out
+}
+
 /// Per-file diagnostics for malformed `smelt.define` parameter / return type
 /// annotations (Phase 4). Iterates `functions_in_file(file)` and emits a
 /// diagnostic for each [`ParamSpec::type_ref`] or
@@ -899,6 +1030,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // function files (functions/*.sql with no model) still surface body
     // diagnostics.
     for diag in function_body_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Call-site expansion diagnostics (Phase 6): unknown/missing/type-
+    // mismatched args on `smelt.fn.*` calls, plus any body-cascaded errors
+    // re-anchored to the call site. Runs before the `parse_model.is_none()`
+    // early-return so call sites in non-model files also surface.
+    for diag in smelt_fn_call_diagnostics_for_file(db, workspace, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 
@@ -1741,7 +1880,23 @@ pub fn type_context(
     };
 
     let provider = SalsaRefSchemaProvider::new(db, workspace);
-    Arc::new(build_type_context(&ast, &sources, &provider))
+    let mut ctx = build_type_context(&ast, &sources, &provider);
+
+    // Seed the workspace's `smelt.define` signatures so
+    // `infer_smelt_fn_call_type` can resolve declared return types when a
+    // SELECT projects a `smelt.fn.*` call. Kept pure — we only hand the
+    // signature data to the `TypeContext`; analysis logic doesn't call
+    // back into Salsa.
+    let mut wsp_files: Vec<SourceFile> = workspace.files(db).to_vec();
+    wsp_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+    for f in &wsp_files {
+        let sigs = file_signature_inputs(db, *f);
+        for sig in sigs.iter() {
+            ctx.add_function_signature(&sig.name, sig.clone());
+        }
+    }
+
+    Arc::new(ctx)
 }
 
 #[salsa::tracked(cycle_initial = typed_model_schema_initial)]

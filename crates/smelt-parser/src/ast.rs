@@ -175,6 +175,14 @@ impl Param {
     pub fn default_value(&self) -> Option<SyntaxNode> {
         self.0.children().find(|n| n.kind() == DEFAULT_VALUE)
     }
+
+    /// The expression inside the DEFAULT_VALUE node, if any. Phase 6 uses this
+    /// so the `fill-missing-arg` check can infer the default's type at the
+    /// call site.
+    pub fn default_value_expr(&self) -> Option<Expr> {
+        self.default_value()
+            .and_then(|dv| dv.children().find_map(Expr::cast))
+    }
 }
 
 /// Flat type reference. Phase 4 will parse structure (sort + constraint).
@@ -270,6 +278,18 @@ impl SmeltFnCall {
             None => String::new(),
         }
     }
+
+    /// The text range of the `CALL_PATH` node (the dotted path including the
+    /// `smelt.fn.` prefix). Phase 6 anchors `UnknownSmeltFn` diagnostics here.
+    pub fn call_path_range(&self) -> Option<TextRange> {
+        self.call_path().map(|p| p.0.text_range())
+    }
+
+    /// Text range of the whole SMELT_FN_CALL node (path + args). Used as a
+    /// fallback anchor when the call path is missing.
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
 }
 
 /// The dotted path inside a `SMELT_FN_CALL` — includes the literal
@@ -332,6 +352,17 @@ impl ArgList {
     /// Iterate over the direct `NAMED_PARAM` children of this argument list.
     pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
         self.0.children().filter_map(NamedParam::cast)
+    }
+
+    /// Iterate over positional (non-named) expression arguments in this arg
+    /// list, in source order. NAMED_PARAM children are skipped — callers that
+    /// want both should iterate `named_params()` separately.
+    pub fn positional_args(&self) -> Vec<Expr> {
+        self.0
+            .children()
+            .filter(|n| n.kind() != NAMED_PARAM)
+            .filter_map(Expr::cast)
+            .collect()
     }
 }
 
@@ -913,7 +944,7 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR => Some(Self(node)),
+            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -929,6 +960,7 @@ impl Expr {
                             | BETWEEN_EXPR
                             | IN_EXPR
                             | EXISTS_EXPR
+                            | SMELT_FN_CALL
                     )
                 }) {
                     Some(Self(node))
@@ -1011,6 +1043,16 @@ impl Expr {
             // Check if this node itself is a function call
             FunctionCall::cast(self.0.clone())
         })
+    }
+
+    /// Check if this is a `smelt.fn.*` user-declared function call. Distinct
+    /// from `as_function_call()` — SQL built-in function calls produce a
+    /// `FUNCTION_CALL` node; `smelt.fn.*` calls produce a `SMELT_FN_CALL`.
+    pub fn as_smelt_fn_call(&self) -> Option<SmeltFnCall> {
+        self.0
+            .children()
+            .find_map(SmeltFnCall::cast)
+            .or_else(|| SmeltFnCall::cast(self.0.clone()))
     }
 
     /// Check if this is a CASE expression
@@ -1642,6 +1684,29 @@ impl NamedParam {
         } else {
             String::new()
         }
+    }
+
+    /// The value expression (the sub-expression after `=>`), if one can be
+    /// extracted as an `Expr`. Phase 6 uses this to type-check the value
+    /// against the declared parameter's type at a call site.
+    pub fn value_expr(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Text range of the parameter-name identifier (before `=>`), suitable
+    /// for anchoring `MissingArgument` / duplicate-name diagnostics at the
+    /// call site.
+    pub fn name_range(&self) -> Option<TextRange> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text_range())
+    }
+
+    /// Full text range of this NAMED_PARAM node (name + `=>` + value).
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
     }
 }
 

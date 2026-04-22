@@ -904,6 +904,9 @@ impl Backend {
                 DbCode::FunctionBodyTypeMismatch => "function-body-type-mismatch",
                 DbCode::UnknownIdentifier => "unknown-identifier",
                 DbCode::DuplicateParameterName => "duplicate-parameter-name",
+                DbCode::UnknownSmeltFn => "unknown-smelt-fn",
+                DbCode::MissingArgument => "missing-argument",
+                DbCode::ArgTypeMismatch => "arg-type-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -941,7 +944,39 @@ impl Backend {
                     "expectedType": expected_type
                 })
             }
+            DbData::ExpansionFrames(frames) => {
+                let frames_json: Vec<_> = frames
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "function": f.function,
+                            "param": f.param,
+                            "boundType": f.bound_type,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "kind": "expansion-frames",
+                    "frames": frames_json,
+                })
+            }
         });
+
+        // Phase 6 (smelt-functions Step 1): append a single-line "in expansion
+        // of `F`, `p` was bound to <type>" trailer using the innermost
+        // (last-pushed) frame. Phase 12 upgrades this to a multi-level
+        // rendering via `DiagnosticRelatedInformation`; for now we keep it
+        // inline so the message is visible in every LSP client, not just ones
+        // that surface related info.
+        let mut message = diag.message.clone();
+        if let Some(DbData::ExpansionFrames(frames)) = diag.data.as_ref() {
+            if let Some(innermost) = frames.last() {
+                message.push_str(&format!(
+                    "\nin expansion of `{}`, `{}` was bound to {}",
+                    innermost.function, innermost.param, innermost.bound_type,
+                ));
+            }
+        }
 
         lsp_types::Diagnostic {
             range: Range {
@@ -959,7 +994,7 @@ impl Backend {
                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
                 DbSeverity::Info => DiagnosticSeverity::INFORMATION,
             }),
-            message: diag.message.clone(),
+            message,
             source: Some("smelt".to_string()),
             code,
             data,
