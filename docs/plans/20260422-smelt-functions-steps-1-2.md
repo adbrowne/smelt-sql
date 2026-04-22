@@ -466,7 +466,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 
 | Phase | Title | Status | Commit | Date |
 |---|---|---|---|---|
-| 1 | Parser: `smelt.define` top-level grammar | pending | — | — |
+| 1 | Parser: `smelt.define` top-level grammar | done | 3d5b285 | 2026-04-22 |
 | 2 | Parser: `smelt.fn.*` call syntax | pending | — | — |
 | 3 | Salsa function signature index | pending | — | — |
 | 4 | `Expr<T>` type-reference resolution | pending | — | — |

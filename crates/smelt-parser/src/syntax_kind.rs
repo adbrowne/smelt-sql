@@ -204,6 +204,16 @@ pub enum SyntaxKind {
     FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
     FETCH_CLAUSE,        // FETCH FIRST N ROWS ONLY
 
+    // smelt.define top-level declaration
+    SMELT_DEFINE,  // smelt.define name(params) [-> TypeRef] AS (body)
+    DEFINE_NAME,   // Wraps the function's identifier in a smelt.define
+    PARAM_LIST,    // Parameter list of a smelt.define: ( param, param, ... )
+    PARAM,         // Single parameter: name [: TypeRef] [= DEFAULT_VALUE]
+    TYPE_REF,      // Type reference (flat in Phase 1: e.g. tokens `Expr < Numeric >`)
+    DEFINE_BODY,   // Parenthesized body expression of a smelt.define
+    RETURN_ARROW,  // Return type arrow: -> <TypeRef>
+    DEFAULT_VALUE, // Default value of a parameter: = <expression>
+
     // Error handling
     ERROR, // Invalid syntax
 

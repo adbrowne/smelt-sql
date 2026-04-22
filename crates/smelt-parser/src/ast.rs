@@ -39,6 +39,167 @@ impl File {
             .filter_map(FunctionCall::cast)
             .filter_map(SourceCall::from_function_call)
     }
+
+    /// Iterate over top-level `smelt.define` declarations in this file.
+    pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
+        self.0.children().filter_map(SmeltDefine::cast)
+    }
+}
+
+// ===== smelt.define (Step 1, Phase 1) =====
+
+/// Top-level `smelt.define name(params) [-> Type] AS (body)` declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltDefine(SyntaxNode);
+
+impl SmeltDefine {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_DEFINE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The declared function name (text of the single IDENT inside DEFINE_NAME).
+    pub fn name(&self) -> Option<String> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The parameter list, if parsed successfully.
+    pub fn param_list(&self) -> Option<ParamList> {
+        self.0.children().find_map(ParamList::cast)
+    }
+
+    /// The declared return type, if any (the TypeRef inside a RETURN_ARROW node).
+    pub fn return_type(&self) -> Option<TypeRef> {
+        self.0
+            .children()
+            .find(|n| n.kind() == RETURN_ARROW)?
+            .children()
+            .find_map(TypeRef::cast)
+    }
+
+    /// The body expression block.
+    pub fn body(&self) -> Option<DefineBody> {
+        self.0.children().find_map(DefineBody::cast)
+    }
+}
+
+/// Parameter list of a `smelt.define`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ParamList(SyntaxNode);
+
+impl ParamList {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PARAM_LIST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over declared parameters.
+    pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
+        self.0.children().filter_map(Param::cast)
+    }
+}
+
+/// A single parameter inside a `smelt.define` parameter list.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Param(SyntaxNode);
+
+impl Param {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PARAM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The parameter name (the first IDENT token of the PARAM node).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The parameter's declared type, if any.
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
+    }
+
+    /// The parameter's default-value node, if any. Structured access will come
+    /// in a later phase; for now callers can inspect the SyntaxNode directly.
+    pub fn default_value(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| n.kind() == DEFAULT_VALUE)
+    }
+}
+
+/// Flat type reference. Phase 4 will parse structure (sort + constraint).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeRef(SyntaxNode);
+
+impl TypeRef {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == TYPE_REF {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Raw text of the type reference (including internal whitespace).
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
+    }
+}
+
+/// Parenthesized body expression of a `smelt.define`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DefineBody(SyntaxNode);
+
+impl DefineBody {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == DEFINE_BODY {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The first expression-like child of the body, if any.
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
 }
 
 /// SELECT statement
