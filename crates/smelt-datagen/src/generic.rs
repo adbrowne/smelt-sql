@@ -142,8 +142,9 @@ pub fn apply_spec(
             let v = log_normal(*median, *sigma, *max).generate(rng);
             GenericValue::Int(v)
         }
-        GeneratorSpec::Geometric { p } => {
+        GeneratorSpec::Geometric { p, min } => {
             let v = geometric(*p).generate(rng);
+            let v = if let Some(m) = min { v.max(*m) } else { v };
             GenericValue::Int(v)
         }
         GeneratorSpec::Bool { prob } => {
@@ -342,5 +343,64 @@ mod tests {
         } else {
             panic!("Expected Str variant");
         }
+    }
+
+    /// Regression for FINDINGS bug #4: the geometric generator must default to
+    /// `min: 1` so specs requiring positive counts (e.g. order quantities)
+    /// don't silently get zeros. Callers can still pass `min: 0` explicitly to
+    /// opt back into the old behaviour — covered by
+    /// `test_geometric_explicit_min_zero_respected`.
+    #[test]
+    fn test_geometric_default_min_is_one() {
+        // Parse via YAML to exercise the same code path as real users — relying
+        // on the serde `default` attribute, not in-Rust struct construction.
+        let spec: GeneratorSpec = serde_yaml::from_str("type: geometric\np: 0.5\n")
+            .expect("geometric spec without min should parse");
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let fk = FkCounts::new();
+        let mut min_seen = i32::MAX;
+        let mut zero_count = 0;
+        for _ in 0..10_000 {
+            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, 0, &fk) {
+                if v < min_seen {
+                    min_seen = v;
+                }
+                if v == 0 {
+                    zero_count += 1;
+                }
+            } else {
+                panic!("Expected Int variant from geometric");
+            }
+        }
+        assert!(
+            min_seen >= 1,
+            "default geometric must not emit values < 1 (saw {} zero(s), min={})",
+            zero_count,
+            min_seen,
+        );
+    }
+
+    /// An explicit `min: 0` overrides the new default and restores
+    /// "may emit zeros" behaviour, so existing configs that intentionally want
+    /// zeros aren't broken.
+    #[test]
+    fn test_geometric_explicit_min_zero_respected() {
+        let spec: GeneratorSpec = serde_yaml::from_str("type: geometric\np: 0.5\nmin: 0\n")
+            .expect("geometric spec with explicit min: 0 should parse");
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let fk = FkCounts::new();
+        let mut saw_zero = false;
+        for _ in 0..10_000 {
+            if let GenericValue::Int(v) = apply_spec(&mut rng, &spec, 0, &fk) {
+                if v == 0 {
+                    saw_zero = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_zero,
+            "explicit min: 0 must allow zeros (none in 10k samples — default leaked through?)",
+        );
     }
 }

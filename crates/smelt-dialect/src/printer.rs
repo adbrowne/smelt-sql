@@ -474,6 +474,15 @@ mod tests {
         assert_eq!(print_with(sql, &d, &c, "main"), sql);
     }
 
+    #[test]
+    fn test_identity_preserves_doubled_quote_in_string_literal() {
+        // SQL standard '' escape inside a single-quoted string must round-trip
+        // verbatim so DuckDB sees the same literal it was given.
+        let sql = "SELECT CASE WHEN x > 0 THEN 'Can''t Lose Them' ELSE 'Other' END AS label FROM t";
+        let (d, c) = duckdb_ctx();
+        assert_eq!(print_with(sql, &d, &c, "main"), sql);
+    }
+
     // ===== Ref resolution tests =====
 
     #[test]

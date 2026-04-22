@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
-use smelt_db::{ColumnSource, TypeChecking};
+use smelt_db::ColumnSource;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::logical_graph::LogicalGraph;
@@ -103,9 +103,14 @@ pub fn build_catalog(
     let mut models = BTreeMap::new();
     let mut tag_index: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
+    let ws = smelt_db::Workspace::try_get(db);
+
     for node in graph.iter_nodes() {
         // Get typed schema from Salsa DB
-        let schema = db.typed_model_schema(node.model_file.path.clone());
+        let schema = match (ws, db.source_file(&node.model_file.path)) {
+            (Some(w), Some(f)) => smelt_db::typed_model_schema(db, w, f),
+            _ => std::sync::Arc::new(smelt_db::ModelSchema::empty()),
+        };
 
         // Get frontmatter column metadata for enrichment
         let frontmatter_columns = node

@@ -39,10 +39,11 @@ GROUP BY 1, 2
 
 ## References
 
-Use `smelt.ref()` to reference other models:
+Use `smelt.ref()` to reference other models and seeds:
 
 ```sql
 SELECT * FROM smelt.ref('upstream_model')
+SELECT * FROM smelt.ref('my_seed')  -- seeds are first-class ref targets
 ```
 
 The parser supports named parameters using `=>` syntax:
@@ -62,6 +63,57 @@ Use `smelt.source()` for external tables defined in `sources.yml`:
 
 ```sql
 SELECT * FROM smelt.source('raw.users')
+```
+
+## Supported SQL features
+
+smelt's type inference and LSP diagnostics understand the following SQL patterns:
+
+### Common Table Expressions
+
+```sql
+WITH
+  filtered AS (
+    SELECT * FROM smelt.ref('events') WHERE event_type = 'purchase'
+  ),
+  summary AS (
+    SELECT user_id, COUNT(*) AS purchase_count FROM filtered GROUP BY 1
+  )
+SELECT * FROM summary
+```
+
+### CASE expressions
+
+```sql
+SELECT
+  user_id,
+  CASE
+    WHEN total_spent > 1000 THEN 'high_value'
+    WHEN total_spent > 100  THEN 'medium_value'
+    ELSE 'low_value'
+  END AS value_segment
+FROM smelt.ref('user_totals')
+```
+
+### EXTRACT
+
+```sql
+SELECT
+  EXTRACT(YEAR FROM event_timestamp) AS event_year,
+  EXTRACT(EPOCH FROM event_timestamp) AS unix_ts
+FROM smelt.ref('events')
+```
+
+### Subqueries
+
+```sql
+SELECT *
+FROM (
+  SELECT user_id, SUM(amount) AS total
+  FROM smelt.ref('transactions')
+  GROUP BY 1
+) AS sub
+WHERE sub.total > 100
 ```
 
 ## Configuration precedence

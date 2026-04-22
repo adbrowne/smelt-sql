@@ -48,7 +48,6 @@ pub use test_runner::TestResult;
 pub use transformer::{inject_time_filter, TimeRange, TransformError};
 
 use std::path::Path;
-use std::sync::Arc;
 
 /// Initialize a Salsa database from discovered models and a project directory.
 ///
@@ -56,7 +55,6 @@ use std::sync::Arc;
 /// ready-to-query database.
 pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
     use smelt_core::find_config_file;
-    use smelt_db::Inputs;
 
     let mut db = smelt_db::Database::default();
 
@@ -69,16 +67,18 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
             String::new()
         }
     };
-    db.set_project_sources_yaml(project_dir.to_path_buf(), Arc::new(sources_yaml));
-    db.set_all_project_roots(Arc::new(vec![project_dir.to_path_buf()]));
+    let project = db.set_project_input(project_dir.to_path_buf(), sources_yaml);
 
-    let mut file_paths = Vec::with_capacity(models.len());
+    let mut source_files = Vec::with_capacity(models.len());
     for model in models {
-        db.set_file_text(model.path.clone(), Arc::new(model.content.clone()));
-        db.set_file_project_root(model.path.clone(), project_dir.to_path_buf());
-        file_paths.push(model.path.clone());
+        let sf = db.set_source_file(
+            model.path.clone(),
+            model.content.clone(),
+            project_dir.to_path_buf(),
+        );
+        source_files.push(sf);
     }
-    db.set_all_files(Arc::new(file_paths));
+    db.set_workspace(source_files, vec![project]);
 
     db
 }

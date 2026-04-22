@@ -419,10 +419,11 @@ fn smoke_integer_plus_bigint_union() {
 
 #[test]
 fn smoke_float_plus_decimal_union() {
+    // FLOAT is normalized to DOUBLE in smelt, so FLOAT UNION DECIMAL → DOUBLE
     let inferred = run_smelt_inference(
         "SELECT CAST(1.0 AS FLOAT) AS x UNION ALL SELECT CAST(2.0 AS DECIMAL(10,2)) AS x",
     );
-    assert_eq!(inferred[0], DataType::Float);
+    assert_eq!(inferred[0], DataType::Double);
 }
 
 #[test]

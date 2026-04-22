@@ -217,8 +217,8 @@ impl<'a> Parser<'a> {
     /// Check if current token can start an expression
     fn at_expression_start(&self) -> bool {
         self.at_any(&[
-            IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXISTS_KW, ARRAY_KW, ROW_KW,
-            STRUCT_KW, MINUS,
+            IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXTRACT_KW, EXISTS_KW,
+            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS,
         ])
     }
 
@@ -1230,6 +1230,8 @@ impl<'a> Parser<'a> {
             self.parse_case_expr();
         } else if self.at(CAST_KW) {
             self.parse_cast_expr();
+        } else if self.at(EXTRACT_KW) {
+            self.parse_extract_expr();
         } else if self.at(EXISTS_KW) {
             self.parse_exists_expr();
         } else if self.at(LPAREN) {
@@ -1565,10 +1567,9 @@ impl<'a> Parser<'a> {
         self.start_node(WHEN_CLAUSE);
         self.expect(WHEN_KW);
 
-        // Parse condition or value (depends on simple vs searched CASE)
-        // Use comparison_expr to avoid consuming beyond THEN keyword
+        // Parse condition (full expression including OR/AND for searched CASE)
         self.skip_trivia();
-        self.parse_comparison_expr();
+        self.parse_or_expr();
 
         // Expect THEN
         self.skip_trivia();
@@ -1576,9 +1577,9 @@ impl<'a> Parser<'a> {
             self.error("Expected THEN in WHEN clause".to_string());
         }
 
-        // Parse result - use comparison_expr to avoid consuming beyond WHEN/ELSE/END
+        // Parse result expression (full expression, WHEN/ELSE/END terminate naturally)
         self.skip_trivia();
-        self.parse_comparison_expr();
+        self.parse_or_expr();
 
         self.finish_node();
     }
@@ -1608,6 +1609,45 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.parse_type_spec();
 
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Parse `EXTRACT(field FROM expr)` as a special expression.
+    /// The field is an identifier like EPOCH, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND.
+    fn parse_extract_expr(&mut self) {
+        self.start_node(EXTRACT_EXPR);
+        self.expect(EXTRACT_KW);
+
+        self.skip_trivia();
+        if !self.expect(LPAREN) {
+            self.error("Expected '(' after EXTRACT".to_string());
+            self.finish_node();
+            return;
+        }
+
+        // Parse the field name (EPOCH, YEAR, MONTH, DAY, etc.)
+        // These are identifiers or keywords that act as field specifiers.
+        self.skip_trivia();
+        if self.at(IDENT) || self.current().is_keyword() {
+            self.advance(); // consume the field name
+        } else {
+            self.error(
+                "Expected date/time field (EPOCH, YEAR, MONTH, etc.) in EXTRACT".to_string(),
+            );
+        }
+
+        // Expect FROM keyword
+        self.skip_trivia();
+        if !self.expect(FROM_KW) {
+            self.error("Expected FROM in EXTRACT expression".to_string());
+        }
+
+        // Parse the source expression
+        self.skip_trivia();
+        self.parse_expression();
+
+        self.skip_trivia();
         self.expect(RPAREN);
         self.finish_node();
     }
@@ -4740,5 +4780,58 @@ LIMIT 100
             "Should report multiple errors: {:?}",
             result.errors
         );
+    }
+
+    #[test]
+    fn test_extract_epoch_from() {
+        let input = "SELECT EXTRACT(EPOCH FROM ts) AS epoch_val FROM events";
+        let (parse, select) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+        // Should have one select item
+        let items: Vec<_> = select.select_list().unwrap().items().collect();
+        assert_eq!(items.len(), 1);
+
+        // The select item should contain an EXTRACT_EXPR node
+        let text = select.syntax().text().to_string();
+        assert!(
+            text.contains("EXTRACT(EPOCH FROM ts)"),
+            "Should preserve EXTRACT(EPOCH FROM ts) in the tree: {}",
+            text
+        );
+
+        // Check the FROM clause still works (the FROM in EXTRACT shouldn't confuse the parser)
+        assert!(select.from_clause().is_some(), "Should have a FROM clause");
+    }
+
+    #[test]
+    fn test_extract_year_from() {
+        let input = "SELECT EXTRACT(YEAR FROM order_date) FROM orders";
+        let (parse, _) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_extract_in_arithmetic() {
+        let input = "SELECT EXTRACT(EPOCH FROM ts1) - EXTRACT(EPOCH FROM ts2) AS diff FROM t";
+        let (parse, select) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+        assert!(select.from_clause().is_some(), "Should have a FROM clause");
+    }
+
+    #[test]
+    fn test_case_is_null_or() {
+        // Regression: IS NULL OR in CASE WHEN was failing to parse
+        let input = "SELECT CASE WHEN x IS NULL OR y > 1800 THEN 1 ELSE 0 END AS flag FROM t";
+        let (parse, _) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn test_case_in_sum_with_is_null_or() {
+        // Regression: SUM(CASE WHEN ... IS NULL OR ... THEN ... END)
+        let input = "SELECT SUM(CASE WHEN gap IS NULL OR gap > 1800 THEN 1 ELSE 0 END) OVER (PARTITION BY v ORDER BY ts) AS sid FROM t";
+        let (parse, _) = parse_select(input);
+        assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
     }
 }

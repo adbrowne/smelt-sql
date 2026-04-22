@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use smelt_backend::PartitionSpec;
 use smelt_cli::{
-    compute_backbuild_plans, discover_python_models, executor, find_project_root,
-    format_plan_summary, inject_time_filter, parse_selector, BackendRegistry, BackfillOptions,
-    CompilerRegistry, Config, LogicalGraph, Materialization, ModelDiscovery, PhysicalGraphBuilder,
-    SourcesConfig, TimeRange,
+    compiler::UpstreamSchemas, compute_backbuild_plans, discover_python_models, executor,
+    find_project_root, format_plan_summary, init_db, inject_time_filter, parse_selector,
+    BackendRegistry, BackfillOptions, CompilerRegistry, Config, LogicalGraph, Materialization,
+    ModelDiscovery, PhysicalGraphBuilder, SourcesConfig, TimeRange,
 };
 use smelt_planner::Frontmatter;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tracing::{debug, info};
 
@@ -43,6 +44,9 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
+    // Seeds are valid `smelt.ref()` targets too (bug #2 in 20260417 follow-up).
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+
     // 3. Discover models
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let mut models = discovery
@@ -76,7 +80,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     }
 
     // 4. Build logical graph
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, &args.target)
+    let graph = LogicalGraph::build(models, sources.as_ref(), &seeds, &config, &args.target)
         .with_context(|| "Failed to build logical graph")?;
 
     graph
@@ -255,6 +259,22 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     )
     .build()
     .with_context(|| "Failed to build physical graph for backbuild")?;
+
+    // Build a populated TypeContext for `apply_type_casts` so SUM/COUNT/AVG
+    // over `smelt.ref()` columns don't silently narrow to BIGINT (bug #3).
+    {
+        let all_models: Vec<_> = physical_graph
+            .iter_in_order()
+            .map(|node| node.model_file.clone())
+            .collect();
+        let type_db = init_db(&project_dir, &all_models);
+        let upstream_schemas = Arc::new(UpstreamSchemas::from_database(
+            &type_db,
+            &project_dir,
+            &all_models,
+        ));
+        compilers.set_upstream_schemas_all(upstream_schemas);
+    }
 
     info!("{}", "=".repeat(60));
     info!("Executing backbuild...");

@@ -93,6 +93,25 @@ smelt seed --target dev
 smelt seed --target spark
 ```
 
+## Referencing seeds in models
+
+Seeds in the top-level seed directory (not in subdirectories) are available as `smelt.ref()` targets, just like SQL models:
+
+```sql
+SELECT
+  p.product_id,
+  p.product_name,
+  ch.category_name
+FROM smelt.ref('products') AS p
+JOIN smelt.ref('category_hierarchy') AS ch
+  ON p.category_code = ch.category_code
+```
+
+Here `category_hierarchy` is a seed CSV (`seeds/category_hierarchy.csv`). smelt resolves its column types from the CSV headers and data, so you get full type inference and LSP diagnostics for seed columns.
+
+!!! note
+    Only top-level seeds (files directly in the seed directory, not in subdirectories) are available as `smelt.ref()` targets. Subdirectory seeds are loaded into their respective schemas and accessed via `smelt.source()`.
+
 ## When to use seeds
 
 Seeds work well for:

@@ -113,6 +113,23 @@ If no materialization is specified anywhere, the default is `view`.
 | Database-managed refresh | `materialized_view` |
 | Development / iteration | `view` |
 
+## Changing materialization type
+
+When you change a model from `view` to `table` (or vice versa), smelt automatically drops the existing object — regardless of its current type — before creating the new one. You do not need to manually drop the old view before running a model as a table.
+
+```sql
+-- Before: view (no frontmatter)
+-- After: add frontmatter to change to table
+
+---
+materialization: table
+---
+
+SELECT ...
+```
+
+Run `smelt run --select my_model` and smelt will drop the view and create the table automatically.
+
 ## Further reading
 
 - [Incremental Models](incremental-models.md) for time-partitioned incremental processing (requires `table`)

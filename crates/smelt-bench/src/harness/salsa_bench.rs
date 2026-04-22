@@ -1,9 +1,7 @@
 use crate::model_gen::GeneratedWorkspace;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use smelt_db::{Inputs, Semantic, Syntax};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// Metrics from Salsa incremental compilation benchmarks.
@@ -52,31 +50,28 @@ pub fn run_salsa_benchmark(workspace: &GeneratedWorkspace) -> Result<SalsaMetric
     let load_start = Instant::now();
 
     let mut db = smelt_db::Database::default();
-
-    // Set file texts
-    let mut all_paths = Vec::new();
-    for (path, content) in &sql_files {
-        db.set_file_text(path.clone(), Arc::new(content.clone()));
-        all_paths.push(path.clone());
-    }
-    db.set_all_files(Arc::new(all_paths.clone()));
-
-    // Set project root for all files
     let project_root = workspace.path().to_path_buf();
-    for (path, _) in &sql_files {
-        db.set_file_project_root(path.clone(), project_root.clone());
+
+    // Register all source files
+    let mut source_files = Vec::with_capacity(sql_files.len());
+    for (path, content) in &sql_files {
+        let sf = db.set_source_file(path.clone(), content.clone(), project_root.clone());
+        source_files.push(sf);
     }
-    db.set_all_project_roots(Arc::new(vec![project_root.clone()]));
 
     // Set sources YAML
     let sources_yml =
         std::fs::read_to_string(workspace.path().join("sources.yml")).unwrap_or_default();
-    db.set_project_sources_yaml(project_root.clone(), Arc::new(sources_yml));
+    let project = db.set_project_input(project_root.clone(), sources_yml);
+    db.set_workspace(source_files.clone(), vec![project]);
 
     // Warm caches
-    let _models = db.all_models();
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let _models = smelt_db::all_models(&db, ws);
     for (path, _) in &sql_files {
-        let _diags = db.file_diagnostics(path.clone());
+        if let Some(file) = db.source_file(path) {
+            let _diags = smelt_db::file_diagnostics(&db, ws, file);
+        }
     }
 
     let initial_load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
@@ -93,11 +88,15 @@ pub fn run_salsa_benchmark(workspace: &GeneratedWorkspace) -> Result<SalsaMetric
 
     let leaf_edit_diagnostics_ms = if let Some(path) = leaf_path {
         let edit_start = Instant::now();
-        db.set_file_text(
+        db.set_source_file(
             path.clone(),
-            Arc::new("SELECT 1 AS edited_column\n".to_string()),
+            "SELECT 1 AS edited_column\n".to_string(),
+            project_root.clone(),
         );
-        let _diags = db.file_diagnostics(path);
+        let ws = smelt_db::Workspace::try_get(&db).unwrap();
+        if let Some(file) = db.source_file(&path) {
+            let _diags = smelt_db::file_diagnostics(&db, ws, file);
+        }
         edit_start.elapsed().as_secs_f64() * 1000.0
     } else {
         0.0
@@ -115,11 +114,15 @@ pub fn run_salsa_benchmark(workspace: &GeneratedWorkspace) -> Result<SalsaMetric
 
     let mid_edit_diagnostics_ms = if let Some(path) = mid_path {
         let edit_start = Instant::now();
-        db.set_file_text(
+        db.set_source_file(
             path.clone(),
-            Arc::new("SELECT 1 AS edited_mid_column\n".to_string()),
+            "SELECT 1 AS edited_mid_column\n".to_string(),
+            project_root.clone(),
         );
-        let _diags = db.file_diagnostics(path);
+        let ws = smelt_db::Workspace::try_get(&db).unwrap();
+        if let Some(file) = db.source_file(&path) {
+            let _diags = smelt_db::file_diagnostics(&db, ws, file);
+        }
         edit_start.elapsed().as_secs_f64() * 1000.0
     } else {
         0.0
@@ -137,11 +140,15 @@ pub fn run_salsa_benchmark(workspace: &GeneratedWorkspace) -> Result<SalsaMetric
 
     let root_edit_diagnostics_ms = if let Some(path) = root_path {
         let edit_start = Instant::now();
-        db.set_file_text(
+        db.set_source_file(
             path.clone(),
-            Arc::new("SELECT 1 AS edited_root_column\n".to_string()),
+            "SELECT 1 AS edited_root_column\n".to_string(),
+            project_root.clone(),
         );
-        let _diags = db.file_diagnostics(path);
+        let ws = smelt_db::Workspace::try_get(&db).unwrap();
+        if let Some(file) = db.source_file(&path) {
+            let _diags = smelt_db::file_diagnostics(&db, ws, file);
+        }
         edit_start.elapsed().as_secs_f64() * 1000.0
     } else {
         0.0
@@ -150,21 +157,22 @@ pub fn run_salsa_benchmark(workspace: &GeneratedWorkspace) -> Result<SalsaMetric
     // --- Phase 5: Add new file ---
     let add_start = Instant::now();
     let new_path = workspace.models_path().join("new_model_bench.sql");
-    db.set_file_text(
-        new_path.clone(),
-        Arc::new("SELECT 1 AS new_col\n".to_string()),
-    );
-    let mut updated_paths = all_paths.clone();
-    updated_paths.push(new_path.clone());
-    db.set_all_files(Arc::new(updated_paths));
-    db.set_file_project_root(new_path, project_root);
-    let _models = db.all_models();
+    let new_sf = db.set_source_file(new_path, "SELECT 1 AS new_col\n".to_string(), project_root);
+    let mut updated_files = source_files;
+    updated_files.push(new_sf);
+    let project = db.project_input(workspace.path()).unwrap();
+    db.set_workspace(updated_files, vec![project]);
+    let ws = smelt_db::Workspace::try_get(&db).unwrap();
+    let _models = smelt_db::all_models(&db, ws);
     let add_file_all_models_ms = add_start.elapsed().as_secs_f64() * 1000.0;
 
     // --- Phase 6: Full diagnostics ---
     let full_start = Instant::now();
+    let ws = smelt_db::Workspace::try_get(&db).unwrap();
     for (path, _) in &sql_files {
-        let _diags = db.file_diagnostics(path.clone());
+        if let Some(file) = db.source_file(path) {
+            let _diags = smelt_db::file_diagnostics(&db, ws, file);
+        }
     }
     let full_diagnostics_ms = full_start.elapsed().as_secs_f64() * 1000.0;
 

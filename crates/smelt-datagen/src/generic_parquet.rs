@@ -51,12 +51,14 @@ pub fn write_generic_dataset(
 fn build_schema(config: &DatasetConfig) -> Schema {
     let mut fields: Vec<Field> = Vec::new();
 
-    // Entity columns first
+    // Entity columns first. Honor Optional<...>::is_nullable() so that an
+    // optional entity attribute (e.g. an FK that not every entity has)
+    // round-trips as a real NULL rather than the type's zero value.
     if let Some(entity) = &config.entity {
         for col in &entity.columns {
             let dt = col.generator.arrow_type();
-            // Entity columns are not nullable (they come from a pre-built pool)
-            fields.push(Field::new(&col.name, dt, false));
+            let nullable = col.generator.is_nullable();
+            fields.push(Field::new(&col.name, dt, nullable));
         }
     }
 
@@ -486,6 +488,229 @@ mod tests {
         let count = write_generic_dataset(&config, 42, None, &FkCounts::new()).unwrap();
         assert_eq!(count, 100);
         assert!(tmp.path().join("data.parquet").exists());
+    }
+
+    /// B11 regression: Optional<ForeignKey> must produce real NULLs in the
+    /// parquet output, not 0 (the int default). Iter-3 of smelt-shop reported
+    /// 45% of `customer_id` rows coming through as 0 instead of NULL when the
+    /// generator was `optional { prob: 0.55, inner: foreign_key(customers) }`.
+    #[test]
+    fn test_optional_foreign_key_emits_nulls() {
+        use arrow::array::Array;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+        let mut fk = FkCounts::new();
+        fk.insert("customers".to_string(), 100);
+        let config = DatasetConfig {
+            name: "test_optional_fk".to_string(),
+            output,
+            num_rows: 1000,
+            seed: Some(42),
+            partition: None,
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "customer_id".to_string(),
+                generator: GeneratorSpec::Optional {
+                    prob: 0.55,
+                    inner: Box::new(GeneratorSpec::ForeignKey {
+                        dataset: "customers".to_string(),
+                    }),
+                },
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &fk).unwrap();
+
+        let file = File::open(tmp.path().join("data.parquet")).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut total = 0usize;
+        let mut nulls = 0usize;
+        let mut zeros = 0usize;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            for i in 0..arr.len() {
+                total += 1;
+                if arr.is_null(i) {
+                    nulls += 1;
+                } else if arr.value(i) == 0 {
+                    zeros += 1;
+                }
+            }
+        }
+
+        assert_eq!(total, 1000);
+        // With prob=0.55, expect ~45% NULL (~450 rows). Allow generous slack.
+        assert!(
+            nulls > 300,
+            "Optional<ForeignKey> must emit real NULLs, got {nulls} nulls / {zeros} zeros / {total} total"
+        );
+        assert_eq!(
+            zeros, 0,
+            "Optional<ForeignKey> must not emit 0 as a stand-in for NULL, got {zeros} zeros"
+        );
+    }
+
+    /// B11 (partitioned variant): same as test_optional_foreign_key_emits_nulls
+    /// but with Hive partitioning, since iter-3 reported the bug on
+    /// `page_events` which is a partitioned dataset.
+    #[test]
+    fn test_optional_foreign_key_emits_nulls_partitioned() {
+        use crate::config::PartitionConfig;
+        use arrow::array::Array;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+        let mut fk = FkCounts::new();
+        fk.insert("customers".to_string(), 100);
+        let config = DatasetConfig {
+            name: "test_optional_fk_part".to_string(),
+            output: output.clone(),
+            num_rows: 1000,
+            seed: Some(42),
+            partition: Some(PartitionConfig {
+                column: "event_date".to_string(),
+                start: "2024-01-01".to_string(),
+                days: 5,
+            }),
+            entity: None,
+            columns: vec![ColumnConfig {
+                name: "customer_id".to_string(),
+                generator: GeneratorSpec::Optional {
+                    prob: 0.55,
+                    inner: Box::new(GeneratorSpec::ForeignKey {
+                        dataset: "customers".to_string(),
+                    }),
+                },
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &fk).unwrap();
+
+        let mut total = 0usize;
+        let mut nulls = 0usize;
+        let mut zeros = 0usize;
+        for entry in std::fs::read_dir(&output).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().join("data.parquet");
+            if !path.exists() {
+                continue;
+            }
+            let file = File::open(&path).unwrap();
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap();
+            for batch in reader {
+                let batch = batch.unwrap();
+                let arr = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int32Array>()
+                    .unwrap();
+                for i in 0..arr.len() {
+                    total += 1;
+                    if arr.is_null(i) {
+                        nulls += 1;
+                    } else if arr.value(i) == 0 {
+                        zeros += 1;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(total, 1000);
+        assert!(
+            nulls > 300,
+            "Optional<ForeignKey> (partitioned) must emit real NULLs, got {nulls} nulls / {zeros} zeros / {total} total"
+        );
+        assert_eq!(
+            zeros, 0,
+            "Optional<ForeignKey> (partitioned) must not emit 0 as a NULL stand-in, got {zeros} zeros"
+        );
+    }
+
+    /// B11 (entity-column variant): an Optional generator placed under
+    /// `entity.columns` must also produce real NULLs. Iter-3's `page_events`
+    /// likely had `customer_id` as an entity attribute (sticky per-session),
+    /// where Optional was being silently coerced to 0 because entity columns
+    /// were unconditionally marked `nullable: false`.
+    #[test]
+    fn test_optional_entity_column_emits_nulls() {
+        use crate::config::EntityConfig;
+        use arrow::array::Array;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().to_str().unwrap().to_string();
+        let mut fk = FkCounts::new();
+        fk.insert("customers".to_string(), 100);
+        let config = DatasetConfig {
+            name: "test_optional_entity".to_string(),
+            output: output.clone(),
+            num_rows: 1000,
+            seed: Some(42),
+            partition: None,
+            entity: Some(EntityConfig {
+                pool_ratio: 0.1,
+                columns: vec![ColumnConfig {
+                    name: "customer_id".to_string(),
+                    generator: GeneratorSpec::Optional {
+                        prob: 0.55,
+                        inner: Box::new(GeneratorSpec::ForeignKey {
+                            dataset: "customers".to_string(),
+                        }),
+                    },
+                }],
+            }),
+            columns: vec![ColumnConfig {
+                name: "session_id".to_string(),
+                generator: GeneratorSpec::Uuid,
+            }],
+        };
+        write_generic_dataset(&config, 42, None, &fk).unwrap();
+
+        let file = File::open(tmp.path().join("data.parquet")).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut total = 0usize;
+        let mut nulls = 0usize;
+        let mut zeros = 0usize;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            for i in 0..arr.len() {
+                total += 1;
+                if arr.is_null(i) {
+                    nulls += 1;
+                } else if arr.value(i) == 0 {
+                    zeros += 1;
+                }
+            }
+        }
+
+        assert_eq!(total, 1000);
+        assert!(
+            nulls > 200,
+            "Optional entity column must emit real NULLs, got {nulls} nulls / {zeros} zeros / {total} total"
+        );
+        assert_eq!(
+            zeros, 0,
+            "Optional entity column must not emit 0 as a NULL stand-in, got {zeros} zeros"
+        );
     }
 
     #[test]

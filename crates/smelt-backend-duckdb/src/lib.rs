@@ -76,6 +76,41 @@ impl DuckDbBackend {
         .await
         .map_err(|e| BackendError::Other(e.into()))
     }
+
+    /// Probe `information_schema.tables` for the catalog object kind.
+    ///
+    /// Returns `Some("BASE TABLE")` for tables, `Some("VIEW")` for views, and
+    /// `None` if no object with that name exists in the given schema.
+    ///
+    /// This is the type-aware probe needed before issuing a `DROP` statement:
+    /// DuckDB's `DROP TABLE/VIEW IF EXISTS` only guards on existence — it
+    /// raises a Catalog Error when the named object is of the wrong kind.
+    /// Callers should issue the `DROP` matching the returned kind.
+    async fn probe_object_kind(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<Option<String>, BackendError> {
+        let query = "SELECT table_type FROM information_schema.tables \
+                     WHERE table_schema = ? AND table_name = ? LIMIT 1";
+        let connection = Arc::clone(&self.connection);
+        let schema = schema.to_string();
+        let name = name.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
+            match conn.query_row(query, [&schema, &name], |row| row.get::<_, String>(0)) {
+                Ok(kind) => Ok(Some(kind)),
+                Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(BackendError::execution_failed(
+                    format!("{}.{}", schema, name),
+                    e.to_string(),
+                )),
+            }
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
 }
 
 #[async_trait]
@@ -141,8 +176,19 @@ impl Backend for DuckDbBackend {
     }
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        // Probe the catalog: only issue `DROP TABLE` if the named object is
+        // actually a Table. DuckDB's `DROP TABLE IF EXISTS` raises a Catalog
+        // Error when the object exists but is a View — `IF EXISTS` guards on
+        // existence, not type. Doing nothing for views/missing objects here
+        // matches the semantics callers expect (they pair this with
+        // `drop_view_if_exists`).
+        let kind = self.probe_object_kind(schema, name).await?;
+        if !matches!(kind.as_deref(), Some("BASE TABLE")) {
+            return Ok(());
+        }
+
         let table_name = format!("{}.{}", schema, name);
-        let drop_sql = format!("DROP TABLE IF EXISTS {}", table_name);
+        let drop_sql = format!("DROP TABLE {}", table_name);
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
@@ -156,8 +202,15 @@ impl Backend for DuckDbBackend {
     }
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        // Mirror of `drop_table_if_exists`: only issue `DROP VIEW` when the
+        // catalog object is actually a View. See that method for rationale.
+        let kind = self.probe_object_kind(schema, name).await?;
+        if !matches!(kind.as_deref(), Some("VIEW")) {
+            return Ok(());
+        }
+
         let view_name = format!("{}.{}", schema, name);
-        let drop_sql = format!("DROP VIEW IF EXISTS {}", view_name);
+        let drop_sql = format!("DROP VIEW {}", view_name);
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
@@ -612,5 +665,122 @@ mod tests {
 
         let strategy = backend.resolve_strategy(&config);
         assert_eq!(strategy, smelt_backend::IncrementalStrategy::DeleteInsert);
+    }
+
+    /// Bug #1 (re-run a Table materialization):
+    /// Re-creating a model that exists as a Table must succeed when
+    /// `execute_model` is called a second time. Phase 7's prior fix issued
+    /// `DROP VIEW IF EXISTS` before `DROP TABLE IF EXISTS`, but DuckDB rejects
+    /// `DROP VIEW IF EXISTS` against an existing Table — `IF EXISTS` guards on
+    /// existence, not on type.
+    #[tokio::test]
+    async fn test_recreate_existing_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        // First execution: creates `t` as a Table with column `(a INT)`.
+        backend
+            .execute_model("main", "t", "SELECT 1 AS a", Materialization::Table, false)
+            .await
+            .expect("first table create");
+
+        // Second execution: re-creates `t` with new contents/schema. The
+        // catalog already holds a Table named `t`. This should succeed.
+        backend
+            .execute_model(
+                "main",
+                "t",
+                "SELECT 2 AS a, 3 AS b",
+                Materialization::Table,
+                false,
+            )
+            .await
+            .expect("second table create (idempotency)");
+
+        // Verify the new contents are present.
+        let row_count = backend.get_row_count("main", "t").await.unwrap();
+        assert_eq!(row_count, 1);
+        let batches = backend
+            .execute_sql("SELECT a, b FROM main.t")
+            .await
+            .unwrap();
+        let a: i32 = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .value(0);
+        let b: i32 = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(a, 2);
+        assert_eq!(b, 3);
+    }
+
+    /// Bug #1 (materialization change view -> table):
+    /// A model previously materialized as a View, then re-run with
+    /// `materialization: table`, must succeed. The Phase 7 logic correctly
+    /// drops the View first here, then creates a Table.
+    #[tokio::test]
+    async fn test_recreate_after_view_to_table_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_model("main", "t", "SELECT 1 AS a", Materialization::View, false)
+            .await
+            .expect("create as view");
+
+        backend
+            .execute_model("main", "t", "SELECT 2 AS a", Materialization::Table, false)
+            .await
+            .expect("recreate as table after view");
+
+        let row: String = duckdb::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT table_type FROM information_schema.tables \
+                 WHERE table_schema = 'main' AND table_name = 't'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read table_type");
+        assert_eq!(row, "BASE TABLE");
+    }
+
+    /// Bug #1 (materialization change table -> view):
+    /// Symmetric to the previous test — a model previously materialized as a
+    /// Table, then re-run with `materialization: view`, must succeed.
+    #[tokio::test]
+    async fn test_recreate_after_table_to_view_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_model("main", "t", "SELECT 1 AS a", Materialization::Table, false)
+            .await
+            .expect("create as table");
+
+        backend
+            .execute_model("main", "t", "SELECT 2 AS a", Materialization::View, false)
+            .await
+            .expect("recreate as view after table");
+
+        let row: String = duckdb::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT table_type FROM information_schema.tables \
+                 WHERE table_schema = 'main' AND table_name = 't'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read table_type");
+        assert_eq!(row, "VIEW");
     }
 }

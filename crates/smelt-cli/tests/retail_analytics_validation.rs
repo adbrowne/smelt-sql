@@ -55,6 +55,7 @@ fn test_retail_analytics_no_undefined_refs() {
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let models = discovery.discover_models().unwrap();
     let sources = SourcesConfig::load(&project_dir).ok();
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
 
     let default_target = config
         .targets
@@ -62,7 +63,8 @@ fn test_retail_analytics_no_undefined_refs() {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target).unwrap();
+    let graph =
+        LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target).unwrap();
     graph
         .validate()
         .expect("All refs in retail-analytics models should resolve to other models or sources.");
@@ -78,6 +80,7 @@ fn test_retail_analytics_dag_is_acyclic() {
     let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
     let models = discovery.discover_models().unwrap();
     let sources = SourcesConfig::load(&project_dir).ok();
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
 
     let default_target = config
         .targets
@@ -85,7 +88,8 @@ fn test_retail_analytics_dag_is_acyclic() {
         .next()
         .map(|s| s.as_str())
         .unwrap_or("dev");
-    let graph = LogicalGraph::build(models, sources.as_ref(), &config, default_target).unwrap();
+    let graph =
+        LogicalGraph::build(models, sources.as_ref(), &seeds, &config, default_target).unwrap();
     let order = graph.execution_order();
     assert!(order.is_ok(), "DAG should be acyclic: {:?}", order.err());
 }

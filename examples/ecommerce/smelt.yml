@@ -1,0 +1,30 @@
+name: ecommerce
+version: 1
+
+model_paths:
+  - models
+
+seed_paths:
+  - seeds
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+models:
+  stg_products:
+    materialization: table
+  stg_orders:
+    materialization: table
+  stg_events:
+    materialization: table
+  int_sessions:
+    materialization: table
+  int_order_enriched:
+    materialization: table
+  mart_funnel:
+    materialization: table

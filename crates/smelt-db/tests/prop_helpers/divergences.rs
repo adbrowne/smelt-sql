@@ -172,6 +172,15 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::ByDesign,
         },
+        TypeDivergence {
+            id: "cast_float_as_double",
+            description:
+                "CAST(x AS FLOAT) — smelt normalizes FLOAT to DOUBLE, DuckDB returns FLOAT (4-byte)",
+            smelt_type: DataType::Double,
+            duckdb_type: Some(DataType::Float),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
     ]
 }
 

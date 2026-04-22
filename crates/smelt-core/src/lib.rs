@@ -8,6 +8,7 @@ pub mod project;
 pub mod python_models;
 pub mod python_utils;
 pub mod refs;
+pub mod seeds;
 pub mod selector;
 pub mod sources;
 pub mod text;
@@ -28,6 +29,7 @@ pub use project::{
     find_project_root_for_file, find_smelt_projects, is_sources_file, ProjectError,
 };
 pub use refs::{extract_refs, RefInfo};
+pub use seeds::{discover_seed_infos, SeedInfo};
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use sources::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig, SourcesError};
 pub use text::{extract_snippet, text_range_to_line_col};

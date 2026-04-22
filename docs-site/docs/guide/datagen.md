@@ -215,6 +215,23 @@ Geometric distribution — "number of failures before first success". Useful for
 generator: { type: geometric, p: 0.5 }
 ```
 
+The optional `min` parameter sets a lower bound clamp on the generated value.
+**`min` defaults to `1`** so the common case ("quantity / count is never zero")
+Just Works — most callers want positive counts. To opt back into the raw
+distribution (which starts at zero), pass `min: 0` explicitly:
+
+```yaml
+# Defaults to min: 1 — values are always ≥ 1.
+generator: { type: geometric, p: 0.5 }
+
+# Opt in to allowing zeros.
+generator: { type: geometric, p: 0.5, min: 0 }
+```
+
+Tip: run `smelt-datagen --list-generators` to see this reference (and the
+parameters of every other generator) from the CLI without leaving your
+terminal.
+
 ### Dates and timestamps
 
 #### `date`

@@ -47,14 +47,14 @@ impl<'a> HistoryQuery<'a> {
             .collect();
 
         // Most recent first
-        results.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        results.sort_by_key(|r| std::cmp::Reverse(r.started_at.clone()));
         results
     }
 
     /// Get all runs, most recent first.
     pub fn all_runs(&self) -> Vec<&RunManifest> {
         let mut runs: Vec<&RunManifest> = self.manifests.iter().collect();
-        runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        runs.sort_by_key(|r| std::cmp::Reverse(&r.started_at));
         runs
     }
 

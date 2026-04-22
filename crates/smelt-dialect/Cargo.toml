@@ -8,8 +8,8 @@ description = "SQL dialect definitions, backend capabilities, and dialect-aware 
 repository = "https://github.com/adbrowne/smelt-sql"
 
 [dependencies]
-smelt-parser = { path = "../smelt-parser", version = "0.2.0" }
-smelt-types = { path = "../smelt-types", version = "0.2.0" }
+smelt-parser = { path = "../smelt-parser", version = "0.3.1" }
+smelt-types = { path = "../smelt-types", version = "0.3.1" }
 
 [dev-dependencies]
 insta = "1"

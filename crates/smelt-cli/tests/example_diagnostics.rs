@@ -1,11 +1,12 @@
 //! Verify that non-broken example workspaces produce zero LSP diagnostics.
 //!
-//! This test ensures that `file_diagnostics()` and `type_diagnostics()` report
-//! no warnings or errors for any model in the example workspaces.  Regressions
-//! introduced by parser, type-inference, or example changes are caught here.
+//! This test ensures that `file_diagnostics()` and `check_type_diagnostics()`
+//! report no warnings or errors for any model in the example workspaces.
+//! Regressions introduced by parser, type-inference, or example changes are
+//! caught here.
 
 use smelt_cli::{init_db, Config, ModelDiscovery};
-use smelt_db::{Semantic, TypeChecking};
+use smelt_db::{DiagnosticAcc, Workspace};
 use std::path::Path;
 
 fn check_workspace_no_diagnostics(example_dir: &str) {
@@ -37,10 +38,15 @@ fn check_workspace_no_diagnostics(example_dir: &str) {
     }
 
     let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
 
     let mut all_issues = Vec::new();
     for model in &models {
-        for d in db.file_diagnostics(model.path.clone()).iter() {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
             all_issues.push(format!(
                 "[{:?}] {}: {}",
                 d.severity,
@@ -48,12 +54,12 @@ fn check_workspace_no_diagnostics(example_dir: &str) {
                 d.message
             ));
         }
-        for d in db.type_diagnostics(model.path.clone()).iter() {
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
             all_issues.push(format!(
                 "[{:?}] {}: {}",
-                d.severity,
+                d.0.severity,
                 model.path.strip_prefix(&path).unwrap().display(),
-                d.message
+                d.0.message
             ));
         }
     }
@@ -90,4 +96,9 @@ fn ephemeral_demo_no_diagnostics() {
 #[test]
 fn multi_engine_no_diagnostics() {
     check_workspace_no_diagnostics("examples/multi_engine");
+}
+
+#[test]
+fn ecommerce_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/ecommerce");
 }

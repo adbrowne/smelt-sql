@@ -84,6 +84,34 @@ GROUP BY ROLLUP(a, b)
 GROUP BY GROUPING SETS ((a, b), (a), ())
 ```
 
+### Labelling rollup rows
+
+`CUBE`, `ROLLUP`, and `GROUPING SETS` produce extra "subtotal" rows where the
+grouped-out columns are returned as `NULL`. Use `GROUPING()` to detect those
+rollup rows and label them with a sentinel value:
+
+```sql
+SELECT
+  CASE WHEN GROUPING(category) = 1 THEN 'ALL' ELSE category END AS category,
+  CASE WHEN GROUPING(region)   = 1 THEN 'ALL' ELSE region   END AS region,
+  SUM(amount) AS total
+FROM smelt.ref('sales')
+GROUP BY CUBE(category, region)
+```
+
+!!! warning "Pitfall: do not use `COALESCE(col, 'ALL')` for rollup labels"
+    `COALESCE(category, 'ALL')` looks like a shorter way to write the same
+    thing, but it is wrong whenever `category` is nullable. A real `NULL` in
+    the source data and a CUBE-rolled-up `NULL` both collapse to `'ALL'`,
+    producing two rows that look like the grand total but are actually
+    different aggregations. `GROUPING(col) = 1` distinguishes "this column was
+    rolled up by CUBE" from "this column happens to be NULL in the data", so
+    real NULLs stay as NULL (or can be labelled separately) and only true
+    rollup rows get the sentinel.
+
+    `COALESCE(col, 'ALL')` is only safe when `col` is declared `NOT NULL` at
+    the source.
+
 ## Subqueries
 
 ```sql
@@ -104,6 +132,24 @@ CAST(x AS INTEGER)
 x::INTEGER          -- PostgreSQL-style
 TRY_CAST(x AS DATE) -- Returns NULL on failure
 ```
+
+## Date/time extraction
+
+```sql
+EXTRACT(EPOCH FROM timestamp_col)   -- returns DOUBLE (Unix timestamp)
+EXTRACT(YEAR FROM date_col)          -- returns BIGINT
+EXTRACT(MONTH FROM timestamp_col)    -- returns BIGINT
+EXTRACT(DAY FROM date_col)           -- returns BIGINT
+EXTRACT(HOUR FROM timestamp_col)     -- returns BIGINT
+EXTRACT(MINUTE FROM timestamp_col)   -- returns BIGINT
+EXTRACT(SECOND FROM timestamp_col)   -- returns BIGINT
+EXTRACT(DOW FROM date_col)           -- day of week, returns BIGINT
+EXTRACT(DOY FROM date_col)           -- day of year, returns BIGINT
+EXTRACT(QUARTER FROM date_col)       -- returns BIGINT
+EXTRACT(WEEK FROM date_col)          -- returns BIGINT
+```
+
+`EXTRACT(EPOCH FROM ...)` returns a `DOUBLE` (floating-point Unix timestamp). All other fields return `BIGINT`.
 
 ## Multi-dialect features
 

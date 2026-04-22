@@ -58,9 +58,53 @@ Dagster/Airflow plugin API. `smelt explain --json` already provides the graph st
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
+### 4. `smelt check` — LLM-Optimised Diagnostic CLI
+
+Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
+
+See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
+
+### 5. Orchestrator Integration
+
+Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
+
+### 6. PostgreSQL Backend
+
+Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
+
 ---
 
 ## Recently Completed
+
+### ~~Type Inference, Parser & Ref Resolution Fixes~~ ✅ (April 10, 2026)
+
+All critical/major bugs from the smelt_shop real-world validation report fixed:
+
+- **Seeds as `smelt.ref()` targets** — Seeds are now first-class dep-graph citizens. `resolve_ref()` searches seeds after SQL models; CSV column types inferred and provided to the type-checking layer. No more `sources.yml` workaround.
+- **JOIN type inference** — Qualified column refs (`p.col`) no longer fall through to `infer_literal_type()`. Fixed by detecting dot patterns before decimal literal inference.
+- **CASE expression column names** — `CAST(? AS TYPE) AS ?` bug fixed; compiler generates `_col1, _col2` deterministic names for unnamed CASE outputs.
+- **CASE expression type widening** — `infer_case_expr_type` now promotes across all branches; `promote_types` widens Decimal+Integer to Decimal(38,10).
+- **EXTRACT(EPOCH FROM ...)** — New dedicated `EXTRACT_EXPR` syntax kind in the parser handles `EXTRACT(field FROM expr)` without treating the FROM keyword as SQL FROM.
+- **CTE type inference** — `parse_when_clause()` fixed to use `parse_or_expr()`, enabling full logical expressions in CASE WHEN.
+- **Subquery ref replacement** — Subquery type inference now clones context and processes inner FROM before calling `infer_select_column_types`.
+- **FLOAT→DOUBLE normalization** — `CAST(x AS FLOAT)` infers as DOUBLE; `float_division` and `cast_float_as_double` divergences documented.
+- **Materialization type changes** — `execute_model()` now drops both table and view before creating either, handling view↔table transitions automatically.
+- **Datagen geometric min** — `GeneratorSpec::Geometric` accepts optional `min: i32` to prevent zero values.
+
+See [plan](plans/20260409-smelt-shop-fixes.md) for full details.
+
+### ~~Packaging — Source Distribution & Python 3.14 Wheels~~ ✅ (April 10, 2026)
+
+- Added `build-sdist` job to release workflow using `maturin sdist`
+- sdist included in PyPI and TestPyPI publish steps
+- `bindings = "bin"` in pyproject.toml produces `py3-none-{platform}` wheels, compatible with Python 3.9–3.14 on all platforms
+
+### ~~Testing Strategy Improvements~~ ✅ (April 10, 2026)
+
+- Added `examples/ecommerce/` workspace (19 models, 2 seeds, 3 sources) as regression scaffold
+- Added `ecommerce_no_diagnostics` test to `example_diagnostics.rs`
+- Added `ecommerce_execution.rs` compile-and-execute integration test against DuckDB
+- Property tests cover CTEs, set operations, joins, and type inference across full model patterns
 
 ### ~~LSP Refactorings & Code Actions~~ ✅ (April 5-6, 2026)
 
@@ -301,7 +345,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - Completions: model names, column names, table alias columns
 - Python model awareness: real `ProjectContext` passed to Python models in LSP, valid ref targets, execution error diagnostics
 - `sources.yml` live reload (changes update LSP without restart)
-- Salsa cycle recovery prevents LSP crashes from circular model references
+- Salsa 0.26 with `#[salsa::tracked]` free functions and `cycle_initial` fixpoint iteration (upgraded from 0.16)
 - Find references for models, sources, and CTEs
 - Rename: CTEs (single-file), models (cross-file with file rename), sources (cross-file + YAML), columns (full lineage tracing)
 - Code actions: CAST quick-fixes, create model, add source/column to YAML, extract CTE, inline CTE
@@ -314,6 +358,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - ✅ Diagnostics for undeclared column references
 - ✅ Python model LSP integration: real `ProjectContext` enables cross-boundary type inference
 - ✅ Fixed LSP crash from Salsa cycle detection during memo validation
+- ✅ Upgraded Salsa 0.16 → 0.26: `#[salsa::tracked]` free functions, `#[salsa::input]` structs, `#[salsa::accumulator]` diagnostics, `cycle_initial` fixpoint iteration; removed `catch_unwind` workaround (April 18, 2026)
 - ✅ Fixed `sources.yml` changes not updating LSP until reload
 - ✅ Fixed 35 LSP diagnostics across example workspaces + CI verification gate
 - ✅ Fixed Python model `E2BIG` error on large projects and PyO3 `dict_items` extraction
