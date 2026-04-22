@@ -25,6 +25,13 @@ pub struct TypeContext {
     cte_names: std::collections::HashSet<String>,
     /// Aliases in scope: alias -> qualified name
     aliases: HashMap<String, String>,
+    /// Bound function parameters (param name → type). Shadows all SQL scopes
+    /// per §16 #1 of `docs/research/20260413-smelt-functions.md`: params
+    /// resolve **before** any SQL scope. Seeded by the Phase 5
+    /// `check_function_body` pure function when checking a `smelt.define`
+    /// body. Unqualified lookups via [`TypeContext::lookup_identifier`]
+    /// check this map first.
+    function_params: HashMap<String, TypedColumn>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -36,6 +43,7 @@ impl PartialEq for TypeContext {
             && self.cte_columns == other.cte_columns
             && self.cte_names == other.cte_names
             && self.aliases == other.aliases
+            && self.function_params == other.function_params
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -50,6 +58,7 @@ impl Clone for TypeContext {
             cte_columns: self.cte_columns.clone(),
             cte_names: self.cte_names.clone(),
             aliases: self.aliases.clone(),
+            function_params: self.function_params.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -234,6 +243,44 @@ impl TypeContext {
         None
     }
 
+    /// Seed a function parameter binding into the context.
+    ///
+    /// Phase 5 hinge: `check_function_body` calls this once per declared
+    /// parameter before re-checking the body. Subsequent unqualified lookups
+    /// via [`TypeContext::lookup_identifier`] will return the bound type
+    /// instead of falling through to source/model/CTE scopes.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn add_function_param(&mut self, name: &str, col: TypedColumn) {
+        self.function_params.insert(name.to_string(), col);
+    }
+
+    /// Is `name` bound as a function parameter in this context?
+    pub fn has_function_param(&self, name: &str) -> bool {
+        self.function_params.contains_key(name)
+    }
+
+    /// Unqualified-or-qualified identifier lookup that honours the
+    /// function-parameter scope.
+    ///
+    /// Per §16 #1 of the smelt-functions research, function parameters
+    /// resolve **before** any SQL scope. This matters in Step 1 only inside
+    /// `smelt.define` bodies (no FROM scope is in play), but the
+    /// mechanism is wired in now so Phase 6+ composition is trivial.
+    ///
+    /// - Qualified lookups (`qualifier.is_some()`) bypass the function-param
+    ///   map entirely — params are always bare names.
+    /// - Unqualified lookups return a function param before falling through
+    ///   to [`TypeContext::lookup_column`].
+    pub fn lookup_identifier(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
+        if qualifier.is_none() {
+            if let Some(col) = self.function_params.get(name) {
+                return Some(col);
+            }
+        }
+        self.lookup_column(qualifier, name)
+    }
+
     /// Take and clear the list of column lookups that returned None.
     /// Used by property-based tests to discover missing columns.
     pub fn take_missed_lookups(&self) -> Vec<(Option<String>, String)> {
@@ -329,7 +376,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try column reference (includes struct field access for qualified refs like s.field_name)
     if let Some(col_ref) = expr.as_column_ref() {
-        if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name()) {
+        // Use `lookup_identifier` so that seeded function parameters (§16 #1)
+        // resolve before any SQL FROM scope. For `TypeContext`s with no
+        // function params seeded (the common case — all pre-Phase-5 call
+        // sites), this is semantically identical to `lookup_column`.
+        if let Some(typed_col) = ctx.lookup_identifier(col_ref.qualifier(), col_ref.name()) {
             return Some(typed_col.clone());
         }
         // If qualified ref didn't resolve as a column, try struct field access:
@@ -3095,6 +3146,50 @@ mod tests {
             types[0].data_type,
             DataType::Double,
             "CAST AS FLOAT should infer as Double"
+        );
+    }
+
+    /// Phase 5 unit: seeded function parameters shadow outer column scope.
+    ///
+    /// §16 #1 of the smelt-functions research pins the resolution order:
+    /// params resolve *before* any SQL scope. This test proves the
+    /// ordering in isolation — no parser, no Salsa — so Phase 6 and
+    /// beyond can compose on top of it with confidence.
+    #[test]
+    fn param_shadows_outer_name_lookup_logic() {
+        let mut ctx = TypeContext::new();
+        // Seed a model column `bar.x: Integer` — this is what
+        // `lookup_column` would return if we consulted it directly.
+        ctx.add_model_column("bar", "x", TypedColumn::nullable(DataType::Integer));
+
+        // Sanity: `lookup_column(None, "x")` currently sees only the model
+        // column, returning Integer.
+        let via_column = ctx
+            .lookup_column(None, "x")
+            .expect("model column should be resolvable before param binding");
+        assert_eq!(via_column.data_type, DataType::Integer);
+
+        // Now seed a function param `x: Double`. Per §16 #1, the param
+        // wins on unqualified lookups through `lookup_identifier`.
+        ctx.add_function_param("x", TypedColumn::nullable(DataType::Double));
+        assert!(ctx.has_function_param("x"));
+
+        let via_identifier = ctx
+            .lookup_identifier(None, "x")
+            .expect("seeded param should resolve through lookup_identifier");
+        assert_eq!(
+            via_identifier.data_type,
+            DataType::Double,
+            "param type must shadow model type on unqualified lookups"
+        );
+
+        // Qualified lookups still bypass the param scope — params are
+        // bare names.
+        let via_qualified = ctx.lookup_identifier(Some("bar"), "x");
+        assert_eq!(
+            via_qualified.map(|c| c.data_type.clone()),
+            Some(DataType::Integer),
+            "qualified lookup must ignore function params"
         );
     }
 }

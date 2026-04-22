@@ -29,6 +29,7 @@ use smelt_types::signatures::{extract_function_signatures, FunctionSig};
 use smelt_types::{parse_type, DataType, TypedColumn};
 
 pub mod code_actions;
+pub mod function_body_check;
 pub mod references;
 pub mod schema;
 pub mod type_inference;
@@ -246,6 +247,23 @@ pub enum DiagnosticCode {
     /// is reserved for Step 3). Anchored at the `TypeRef` span. Introduced in
     /// Phase 4 of smelt-functions.
     InvalidFunctionTypeRef,
+    /// Emitted when a `smelt.define` body contains a type mismatch —
+    /// e.g. `x + 'text'` when `x: Expr<Integer>`. Distinct from generic
+    /// `TypeMismatch` because body diagnostics will carry additional frame
+    /// context in Phase 6 (`ExpansionFrames`). Anchored at the *inner* bad
+    /// subexpression, not the whole body. Introduced in Phase 5 of
+    /// smelt-functions.
+    FunctionBodyTypeMismatch,
+    /// Emitted when a `smelt.define` body references a name that is neither a
+    /// declared parameter nor resolvable in any enclosing scope (sources,
+    /// models, CTEs — though none of those exist inside a bare function body
+    /// in Step 1). Anchored at the identifier's span. Introduced in Phase 5
+    /// of smelt-functions.
+    UnknownIdentifier,
+    /// Emitted when two parameters in a single `smelt.define` share a name.
+    /// Anchored at the *second* occurrence's name span. Introduced in Phase 5
+    /// of smelt-functions.
+    DuplicateParameterName,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -707,6 +725,52 @@ pub fn duplicate_function_diagnostics_for_file(
         .collect()
 }
 
+/// Per-file diagnostics for `smelt.define` bodies (Phase 5).
+///
+/// For each function declared in `file`, invokes the pure
+/// [`function_body_check::check_function_body`] against the extracted
+/// [`FunctionSig`] and the body AST. Emitted diagnostic codes:
+///   - [`DiagnosticCode::DuplicateParameterName`]
+///   - [`DiagnosticCode::UnknownIdentifier`]
+///   - [`DiagnosticCode::FunctionBodyTypeMismatch`]
+///
+/// Pure-function-rule note: this helper is the thin Salsa wrapper; all logic
+/// lives in the pure `function_body_check::check_function_body`. It reads
+/// `parse_file` (for the body AST) and `file_signature_inputs` (for the
+/// signatures). Body-only edits re-run this query but do not invalidate the
+/// signature query, preserving §20H.
+pub fn function_body_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let text_raw = file.text(db);
+    let clean_text = smelt_parser::strip_frontmatter(text_raw);
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+    let sigs = file_signature_inputs(db, file);
+    let mut out = Vec::new();
+    for define in ast.defines() {
+        let Some(name) = define.name() else {
+            continue;
+        };
+        let Some(sig) = sigs.iter().find(|s| s.name == name) else {
+            continue;
+        };
+        let Some(body_expr) = define.body().and_then(|b| b.expression()) else {
+            continue;
+        };
+        out.extend(function_body_check::check_function_body(
+            sig,
+            &body_expr,
+            &clean_text,
+        ));
+    }
+    out
+}
+
 /// Per-file diagnostics for malformed `smelt.define` parameter / return type
 /// annotations (Phase 4). Iterates `functions_in_file(file)` and emits a
 /// diagnostic for each [`ParamSpec::type_ref`] or
@@ -826,6 +890,15 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Invalid-type-ref diagnostics (Phase 4): emitted at each malformed
     // `Expr<T>` / unsupported-sort annotation on parameters or return types.
     for diag in invalid_function_type_ref_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Function body diagnostics (Phase 5): duplicate param names, unknown
+    // identifiers inside a body, and body-level type mismatches. Emitted
+    // regardless of whether the file contains a SELECT statement — pure
+    // function files (functions/*.sql with no model) still surface body
+    // diagnostics.
+    for diag in function_body_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

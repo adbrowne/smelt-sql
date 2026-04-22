@@ -246,6 +246,11 @@ fn parse_inner_constraint(inner: &str) -> Option<TypeConstraint> {
 pub struct ParamSpec {
     /// The parameter's declared name.
     pub name: String,
+    /// Source range of the parameter-name identifier, suitable for anchoring
+    /// diagnostics (notably `DuplicateParameterName` in Phase 5). `None` only
+    /// if the declaration was so malformed that no IDENT token was present in
+    /// the PARAM node.
+    pub name_range: Option<Range>,
     /// Raw text of the declared type, or `None` if unannotated.
     pub type_ref_text: Option<String>,
     /// Structured parse of `type_ref_text`, or `None` if unannotated.
@@ -318,8 +323,13 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
     let type_ref_text = type_ref_node.as_ref().map(|t| t.text());
     let type_ref = type_ref_text.as_deref().map(parse_smelt_type);
     let type_ref_range = type_ref_node.as_ref().map(|t| type_ref_range(t, text));
+    let name_range = param.name_range().map(|r| Range {
+        start: offset_to_position(text, usize::from(r.start())),
+        end: offset_to_position(text, usize::from(r.end())),
+    });
     ParamSpec {
         name: param.name().unwrap_or_default(),
+        name_range,
         type_ref_text,
         type_ref,
         type_ref_range,

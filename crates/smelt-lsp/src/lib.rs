@@ -901,6 +901,9 @@ impl Backend {
                 DbCode::UnrecognizedFunction => "unrecognized-function",
                 DbCode::DuplicateFunctionDefinition => "duplicate-function-definition",
                 DbCode::InvalidFunctionTypeRef => "invalid-function-type-ref",
+                DbCode::FunctionBodyTypeMismatch => "function-body-type-mismatch",
+                DbCode::UnknownIdentifier => "unknown-identifier",
+                DbCode::DuplicateParameterName => "duplicate-parameter-name",
             };
             NumberOrString::String(code_str.to_string())
         });
