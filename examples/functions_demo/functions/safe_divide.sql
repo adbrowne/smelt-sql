@@ -1,6 +1,11 @@
--- Phase 5: canonical end-to-end `safe_divide` from §2 of the smelt-functions
--- research. Body is type-clean — `Expr<Numeric>` params bind to the widest
--- numeric (Double) in Tier 1, and CAST(numerator AS DOUBLE) / denominator
--- type-checks cleanly. functions_demo must remain diagnostic-clean.
+---
+backends: [duckdb]
+---
+-- Phase 11: per-declaration frontmatter. The declared `backends: [duckdb]`
+-- narrows the body's inferred set (`all` — body uses only generic SQL);
+-- that is an accepted narrowing under the §16 #23 narrow-only rule.
+-- Legacy single-block frontmatter on stand-alone models still works, but
+-- function files now use the per-decl form so every smelt.define can
+-- carry its own attributes independently.
 smelt.define safe_divide(numerator: Expr<Numeric>, denominator: Expr<Numeric>) -> Expr<Double>
     AS (CASE WHEN denominator = 0 THEN NULL ELSE CAST(numerator AS DOUBLE) / denominator END)

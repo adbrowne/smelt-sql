@@ -350,6 +350,184 @@ pub enum SigOrigin {
     Extern,
 }
 
+/// The set of backends a function is declared (or inferred) to target.
+///
+/// `All` is the universal set — it accepts any backend. `Only(names)` is
+/// a fixed, alphabetically-sortable list of backend names (e.g.
+/// `["duckdb"]`, `["duckdb", "spark"]`). Backend names are case-sensitive
+/// to keep string comparison simple; the canonical names are lowercase
+/// (`duckdb`, `spark`, `databricks`).
+///
+/// Introduced in Phase 11 of the smelt-functions plan (§16 #23).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendSet {
+    /// Unconstrained — valid on every backend.
+    All,
+    /// Restricted to the listed backends. The list is sorted & dedup'd
+    /// when constructed via [`BackendSet::from_names`].
+    Only(Vec<String>),
+}
+
+impl BackendSet {
+    /// Canonicalise a raw list of backend names into a [`BackendSet::Only`].
+    /// Normalises (trim + lowercase), deduplicates, and sorts so that
+    /// two equivalent lists compare equal.
+    pub fn from_names<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut v: Vec<String> = names
+            .into_iter()
+            .map(|s| s.as_ref().trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        v.sort();
+        v.dedup();
+        BackendSet::Only(v)
+    }
+
+    /// Is `self` a (non-strict) subset of `other`? `All` is only a
+    /// subset of `All`; `Only(a)` is a subset of `All`; `Only(a)` is a
+    /// subset of `Only(b)` iff every element of `a` is in `b`.
+    pub fn is_subset_of(&self, other: &BackendSet) -> bool {
+        match (self, other) {
+            (BackendSet::All, BackendSet::All) => true,
+            (BackendSet::All, BackendSet::Only(_)) => false,
+            (BackendSet::Only(_), BackendSet::All) => true,
+            (BackendSet::Only(a), BackendSet::Only(b)) => a.iter().all(|x| b.contains(x)),
+        }
+    }
+
+    /// Intersection: backends present in both sets.
+    pub fn intersect(&self, other: &BackendSet) -> BackendSet {
+        match (self, other) {
+            (BackendSet::All, other) => other.clone(),
+            (self_, BackendSet::All) => self_.clone(),
+            (BackendSet::Only(a), BackendSet::Only(b)) => {
+                let mut v: Vec<String> = a.iter().filter(|x| b.contains(*x)).cloned().collect();
+                v.sort();
+                v.dedup();
+                BackendSet::Only(v)
+            }
+        }
+    }
+
+    /// Human-readable rendering for diagnostics, e.g. `all`,
+    /// `[duckdb]`, `[duckdb, spark]`.
+    pub fn render(&self) -> String {
+        match self {
+            BackendSet::All => "all".to_string(),
+            BackendSet::Only(v) => format!("[{}]", v.join(", ")),
+        }
+    }
+}
+
+/// Error produced by [`parse_frontmatter_backends`] when the YAML-ish
+/// frontmatter text contains a malformed `backends:` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterParseError {
+    pub message: String,
+}
+
+impl std::fmt::Display for FrontmatterParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for FrontmatterParseError {}
+
+/// Parse a `backends:` declaration out of a frontmatter block body.
+///
+/// Accepted shapes (Phase 11, intentionally minimal — extensible):
+///   * `backends: [duckdb, spark]`      — inline array of backend names
+///   * `backends: [duckdb]`             — single-element inline array
+///   * no `backends:` key               — returns `Ok(None)` (unconstrained)
+///   * `backends: { duckdb: { emit: foo } }` — mapping form; only the
+///     backend names are read (emit name is stored alongside). Parsed
+///     minimally — a malformed nested shape returns an error.
+///
+/// The parser is hand-rolled: we don't want a full YAML dependency for
+/// what's effectively a single key.
+pub fn parse_frontmatter_backends(
+    yaml_text: &str,
+) -> Result<Option<BackendSet>, FrontmatterParseError> {
+    for line in yaml_text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("backends:") {
+            continue;
+        }
+        let value = trimmed["backends:".len()..].trim();
+        if value.is_empty() {
+            // `backends:` on its own line — not valid in this minimal parser.
+            return Err(FrontmatterParseError {
+                message: "backends: expects a value on the same line (e.g. `backends: [duckdb]`)"
+                    .to_string(),
+            });
+        }
+        // Inline-array form: `[a, b, c]`.
+        if value.starts_with('[') && value.ends_with(']') {
+            let inner = &value[1..value.len() - 1];
+            let names: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            return Ok(Some(BackendSet::from_names(names)));
+        }
+        // Mapping form: `{ duckdb: { emit: foo } }`. We only extract the
+        // top-level backend keys — enough for Phase 11 narrow-check.
+        if value.starts_with('{') && value.ends_with('}') {
+            let inner = &value[1..value.len() - 1];
+            // Split on top-level commas. Nesting is shallow so this simple
+            // depth-tracker suffices.
+            let mut segments: Vec<String> = Vec::new();
+            let mut depth = 0i32;
+            let mut buf = String::new();
+            for ch in inner.chars() {
+                match ch {
+                    '{' | '[' => {
+                        depth += 1;
+                        buf.push(ch);
+                    }
+                    '}' | ']' => {
+                        depth -= 1;
+                        buf.push(ch);
+                    }
+                    ',' if depth == 0 => {
+                        segments.push(std::mem::take(&mut buf));
+                    }
+                    _ => buf.push(ch),
+                }
+            }
+            if !buf.trim().is_empty() {
+                segments.push(buf);
+            }
+            let mut names = Vec::new();
+            for seg in segments {
+                let seg = seg.trim();
+                if seg.is_empty() {
+                    continue;
+                }
+                // Take the backend name: everything up to the first `:`.
+                let name = seg.split(':').next().unwrap_or("").trim().to_string();
+                if name.is_empty() {
+                    return Err(FrontmatterParseError {
+                        message: "backends: map entry missing key".to_string(),
+                    });
+                }
+                names.push(name);
+            }
+            return Ok(Some(BackendSet::from_names(names)));
+        }
+        return Err(FrontmatterParseError {
+            message: format!("backends: expects `[...]` or `{{...}}`, got {:?}", value),
+        });
+    }
+    Ok(None)
+}
+
 /// Signature of a single `smelt.define` or `smelt.extern` declaration.
 ///
 /// The `name_range` field points at the `DEFINE_NAME` token in the source
@@ -376,6 +554,28 @@ pub struct FunctionSig {
     /// Whether this signature comes from a `smelt.define` (has a body) or
     /// a `smelt.extern` (signature-only).
     pub origin: SigOrigin,
+    /// Backend set declared in frontmatter (`backends: [...]`) OR implied
+    /// by a backend-namespace sugar extern (e.g. `smelt.extern duckdb.foo`).
+    /// `None` when no declaration is present — the checker then infers
+    /// the set from the body (or defaults to [`BackendSet::All`] for
+    /// body-less externs).
+    ///
+    /// Introduced in Phase 11.
+    pub declared_backends: Option<BackendSet>,
+    /// For externs only: the optional backend-specific emit name. When
+    /// the extern is declared with the `duckdb.<name>` sugar, this is
+    /// populated with `<name>` so the later SQL emitter knows which
+    /// backend symbol to call. For `smelt.define`, always `None`.
+    ///
+    /// Introduced in Phase 11.
+    pub emit_name: Option<String>,
+    /// Malformed-frontmatter diagnostic, if any, anchored at the
+    /// declaration's name range. `Some(msg)` indicates the frontmatter
+    /// block attached to this decl could not be parsed. Checkers should
+    /// surface this as a `DiagnosticCode::BackendsWideningNotAllowed`-
+    /// adjacent error (for now we reuse the same code since only that
+    /// check is wired in Phase 11).
+    pub frontmatter_parse_error: Option<String>,
 }
 
 fn type_ref_range(type_ref: &TypeRef, text: &str) -> Range {
@@ -427,24 +627,49 @@ fn compute_tier(params: &[ParamSpec], return_type_text: Option<&str>) -> Tier {
 /// produced a fragment without an identifier). File text is required so
 /// the `name_range` can be rendered as a line/column range — `Range` is
 /// the same type returned by other `smelt-db` queries.
+///
+/// Phase 11: `raw_text` is the pre-strip source text. It's used to
+/// attach per-declaration frontmatter blocks. For the common "stripped
+/// text == raw text" case (callers without raw access), pass the
+/// stripped text — `attach_frontmatter_to_decls` simply finds no blocks
+/// and `declared_backends` stays `None`.
 pub fn extract_signature(define: &SmeltDefine, text: &str) -> Option<FunctionSig> {
+    extract_signature_with_raw(define, text, text)
+}
+
+/// `extract_signature` plus raw-text access for per-declaration
+/// frontmatter attachment (Phase 11).
+pub fn extract_signature_with_raw(
+    define: &SmeltDefine,
+    stripped_text: &str,
+    raw_text: &str,
+) -> Option<FunctionSig> {
     let name = define.name()?;
     let name_text_range = define.name_range()?;
     let name_range = Range {
-        start: offset_to_position(text, usize::from(name_text_range.start())),
-        end: offset_to_position(text, usize::from(name_text_range.end())),
+        start: offset_to_position(stripped_text, usize::from(name_text_range.start())),
+        end: offset_to_position(stripped_text, usize::from(name_text_range.end())),
     };
 
     let params: Vec<ParamSpec> = define
         .param_list()
-        .map(|pl| pl.params().map(|p| extract_param_spec(&p, text)).collect())
+        .map(|pl| {
+            pl.params()
+                .map(|p| extract_param_spec(&p, stripped_text))
+                .collect()
+        })
         .unwrap_or_default();
 
     let return_type_node = define.return_type();
     let return_type_text = return_type_node.as_ref().map(|t| t.text());
     let return_type = return_type_text.as_deref().map(parse_smelt_type);
-    let return_type_range = return_type_node.as_ref().map(|t| type_ref_range(t, text));
+    let return_type_range = return_type_node
+        .as_ref()
+        .map(|t| type_ref_range(t, stripped_text));
     let tier = compute_tier(&params, return_type_text.as_deref());
+
+    let (declared_backends, frontmatter_parse_error) =
+        parse_frontmatter_on_define(define, raw_text);
 
     Some(FunctionSig {
         name,
@@ -455,7 +680,25 @@ pub fn extract_signature(define: &SmeltDefine, text: &str) -> Option<FunctionSig
         tier,
         name_range,
         origin: SigOrigin::Define,
+        declared_backends,
+        emit_name: None,
+        frontmatter_parse_error,
     })
+}
+
+/// Read the per-decl frontmatter attached to `define` and parse a
+/// `backends:` directive if present.
+fn parse_frontmatter_on_define(
+    define: &SmeltDefine,
+    raw_text: &str,
+) -> (Option<BackendSet>, Option<String>) {
+    let Some(fm) = define.frontmatter(raw_text) else {
+        return (None, None);
+    };
+    match parse_frontmatter_backends(&fm) {
+        Ok(backends) => (backends, None),
+        Err(e) => (None, Some(e.message)),
+    }
 }
 
 /// Convert a `SmeltExtern` AST node into a `FunctionSig`.
@@ -463,23 +706,66 @@ pub fn extract_signature(define: &SmeltDefine, text: &str) -> Option<FunctionSig
 /// Externs have no body but share the same signature surface as defines.
 /// Returns `None` when the declaration is missing a name.
 pub fn extract_extern_signature(ext: &SmeltExtern, text: &str) -> Option<FunctionSig> {
+    extract_extern_signature_with_raw(ext, text, text)
+}
+
+/// `extract_extern_signature` plus raw-text access for per-decl
+/// frontmatter attachment (Phase 11). Also populates the backend
+/// namespace when the extern uses the `duckdb.<name>` sugar.
+pub fn extract_extern_signature_with_raw(
+    ext: &SmeltExtern,
+    stripped_text: &str,
+    raw_text: &str,
+) -> Option<FunctionSig> {
     let name = ext.name()?;
     let name_text_range = ext.name_range()?;
     let name_range = Range {
-        start: offset_to_position(text, usize::from(name_text_range.start())),
-        end: offset_to_position(text, usize::from(name_text_range.end())),
+        start: offset_to_position(stripped_text, usize::from(name_text_range.start())),
+        end: offset_to_position(stripped_text, usize::from(name_text_range.end())),
     };
 
     let params: Vec<ParamSpec> = ext
         .param_list()
-        .map(|pl| pl.params().map(|p| extract_param_spec(&p, text)).collect())
+        .map(|pl| {
+            pl.params()
+                .map(|p| extract_param_spec(&p, stripped_text))
+                .collect()
+        })
         .unwrap_or_default();
 
     let return_type_node = ext.return_type();
     let return_type_text = return_type_node.as_ref().map(|t| t.text());
     let return_type = return_type_text.as_deref().map(parse_smelt_type);
-    let return_type_range = return_type_node.as_ref().map(|t| type_ref_range(t, text));
+    let return_type_range = return_type_node
+        .as_ref()
+        .map(|t| type_ref_range(t, stripped_text));
     let tier = compute_tier(&params, return_type_text.as_deref());
+
+    // Phase 11: frontmatter-declared backends take precedence, but the
+    // backend-namespace sugar (`smelt.extern duckdb.foo`) implies a
+    // [duckdb] constraint when no frontmatter is present. If both are
+    // present and agree, they stack; disagreement lets the frontmatter
+    // win (it is more explicit).
+    let (mut declared_backends, frontmatter_parse_error) = {
+        match ext.frontmatter(raw_text) {
+            Some(fm) => match parse_frontmatter_backends(&fm) {
+                Ok(b) => (b, None),
+                Err(e) => (None, Some(e.message)),
+            },
+            None => (None, None),
+        }
+    };
+    let mut emit_name: Option<String> = None;
+    if let Some(backend) = ext.backend_namespace() {
+        let sugar_set = BackendSet::from_names([backend.clone()]);
+        // The sugar also implies the smelt-level name is the emit name.
+        emit_name = Some(name.clone());
+        declared_backends = match declared_backends {
+            None => Some(sugar_set),
+            Some(explicit) => Some(explicit),
+        };
+        let _ = backend; // keep for future use.
+    }
 
     Some(FunctionSig {
         name,
@@ -490,6 +776,9 @@ pub fn extract_extern_signature(ext: &SmeltExtern, text: &str) -> Option<Functio
         tier,
         name_range,
         origin: SigOrigin::Extern,
+        declared_backends,
+        emit_name,
+        frontmatter_parse_error,
     })
 }
 
@@ -504,14 +793,27 @@ pub fn extract_extern_signature(ext: &SmeltExtern, text: &str) -> Option<Functio
 /// syntax tree, so downstream per-declaration diagnostics fire in source
 /// order regardless of origin.
 pub fn extract_function_signatures(file: &AstFile, text: &str) -> Vec<FunctionSig> {
+    extract_function_signatures_with_raw(file, text, text)
+}
+
+/// `extract_function_signatures` variant that takes both the stripped
+/// source (used for the parsed AST ranges) and the raw pre-strip source
+/// (used to look up per-declaration frontmatter). Phase 11 call sites
+/// pass the two explicitly; legacy callers using `extract_function_signatures`
+/// get frontmatter-less signatures (`declared_backends = None`).
+pub fn extract_function_signatures_with_raw(
+    file: &AstFile,
+    stripped_text: &str,
+    raw_text: &str,
+) -> Vec<FunctionSig> {
     let mut out: Vec<FunctionSig> = Vec::new();
     for child in file.syntax().children() {
         if let Some(d) = SmeltDefine::cast(child.clone()) {
-            if let Some(sig) = extract_signature(&d, text) {
+            if let Some(sig) = extract_signature_with_raw(&d, stripped_text, raw_text) {
                 out.push(sig);
             }
         } else if let Some(e) = SmeltExtern::cast(child) {
-            if let Some(sig) = extract_extern_signature(&e, text) {
+            if let Some(sig) = extract_extern_signature_with_raw(&e, stripped_text, raw_text) {
                 out.push(sig);
             }
         }

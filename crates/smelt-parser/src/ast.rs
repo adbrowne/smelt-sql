@@ -108,6 +108,31 @@ impl SmeltDefine {
     pub fn body(&self) -> Option<DefineBody> {
         self.0.children().find_map(DefineBody::cast)
     }
+
+    /// Byte offset at which this declaration starts in the source text.
+    ///
+    /// Since `strip_frontmatter` preserves byte offsets (each stripped
+    /// line becomes `-- <spaces>` of the same byte length), offsets into
+    /// the stripped text are identical to offsets into the raw text.
+    /// Callers can therefore use this offset to look up a
+    /// per-declaration frontmatter block in the raw source.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+
+    /// Text of the frontmatter block that immediately precedes this
+    /// declaration in `raw_text`, if any.
+    ///
+    /// Returns `None` when there is no `---`/`---` block directly
+    /// before the declaration, or when the gap between the block and
+    /// the declaration contains SQL / another declaration.
+    ///
+    /// Introduced in Phase 11 (per-declaration frontmatter).
+    pub fn frontmatter(&self, raw_text: &str) -> Option<String> {
+        let off = self.source_offset();
+        let attached = crate::attach_frontmatter_to_decls(raw_text, &[off]);
+        attached.into_iter().next().flatten().map(|b| b.inner_text)
+    }
 }
 
 /// Top-level `smelt.extern name(params) -> Type` declaration (Phase 10).
@@ -132,24 +157,35 @@ impl SmeltExtern {
         &self.0
     }
 
-    /// The declared extern's name (text of the single IDENT inside DEFINE_NAME).
+    /// The declared extern's function name.
+    ///
+    /// For the legacy single-IDENT form (`smelt.extern foo(...)`) this is
+    /// just `foo`. For the dotted backend-namespace form
+    /// (`smelt.extern duckdb.read_parquet(...)`), this returns
+    /// `read_parquet` — the backend prefix is available separately via
+    /// [`SmeltExtern::backend_namespace`].
     pub fn name(&self) -> Option<String> {
         let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
-        name_node
+        let idents: Vec<_> = name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)
-            .map(|t| t.text().to_string())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        idents.last().map(|t| t.text().to_string())
     }
 
-    /// The text range of the DEFINE_NAME node (the extern name identifier).
+    /// The text range of the extern's function-name identifier. For the
+    /// dotted form this points at the second IDENT (the function name,
+    /// not the backend prefix); diagnostics anchored here therefore
+    /// underline the part users will care about.
     pub fn name_range(&self) -> Option<TextRange> {
         let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
-        let ident = name_node
+        let idents: Vec<_> = name_node
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)?;
-        Some(ident.text_range())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        idents.last().map(|t| t.text_range())
     }
 
     /// The parameter list, if parsed successfully.
@@ -164,6 +200,47 @@ impl SmeltExtern {
             .find(|n| n.kind() == RETURN_ARROW)?
             .children()
             .find_map(TypeRef::cast)
+    }
+
+    /// Byte offset at which this declaration starts in the source text.
+    /// See `SmeltDefine::source_offset` for the offset-stability rationale.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+
+    /// Optional backend namespace captured from a dotted extern name,
+    /// e.g. `smelt.extern duckdb.read_parquet(...)` — returns
+    /// `Some("duckdb")`. Single-segment extern names return `None`.
+    ///
+    /// Introduced in Phase 11 (backend namespace sugar for externs).
+    pub fn backend_namespace(&self) -> Option<String> {
+        // We stored the backend prefix as the *first* IDENT inside the
+        // DEFINE_NAME node, followed by a DOT and a second IDENT whose
+        // text is returned by `name()`. If the node only contains a
+        // single IDENT (the legacy form), return None.
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let tokens: Vec<_> = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+            .collect();
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            Some(tokens[0].text().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Text of the frontmatter block that immediately precedes this
+    /// declaration. See `SmeltDefine::frontmatter` for semantics.
+    pub fn frontmatter(&self, raw_text: &str) -> Option<String> {
+        let off = self.source_offset();
+        let attached = crate::attach_frontmatter_to_decls(raw_text, &[off]);
+        attached.into_iter().next().flatten().map(|b| b.inner_text)
     }
 }
 

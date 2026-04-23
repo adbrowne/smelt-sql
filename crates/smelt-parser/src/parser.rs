@@ -564,10 +564,47 @@ impl<'a> Parser<'a> {
         // DEFINE_NAME: wrap the next identifier. (Reusing DEFINE_NAME here so
         // downstream AST helpers can read the extern's name with the same
         // getter used for smelt.define.)
+        //
+        // Phase 11 (backend namespace sugar): accept a dotted form
+        // `<backend>.<name>`, e.g. `smelt.extern duckdb.read_parquet(...)`.
+        // When present, the backend segment is captured as the first IDENT
+        // inside DEFINE_NAME; downstream AST helpers (`SmeltExtern::name`
+        // and `SmeltExtern::backend_namespace`) read the two idents
+        // separately. Non-dotted externs keep the legacy single-IDENT shape.
         self.skip_trivia();
         if self.at(IDENT) {
             self.start_node(DEFINE_NAME);
-            self.advance();
+            self.advance(); // first IDENT
+                            // If the next non-trivia tokens are `.` IDENT, treat this as a
+                            // backend-namespaced extern name.
+            let mut lookahead = 0;
+            while let Some(t) = self.tokens.get(self.pos + lookahead) {
+                if t.kind.is_trivia() {
+                    lookahead += 1;
+                } else {
+                    break;
+                }
+            }
+            let next = self.tokens.get(self.pos + lookahead).map(|t| t.kind);
+            if next == Some(DOT) {
+                // Check the token after the DOT is an IDENT.
+                let mut after_dot = lookahead + 1;
+                while let Some(t) = self.tokens.get(self.pos + after_dot) {
+                    if t.kind.is_trivia() {
+                        after_dot += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if self.tokens.get(self.pos + after_dot).map(|t| t.kind) == Some(IDENT) {
+                    // Consume `.` and the second IDENT — both land inside
+                    // the same DEFINE_NAME node.
+                    self.skip_trivia();
+                    self.advance(); // DOT
+                    self.skip_trivia();
+                    self.advance(); // second IDENT
+                }
+            }
             self.finish_node();
         } else {
             self.error("Expected function name after smelt.extern".to_string());
@@ -5960,5 +5997,70 @@ LIMIT 100
             1,
             "expected exactly one SMELT_FN_CALL inside DEFINE_BODY"
         );
+    }
+
+    // ===== Phase 11: per-declaration frontmatter =====
+
+    #[test]
+    fn frontmatter_attaches_to_next_decl() {
+        // Phase 11 TDD #1: a file containing two `---/---` blocks, each
+        // preceded by (i.e. each immediately followed by) a distinct
+        // `smelt.define`. Each decl's `frontmatter()` helper returns the
+        // matching block's body — and only the matching block.
+        let raw = "---\nbackends: [duckdb]\n---\nsmelt.define f() -> Expr<Integer> AS (1)\n\n---\nbackends: [spark]\n---\nsmelt.define g() -> Expr<Integer> AS (2)\n";
+
+        let stripped = crate::strip_frontmatter(raw);
+        let (parse, file) = parse_file_text(&stripped);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 2, "expected two smelt.define declarations");
+
+        let fm_f = defines[0]
+            .frontmatter(raw)
+            .expect("first decl should have frontmatter");
+        assert!(fm_f.contains("duckdb"), "got {:?}", fm_f);
+        assert!(!fm_f.contains("spark"), "wrong block attached: {:?}", fm_f);
+
+        let fm_g = defines[1]
+            .frontmatter(raw)
+            .expect("second decl should have frontmatter");
+        assert!(fm_g.contains("spark"), "got {:?}", fm_g);
+        assert!(!fm_g.contains("duckdb"), "wrong block attached: {:?}", fm_g);
+    }
+
+    #[test]
+    fn extern_with_dotted_backend_namespace() {
+        // Phase 11: `smelt.extern duckdb.read_parquet(...)` parses cleanly
+        // and exposes `read_parquet` as the function name with `duckdb`
+        // as the backend namespace.
+        use crate::ast::SmeltExtern;
+        let input = "smelt.extern duckdb.read_parquet(path: Expr<Text>) -> Expr<Text>\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs.len(), 1);
+        assert_eq!(externs[0].name().as_deref(), Some("read_parquet"));
+        assert_eq!(externs[0].backend_namespace().as_deref(), Some("duckdb"));
+    }
+
+    #[test]
+    fn extern_plain_name_has_no_backend_namespace() {
+        // Sanity check — the legacy single-IDENT extern form still works.
+        use crate::ast::SmeltExtern;
+        let input = "smelt.extern regex_match(s: Expr<Text>, p: Expr<Text>) -> Expr<Boolean>\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(parse.errors.is_empty(), "{:?}", parse.errors);
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs[0].name().as_deref(), Some("regex_match"));
+        assert!(externs[0].backend_namespace().is_none());
     }
 }

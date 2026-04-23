@@ -118,6 +118,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::DuplicateFunctionDefinition,
         message_substring: "extern_twice",
     },
+    // Phase 11 — frontmatter declares `[duckdb, spark]` while the body
+    // uses `duckdb.read_parquet` (inferred [duckdb]). The narrow-only
+    // rule rejects the widening.
+    Case {
+        fixture: "fn_backends_widening.sql",
+        companion: None,
+        code: DiagnosticCode::BackendsWideningNotAllowed,
+        message_substring: "load_broken",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

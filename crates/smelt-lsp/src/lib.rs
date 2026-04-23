@@ -908,6 +908,7 @@ impl Backend {
                 DbCode::MissingArgument => "missing-argument",
                 DbCode::ArgTypeMismatch => "arg-type-mismatch",
                 DbCode::ExternCollidesWithBuiltin => "extern-collides-with-builtin",
+                DbCode::BackendsWideningNotAllowed => "backends-widening-not-allowed",
             };
             NumberOrString::String(code_str.to_string())
         });

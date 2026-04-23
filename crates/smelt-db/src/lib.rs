@@ -25,9 +25,10 @@ use rowan::TextRange;
 use salsa::{Accumulator, Setter};
 use serde::Deserialize;
 use smelt_parser::{self, File as AstFile, RefCall, TableRef};
-use smelt_types::signatures::{extract_function_signatures, FunctionSig};
+use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
 use smelt_types::{parse_type, DataType, TypedColumn};
 
+pub mod backends;
 pub mod code_actions;
 pub mod function_body_check;
 pub mod references;
@@ -281,6 +282,13 @@ pub enum DiagnosticCode {
     /// the built-in registry (e.g. `smelt.extern lower(...)`). Anchored at
     /// the extern name span. Introduced in Phase 10 of smelt-functions.
     ExternCollidesWithBuiltin,
+    /// Emitted when a `smelt.define`'s frontmatter declares a `backends:`
+    /// set that is broader than what the body implies — e.g.
+    /// `backends: [duckdb, spark]` on a body that calls
+    /// `duckdb.read_parquet(...)`. Also emitted when the frontmatter
+    /// itself is malformed. Anchored at the declaration's name range.
+    /// Introduced in Phase 11 of smelt-functions.
+    BackendsWideningNotAllowed,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -596,7 +604,11 @@ pub fn file_signature_inputs(db: &dyn salsa::Database, file: SourceFile) -> Arc<
     let text_raw = file.text(db);
     let clean_text = smelt_parser::strip_frontmatter(text_raw);
     if let Some(ast) = AstFile::cast(syntax) {
-        Arc::new(extract_function_signatures(&ast, &clean_text))
+        Arc::new(extract_function_signatures_with_raw(
+            &ast,
+            &clean_text,
+            text_raw,
+        ))
     } else {
         Arc::new(Vec::new())
     }
@@ -821,6 +833,132 @@ pub fn function_body_diagnostics_for_file(
             &body_expr,
             &clean_text,
         ));
+    }
+    out
+}
+
+/// Final backend set for a function in `file`, applying the narrow-only
+/// rule (§16 #23).
+///
+/// Steps:
+///   1. Look up the function's [`FunctionSig`] in this file.
+///   2. For defines, walk the body and intersect each nested
+///      `smelt.fn.*` callee's declared set + each `<backend>.<foo>` SQL
+///      call into a running inferred set.
+///   3. Apply the narrow-only rule: declared ⊆ inferred.
+///
+/// Returns `None` when no signature with the given name exists in the
+/// file. When the narrow rule is violated the query still returns a
+/// best-effort set (the inferred one) so downstream call-site checks
+/// don't cascade — the diagnostic is emitted separately by
+/// `backends_widening_diagnostics_for_file`.
+///
+/// Pure-function-rule note: the heavy lifting lives in
+/// [`backends::infer_body_backends`] / [`backends::apply_narrow_rule`].
+/// This wrapper builds a signature-lookup closure over the workspace
+/// and re-parses the body via `parse_file`.
+pub fn function_backends(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+    name: String,
+) -> Option<smelt_types::BackendSet> {
+    let sig = file_signature_inputs(db, file)
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()?;
+    Some(compute_function_backends(db, workspace, file, &sig))
+}
+
+/// Non-Salsa helper: compute the final backend set for `sig` in `file`
+/// using the given workspace for cross-file `smelt.fn.*` lookup.
+fn compute_function_backends(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+    sig: &FunctionSig,
+) -> smelt_types::BackendSet {
+    use smelt_types::BackendSet;
+    if sig.origin == smelt_types::SigOrigin::Extern {
+        return backends::resolve_backends(sig, None).unwrap_or(BackendSet::All);
+    }
+
+    // Walk the body to infer.
+    let inferred =
+        body_inferred_backends(db, workspace, file, &sig.name).unwrap_or(BackendSet::All);
+    backends::resolve_backends(sig, Some(inferred.clone())).unwrap_or(inferred)
+}
+
+/// Walk the body of `name` in `file` to compute its inferred backend
+/// set. Returns `None` when the define has no resolvable body (e.g. a
+/// parse-error recovery fragment).
+fn body_inferred_backends(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+    name: &str,
+) -> Option<smelt_types::BackendSet> {
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let ast = AstFile::cast(syntax)?;
+    for define in ast.defines() {
+        if define.name().as_deref() == Some(name) {
+            let body = define.body()?.expression()?;
+            let sig_lookup = |callee_name: &str| -> Option<FunctionSig> {
+                resolve_function(db, workspace, callee_name.to_string()).map(|arc| (*arc).clone())
+            };
+            return Some(backends::infer_body_backends(&body, &sig_lookup));
+        }
+    }
+    None
+}
+
+/// Per-file diagnostics for the Phase 11 narrow-only rule. For each
+/// `smelt.define` in `file` whose frontmatter declares a `backends:`
+/// set broader than the body's inferred set, emit
+/// [`DiagnosticCode::BackendsWideningNotAllowed`] anchored at the
+/// declaration's name range. Also surfaces malformed-frontmatter errors
+/// under the same code.
+pub fn backends_widening_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let sigs = file_signature_inputs(db, file);
+    let mut out = Vec::new();
+    for sig in sigs.iter() {
+        if let Some(msg) = sig.frontmatter_parse_error.as_ref() {
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("Invalid frontmatter for `{}`: {}", sig.name, msg),
+                range: sig.name_range,
+                code: Some(DiagnosticCode::BackendsWideningNotAllowed),
+                data: None,
+            });
+            continue;
+        }
+        if sig.origin == smelt_types::SigOrigin::Extern {
+            // Externs with both a frontmatter `backends:` and the
+            // dotted-backend sugar could disagree — but we accept the
+            // frontmatter as authoritative and skip narrow checks
+            // (there is no body to infer from).
+            continue;
+        }
+        let Some(declared) = &sig.declared_backends else {
+            continue;
+        };
+        let Some(inferred) = body_inferred_backends(db, workspace, file, &sig.name) else {
+            continue;
+        };
+        if let Err(msg) = backends::apply_narrow_rule(Some(declared), &inferred) {
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("Function `{}`: {}", sig.name, msg),
+                range: sig.name_range,
+                code: Some(DiagnosticCode::BackendsWideningNotAllowed),
+                data: None,
+            });
+        }
     }
     out
 }
@@ -1094,6 +1232,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // re-anchored to the call site. Runs before the `parse_model.is_none()`
     // early-return so call sites in non-model files also surface.
     for diag in smelt_fn_call_diagnostics_for_file(db, workspace, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 11 — backends widening / malformed frontmatter.
+    for diag in backends_widening_diagnostics_for_file(db, workspace, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 
