@@ -7,7 +7,9 @@ use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
     SelectStmt, SmeltFnCall, StructLiteral, Subquery,
 };
-use smelt_types::signatures::{FunctionSig, SmeltType, TypeConstraint};
+use smelt_types::signatures::{
+    unify_call, BuiltinRegistry, FunctionSig, SmeltType, TypeConstraint,
+};
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -655,10 +657,136 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
     Some(TypedColumn::nullable(dt))
 }
 
+/// LUB adapter: the canonical numeric-promotion routine lives in
+/// [`promote_types`] (this module) but signatures-side [`unify_call`] needs a
+/// plain `Fn(&DataType, &DataType) -> DataType`. This wrapper keeps
+/// `smelt-types` dependency-free per the plan's cross-phase design choice.
+fn registry_lub(a: &DataType, b: &DataType) -> DataType {
+    let lhs = TypedColumn {
+        data_type: a.clone(),
+        nullable: true,
+    };
+    let rhs = TypedColumn {
+        data_type: b.clone(),
+        nullable: true,
+    };
+    promote_types(&lhs, &rhs).data_type
+}
+
+/// Names we've migrated from the hand-written match to registry-driven
+/// inference. Phase 9 deliberately keeps this allowlist small — each entry is
+/// one that the registry's `unify_call` shape reproduces the legacy
+/// `infer_function_type` behaviour for. Entries NOT on this list continue
+/// through the legacy match unchanged (see coverage-spike findings in the
+/// Phase 9 implementer report).
+///
+/// The list is ordered by family for easy review.
+const REGISTRY_MIGRATED: &[&str] = &[
+    // Aggregates — simple identity-return or fixed-return.
+    "AVG",   // registry: <T: Numeric>(T) → Double — matches legacy (Double, nullable=true)
+    "MIN",   // registry: <T: Ordered>(T) → T — matches legacy first-arg + nullable=true
+    "MAX",   // same as MIN
+    "COUNT", // registry: (Any) → BigInt — matches legacy (BigInt, nullable=false)
+    // Arithmetic scalars.
+    "ABS", // registry: <T: Numeric>(T) → T — matches legacy (preserves arg type + nullable)
+    // Text scalars (registry demands Text arg; legacy is permissive. On a
+    // constraint violation we fall back to legacy).
+    "LOWER",
+    "UPPER",
+    "TRIM",
+    "CONCAT",
+    // Date/time basics (fixed returns).
+    "DATE",
+    "NOW",
+    "CURRENT_DATE",
+    "CURRENT_TIMESTAMP",
+    "DATE_TRUNC",
+];
+
+/// Policy for deriving [`TypedColumn::nullable`] on a registry-resolved call.
+///
+/// The registry itself doesn't track nullability (§16 defers it — see "Out of
+/// scope" in the plan), so Phase 9 mirrors the legacy per-function rule via a
+/// tiny lookup table. Migrating a new entry to the registry means adding a row
+/// here.
+fn registry_result_nullable(name: &str, arg_nullable: &[bool]) -> bool {
+    match name {
+        // Non-nullable aggregates / niladic clocks.
+        "COUNT" | "NOW" | "CURRENT_DATE" | "CURRENT_TIMESTAMP" => false,
+        // ABS preserves its arg's nullability — legacy returns the arg
+        // TypedColumn verbatim when a single-arg inference succeeds.
+        "ABS" => arg_nullable.first().copied().unwrap_or(true),
+        // Everything else is nullable per legacy.
+        _ => true,
+    }
+}
+
+/// Registry-first inference for the allowlisted subset of built-ins.
+///
+/// Returns:
+/// * `Some(Some(tc))` when the registry resolved the call cleanly — the caller
+///   uses this directly and skips the legacy match.
+/// * `Some(None)` when the function is known to the registry but arg types
+///   couldn't be inferred up-front — the caller should fall through to the
+///   legacy match which handles Unknown args more gracefully.
+/// * `None` when the function isn't on [`REGISTRY_MIGRATED`] or the registry
+///   doesn't know about it — caller uses the legacy match.
+fn try_registry_inference(
+    upper_name: &str,
+    func: &FunctionCall,
+    ctx: &TypeContext,
+) -> Option<Option<TypedColumn>> {
+    if !REGISTRY_MIGRATED.contains(&upper_name) {
+        return None;
+    }
+    let sig = BuiltinRegistry::resolve(upper_name)?;
+
+    // Collect arg DataTypes + nullability. If any arg fails to infer, defer
+    // to the legacy match — it has per-function fallback behaviour for
+    // Unknown args that the registry doesn't model.
+    let args = func.arguments();
+    let mut arg_types: Vec<DataType> = Vec::with_capacity(args.len());
+    let mut arg_nullable: Vec<bool> = Vec::with_capacity(args.len());
+    for arg in &args {
+        match infer_expression_type(arg, ctx) {
+            Some(tc) => {
+                arg_types.push(tc.data_type);
+                arg_nullable.push(tc.nullable);
+            }
+            None => {
+                // Missing arg inference — fall back to legacy, which has
+                // function-specific Unknown handling (e.g. `first_arg_type_or`
+                // supplies a sensible default for MIN/MAX).
+                return Some(None);
+            }
+        }
+    }
+
+    match unify_call(sig, &arg_types, &registry_lub) {
+        Ok(result) => {
+            let nullable = registry_result_nullable(upper_name, &arg_nullable);
+            Some(Some(TypedColumn {
+                data_type: result.return_type,
+                nullable,
+            }))
+        }
+        // Unification failed — fall back to the legacy match so permissive
+        // behaviour (e.g. LOWER on Integer, MIN on Unknown) is preserved.
+        Err(_) => Some(None),
+    }
+}
+
 /// Infer the type of a function call (aggregates, etc.)
 fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedColumn> {
     let name = func.name()?.to_uppercase();
     let sql_func = SqlFunction::from_name(&name)?;
+
+    // Phase 9: registry-first lookup for the allowlisted subset. When the
+    // registry returns a concrete result we use it; on miss/fall-through we
+    // continue into the legacy match below.
+    if let Some(Some(tc)) = try_registry_inference(&name, func, ctx) {
+        return Some(tc);
+    }
 
     /// Helper: return the type of the first argument, or `fallback` if inference fails.
     /// For COALESCE and similar, this intentionally only checks the first arg —
