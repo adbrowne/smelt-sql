@@ -37,7 +37,9 @@ pub mod schema;
 pub mod type_inference;
 pub mod yaml_edits;
 
-pub use function_body_check::infer_tableexpr_return_schema;
+pub use function_body_check::{
+    extract_function_body_cte_schemas, infer_splice_contexts, infer_tableexpr_return_schema,
+};
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
     ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
@@ -317,9 +319,17 @@ pub enum DiagnosticCode {
     /// Emitted when the context identifier in `Expr<T, ctx>` does not
     /// resolve to any parameter in the same `smelt.define` declaration.
     /// Anchored at the `TypeRef` span of the offending parameter
-    /// (Phase 19 of smelt-functions). CTE resolution is deferred to
-    /// Phase 20.
+    /// (Phase 19 of smelt-functions).
     UnknownContext,
+    /// Emitted when a CTE in a `smelt.define` body forms a cyclic reference
+    /// (directly or transitively). Anchored at the CTE name span.
+    /// Introduced in Phase 20 of smelt-functions.
+    CteCycle,
+    /// Emitted when an explicit `Expr<T, ctx_name>` annotation disagrees with
+    /// the context inferred from the parameter's splice point in the function
+    /// body. Anchored at the `TypeRef` span of the offending parameter.
+    /// Introduced in Phase 20 of smelt-functions.
+    ContextMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -1414,6 +1424,75 @@ pub fn unknown_context_diagnostics_for_file(
     out
 }
 
+/// Phase 20: emit [`DiagnosticCode::CteCycle`] for every `smelt.define` in
+/// `file` whose SELECT body contains a cyclic CTE reference.
+///
+/// Uses [`function_body_check::extract_function_body_cte_schemas`] with an
+/// empty seed context (cycle detection is purely structural).
+///
+/// Pure: reads `parse_file`.
+pub fn cte_cycle_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let text_raw = file.text(db);
+    let clean_text = smelt_parser::strip_frontmatter(text_raw);
+    let Some(ast) = AstFile::cast(syntax) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    for define in ast.defines() {
+        let Some(body) = define.body() else { continue };
+        let Some(select) = body.select_stmt() else {
+            continue;
+        };
+        let empty_ctx = type_inference::TypeContext::new();
+        let (_ctx, cycle_diags) = function_body_check::extract_function_body_cte_schemas(
+            &select,
+            &empty_ctx,
+            &clean_text,
+        );
+        out.extend(cycle_diags);
+    }
+    out
+}
+
+/// Phase 20: emit [`DiagnosticCode::ContextMismatch`] for every `smelt.define`
+/// in `file` whose explicit `Expr<T, ctx>` annotation disagrees with the
+/// context inferred from the parameter's splice point.
+///
+/// Uses [`function_body_check::context_mismatch_diagnostics_for_fn`].
+///
+/// Pure: reads `parse_file` and `file_signature_inputs`.
+pub fn context_mismatch_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return vec![];
+    };
+    let sigs = file_signature_inputs(db, file);
+    let mut out = Vec::new();
+    for define in ast.defines() {
+        let Some(name) = define.name() else { continue };
+        let Some(sig) = sigs.iter().find(|s| s.name == name) else {
+            continue;
+        };
+        let Some(body) = define.body() else { continue };
+        let Some(select) = body.select_stmt() else {
+            continue;
+        };
+        out.extend(function_body_check::context_mismatch_diagnostics_for_fn(
+            sig, &select,
+        ));
+    }
+    out
+}
+
 // ============================================================================
 // Semantic queries
 // ============================================================================
@@ -1500,6 +1579,18 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Unknown-context diagnostics (Phase 19): emitted when `Expr<T, ctx>`
     // context name doesn't resolve to any parameter in the same function.
     for diag in unknown_context_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // CTE cycle diagnostics (Phase 20): emitted when a function body's WITH
+    // clause contains a cyclic CTE reference.
+    for diag in cte_cycle_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Context mismatch diagnostics (Phase 20): emitted when an explicit
+    // Expr<T, ctx> annotation disagrees with the inferred splice-point context.
+    for diag in context_mismatch_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

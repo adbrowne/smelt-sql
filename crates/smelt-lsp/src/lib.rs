@@ -977,6 +977,8 @@ impl Backend {
                 DbCode::ParameterShadowsColumn => "parameter-shadows-column",
                 DbCode::RowRequirementUnsatisfied => "row-requirement-unsatisfied",
                 DbCode::UnknownContext => "unknown-context",
+                DbCode::CteCycle => "cte-cycle",
+                DbCode::ContextMismatch => "context-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });

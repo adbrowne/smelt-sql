@@ -190,6 +190,14 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::UndeclaredColumn,
         message_substring: "missing_col",
     },
+    // Phase 20 — CTE `a` and `b` mutually reference each other, forming a
+    // cycle that is detected by the two-pass body analyser.
+    Case {
+        fixture: "fn_cte_cycle.sql",
+        companion: None,
+        code: DiagnosticCode::CteCycle,
+        message_substring: "cyclic",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

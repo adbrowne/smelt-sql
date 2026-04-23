@@ -15,7 +15,7 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Expr, SelectStmt, SmeltFnCall};
+use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, unify_call, FrameInfo, FunctionSig, ParamSpec, SchemaMismatch,
@@ -26,7 +26,8 @@ use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
-    check_undeclared_columns, infer_expression_type, walk_select_columns_with_visitor, TypeContext,
+    check_undeclared_columns, infer_cte_columns, infer_expression_type,
+    walk_select_columns_with_visitor, TypeContext,
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
@@ -1316,6 +1317,423 @@ fn types_assignment_compatible(expected: &DataType, actual: &DataType) -> bool {
         (expected, actual),
         (BigInt, SmallInt) | (BigInt, Integer) | (Integer, SmallInt)
     )
+}
+
+// ============================================================================
+// Phase 20 — CTE schema extraction + splice-point context inference
+// ============================================================================
+
+/// Colour used by the DFS cycle-detection pass (white=unvisited,
+/// grey=in-progress, black=done).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DfsColour {
+    White,
+    Grey,
+    Black,
+}
+
+/// DFS state for extracting CTE schemas with cycle detection (Pass 1).
+struct CteDfs<'a> {
+    /// CTE name → Cte node for all CTEs in the WITH clause.
+    ctes: std::collections::HashMap<String, Cte>,
+    /// Set of all CTE names (for dependency look-up).
+    all_names: std::collections::HashSet<String>,
+    /// Colour of each CTE node in the DFS.
+    colour: std::collections::HashMap<String, DfsColour>,
+    /// Topological processing result: (cte_name, columns).
+    topo: Vec<(String, Vec<(String, TypedColumn)>)>,
+    /// Cycle diagnostics emitted during the DFS.
+    diagnostics: Vec<Diagnostic>,
+    /// The seed context — parameters and outer CTEs already in scope.
+    seed_ctx: &'a TypeContext,
+    /// Source text for anchoring diagnostics.
+    text: &'a str,
+}
+
+impl<'a> CteDfs<'a> {
+    fn visit(&mut self, name: &str) {
+        let colour = self.colour.get(name).copied().unwrap_or(DfsColour::White);
+
+        if colour == DfsColour::Black {
+            return;
+        }
+        if colour == DfsColour::Grey {
+            // Back-edge: cycle detected.
+            let range = self
+                .ctes
+                .get(name)
+                .and_then(|c| c.name_range())
+                .map(|tr| to_range(tr, self.text))
+                .unwrap_or(Range {
+                    start: smelt_parser::Position { line: 0, column: 0 },
+                    end: smelt_parser::Position { line: 0, column: 0 },
+                });
+            self.diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "CTE `{name}` forms a cyclic reference (directly or transitively)"
+                ),
+                range,
+                code: Some(DiagnosticCode::CteCycle),
+                data: None,
+            });
+            return;
+        }
+
+        self.colour.insert(name.to_string(), DfsColour::Grey);
+
+        // Find this CTE's dependencies on other CTEs in the same WITH clause.
+        let deps: Vec<String> = self
+            .ctes
+            .get(name)
+            .map(|c| find_cte_table_deps(c, &self.all_names))
+            .unwrap_or_default();
+
+        for dep in deps {
+            self.visit(&dep.clone());
+        }
+
+        // Build context from already-processed CTEs.
+        let mut ctx = self.seed_ctx.clone();
+        for (cte_nm, cols) in &self.topo {
+            for (col, typed) in cols {
+                ctx.add_cte_column(cte_nm, col, typed.clone());
+            }
+            ctx.add_alias(cte_nm, cte_nm);
+        }
+
+        // Infer this CTE's schema.
+        if let Some(cte) = self.ctes.get(name) {
+            let cols = infer_cte_columns(cte, &ctx);
+            self.topo.push((name.to_string(), cols));
+        }
+
+        self.colour.insert(name.to_string(), DfsColour::Black);
+    }
+}
+
+/// Walk the direct FROM-clause table references of a CTE body and return the
+/// names of any that match a known CTE in the same WITH clause.
+fn find_cte_table_deps(cte: &Cte, all_names: &std::collections::HashSet<String>) -> Vec<String> {
+    let Some(query) = cte.query() else {
+        return vec![];
+    };
+    let Some(select) = query.select_stmt() else {
+        return vec![];
+    };
+    let mut deps: Vec<String> = vec![];
+    for node in select.syntax().descendants() {
+        if node.kind() == smelt_parser::SyntaxKind::TABLE_REF {
+            if let Some(tr) = smelt_parser::ast::TableRef::cast(node) {
+                if !tr.is_function_call() && tr.smelt_fn_call().is_none() {
+                    if let Some(id) = tr.identifier() {
+                        if all_names.contains(&id) && !deps.contains(&id) {
+                            deps.push(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deps
+}
+
+/// Phase 20 Pass 1: extract CTE schemas from a SELECT body's WITH clause.
+///
+/// Uses depth-first search with colour-based cycle detection. Returns:
+/// - A clone of `seed_ctx` augmented with all CTE schemas (CTE columns +
+///   aliases added via [`TypeContext::add_cte_column`]).
+/// - Any [`DiagnosticCode::CteCycle`] diagnostics encountered.
+///
+/// When no WITH clause is present the seed context is returned unchanged.
+/// Pure — does not touch Salsa.
+pub fn extract_function_body_cte_schemas(
+    select: &SelectStmt,
+    seed_ctx: &TypeContext,
+    text: &str,
+) -> (TypeContext, Vec<Diagnostic>) {
+    let Some(with_clause) = select.with_clause() else {
+        return (seed_ctx.clone(), vec![]);
+    };
+
+    let ctes: std::collections::HashMap<String, Cte> = with_clause
+        .ctes()
+        .filter_map(|c| c.name().map(|n| (n, c)))
+        .collect();
+
+    if ctes.is_empty() {
+        return (seed_ctx.clone(), vec![]);
+    }
+
+    let all_names: std::collections::HashSet<String> = ctes.keys().cloned().collect();
+    let names_iter: Vec<String> = ctes.keys().cloned().collect();
+
+    let mut dfs = CteDfs {
+        ctes,
+        all_names,
+        colour: std::collections::HashMap::new(),
+        topo: vec![],
+        diagnostics: vec![],
+        seed_ctx,
+        text,
+    };
+
+    for name in names_iter {
+        dfs.visit(&name);
+    }
+
+    // Build the final augmented context from the topological result.
+    let mut ctx = seed_ctx.clone();
+    for (cte_name, cols) in &dfs.topo {
+        for (col_name, typed_col) in cols {
+            ctx.add_cte_column(cte_name, col_name, typed_col.clone());
+        }
+        ctx.add_alias(cte_name, cte_name);
+    }
+
+    (ctx, dfs.diagnostics)
+}
+
+/// Return `true` when any unqualified IDENT token in `expr` exactly matches
+/// `param_name`.
+///
+/// Used by [`infer_splice_contexts`] to detect where an `Expr<T>` parameter
+/// is referenced inside a WHERE or HAVING clause.
+pub fn expr_refs_param(expr: &Expr, param_name: &str) -> bool {
+    for token in expr
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        if token.kind() == smelt_parser::SyntaxKind::IDENT && token.text() == param_name {
+            return true;
+        }
+    }
+    false
+}
+
+/// Collect the FROM-clause columns that are in scope at the WHERE clause
+/// for this SELECT.
+///
+/// Walks the FROM clause and, for each non-function table ref, looks up the
+/// ref name in `body_ctx` as either a `TableExpr` parameter (via
+/// [`TypeContext::tableexpr_param_columns`]) or a CTE (via
+/// [`TypeContext::cte_columns`]).  All matching columns are returned.
+fn from_scope_columns(select: &SelectStmt, body_ctx: &TypeContext) -> Vec<(String, TypedColumn)> {
+    let Some(from_clause) = select.from_clause() else {
+        return vec![];
+    };
+    let mut cols: Vec<(String, TypedColumn)> = vec![];
+    for table_ref in from_clause.table_refs() {
+        if table_ref.is_function_call() || table_ref.smelt_fn_call().is_some() {
+            continue;
+        }
+        let Some(id) = table_ref.identifier() else {
+            continue;
+        };
+        // TableExpr param?
+        if let Some(param_cols) = body_ctx.tableexpr_param_columns(&id) {
+            for (col_name, typed) in param_cols {
+                cols.push((col_name.clone(), typed.clone()));
+            }
+        }
+        // CTE?
+        else if body_ctx.is_cte(&id) {
+            for (col_name, typed) in body_ctx.cte_columns(&id) {
+                cols.push((col_name.to_string(), typed.clone()));
+            }
+        }
+    }
+    cols
+}
+
+/// Intersect two column schemas by name.  The result contains only columns
+/// whose names appear in BOTH inputs.
+fn intersect_columns(
+    a: &[(String, TypedColumn)],
+    b: &[(String, TypedColumn)],
+) -> Vec<(String, TypedColumn)> {
+    let b_names: std::collections::HashSet<&str> = b.iter().map(|(n, _)| n.as_str()).collect();
+    a.iter()
+        .filter(|(n, _)| b_names.contains(n.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Phase 20 Pass 2 (splice-point tracker): for each `Expr<T>` parameter in
+/// `sig` that is NOT a `TableExpr`, find where it is referenced in `select`'s
+/// WHERE and HAVING clauses and return the intersection of the FROM-scope
+/// column sets at each splice point.
+///
+/// - **WHERE scope**: columns from the FROM clause's `TableExpr` params / CTEs
+///   (as seeded in `body_ctx`).
+/// - **HAVING scope**: projected columns from the SELECT list (inferred via
+///   [`infer_tableexpr_return_schema`]).
+/// - **Intersection**: field-by-field by column name over all splice points
+///   for the same parameter.
+///
+/// Returns a map `param_name → inferred_columns`.  Parameters that do not
+/// appear in any splice point are absent from the map.
+///
+/// Pure — does not touch Salsa.
+pub fn infer_splice_contexts(
+    sig: &FunctionSig,
+    select: &SelectStmt,
+    body_ctx: &TypeContext,
+) -> std::collections::HashMap<String, Vec<(String, TypedColumn)>> {
+    let mut result: std::collections::HashMap<String, Vec<(String, TypedColumn)>> =
+        std::collections::HashMap::new();
+
+    // Only consider Expr<T> params (not TableExpr).
+    let expr_params: Vec<&str> = sig
+        .params
+        .iter()
+        .filter(|p| !is_tableexpr_param(p))
+        .map(|p| p.name.as_str())
+        .collect();
+
+    if expr_params.is_empty() {
+        return result;
+    }
+
+    // Pre-compute the WHERE scope = FROM clause columns.
+    let where_scope = from_scope_columns(select, body_ctx);
+
+    // Pre-compute the HAVING scope = SELECT-list projected columns.
+    let having_scope: Vec<(String, TypedColumn)> = infer_tableexpr_return_schema(select, body_ctx)
+        .map(|schema| {
+            schema
+                .columns
+                .iter()
+                .map(|c| {
+                    (
+                        c.name.clone(),
+                        c.data_type
+                            .clone()
+                            .unwrap_or_else(|| TypedColumn::nullable(DataType::Unknown)),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for param_name in expr_params {
+        let mut scopes: Vec<Vec<(String, TypedColumn)>> = vec![];
+
+        // Check WHERE clause.
+        if let Some(wc) = select.where_clause() {
+            if let Some(expr) = wc.expression() {
+                if expr_refs_param(&expr, param_name) && !where_scope.is_empty() {
+                    scopes.push(where_scope.clone());
+                }
+            }
+        }
+
+        // Check HAVING clause.
+        if let Some(hc) = select.having_clause() {
+            if let Some(expr) = hc.expression() {
+                if expr_refs_param(&expr, param_name) && !having_scope.is_empty() {
+                    scopes.push(having_scope.clone());
+                }
+            }
+        }
+
+        if scopes.is_empty() {
+            continue;
+        }
+
+        // Intersect all recorded scopes.
+        let inferred = scopes[1..]
+            .iter()
+            .fold(scopes[0].clone(), |acc, s| intersect_columns(&acc, s));
+
+        if !inferred.is_empty() {
+            result.insert(param_name.to_string(), inferred);
+        }
+    }
+
+    result
+}
+
+/// Definition-time ContextMismatch check for a single `smelt.define` with a
+/// SELECT body.
+///
+/// For each `Expr<T, ctx_name>` parameter:
+///   1. Check whether the parameter name appears in a WHERE clause.
+///   2. If so, identify the `TableExpr` parameter directly named in the FROM
+///      clause.
+///   3. If the FROM parameter name differs from `ctx_name` → emit
+///      [`DiagnosticCode::ContextMismatch`].
+///
+/// This is a name-based check (no column schemas needed) so it works at
+/// definition time before any caller context is available.
+///
+/// Pure — does not touch Salsa.
+pub fn context_mismatch_diagnostics_for_fn(
+    sig: &FunctionSig,
+    select: &SelectStmt,
+) -> Vec<Diagnostic> {
+    // Find the primary TableExpr param named in the FROM clause.
+    let inferred_from_param: Option<String> = {
+        let tableexpr_names: std::collections::HashSet<&str> = sig
+            .params
+            .iter()
+            .filter(|p| is_tableexpr_param(p))
+            .map(|p| p.name.as_str())
+            .collect();
+
+        select.from_clause().and_then(|fc| {
+            fc.table_refs()
+                .filter(|tr| !tr.is_function_call() && tr.smelt_fn_call().is_none())
+                .find_map(|tr| {
+                    tr.identifier()
+                        .filter(|id| tableexpr_names.contains(id.as_str()))
+                })
+        })
+    };
+
+    let Some(ref from_param) = inferred_from_param else {
+        // Can't infer — skip mismatch check.
+        return vec![];
+    };
+
+    let mut out: Vec<Diagnostic> = vec![];
+
+    for param in &sig.params {
+        let Some(ctx_ref) = &param.context else {
+            continue;
+        };
+        let ctx_name = ctx_ref.name();
+
+        // Only fire when the param actually appears in a WHERE clause.
+        let in_where = select
+            .where_clause()
+            .and_then(|wc| wc.expression())
+            .map(|e| expr_refs_param(&e, &param.name))
+            .unwrap_or(false);
+        if !in_where {
+            continue;
+        }
+
+        if ctx_name != from_param.as_str() {
+            let Some(range) = param.type_ref_range else {
+                continue;
+            };
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "Context annotation `{ctx_name}` for parameter `{}` does not match \
+                     the inferred splice context `{from_param}` in `{}`",
+                    param.name, sig.name
+                ),
+                range,
+                code: Some(DiagnosticCode::ContextMismatch),
+                data: None,
+            });
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
