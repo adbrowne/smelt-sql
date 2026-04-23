@@ -481,4 +481,4 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 
 ### Deferred during implementation
 
-_None yet._
+- **Phase 8 broken fixtures → Phase 9** (2026-04-23). `examples/broken/models/fn_coalesce_text_int.sql` and `fn_greatest_no_args.sql` were deferred to Phase 9. Phase 8 is data-only — the registry isn't wired into `infer_function_type` yet, so those fixtures would exercise the hand-written path's current behaviour, not the new `unify_call` error shape. Phase 9 rewires inference through the registry and is the natural home for those fixtures (and the paired `broken_function_diagnostics.rs` CASES rows).

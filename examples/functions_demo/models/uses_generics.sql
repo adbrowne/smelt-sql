@@ -1,0 +1,21 @@
+-- Phase 8 fixture: exercise the generic/variadic shapes seeded in the
+-- canonical registry. `sources.yml` declares `source.events` with
+-- `event_id INTEGER`, `user_id INTEGER`, `event_type VARCHAR`.
+--
+-- Each call below covers a different registry form:
+--   * MIN(event_id)                          — `MIN<T: Ordered>(T) → T`
+--   * COALESCE(user_id, 0)                   — `COALESCE<T: Any>(T...) → T`
+--   * GREATEST(event_id, user_id, 0)         — `GREATEST<T: Ordered>(T...) → T`
+--   * CONCAT(event_type, '-', event_type)    — `CONCAT(Text...) → Text`
+--
+-- Phase 8 is data-only: the registry is not yet wired into
+-- `infer_function_type`. Today these calls flow through the existing
+-- hand-written inference path, so the fixture must stay clean under the
+-- legacy checker. Phase 9 rewires the checker to drive inference through
+-- the registry directly.
+SELECT
+    MIN(event_id) AS min_event_id,
+    COALESCE(user_id, 0) AS user_id_or_zero,
+    GREATEST(event_id, user_id, 0) AS max_numeric,
+    CONCAT(event_type, '-', event_type) AS doubled_event_type
+FROM smelt.source('source.events')

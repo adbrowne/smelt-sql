@@ -12,9 +12,11 @@
 //! parsing into [`SmeltType`], alongside [`TypeConstraint`] for the `Numeric`
 //! / `Any` constraints per §16 #9. Phase 7 adds the [`TypeConstraint::Ordered`]
 //! member (§16 #13) and a monomorphic [`BuiltinRegistry`] skeleton seeded with
-//! a handful of SQL built-ins. Generics, variadics, and non-`Expr` sorts
-//! (TableExpr, AggExpr, …) are deferred to later phases of the smelt-functions
-//! plan.
+//! a handful of SQL built-ins. Phase 8 extends the registry with angle-bracket
+//! generics and trailing variadic parameters (§16 #14 + #15), adds
+//! [`unify_call`] for signature-driven type inference, and seeds ~30
+//! commonly-used SQL built-ins. Non-`Expr` sorts (TableExpr, AggExpr, …) remain
+//! deferred to later phases of the smelt-functions plan.
 
 use crate::{parse_type, DataType};
 use smelt_parser::ast::{File as AstFile, Param as AstParam, Range, SmeltDefine, TypeRef};
@@ -460,37 +462,513 @@ pub fn extract_function_signature_by_name(
         .find(|sig| sig.name == name)
 }
 
-/// Monomorphic signature of a SQL built-in in the canonical registry.
+/// One type parameter in a signature generic list (§16 #14).
 ///
-/// Phase 7 ships a deliberately tiny shape: every parameter and the return
-/// type are [`TypeConstraint`] values. Concrete scalar entries use
-/// [`TypeConstraint::Concrete`]; the `Numeric` / `Ordered` / `Any` constraints
-/// exist for forward-compatibility but none of the Phase 7 seeds use them
-/// directly. Generics and variadics land in Phase 8 and will extend this
-/// type.
+/// Generics live on built-in signatures only; `smelt.define` stays
+/// monomorphic in v1. The `constraint` narrows what concrete types may
+/// bind: `TypeConstraint::Numeric` triggers the promotion-chain branch of
+/// unification, everything else requires exact equality across positions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParam {
+    /// The variable's name as written in the signature (e.g. `"T"`).
+    pub name: String,
+    /// Narrowing constraint; `TypeConstraint::Any` means "no constraint".
+    pub constraint: TypeConstraint,
+}
+
+/// A single parameter slot in a signature (§16 #14 + #15).
+///
+/// `Concrete(c)` demands a fixed `TypeConstraint` (usually
+/// `Concrete(DataType::…)`). `Var(name)` refers to one of the signature's
+/// [`TypeParam`]s by name. `Variadic(inner)` is only legal in the trailing
+/// slot — enforced by [`Signature::new`]; see
+/// [`SignatureBuildError::NonTrailingVariadic`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SigParam {
+    /// A concrete constraint the argument must satisfy (e.g.
+    /// `Concrete(Concrete(Text))` for a scalar Text parameter).
+    Concrete(TypeConstraint),
+    /// A reference to a generic type parameter by name.
+    Var(String),
+    /// Trailing zero-or-more parameter of the inner shape. The inner
+    /// `SigParam` is itself a `Concrete(...)` or `Var(...)` (never a
+    /// nested `Variadic`).
+    Variadic(Box<SigParam>),
+}
+
+/// A signature's return type — same vocabulary as [`SigParam`] without
+/// [`SigParam::Variadic`] (SQL functions return a single column).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeExpr {
+    /// A fixed `TypeConstraint` for the return type.
+    Concrete(TypeConstraint),
+    /// The return type is bound to a generic type variable of this name.
+    Var(String),
+}
+
+/// Error produced at registry-construction time when a [`Signature`] is
+/// shaped in a way the inference routine can't handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureBuildError {
+    /// A non-trailing [`SigParam::Variadic`] appeared in the parameter list.
+    NonTrailingVariadic { name: String, position: usize },
+    /// A variadic contained another variadic — not expressible in v1.
+    NestedVariadic { name: String },
+    /// A [`TypeExpr::Var`] or [`SigParam::Var`] referenced a name that
+    /// isn't declared in `type_params`.
+    UndeclaredTypeVar { name: String, var_name: String },
+}
+
+impl std::fmt::Display for SignatureBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignatureBuildError::NonTrailingVariadic { name, position } => write!(
+                f,
+                "signature `{name}` declares a variadic at position {position} but variadics must be the final parameter"
+            ),
+            SignatureBuildError::NestedVariadic { name } => write!(
+                f,
+                "signature `{name}` nests a variadic inside a variadic"
+            ),
+            SignatureBuildError::UndeclaredTypeVar { name, var_name } => write!(
+                f,
+                "signature `{name}` references undeclared type variable `{var_name}`"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SignatureBuildError {}
+
+/// Polymorphic signature of a SQL built-in in the canonical registry.
+///
+/// Phase 7 was monomorphic (`params: Vec<TypeConstraint>`, same for return).
+/// Phase 8 extends to full generics + trailing variadic per §16 #14/#15:
+///
+/// * [`Signature::type_params`] — generic list (empty for monomorphic
+///   entries).
+/// * [`Signature::params`] — positional [`SigParam`]s; at most one trailing
+///   [`SigParam::Variadic`].
+/// * [`Signature::return_type`] — concrete [`TypeConstraint`] or a reference
+///   to one of the type parameters.
+///
+/// Construct entries via [`Signature::new`] so the well-formedness checks
+/// run once at registry initialisation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     /// Canonical (upper-cased) function name.
     pub name: String,
-    /// Positional parameter constraints, in declaration order.
-    pub params: Vec<TypeConstraint>,
-    /// Return type constraint.
-    pub return_type: TypeConstraint,
+    /// Declared generic type parameters, in declaration order. Empty when
+    /// the signature is monomorphic.
+    pub type_params: Vec<TypeParam>,
+    /// Positional parameters, in declaration order. At most one
+    /// [`SigParam::Variadic`], which must be last.
+    pub params: Vec<SigParam>,
+    /// Return type.
+    pub return_type: TypeExpr,
 }
 
-/// Canonical registry of SQL built-in signatures.
+impl Signature {
+    /// Build a validated signature. Panics with a readable message when
+    /// the signature violates a structural invariant — registry seeds are
+    /// static data, so any error here is a programmer bug caught at first
+    /// call (via [`std::sync::LazyLock`]).
+    pub fn new(
+        name: &str,
+        type_params: Vec<TypeParam>,
+        params: Vec<SigParam>,
+        return_type: TypeExpr,
+    ) -> Self {
+        Self::try_new(name, type_params, params, return_type).expect("malformed built-in signature")
+    }
+
+    /// Non-panicking variant for tests / future `smelt.extern` use.
+    pub fn try_new(
+        name: &str,
+        type_params: Vec<TypeParam>,
+        params: Vec<SigParam>,
+        return_type: TypeExpr,
+    ) -> Result<Self, SignatureBuildError> {
+        // Variadic must be trailing only.
+        for (idx, p) in params.iter().enumerate() {
+            if let SigParam::Variadic(inner) = p {
+                if idx != params.len() - 1 {
+                    return Err(SignatureBuildError::NonTrailingVariadic {
+                        name: name.to_string(),
+                        position: idx + 1,
+                    });
+                }
+                if matches!(**inner, SigParam::Variadic(_)) {
+                    return Err(SignatureBuildError::NestedVariadic {
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+        // Every type-var reference must be declared.
+        let declared: std::collections::HashSet<&str> =
+            type_params.iter().map(|tp| tp.name.as_str()).collect();
+        for p in &params {
+            check_param_vars(name, p, &declared)?;
+        }
+        if let TypeExpr::Var(var_name) = &return_type {
+            if !declared.contains(var_name.as_str()) {
+                return Err(SignatureBuildError::UndeclaredTypeVar {
+                    name: name.to_string(),
+                    var_name: var_name.clone(),
+                });
+            }
+        }
+        Ok(Self {
+            name: name.to_string(),
+            type_params,
+            params,
+            return_type,
+        })
+    }
+
+    /// Look up a declared type parameter by name.
+    pub fn type_param(&self, var_name: &str) -> Option<&TypeParam> {
+        self.type_params.iter().find(|tp| tp.name == var_name)
+    }
+}
+
+fn check_param_vars(
+    sig_name: &str,
+    p: &SigParam,
+    declared: &std::collections::HashSet<&str>,
+) -> Result<(), SignatureBuildError> {
+    match p {
+        SigParam::Concrete(_) => Ok(()),
+        SigParam::Var(v) => {
+            if declared.contains(v.as_str()) {
+                Ok(())
+            } else {
+                Err(SignatureBuildError::UndeclaredTypeVar {
+                    name: sig_name.to_string(),
+                    var_name: v.clone(),
+                })
+            }
+        }
+        SigParam::Variadic(inner) => check_param_vars(sig_name, inner, declared),
+    }
+}
+
+/// Result of a successful [`unify_call`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifyResult {
+    /// The concrete return type after resolving all type variables.
+    pub return_type: DataType,
+    /// Bindings collected for each declared type variable.
+    pub bindings: HashMap<String, DataType>,
+}
+
+/// Error produced when call-site arguments don't match a signature (§16 #14/#15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnificationError {
+    /// A concrete argument type didn't satisfy the parameter's constraint.
+    /// `position` is 1-based.
+    ConstraintViolation {
+        position: usize,
+        param_constraint: TypeConstraint,
+        actual: DataType,
+    },
+    /// A type variable bound inconsistently across positions. `positions`
+    /// holds every 1-based argument index where this variable appeared
+    /// (plus the return position only if it participated — not used in v1).
+    InconsistentBinding {
+        var_name: String,
+        positions: Vec<usize>,
+        types: Vec<DataType>,
+    },
+    /// Not enough positional arguments supplied.
+    MissingArgs { expected: usize, got: usize },
+    /// Too many positional arguments — no variadic to absorb the overflow.
+    TooManyArgs { expected: usize, got: usize },
+    /// A variadic type variable with no supplied arguments and no return
+    /// binding — can't determine what to bind it to (§16 #15 fallback 2).
+    EmptyVariadicTypeVar { var_name: String },
+}
+
+impl std::fmt::Display for UnificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnificationError::ConstraintViolation {
+                position,
+                param_constraint,
+                actual,
+            } => write!(
+                f,
+                "argument at position {position} (type {actual}) does not satisfy {param_constraint:?}"
+            ),
+            UnificationError::InconsistentBinding {
+                var_name,
+                positions,
+                types,
+            } => {
+                write!(f, "type variable `{var_name}` inferred inconsistently:")?;
+                for (pos, ty) in positions.iter().zip(types.iter()) {
+                    write!(f, " position {pos} = {ty};")?;
+                }
+                Ok(())
+            }
+            UnificationError::MissingArgs { expected, got } => {
+                write!(f, "expected at least {expected} argument(s), got {got}")
+            }
+            UnificationError::TooManyArgs { expected, got } => {
+                write!(f, "expected {expected} argument(s), got {got}")
+            }
+            UnificationError::EmptyVariadicTypeVar { var_name } => write!(
+                f,
+                "cannot infer type variable `{var_name}` — variadic position received no arguments and no return type is expected from context"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UnificationError {}
+
+/// Unify a signature against a list of concrete argument types.
 ///
-/// Phase 7 seeds the registry with four monomorphic scalar entries (`LOWER`,
-/// `UPPER`, `LENGTH`, `ABS`) so downstream phases (and this phase's tests)
-/// can exercise the lookup surface. The registry is populated once at
-/// program start via [`std::sync::LazyLock`], stays `'static`, and is
-/// keyed by ASCII-uppercased name — callers use [`BuiltinRegistry::resolve`]
-/// which folds case at the boundary.
+/// For each signature, the checker collects every position where a type
+/// variable appears (argument positions only in v1; bidirectional
+/// checking is deferred to Step 5). Variables whose constraint is
+/// [`TypeConstraint::Numeric`] reduce by LUB via the caller-supplied
+/// `lub` closure (the only promotion-chain constraint in v1, §16 #14);
+/// every other constraint requires exact equality across positions.
 ///
-/// The registry is *data only*: it has no Salsa dependency, no inference
-/// wiring, and is not yet consumed by the type checker (the hand-written
-/// match in `smelt-db::type_inference` continues to drive inference until
-/// Phase 9 rewires it).
+/// The `lub` closure lives outside this crate because the real LUB
+/// computation is in `smelt-db::type_inference::promote_types`, and
+/// `smelt-types` must remain dependency-free. Tests in this module use
+/// a small inline LUB that matches §16 #9's promotion chain.
+pub fn unify_call(
+    sig: &Signature,
+    args: &[DataType],
+    lub: &dyn Fn(&DataType, &DataType) -> DataType,
+) -> Result<UnifyResult, UnificationError> {
+    // Split leading vs (optional) trailing variadic.
+    let (leading, variadic) = match sig.params.last() {
+        Some(SigParam::Variadic(inner)) => {
+            let last_idx = sig.params.len() - 1;
+            (&sig.params[..last_idx], Some(inner.as_ref()))
+        }
+        _ => (&sig.params[..], None),
+    };
+
+    // Arity checks.
+    if variadic.is_none() {
+        if args.len() < leading.len() {
+            return Err(UnificationError::MissingArgs {
+                expected: leading.len(),
+                got: args.len(),
+            });
+        }
+        if args.len() > leading.len() {
+            return Err(UnificationError::TooManyArgs {
+                expected: leading.len(),
+                got: args.len(),
+            });
+        }
+    } else if args.len() < leading.len() {
+        return Err(UnificationError::MissingArgs {
+            expected: leading.len(),
+            got: args.len(),
+        });
+    }
+
+    // Collect positions per type variable, in 1-based order.
+    let mut var_positions: HashMap<String, Vec<(usize, DataType)>> = HashMap::new();
+    for tp in &sig.type_params {
+        var_positions.insert(tp.name.clone(), Vec::new());
+    }
+
+    let check_concrete = |position: usize,
+                          constraint: &TypeConstraint,
+                          arg: &DataType|
+     -> Result<(), UnificationError> {
+        if constraint.satisfies(arg) {
+            Ok(())
+        } else {
+            Err(UnificationError::ConstraintViolation {
+                position,
+                param_constraint: constraint.clone(),
+                actual: arg.clone(),
+            })
+        }
+    };
+
+    // Leading params.
+    for (idx, (param, arg)) in leading.iter().zip(args.iter()).enumerate() {
+        let position = idx + 1;
+        match param {
+            SigParam::Concrete(c) => check_concrete(position, c, arg)?,
+            SigParam::Var(var_name) => {
+                let tp = sig
+                    .type_param(var_name)
+                    .expect("validated in Signature::new");
+                check_concrete(position, &tp.constraint, arg)?;
+                var_positions
+                    .get_mut(var_name)
+                    .expect("initialised above")
+                    .push((position, arg.clone()));
+            }
+            SigParam::Variadic(_) => unreachable!("leading can't contain variadic"),
+        }
+    }
+
+    // Variadic params.
+    if let Some(inner) = variadic {
+        for (rel, arg) in args[leading.len()..].iter().enumerate() {
+            let position = leading.len() + rel + 1;
+            match inner {
+                SigParam::Concrete(c) => check_concrete(position, c, arg)?,
+                SigParam::Var(var_name) => {
+                    let tp = sig
+                        .type_param(var_name)
+                        .expect("validated in Signature::new");
+                    check_concrete(position, &tp.constraint, arg)?;
+                    var_positions
+                        .get_mut(var_name)
+                        .expect("initialised above")
+                        .push((position, arg.clone()));
+                }
+                SigParam::Variadic(_) => {
+                    unreachable!("nested variadic rejected in Signature::try_new")
+                }
+            }
+        }
+    }
+
+    // Reduce per-var positions into a single binding.
+    let mut bindings: HashMap<String, DataType> = HashMap::new();
+    for tp in &sig.type_params {
+        let positions = var_positions.remove(&tp.name).unwrap_or_default();
+        if positions.is_empty() {
+            return Err(UnificationError::EmptyVariadicTypeVar {
+                var_name: tp.name.clone(),
+            });
+        }
+        let binding = match tp.constraint {
+            // Only Numeric has a declared promotion chain in v1 (§16 #9/#14).
+            TypeConstraint::Numeric => {
+                let mut iter = positions.iter();
+                let (_, first) = iter.next().unwrap();
+                let mut acc = first.clone();
+                for (_, ty) in iter {
+                    acc = lub(&acc, ty);
+                }
+                // Widen via `lub` may produce any numeric; constraint is
+                // already satisfied per-position, so no re-check needed.
+                acc
+            }
+            // All non-Numeric constraints (Ordered, Any, Concrete): require
+            // exact equality across positions.
+            _ => {
+                let first = &positions[0].1;
+                let disagreements: Vec<(usize, DataType)> = positions
+                    .iter()
+                    .filter(|(_, ty)| ty != first)
+                    .cloned()
+                    .collect();
+                if !disagreements.is_empty() {
+                    // Cite every position, including the first (which
+                    // established the "winning" type), per §16 #14.
+                    let all_positions: Vec<usize> = positions.iter().map(|(p, _)| *p).collect();
+                    let all_types: Vec<DataType> =
+                        positions.iter().map(|(_, t)| t.clone()).collect();
+                    return Err(UnificationError::InconsistentBinding {
+                        var_name: tp.name.clone(),
+                        positions: all_positions,
+                        types: all_types,
+                    });
+                }
+                first.clone()
+            }
+        };
+        bindings.insert(tp.name.clone(), binding);
+    }
+
+    // Resolve the return type.
+    let return_type = match &sig.return_type {
+        TypeExpr::Concrete(TypeConstraint::Concrete(dt)) => dt.clone(),
+        TypeExpr::Concrete(TypeConstraint::Numeric) => DataType::Double,
+        TypeExpr::Concrete(TypeConstraint::Ordered) => DataType::Unknown,
+        TypeExpr::Concrete(TypeConstraint::Any) => DataType::Unknown,
+        TypeExpr::Var(var_name) => bindings
+            .get(var_name)
+            .cloned()
+            .expect("type var validated at Signature::new"),
+    };
+
+    Ok(UnifyResult {
+        return_type,
+        bindings,
+    })
+}
+
+/// A minimal Numeric LUB matching §16 #9 — the only promotion chain in v1.
+///
+/// Lives in `smelt-types` so the signature-unification unit tests don't
+/// depend on `smelt-db`. Production callers in Phase 9+ will pass
+/// `smelt-db::promote_types` (or a thin adapter) to [`unify_call`] instead.
+pub fn numeric_lub(a: &DataType, b: &DataType) -> DataType {
+    // Exact-match early-out (including Decimal precision/scale — v1 keeps
+    // Decimal opaque here; smelt-db's promote_types has full decimal rules).
+    if std::mem::discriminant(a) == std::mem::discriminant(b) {
+        return a.clone();
+    }
+    use DataType::*;
+    let rank = |d: &DataType| -> u8 {
+        match d {
+            SmallInt => 1,
+            Integer => 2,
+            BigInt => 3,
+            // Per §16 #9: Decimal sits between BigInt and Double; since v1
+            // combines Decimal + integer by widening to DECIMAL(38,10),
+            // rank Decimal at 4 and Float/Double at 5/6.
+            Decimal { .. } => 4,
+            Float => 5,
+            Double => 6,
+            _ => 0,
+        }
+    };
+    match (a, b) {
+        // Decimal combined with any integer type widens to DECIMAL(38,10)
+        // (§16 #9 rule for precision/scale preservation).
+        (Decimal { .. }, SmallInt | Integer | BigInt)
+        | (SmallInt | Integer | BigInt, Decimal { .. }) => Decimal {
+            precision: 38,
+            scale: 10,
+        },
+        _ => {
+            let (ra, rb) = (rank(a), rank(b));
+            if ra >= rb {
+                a.clone()
+            } else {
+                b.clone()
+            }
+        }
+    }
+}
+
+/// Canonical registry of SQL built-in signatures (§16 #14/#15, Phase 8).
+///
+/// Phase 8 seeds the registry with ~30 of the most-commonly-used SQL
+/// functions, spanning monomorphic, generic, and variadic shapes. The
+/// registry is populated once via [`std::sync::LazyLock`] and stays
+/// `'static`; [`BuiltinRegistry::resolve`] folds ASCII case at the
+/// lookup boundary.
+///
+/// Known omissions (documented per Phase 8's scope):
+/// * `IS NULL` / `IS NOT NULL` — unary predicates with dedicated SQL
+///   syntax, not callable via the function-registry surface. A future
+///   rewire may route them through a separate predicate resolver.
+/// * `CAST(x AS T)` — also has dedicated SQL syntax; tracked separately
+///   from the function registry.
+///
+/// The registry remains *data only* in Phase 8: inference is still
+/// driven by the hand-written match in `smelt-db::type_inference`.
+/// Phase 9 rewires `infer_function_type` through this registry.
 pub struct BuiltinRegistry;
 
 impl BuiltinRegistry {
@@ -508,27 +986,244 @@ impl BuiltinRegistry {
     }
 }
 
+fn tp(name: &str, c: TypeConstraint) -> TypeParam {
+    TypeParam {
+        name: name.to_string(),
+        constraint: c,
+    }
+}
+
+fn concrete(dt: DataType) -> SigParam {
+    SigParam::Concrete(TypeConstraint::Concrete(dt))
+}
+
+fn var(name: &str) -> SigParam {
+    SigParam::Var(name.to_string())
+}
+
+fn variadic(inner: SigParam) -> SigParam {
+    SigParam::Variadic(Box::new(inner))
+}
+
 static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     let mut m: HashMap<String, Signature> = HashMap::new();
-    let text = || TypeConstraint::Concrete(DataType::Text);
-    let integer = || TypeConstraint::Concrete(DataType::Integer);
-    let double = || TypeConstraint::Concrete(DataType::Double);
-    let mut insert = |name: &str, params: Vec<TypeConstraint>, return_type: TypeConstraint| {
-        m.insert(
-            name.to_string(),
-            Signature {
-                name: name.to_string(),
-                params,
-                return_type,
-            },
-        );
+    let mut insert = |sig: Signature| {
+        m.insert(sig.name.clone(), sig);
     };
-    // Phase 7 seeds. All entries are monomorphic scalars; Phase 8 will
-    // add generic and variadic forms.
-    insert("LOWER", vec![text()], text());
-    insert("UPPER", vec![text()], text());
-    insert("LENGTH", vec![text()], integer());
-    insert("ABS", vec![double()], double());
+
+    // ─── Aggregates (treated like scalars here; aggregate-ness is Phase 3+
+    //     of the broader roadmap and has no bearing on unification).
+    insert(Signature::new(
+        "SUM",
+        vec![tp("T", TypeConstraint::Numeric)],
+        vec![var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "AVG",
+        vec![tp("T", TypeConstraint::Numeric)],
+        vec![var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "MIN",
+        vec![tp("T", TypeConstraint::Ordered)],
+        vec![var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "MAX",
+        vec![tp("T", TypeConstraint::Ordered)],
+        vec![var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "COUNT",
+        vec![],
+        vec![SigParam::Concrete(TypeConstraint::Any)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+    ));
+
+    // ─── Null / coalesce / comparison family.
+    insert(Signature::new(
+        "COALESCE",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![variadic(var("T"))],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "GREATEST",
+        vec![tp("T", TypeConstraint::Ordered)],
+        vec![variadic(var("T"))],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "LEAST",
+        vec![tp("T", TypeConstraint::Ordered)],
+        vec![variadic(var("T"))],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "NULLIF",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T"), var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "IFNULL",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T"), var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+
+    // ─── Arithmetic / numeric scalars.
+    insert(Signature::new(
+        "ABS",
+        vec![tp("T", TypeConstraint::Numeric)],
+        vec![var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "POWER",
+        vec![],
+        vec![concrete(DataType::Double), concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "SQRT",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "LOG",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "LN",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "ROUND",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "CEIL",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "FLOOR",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+
+    // ─── Text / string scalars.
+    insert(Signature::new(
+        "LOWER",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "UPPER",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "LENGTH",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+    ));
+    insert(Signature::new(
+        "SUBSTRING",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::Integer),
+            concrete(DataType::Integer),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "TRIM",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "CONCAT",
+        vec![],
+        vec![variadic(concrete(DataType::Text))],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+
+    // ─── Date / time basics.
+    insert(Signature::new(
+        "DATE_TRUNC",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+            with_timezone: false,
+        })),
+    ));
+    insert(Signature::new(
+        "EXTRACT",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+    ));
+    insert(Signature::new(
+        "DATE",
+        vec![],
+        vec![concrete(DataType::Timestamp {
+            with_timezone: false,
+        })],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+    ));
+    insert(Signature::new(
+        "NOW",
+        vec![],
+        vec![],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+            with_timezone: false,
+        })),
+    ));
+    insert(Signature::new(
+        "CURRENT_DATE",
+        vec![],
+        vec![],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+    ));
+    insert(Signature::new(
+        "CURRENT_TIMESTAMP",
+        vec![],
+        vec![],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+            with_timezone: false,
+        })),
+    ));
+
     m
 });
 
@@ -885,28 +1580,47 @@ mod tests {
 
     #[test]
     fn registry_lookup_by_name() {
+        // Phase 8 migrated these entries to the new shape. LOWER/UPPER/LENGTH
+        // are still monomorphic (no type params, concrete params + return);
+        // ABS moved to `ABS<T: Numeric>(T) → T` per the plan.
         let lower = BuiltinRegistry::resolve("LOWER").expect("LOWER present");
         assert_eq!(lower.name, "LOWER");
-        assert_eq!(lower.params, vec![TypeConstraint::Concrete(DataType::Text)]);
-        assert_eq!(lower.return_type, TypeConstraint::Concrete(DataType::Text));
+        assert!(lower.type_params.is_empty());
+        assert_eq!(
+            lower.params,
+            vec![SigParam::Concrete(TypeConstraint::Concrete(DataType::Text))]
+        );
+        assert_eq!(
+            lower.return_type,
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text))
+        );
 
         let upper = BuiltinRegistry::resolve("UPPER").expect("UPPER present");
-        assert_eq!(upper.params, vec![TypeConstraint::Concrete(DataType::Text)]);
-        assert_eq!(upper.return_type, TypeConstraint::Concrete(DataType::Text));
+        assert_eq!(
+            upper.params,
+            vec![SigParam::Concrete(TypeConstraint::Concrete(DataType::Text))]
+        );
+        assert_eq!(
+            upper.return_type,
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text))
+        );
 
         let length = BuiltinRegistry::resolve("LENGTH").expect("LENGTH present");
         assert_eq!(
             length.params,
-            vec![TypeConstraint::Concrete(DataType::Text)]
+            vec![SigParam::Concrete(TypeConstraint::Concrete(DataType::Text))]
         );
         assert_eq!(
             length.return_type,
-            TypeConstraint::Concrete(DataType::Integer)
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer))
         );
 
         let abs = BuiltinRegistry::resolve("ABS").expect("ABS present");
-        assert_eq!(abs.params, vec![TypeConstraint::Concrete(DataType::Double)]);
-        assert_eq!(abs.return_type, TypeConstraint::Concrete(DataType::Double));
+        assert_eq!(abs.type_params.len(), 1);
+        assert_eq!(abs.type_params[0].name, "T");
+        assert_eq!(abs.type_params[0].constraint, TypeConstraint::Numeric);
+        assert_eq!(abs.params, vec![SigParam::Var("T".into())]);
+        assert_eq!(abs.return_type, TypeExpr::Var("T".into()));
     }
 
     #[test]
@@ -922,5 +1636,246 @@ mod tests {
         assert!(std::ptr::eq(canonical, lowercase));
         assert!(std::ptr::eq(canonical, titlecase));
         assert!(std::ptr::eq(canonical, mixed));
+    }
+
+    // === Phase 8 TDD tests — generics + variadics (§16 #14, #15) ===
+
+    #[test]
+    fn min_generic_preserves_input_type() {
+        // `MIN<T: Ordered>(T) → T` with Integer must return Integer — the
+        // canonical type-preserving case (§16 #14).
+        let sig = BuiltinRegistry::resolve("MIN").expect("MIN present");
+        let res = unify_call(sig, &[DataType::Integer], &numeric_lub).expect("unification ok");
+        assert_eq!(res.return_type, DataType::Integer);
+        assert_eq!(res.bindings.get("T"), Some(&DataType::Integer));
+    }
+
+    #[test]
+    fn coalesce_lub_of_numeric_args() {
+        // COALESCE is `<T: Any>(T...) → T`. Any has no promotion chain, so
+        // mixing Integer/BigInt/Double would normally fail unification.
+        // For the LUB test, we exercise the Numeric-chain path via a bespoke
+        // signature (the core behaviour under test is that a Numeric-constrained
+        // type variable reduces by LUB across all positions).
+        let sig = Signature::new(
+            "numeric_coalesce",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![variadic(var("T"))],
+            TypeExpr::Var("T".into()),
+        );
+        let res = unify_call(
+            &sig,
+            &[DataType::Integer, DataType::BigInt, DataType::Double],
+            &numeric_lub,
+        )
+        .expect("LUB should succeed under Numeric constraint");
+        assert_eq!(res.return_type, DataType::Double);
+    }
+
+    #[test]
+    fn coalesce_text_int_rejects() {
+        // COALESCE has an Any-constrained type var. Any has no promotion
+        // chain, so mixing Text/Integer must fail with an InconsistentBinding
+        // citing position 2 (the Integer that conflicts with T=Text
+        // established at position 1).
+        let sig = BuiltinRegistry::resolve("COALESCE").expect("COALESCE present");
+        let err = unify_call(sig, &[DataType::Text, DataType::Integer], &numeric_lub)
+            .expect_err("Text/Integer must not unify under `Any`");
+        match err {
+            UnificationError::InconsistentBinding {
+                var_name,
+                positions,
+                types,
+            } => {
+                assert_eq!(var_name, "T");
+                // Both positions are cited; position 2 (the mismatch) must
+                // appear so the user can pinpoint the offender.
+                assert!(
+                    positions.contains(&2),
+                    "expected position 2 to be cited, got {positions:?}"
+                );
+                assert!(
+                    positions.contains(&1),
+                    "expected position 1 (the establishing Text) to be cited, got {positions:?}"
+                );
+                assert!(types.contains(&DataType::Text));
+                assert!(types.contains(&DataType::Integer));
+            }
+            other => panic!("expected InconsistentBinding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn greatest_variadic_allows_single_arg() {
+        // `GREATEST<T: Ordered>(T...) → T` must accept exactly one arg.
+        let sig = BuiltinRegistry::resolve("GREATEST").expect("GREATEST present");
+        let res = unify_call(sig, &[DataType::Integer], &numeric_lub)
+            .expect("GREATEST should accept a single Integer");
+        assert_eq!(res.return_type, DataType::Integer);
+    }
+
+    #[test]
+    fn concat_zero_args_returns_text() {
+        // CONCAT has a concrete Text variadic and a concrete Text return —
+        // no type vars to infer. Zero args therefore types cleanly.
+        let sig = BuiltinRegistry::resolve("CONCAT").expect("CONCAT present");
+        let res = unify_call(sig, &[], &numeric_lub).expect("zero-arity CONCAT ok");
+        assert_eq!(res.return_type, DataType::Text);
+    }
+
+    #[test]
+    fn generic_inference_error_cites_positions() {
+        // §16 #14's error-surface contract: messages must cite the positions
+        // that forced the inconsistent binding.
+        let sig = BuiltinRegistry::resolve("COALESCE").expect("COALESCE present");
+        let err = unify_call(
+            sig,
+            &[DataType::Text, DataType::Integer, DataType::Text],
+            &numeric_lub,
+        )
+        .expect_err("Text/Integer/Text must not unify under Any");
+        match &err {
+            UnificationError::InconsistentBinding { positions, .. } => {
+                // All three positions are cited in the error payload.
+                assert_eq!(positions.len(), 3);
+                assert!(positions.contains(&1));
+                assert!(positions.contains(&2));
+                assert!(positions.contains(&3));
+            }
+            other => panic!("expected InconsistentBinding, got {other:?}"),
+        }
+        // The Display impl mentions "position N" so users can read the error.
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("position 1"),
+            "error message should mention position 1, got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("position 2"),
+            "error message should mention position 2, got {rendered:?}"
+        );
+    }
+
+    // === Phase 8 supplementary tests — signature construction invariants ===
+
+    #[test]
+    fn non_trailing_variadic_rejected() {
+        let err = Signature::try_new(
+            "bad",
+            vec![],
+            vec![
+                SigParam::Variadic(Box::new(SigParam::Concrete(TypeConstraint::Concrete(
+                    DataType::Text,
+                )))),
+                SigParam::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .expect_err("variadic in non-trailing position must be rejected");
+        assert!(matches!(
+            err,
+            SignatureBuildError::NonTrailingVariadic { .. }
+        ));
+    }
+
+    #[test]
+    fn undeclared_type_var_rejected() {
+        let err = Signature::try_new(
+            "bad",
+            vec![],
+            vec![SigParam::Var("T".into())],
+            TypeExpr::Var("T".into()),
+        )
+        .expect_err("undeclared type var must be rejected");
+        assert!(matches!(err, SignatureBuildError::UndeclaredTypeVar { .. }));
+    }
+
+    #[test]
+    fn too_many_args_for_fixed_arity_signature() {
+        let sig = BuiltinRegistry::resolve("LOWER").expect("LOWER present");
+        let err = unify_call(sig, &[DataType::Text, DataType::Text], &numeric_lub)
+            .expect_err("LOWER takes exactly one arg");
+        assert!(matches!(err, UnificationError::TooManyArgs { .. }));
+    }
+
+    #[test]
+    fn missing_args_for_leading_positions() {
+        // SUBSTRING takes three args; supplying one triggers MissingArgs.
+        let sig = BuiltinRegistry::resolve("SUBSTRING").expect("SUBSTRING present");
+        let err =
+            unify_call(sig, &[DataType::Text], &numeric_lub).expect_err("SUBSTRING needs 3 args");
+        assert!(matches!(
+            err,
+            UnificationError::MissingArgs {
+                expected: 3,
+                got: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn constraint_violation_for_wrong_type() {
+        // LENGTH(Text) → Integer — passing Integer must violate the Text
+        // constraint at position 1.
+        let sig = BuiltinRegistry::resolve("LENGTH").expect("LENGTH present");
+        let err = unify_call(sig, &[DataType::Integer], &numeric_lub)
+            .expect_err("LENGTH(Integer) rejects");
+        match err {
+            UnificationError::ConstraintViolation {
+                position, actual, ..
+            } => {
+                assert_eq!(position, 1);
+                assert_eq!(actual, DataType::Integer);
+            }
+            other => panic!("expected ConstraintViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn count_accepts_any_returns_bigint() {
+        // COUNT(Any) → BigInt is the monomorphic shape that accepts any
+        // concrete type without introducing a type variable.
+        let sig = BuiltinRegistry::resolve("COUNT").expect("COUNT present");
+        for dt in [
+            DataType::Integer,
+            DataType::Text,
+            DataType::Boolean,
+            DataType::Date,
+        ] {
+            let res = unify_call(sig, std::slice::from_ref(&dt), &numeric_lub)
+                .unwrap_or_else(|e| panic!("COUNT({dt:?}) should succeed: {e}"));
+            assert_eq!(res.return_type, DataType::BigInt);
+        }
+    }
+
+    #[test]
+    fn numeric_lub_matches_promotion_chain() {
+        // Spot-check the helper LUB against §16 #9.
+        assert_eq!(
+            numeric_lub(&DataType::Integer, &DataType::BigInt),
+            DataType::BigInt
+        );
+        assert_eq!(
+            numeric_lub(&DataType::Integer, &DataType::Double),
+            DataType::Double
+        );
+        assert_eq!(
+            numeric_lub(&DataType::Integer, &DataType::SmallInt),
+            DataType::Integer
+        );
+        // Decimal + integer widens to DECIMAL(38,10).
+        assert_eq!(
+            numeric_lub(
+                &DataType::Integer,
+                &DataType::Decimal {
+                    precision: 5,
+                    scale: 2,
+                },
+            ),
+            DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            }
+        );
     }
 }
