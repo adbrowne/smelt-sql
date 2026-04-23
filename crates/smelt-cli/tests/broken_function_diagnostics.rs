@@ -16,7 +16,10 @@
 
 use std::path::PathBuf;
 
-use smelt_db::{file_diagnostics, Database, DiagnosticCode, SourceFile, Workspace};
+use smelt_db::{
+    check_type_diagnostics, file_diagnostics, Database, DiagnosticAcc, DiagnosticCode, SourceFile,
+    Workspace,
+};
 
 /// A broken-fixture case: which file to load, its expected diagnostic
 /// code, and a message substring the diagnostic must contain.
@@ -176,6 +179,16 @@ const CASES: &[Case] = &[
         companion: Some("fn_row_requirement_missing_other.sql"),
         code: DiagnosticCode::RowRequirementUnsatisfied,
         message_substring: "cost",
+    },
+    // Phase 17 — the caller projects `missing_col` through a
+    // `TableExpr`-returning call's inferred return schema, but
+    // `missing_col` isn't in that schema. Surfaces as
+    // `UndeclaredColumn` on the explicit projection.
+    Case {
+        fixture: "fn_tableexpr_return_bare_col_missing.sql",
+        companion: Some("fn_tableexpr_return_bare_col_missing_other.sql"),
+        code: DiagnosticCode::UndeclaredColumn,
+        message_substring: "missing_col",
     },
 ];
 
@@ -381,7 +394,16 @@ fn every_broken_fn_fixture_emits_expected_diagnostic() {
         let (db, ws, handles) = build_db(project_root.clone(), &files);
         let fixture_handle = handles[0];
 
-        let diags = file_diagnostics(&db, ws, fixture_handle);
+        // Aggregate both the accumulated `check_file_diagnostics` set
+        // and the `check_type_diagnostics` set — Phase 17's
+        // UndeclaredColumn diagnostics live in the latter.
+        let file_diags = file_diagnostics(&db, ws, fixture_handle);
+        let type_diags: Vec<_> =
+            check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, fixture_handle)
+                .into_iter()
+                .map(|d| d.0.clone())
+                .collect();
+        let diags: Vec<_> = file_diags.into_iter().chain(type_diags).collect();
         let matching: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(case.code) && d.message.contains(case.message_substring))

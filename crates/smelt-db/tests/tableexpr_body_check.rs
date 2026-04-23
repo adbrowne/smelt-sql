@@ -27,13 +27,27 @@
 //! `TableExpr<{col: Type, ..r}>` is verified at the call site *before*
 //! body expansion. See the `row_requirement_*` tests at the bottom of
 //! this file.
+//!
+//! Phase 17 extends this file with the `sessionize` end-to-end suite.
+//! A `TableExpr`-returning function that uses `LAG()` and `SUM() OVER
+//! (…)` in its body must:
+//!
+//!   * body-check clean against a caller that supplies matching columns;
+//!   * synthesise an output schema that unions `source.*` with the
+//!     body's explicit projections;
+//!   * accept `WindowExpr`-kinded expressions in SELECT position;
+//!   * apply parameter defaults when a caller omits the argument.
+//!
+//! See the `sessionize_*` tests at the bottom of this file.
 
 use std::path::PathBuf;
 
 use smelt_db::{
-    file_diagnostics, Database, DiagnosticCode, DiagnosticData, DiagnosticSeverity, SourceFile,
-    Workspace,
+    file_diagnostics, infer_tableexpr_return_schema, model_schema, parse_file, typed_model_schema,
+    Database, DiagnosticCode, DiagnosticData, DiagnosticSeverity, SourceFile, Workspace,
 };
+use smelt_parser::ast::{File as AstFile, SmeltDefine};
+use smelt_types::DataType;
 
 fn build_db(
     project_root: PathBuf,
@@ -648,5 +662,389 @@ fn row_requirement_at_tier1_function_body_still_checks_on_expansion() {
     assert!(
         !body_unknowns.is_empty(),
         "body check must still run when row requirement is satisfied; got {diags:#?}"
+    );
+}
+
+// =====================================================================
+// Phase 17 — sessionize: TableExpr output-schema inference + defaults
+// =====================================================================
+
+/// Canonical `sessionize` used in several Phase-17 tests. The body uses
+/// both `LAG()` and `SUM() OVER (…)` — two window-kind expressions that
+/// must be accepted in SELECT-list position. The `gap` parameter has a
+/// default value so tests can exercise default-value expansion.
+const SESSIONIZE_SRC: &str = "smelt.define sessionize(\
+    source: TableExpr, \
+    user_col: Expr<Text>, \
+    ts_col: Expr<Timestamp>, \
+    gap: Expr<Interval> = INTERVAL '30 minutes'\
+) -> TableExpr AS (\
+    SELECT source.*, \
+        SUM(CASE WHEN ts_col - LAG(ts_col) OVER (PARTITION BY user_col ORDER BY ts_col) > gap THEN 1 ELSE 0 END) \
+        OVER (PARTITION BY user_col ORDER BY ts_col) AS session_id \
+    FROM source\
+)\n";
+
+/// Build an `events` model exposing `{user_id: Text, event_time:
+/// Timestamp}` so `smelt.ref('events')` resolves to a schema compatible
+/// with `sessionize`'s inputs.
+fn events_model_sql() -> String {
+    orders_model_sql(&[
+        ("user_id", "TEXT"),
+        ("event_time", "TIMESTAMP"),
+        ("event_type", "TEXT"),
+    ])
+}
+
+#[test]
+fn sessionize_body_types_clean() {
+    // Phase 17 TDD test 1: define `sessionize(source, user_col, ts_col,
+    // gap=…)` with a body that mixes `LAG()` and `SUM() OVER (…)`. When
+    // the caller supplies `{user_id, event_time, …}`, the body check
+    // must produce zero diagnostics.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("sessionize.sql");
+    let events_path = root.join("models").join("events.sql");
+    let model_path = root.join("models").join("sessions_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.sessionize(\
+         smelt.ref('events'), \
+         user_col => user_id, \
+         ts_col => event_time\
+     ) AS s\n";
+
+    let events_sql = events_model_sql();
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, SESSIONIZE_SRC),
+            (events_path, events_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let bad: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::ArgTypeMismatch)
+                    | Some(DiagnosticCode::MissingArgument)
+                    | Some(DiagnosticCode::UnknownSmeltFn)
+                    | Some(DiagnosticCode::FunctionBodyTypeMismatch)
+                    | Some(DiagnosticCode::UnknownIdentifier)
+                    | Some(DiagnosticCode::ParameterShadowsColumn)
+                    | Some(DiagnosticCode::WindowInScalarContext)
+                    | Some(DiagnosticCode::RowRequirementUnsatisfied)
+            )
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "expected clean body-check on sessionize call; got {bad:#?}"
+    );
+}
+
+#[test]
+fn sessionize_output_schema_inferred() {
+    // Phase 17 TDD test 2: pure-function-level assertion that the
+    // `infer_tableexpr_return_schema` helper walks the body's final
+    // SELECT and produces `source.*` + `session_id: BigInt`. We build a
+    // minimal context with the caller-bound schema and expect the
+    // returned `ModelSchema` to carry that union.
+    use smelt_db::TypeContext;
+    use smelt_parser::{parse, strip_frontmatter};
+    use smelt_types::TypedColumn;
+
+    let clean = strip_frontmatter(SESSIONIZE_SRC).to_string();
+    let p = parse(&clean);
+    let ast = AstFile::cast(p.syntax()).expect("FILE");
+    let define: SmeltDefine = ast.defines().next().expect("one SmeltDefine");
+    let body = define.body().expect("body present");
+    let select_stmt = body.select_stmt().expect("body is SELECT");
+
+    // Seed a ctx with the caller schema on `source` and the Expr<T>
+    // params on `user_col`, `ts_col`, `gap`.
+    let mut ctx = TypeContext::new();
+    let caller_cols: Vec<(String, TypedColumn)> = vec![
+        ("user_id".to_string(), TypedColumn::nullable(DataType::Text)),
+        (
+            "event_time".to_string(),
+            TypedColumn::nullable(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        ),
+    ];
+    ctx.add_tableexpr_param("source", &caller_cols);
+    ctx.add_function_param("user_col", TypedColumn::nullable(DataType::Text));
+    ctx.add_function_param(
+        "ts_col",
+        TypedColumn::nullable(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    ctx.add_function_param("gap", TypedColumn::nullable(DataType::Interval));
+
+    let schema = infer_tableexpr_return_schema(&select_stmt, &ctx)
+        .expect("infer_tableexpr_return_schema must produce Some");
+
+    let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    // `source.*` expands to the caller's columns.
+    assert!(
+        col_names.contains(&"user_id"),
+        "output schema must carry user_id; got {col_names:?}"
+    );
+    assert!(
+        col_names.contains(&"event_time"),
+        "output schema must carry event_time; got {col_names:?}"
+    );
+    // Explicit alias.
+    assert!(
+        col_names.contains(&"session_id"),
+        "output schema must carry session_id; got {col_names:?}"
+    );
+    // The inferred type of `session_id` must be BigInt (SUM over
+    // Integer → BigInt per the built-in aggregate-widening rule).
+    let session_id = schema
+        .columns
+        .iter()
+        .find(|c| c.name == "session_id")
+        .expect("session_id present");
+    let dt = session_id
+        .data_type
+        .as_ref()
+        .map(|tc| tc.data_type.clone())
+        .unwrap_or(DataType::Unknown);
+    assert!(
+        matches!(dt, DataType::BigInt),
+        "session_id should widen to BigInt; got {dt:?}"
+    );
+}
+
+#[test]
+fn sessionize_windowexpr_in_body_accepted() {
+    // Phase 17 TDD test 3: body synthesising window-kind expressions
+    // in SELECT position must not trigger WindowInScalarContext —
+    // Phase 14's check only fires in WHERE / GROUP BY.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("sessionize.sql");
+    let events_path = root.join("models").join("events.sql");
+    let model_path = root.join("models").join("sessions_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.sessionize(\
+         smelt.ref('events'), \
+         user_col => user_id, \
+         ts_col => event_time\
+     ) AS s\n";
+
+    let events_sql = events_model_sql();
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, SESSIONIZE_SRC),
+            (events_path, events_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let window_errs: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::WindowInScalarContext))
+        .collect();
+    assert!(
+        window_errs.is_empty(),
+        "window expressions in SELECT list must not trigger WindowInScalarContext; got {window_errs:#?}"
+    );
+}
+
+#[test]
+fn sessionize_missing_ts_col_on_source_errors() {
+    // Phase 17 TDD test 4: when the caller's source schema lacks a
+    // column that the body references via the `source.col` qualified
+    // access pattern, the body-check surfaces the failure as a cascade
+    // `UnknownIdentifier` rooted at the call site.
+    //
+    // We exercise this by defining a variant of `sessionize` whose
+    // body references `source.ts` (a column the caller may or may not
+    // supply). When the source lacks `ts`, the body's reference
+    // surfaces through the expansion path — the canonical §16 #7
+    // behaviour extended to the SELECT-body walker.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("sessionize_v.sql");
+    // A simplified variant that uses `source.ts` directly in the body
+    // so missing `ts` from the caller surfaces as UnknownIdentifier.
+    let fn_src = "smelt.define sessionize_v(source: TableExpr) \
+         -> TableExpr AS (\
+            SELECT source.*, source.ts AS ts2 FROM source\
+         )\n";
+    let events_path = root.join("models").join("events.sql");
+    let model_path = root.join("models").join("sessions_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.sessionize_v(smelt.ref('events')) AS s\n";
+
+    // Missing `ts` — only user_id present.
+    let events_sql = orders_model_sql(&[("user_id", "TEXT")]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, fn_src),
+            (events_path, events_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let unknowns: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownIdentifier) && d.message.contains("ts"))
+        .collect();
+    assert!(
+        !unknowns.is_empty(),
+        "missing `ts` on source should surface as UnknownIdentifier with expansion frames; got {diags:#?}"
+    );
+    // The top frame must name `sessionize_v` so the user's editor can
+    // render a Phase-12 stack trailer.
+    let has_frame = unknowns.iter().any(|d| {
+        matches!(
+            &d.data,
+            Some(DiagnosticData::ExpansionFrames(frames)) if frames.iter().any(|f| f.function == "sessionize_v")
+        )
+    });
+    assert!(
+        has_frame,
+        "body cascade on missing column must carry ExpansionFrames rooted at `sessionize_v`; got {unknowns:#?}"
+    );
+}
+
+#[test]
+fn sessionize_default_gap_applied_when_omitted() {
+    // Phase 17 TDD test 5: the caller omits `gap`; the default value
+    // (an INTERVAL literal) is plumbed through, so zero diagnostics
+    // surface. Previously Phase 16 emitted a MissingArgument here
+    // because the default expansion wasn't wired end-to-end.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("sessionize.sql");
+    let events_path = root.join("models").join("events.sql");
+    let model_path = root.join("models").join("sessions_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.sessionize(\
+         smelt.ref('events'), \
+         user_col => user_id, \
+         ts_col => event_time\
+     ) AS s\n";
+
+    let events_sql = events_model_sql();
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, SESSIONIZE_SRC),
+            (events_path, events_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let missing_gap: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MissingArgument) && d.message.contains("gap"))
+        .collect();
+    assert!(
+        missing_gap.is_empty(),
+        "`gap`'s default value must be applied when omitted; got {missing_gap:#?}"
+    );
+    // And the overall body-level diagnostics must stay clean.
+    let cascade: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(&d.data, Some(DiagnosticData::ExpansionFrames(_)))
+                && matches!(
+                    d.code,
+                    Some(DiagnosticCode::UnknownIdentifier)
+                        | Some(DiagnosticCode::FunctionBodyTypeMismatch)
+                )
+        })
+        .collect();
+    assert!(
+        cascade.is_empty(),
+        "default-value expansion must not introduce body cascades; got {cascade:#?}"
+    );
+}
+
+#[test]
+fn margin_report_explicit_columns_after_return_schema_inference() {
+    // Phase 17 TDD test 6: the Phase-15 deferred item — once
+    // TableExpr return-schema inference lands, callers can project
+    // explicit columns from a `TableExpr`-returning call site. Assert
+    // the caller model's inferred schema carries `order_id` and
+    // `margin` (from the `add_margin` body's projections).
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("add_margin.sql");
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("margin_report.sql");
+    let model_src = "SELECT order_id, margin FROM smelt.fn.add_margin(smelt.ref('orders')) AS m\n";
+
+    let orders_sql = orders_model_sql(&[
+        ("order_id", "BIGINT"),
+        ("revenue", "DECIMAL(18, 2)"),
+        ("cost", "DECIMAL(18, 2)"),
+    ]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, ADD_MARGIN_SRC),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    // No `UnknownIdentifier` / `UndeclaredColumn` on `order_id` /
+    // `margin` — they resolve against the inferred `add_margin`
+    // output schema exposed as FROM-scope columns of the alias `m`.
+    let diags = file_diagnostics(&db, ws, model_file);
+    let unknowns: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::UnknownIdentifier) | Some(DiagnosticCode::UndeclaredColumn)
+            ) && (d.message.contains("order_id") || d.message.contains("margin"))
+        })
+        .collect();
+    assert!(
+        unknowns.is_empty(),
+        "explicit columns from a TableExpr call must resolve via the inferred return schema; got {unknowns:#?}"
+    );
+
+    // Parsing / model_schema sanity check — ensure the caller model's
+    // schema carries `order_id` and `margin` columns.
+    let p = parse_file(&db, model_file);
+    let _ = p; // just exercising the path
+    let schema = typed_model_schema(&db, ws, model_file);
+    let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        names.contains(&"order_id"),
+        "caller schema must carry order_id; got {names:?}"
+    );
+    assert!(
+        names.contains(&"margin"),
+        "caller schema must carry margin; got {names:?}"
+    );
+
+    // Also verify the bare model_schema plumbing still sees them (a
+    // simple check of pre-typing schema extraction).
+    let base = model_schema(&db, model_file);
+    assert!(
+        !base.columns.is_empty(),
+        "base model schema should not be empty"
     );
 }

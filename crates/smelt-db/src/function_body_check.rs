@@ -24,6 +24,7 @@ use smelt_types::signatures::{
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
 
+use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
     check_undeclared_columns, infer_expression_type, walk_select_columns_with_visitor, TypeContext,
 };
@@ -527,6 +528,11 @@ pub fn check_smelt_fn_call(
     // schema for that parameter, which surfaces as `UnknownIdentifier`
     // on bare column references inside the body.
     tableexpr_schema_lookup: &dyn Fn(&Expr, &TypeContext) -> Option<Vec<(String, TypedColumn)>>,
+    // Phase 17: resolve the default value of a parameter. Called when
+    // the caller omits an argument for a parameter with `has_default`.
+    // Returns the inferred type of the default expression, or `None`
+    // if the default cannot be located / inferred.
+    default_type_lookup: &dyn Fn(&FunctionSig, &str) -> Option<DataType>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -746,16 +752,22 @@ pub fn check_smelt_fn_call(
                         .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
                     frame_bindings.push((param.name.clone(), "<missing>".to_string()));
                 } else {
-                    // Default value is present — infer its type and bind.
-                    // Phase 6 only handles expression-shaped defaults.
-                    // `param.has_default` is always true when the parser saw
-                    // `= expr`, so we can locate the DEFAULT_VALUE expression
-                    // directly off the AST — but `ParamSpec` doesn't carry
-                    // the AST. We fall back to `Unknown` if we can't infer,
-                    // which lets the body walk proceed.
-                    body_ctx
-                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
-                    frame_bindings.push((param.name.clone(), "<default>".to_string()));
+                    // Phase 17: default value expansion runs end-to-
+                    // end. Ask the default-type lookup for the
+                    // expression's inferred type; if the lookup hits,
+                    // bind with that type (so the body typechecks as
+                    // if the user had passed the default literally).
+                    // Fallback stays `Unknown` when inference fails.
+                    let dt = default_type_lookup(&sig, &param.name).unwrap_or(DataType::Unknown);
+                    body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt.clone()));
+                    // Provenance: mark the binding as synthesized so a
+                    // future frame renderer can display "default
+                    // applied". Reuse the frame_bindings slot —
+                    // attaching a dedicated provenance field would
+                    // require touching FrameInfo across Phase 12's LSP
+                    // surface; Phase 17 keeps the signal in the
+                    // bound-type string for now.
+                    frame_bindings.push((param.name.clone(), format!("{} (default)", dt)));
                 }
             }
         }
@@ -817,6 +829,7 @@ pub fn check_smelt_fn_call(
             body_lookup,
             decl_lookup,
             tableexpr_schema_lookup,
+            default_type_lookup,
         )
     };
 
@@ -895,6 +908,104 @@ pub fn check_smelt_fn_call(
     diagnostics.extend(shadow_warnings);
 
     diagnostics
+}
+
+/// Infer the output schema of a `TableExpr`-returning `smelt.define`
+/// body (Phase 17).
+///
+/// Walks the top-level SELECT's projection list and builds the output
+/// column list by:
+///   1. Expanding `source.*` (qualified wildcard) against the
+///      `TableExpr` parameter schema seeded on `ctx` (via
+///      [`TypeContext::add_tableexpr_param`]). Bare `*` is treated the
+///      same way when there is exactly one `TableExpr` parameter in
+///      scope — the common case.
+///   2. Adding each explicit `expr AS name` projection as a single
+///      column, inferring the column's type via
+///      [`infer_expression_type`].
+///   3. Adding bare-column projections (`col_ref`) using the
+///      column-ref's name and inferred type.
+///
+/// Returns `None` when the body has no top-level SELECT list
+/// (shouldn't happen for well-formed `TableExpr` bodies but the CST
+/// may hand back a malformed AST under error recovery).
+///
+/// Pure — no Salsa. Callers that want the rendered model schema
+/// attach it as a FROM-scope entry on the enclosing caller model's
+/// context so bare-column references like `SELECT margin FROM
+/// smelt.fn.add_margin(…)` type-check.
+pub fn infer_tableexpr_return_schema(body: &SelectStmt, ctx: &TypeContext) -> Option<ModelSchema> {
+    let select_list = body.select_list()?;
+    let mut columns: Vec<Column> = Vec::new();
+
+    // Collect every TableExpr parameter's schema once. Used for both
+    // qualified (`source.*`) and bare (`*` with exactly one table-expr
+    // param) wildcard expansion.
+    let tableexpr_params: Vec<(String, Vec<(String, TypedColumn)>)> = ctx
+        .tableexpr_param_schemas_iter()
+        .map(|(name, cols)| (name.to_string(), cols.to_vec()))
+        .collect();
+
+    for item in select_list.items() {
+        // Qualified wildcard: expand against the named TableExpr param
+        // (or any FROM-scope alias matching the qualifier).
+        if let Some(qualifier) = item.qualified_wildcard_target() {
+            if let Some((_, cols)) = tableexpr_params.iter().find(|(n, _)| *n == qualifier) {
+                for (col_name, typed_col) in cols {
+                    columns.push(Column {
+                        name: col_name.clone(),
+                        alias: None,
+                        source: ColumnSource::Computed,
+                        expression: format!("{}.{}", qualifier, col_name),
+                        range: item.range(),
+                        data_type: Some(typed_col.clone()),
+                    });
+                }
+            }
+            continue;
+        }
+        // Bare `*`: when there is exactly one TableExpr param, expand
+        // against it. For multiple params the ambiguity resolution is
+        // out of scope for Phase 17 — leave those as unknown.
+        if item.is_wildcard() {
+            if tableexpr_params.len() == 1 {
+                let (_, cols) = &tableexpr_params[0];
+                for (col_name, typed_col) in cols {
+                    columns.push(Column {
+                        name: col_name.clone(),
+                        alias: None,
+                        source: ColumnSource::Computed,
+                        expression: "*".to_string(),
+                        range: item.range(),
+                        data_type: Some(typed_col.clone()),
+                    });
+                }
+            }
+            continue;
+        }
+
+        // Explicit projection (with or without alias).
+        let Some(expr) = item.expression() else {
+            continue;
+        };
+        let name = item.column_name().unwrap_or_else(|| "?col?".to_string());
+        let typed = infer_expression_type(&expr, ctx);
+        let alias = item.alias();
+        columns.push(Column {
+            name,
+            alias,
+            source: ColumnSource::Computed,
+            expression: expr.text(),
+            range: item.range(),
+            data_type: typed,
+        });
+    }
+
+    Some(ModelSchema {
+        columns,
+        row_extensions: Vec::new(),
+        input_constraints: Vec::new(),
+    })
 }
 
 /// Walk a SELECT-shaped function body (Phase 15) against a pre-seeded

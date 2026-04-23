@@ -2304,7 +2304,14 @@ pub fn check_undeclared_columns(
                 return;
             }
 
-            if ctx.lookup_column(qualifier, col_name).is_some() {
+            // Use `lookup_identifier` so bound function parameters
+            // (seeded via `add_function_param` at call-site expansion
+            // for `Expr<T>` kinds) resolve before falling back to the
+            // FROM scopes. Phase 17 hinge: a SELECT-shaped function
+            // body that references `ts_col` / `gap` must see the
+            // Expr<Timestamp> / Expr<Interval> bindings populated by
+            // the call-site checker.
+            if ctx.lookup_identifier(qualifier, col_name).is_some() {
                 return;
             }
 

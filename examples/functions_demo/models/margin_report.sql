@@ -1,12 +1,12 @@
--- Phase 15 fixture: call `smelt.fn.add_margin(smelt.ref('orders'))` in a
--- FROM clause. `add_margin`'s `source: TableExpr` parameter binds the
--- caller-supplied `{order_id, revenue, cost}` schema; bare `revenue` and
--- `cost` inside the body resolve through the caller schema.
+-- Phase 17 upgrade of the Phase-15 fixture: call
+-- `smelt.fn.add_margin(smelt.ref('orders'))` and project explicit
+-- columns through the inferred TableExpr return schema. The
+-- `order_id` column comes from `source.*` expansion, `margin`
+-- comes from the explicit projection in `add_margin`'s body.
 --
--- We project `*` rather than named columns here because full output-
--- schema inference for `TableExpr`-returning calls lands in Phase 17
--- (research §3 / plan §17). Until then the outer SELECT cannot resolve
--- `m.margin` as a known column — the Phase-15 scope is purely the body
--- check, which this fixture exercises via the call-site expansion.
-SELECT *
+-- This proves Phase 17's return-schema inference wired up
+-- correctly — explicit columns from a `TableExpr`-returning call
+-- resolve against the caller's FROM-scope entry seeded via
+-- `RefSchemaProvider::smelt_fn_columns`.
+SELECT order_id, margin
 FROM smelt.fn.add_margin(smelt.ref('orders')) AS m

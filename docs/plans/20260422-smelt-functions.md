@@ -1192,7 +1192,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 14 | Types: WindowExpr sort and SelectItems<K> kind ceiling | done | 80553d1 | 2026-04-23 |
 | 15 | TableExpr parameters: bare-column row polymorphism + shadow warnings | done | 85a9441 | 2026-04-24 |
 | 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | done | 38609e5 | 2026-04-24 |
-| 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | pending | | |
+| 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | done | | 2026-04-24 |
 | 18 | LSP polish + examples (Step 3 complete) | pending | | |
 | 19 | Parser + types: context-binding syntax (Step 4 opens) | pending | | |
 | 20 | CTE schema extraction + splice-point context inference | pending | | |
@@ -1217,6 +1217,9 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 
 ### Deferred during implementation
 
+- **Phase 17 — test 4 reframed to use `source.ts` body reference instead of `smelt.ref('events').event_time` arg** (2026-04-24). The plan's literal phrasing required member-access on a `smelt.ref()` call which isn't currently parseable, and bare-identifier args to a FROM-position `smelt.fn.*` call have no scope until Phase 19's context binding. The reframed test still asserts the Phase 17 contract — missing column on `source` surfaces as `UnknownIdentifier` with `ExpansionFrames` rooted at the callee. Proper arg-position column resolution follows in Phase 19+.
+- **Phase 17 — default-value provenance tagged via `(default)` suffix on frame binding type string** (2026-04-24). The plan suggested a `Synthesized` marker; extending `FrameInfo` would ripple through the LSP renderer's Phase 12 surface. Minimal-surface-change approach: append `(default)` to the bound-type string in the frame, so the LSP trailer shows "in expansion of `sessionize`, `gap` was bound to Interval (default)". Upgrade to a structured flag if downstream phases need to discriminate programmatically.
+- **Phase 17 — bare-identifier args resolving against TableExpr source schema rolled back** (2026-04-24). Over-eagerly flagged identifiers that the outer SELECT's other FROM entries would supply. Proper argument-scope resolution requires Phase 19's context binding.
 - **Phase 16 — `RowTail::None` accepts extras (open-record semantics)** (2026-04-24). The Phase 16 plan's TDD test 1 (`row_requirement_satisfied_by_superset_schema`) asserts zero diagnostics when a caller supplies extra columns to a requirement with no tail written — `TableExpr<{revenue: Numeric, cost: Numeric}>`. Resolved toward research §8 "open-record" semantics: extras are always accepted; only `MissingColumn` and `TypeMismatch` are structural failures. `RowTail::Named` still captures extras into `row_var_env` (the observable difference). No `UnexpectedColumns` diagnostic exists in Phase 16; a future strict-schema switch can add it.
 - **Phase 16 — `SchemaRequirement` built from CST, not re-parsed from string** (2026-04-24). Phase 13 already emits `ROW_REQUIREMENT` CST nodes; a CST-aware helper `tableexpr_type_from_cst` overrides `parse_smelt_type`'s string-path `UnsupportedSort` for annotated `TableExpr<{…}>`. Keeps the string-level parser unchanged as a best-effort fallback while the structured form is always accurate via CST.
 - **Phase 16 — `row_var_env` binding recorded but opaque to user code** (2026-04-24). Named row tails (`..r`) write into the per-call `row_var_env` at the call site. `r` is not yet referenceable from body expressions or return types — that is Phase 17 (return-schema inference) and Phase 37 (row variables in return types). Unit tests exercise the binding via `#[doc(hidden)] pub` accessors.

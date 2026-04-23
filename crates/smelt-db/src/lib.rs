@@ -26,7 +26,8 @@ use salsa::{Accumulator, Setter};
 use serde::Deserialize;
 use smelt_parser::{self, File as AstFile, RefCall, TableRef};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
-use smelt_types::{parse_type, DataType, TypedColumn};
+pub use smelt_types::TypedColumn;
+use smelt_types::{parse_type, DataType};
 
 pub mod backends;
 pub mod code_actions;
@@ -36,6 +37,7 @@ pub mod schema;
 pub mod type_inference;
 pub mod yaml_edits;
 
+pub use function_body_check::infer_tableexpr_return_schema;
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
     ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
@@ -1240,6 +1242,36 @@ pub fn smelt_fn_call_diagnostics_for_file(
         None
     };
 
+    // Phase 17: resolve a parameter's default-value expression by
+    // re-parsing the declaring file and walking to the matching
+    // PARAM node. Returns the inferred `DataType` of the default
+    // expression (against an empty context — defaults are
+    // self-contained per research §3).
+    let default_type_lookup = |sig: &FunctionSig, param_name: &str| -> Option<DataType> {
+        let decl_path = decl_lookup(sig)?;
+        let f = files.iter().find(|f| f.path(db) == &decl_path)?;
+        let f_parse = parse_file(db, *f);
+        let ast = AstFile::cast(f_parse.syntax())?;
+        for define in ast.defines() {
+            if define.name().as_deref() != Some(&sig.name) {
+                continue;
+            }
+            let Some(param_list) = define.param_list() else {
+                continue;
+            };
+            for p in param_list.params() {
+                if p.name().as_deref() != Some(param_name) {
+                    continue;
+                }
+                let default_expr = p.default_value_expr()?;
+                let empty_ctx = TypeContext::new();
+                return type_inference::infer_expression_type(&default_expr, &empty_ctx)
+                    .map(|t| t.data_type);
+            }
+        }
+        None
+    };
+
     let mut out = Vec::new();
     for call in &call_nodes {
         out.extend(function_body_check::check_smelt_fn_call(
@@ -1252,6 +1284,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &body_lookup,
             &decl_lookup,
             &tableexpr_schema_lookup,
+            &default_type_lookup,
         ));
     }
     out
@@ -1947,6 +1980,18 @@ pub trait RefSchemaProvider {
     /// loop wants to distinguish them (CSV files don't participate in
     /// SELECT * schema resolution, etc.).
     fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>>;
+    /// Returns the inferred output columns for a `smelt.fn.<name>(...)`
+    /// call in FROM position (Phase 17). Default impl returns `None` —
+    /// providers that can't resolve function calls (static test fixtures
+    /// without sig data) fall back to "no schema contribution", which
+    /// matches the Phase-15 behaviour where `smelt.fn.*` in FROM was
+    /// opaque.
+    fn smelt_fn_columns(
+        &self,
+        _call: &smelt_parser::ast::SmeltFnCall,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        None
+    }
 }
 
 /// `RefSchemaProvider` impl that delegates to the Salsa database. Used by the
@@ -1960,6 +2005,209 @@ pub struct SalsaRefSchemaProvider<'a> {
 impl<'a> SalsaRefSchemaProvider<'a> {
     pub fn new(db: &'a dyn salsa::Database, workspace: Workspace) -> Self {
         Self { db, workspace }
+    }
+}
+
+impl SalsaRefSchemaProvider<'_> {
+    /// Resolve a `smelt.fn.<name>(...)` call in FROM position to its
+    /// inferred output schema (Phase 17).
+    ///
+    /// Flow:
+    ///   1. Resolve the call path's tail segment to a workspace
+    ///      `FunctionSig`. Built-ins don't participate — they aren't
+    ///      `TableExpr`-returning.
+    ///   2. If the signature's return type isn't `TableExpr`, return
+    ///      `None` — scalar returns don't contribute a FROM schema.
+    ///   3. Re-parse the callee's file and find the body `SelectStmt`.
+    ///   4. Build a body ctx by resolving each `TableExpr` argument
+    ///      (typically `smelt.ref('model_name')`) to its schema and
+    ///      seeding via `add_tableexpr_param`. Other `Expr<T>` params
+    ///      are seeded to `Unknown` — their types don't affect output
+    ///      schema inference in Phase 17's scope.
+    ///   5. Call `infer_tableexpr_return_schema` on the body and
+    ///      return the column list.
+    fn resolve_smelt_fn_call_schema(
+        &self,
+        call: &smelt_parser::ast::SmeltFnCall,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        use smelt_parser::ast::{Expr as AstExpr, FunctionCall, RefCall, SourceCall};
+        use smelt_types::signatures::SmeltType;
+
+        let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+        let name = segments.last()?.clone();
+        let sig_arc = resolve_function(self.db, self.workspace, name)?;
+        let sig: &smelt_types::signatures::FunctionSig = sig_arc.as_ref();
+
+        // Only `TableExpr`-returning functions contribute a FROM schema.
+        match &sig.return_type {
+            Some(Ok(SmeltType::TableExpr(_))) => {}
+            _ => return None,
+        }
+
+        // Find the callee's file + body SelectStmt.
+        let files: Vec<SourceFile> = self.workspace.files(self.db).to_vec();
+        let mut body_select: Option<smelt_parser::ast::SelectStmt> = None;
+        for f in &files {
+            let sigs = file_signature_inputs(self.db, *f);
+            if !sigs.iter().any(|s| s.name == sig.name) {
+                continue;
+            }
+            let f_parse = parse_file(self.db, *f);
+            let f_syntax = f_parse.syntax();
+            if let Some(ast) = AstFile::cast(f_syntax) {
+                for define in ast.defines() {
+                    if define.name().as_deref() == Some(&sig.name) {
+                        if let Some(body) = define.body() {
+                            if let Some(stmt) = body.select_stmt() {
+                                body_select = Some(stmt);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if body_select.is_some() {
+                break;
+            }
+        }
+        let body_select = body_select?;
+
+        // Bind args to params by position / name.
+        let arg_list = call.arg_list();
+        let positional: Vec<AstExpr> = arg_list
+            .as_ref()
+            .map(|al| al.positional_args())
+            .unwrap_or_default();
+        let named: Vec<smelt_parser::ast::NamedParam> = arg_list
+            .as_ref()
+            .map(|al| al.named_params().collect())
+            .unwrap_or_default();
+
+        let mut bindings: std::collections::HashMap<String, AstExpr> =
+            std::collections::HashMap::new();
+        for (i, arg) in positional.iter().enumerate() {
+            if let Some(p) = sig.params.get(i) {
+                bindings.insert(p.name.clone(), arg.clone());
+            }
+        }
+        for np in &named {
+            if let (Some(nm), Some(value)) = (np.name(), np.value_expr()) {
+                bindings.insert(nm, value);
+            }
+        }
+
+        // Seed the body ctx with every parameter's caller schema / type.
+        let mut body_ctx = TypeContext::new();
+        for param in &sig.params {
+            if param.name.is_empty() {
+                continue;
+            }
+            if matches!(&param.type_ref, Some(Ok(SmeltType::TableExpr(_)))) {
+                // Resolve the TableExpr argument to its column schema.
+                if let Some(arg_expr) = bindings.get(&param.name) {
+                    // Walk the arg expression for a smelt.ref('X') call
+                    // and resolve its schema.
+                    for node in arg_expr.syntax().descendants() {
+                        if node.kind() == smelt_parser::SyntaxKind::FUNCTION_CALL {
+                            let func = match FunctionCall::cast(node) {
+                                Some(f) => f,
+                                None => continue,
+                            };
+                            if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
+                                if let Some(model_name) = ref_call.model_name() {
+                                    if let Some(cols) = self
+                                        .resolved_columns(&model_name)
+                                        .or_else(|| self.seed_columns(&model_name))
+                                    {
+                                        body_ctx.add_tableexpr_param(&param.name, &cols);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(src_call) = SourceCall::from_function_call(func) {
+                                if let (Some(source_name), Some(table_name)) =
+                                    (src_call.source_name(), src_call.table_name())
+                                {
+                                    let project = self.workspace.projects(self.db).first().copied();
+                                    if let Some(p) = project {
+                                        let sources = sources_config(self.db, p);
+                                        for s in &sources.sources {
+                                            if s.name != source_name {
+                                                continue;
+                                            }
+                                            for t in &s.tables {
+                                                if t.name == table_name {
+                                                    let cols: Vec<(String, TypedColumn)> = t
+                                                        .columns
+                                                        .iter()
+                                                        .map(|c| {
+                                                            (
+                                                                c.name.clone(),
+                                                                TypedColumn {
+                                                                    data_type: c
+                                                                        .data_type
+                                                                        .clone()
+                                                                        .unwrap_or(
+                                                                            DataType::Unknown,
+                                                                        ),
+                                                                    nullable: true,
+                                                                },
+                                                            )
+                                                        })
+                                                        .collect();
+                                                    body_ctx
+                                                        .add_tableexpr_param(&param.name, &cols);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Expr<T> param — bind to Unknown for schema inference.
+                // The return schema only needs types from the projection
+                // list, which references params' types via inference.
+                let dt = match &param.type_ref {
+                    Some(Ok(SmeltType::Expr(
+                        smelt_types::signatures::TypeConstraint::Concrete(dt),
+                    ))) => dt.clone(),
+                    _ => DataType::Unknown,
+                };
+                body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt));
+            }
+        }
+
+        // Seed workspace signatures so nested smelt.fn.* calls in the
+        // body (if any) infer their return types.
+        let mut wsp_files = files.clone();
+        wsp_files.sort_by(|a, b| a.path(self.db).cmp(b.path(self.db)));
+        for f in &wsp_files {
+            let sigs = file_signature_inputs(self.db, *f);
+            for s in sigs.iter() {
+                body_ctx.add_function_signature(&s.name, s.clone());
+            }
+        }
+
+        let schema = infer_tableexpr_return_schema(&body_select, &body_ctx)?;
+        // Project to (name, TypedColumn) pairs.
+        let cols: Vec<(String, TypedColumn)> = schema
+            .columns
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.data_type.clone().unwrap_or(TypedColumn {
+                        data_type: DataType::Unknown,
+                        nullable: true,
+                    }),
+                )
+            })
+            .collect();
+        Some(cols)
     }
 }
 
@@ -2006,6 +2254,13 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
             }
         }
         None
+    }
+
+    fn smelt_fn_columns(
+        &self,
+        call: &smelt_parser::ast::SmeltFnCall,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        self.resolve_smelt_fn_call_schema(call)
     }
 }
 
@@ -2124,6 +2379,31 @@ fn process_table_ref_pure(
     refs: &dyn RefSchemaProvider,
     ctx: &mut TypeContext,
 ) {
+    // Phase 17: `smelt.fn.<name>(...)` in FROM position contributes the
+    // inferred TableExpr output schema as a FROM-scope entry. The
+    // provider performs the resolution; fixtures without a provider
+    // implementation (static tests) fall through silently.
+    if let Some(call) = table_ref.smelt_fn_call() {
+        let alias = table_ref.alias();
+        let bind_to = alias.clone().unwrap_or_else(|| {
+            // Fall back to the trailing call-path segment so a
+            // call without `AS alias` still has a stable qualifier.
+            call.call_path()
+                .map(|p| p.segments())
+                .and_then(|segs| segs.last().cloned())
+                .unwrap_or_else(|| "__smelt_fn_call".to_string())
+        });
+        if let Some(cols) = refs.smelt_fn_columns(&call) {
+            for (col_name, typed_col) in &cols {
+                ctx.add_model_column(&bind_to, col_name, typed_col.clone());
+            }
+            ctx.add_alias(&bind_to, &bind_to);
+        }
+        // Don't fall through to the generic identifier path —
+        // SMELT_FN_CALL isn't an identifier-shaped TableRef.
+        return;
+    }
+
     // Check for smelt.ref() calls
     if let Some(func) = table_ref.function_call() {
         if let Some(ref_call) = RefCall::from_function_call(func) {

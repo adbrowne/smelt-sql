@@ -970,6 +970,45 @@ impl SelectItem {
         }) && self.expression().is_none()
     }
 
+    /// If this select item is a qualified wildcard `<qualifier>.*`,
+    /// return the qualifier identifier text. Returns `None` for a bare
+    /// `*` (see [`Self::is_wildcard`]) or any non-wildcard item.
+    ///
+    /// The parser emits a `SELECT_ITEM` whose tokens are `IDENT DOT
+    /// STAR` for this shape (no wrapping `EXPRESSION` node). Phase 17
+    /// uses this accessor to expand `source.*` inside a
+    /// `TableExpr`-returning function body.
+    pub fn qualified_wildcard_target(&self) -> Option<String> {
+        if !self.is_wildcard() {
+            return None;
+        }
+        // Walk tokens; if we see `IDENT DOT STAR` before the STAR, the
+        // IDENT is the qualifier. Bare `*` has no leading IDENT.
+        let mut last_ident: Option<String> = None;
+        let mut last_was_dot = false;
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                match token.kind() {
+                    IDENT => {
+                        last_ident = Some(token.text().to_string());
+                        last_was_dot = false;
+                    }
+                    DOT => {
+                        last_was_dot = true;
+                    }
+                    STAR | MULTIPLY => {
+                        if last_was_dot {
+                            return last_ident;
+                        }
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Get the text range of this select item
     pub fn range(&self) -> TextRange {
         self.0.text_range()
@@ -1138,6 +1177,17 @@ impl TableRef {
     /// Get the function call if this table ref is a function (like ref('model'))
     pub fn function_call(&self) -> Option<FunctionCall> {
         self.0.children().find_map(FunctionCall::cast)
+    }
+
+    /// Get the `smelt.fn.*` call if this table ref is one (Phase 15+).
+    ///
+    /// `SMELT_FN_CALL` nodes are distinct from `FUNCTION_CALL`; the
+    /// parser emits them for calls starting with the `smelt.fn.`
+    /// prefix. Phase 17 uses this accessor to resolve a
+    /// `TableExpr`-returning call in FROM position to its inferred
+    /// output schema.
+    pub fn smelt_fn_call(&self) -> Option<SmeltFnCall> {
+        self.0.children().find_map(SmeltFnCall::cast)
     }
 
     pub fn identifier(&self) -> Option<String> {
