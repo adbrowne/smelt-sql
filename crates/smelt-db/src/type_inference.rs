@@ -643,6 +643,11 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
     let dt = match &sig.return_type {
         Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(dt)))) => dt.clone(),
         Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => DataType::Double,
+        // `Ordered` (Phase 7) is only reachable via generics in v1 signatures
+        // (§16 #14) — Phase 8 adds the inference machinery. In the monomorphic
+        // `smelt.define` path we stay conservative: no precise return type
+        // known yet, surface `Unknown` like `Any`.
+        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
         Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,

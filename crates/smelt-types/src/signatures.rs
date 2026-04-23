@@ -8,15 +8,19 @@
 //! w.r.t. Salsa. Callers in `smelt-db` are responsible for wiring these
 //! extractors into tracked queries.
 //!
-//! Phase 3 scope: raw `type_ref_text` only. Phase 4 (this module) adds
-//! structured `Expr<T>` parsing into [`SmeltType`], alongside [`TypeConstraint`]
-//! for the `Numeric` / `Any` constraints per §16 #9. The `Ordered` constraint,
-//! generics, and non-`Expr` sorts (TableExpr, AggExpr, …) are all deferred to
-//! later phases of the smelt-functions plan.
+//! Phase 3 scope: raw `type_ref_text` only. Phase 4 adds structured `Expr<T>`
+//! parsing into [`SmeltType`], alongside [`TypeConstraint`] for the `Numeric`
+//! / `Any` constraints per §16 #9. Phase 7 adds the [`TypeConstraint::Ordered`]
+//! member (§16 #13) and a monomorphic [`BuiltinRegistry`] skeleton seeded with
+//! a handful of SQL built-ins. Generics, variadics, and non-`Expr` sorts
+//! (TableExpr, AggExpr, …) are deferred to later phases of the smelt-functions
+//! plan.
 
 use crate::{parse_type, DataType};
 use smelt_parser::ast::{File as AstFile, Param as AstParam, Range, SmeltDefine, TypeRef};
 use smelt_parser::offset_to_position;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
 ///
@@ -30,9 +34,16 @@ pub enum TypeConstraint {
     /// Any numeric type per §16 #9: `SmallInt`, `Integer`, `BigInt`, `Float`,
     /// `Double`, `Decimal`. Boolean is deliberately excluded.
     Numeric,
+    /// Any type with a total order on every v1 backend, per §16 #13.
+    ///
+    /// Members: `Numeric` ∪ the string family (`Text`, `Varchar`, `Char`) ∪
+    /// the temporal family (`Date`, `Time`, `Timestamp` with either tz, and
+    /// `Interval`) ∪ `Boolean` ∪ `Blob`. Composite types (`Array`, `Struct`,
+    /// `Map`) are excluded in v1 because their ordering semantics diverge
+    /// across backends — `Null`/`Unknown` are likewise non-members.
+    Ordered,
     /// Any type — effectively "no constraint". Reserved for parameters like
-    /// `x: Expr<Any>`. Only `Any` and `Numeric` are spelt today; future phases
-    /// will add more (notably `Ordered`).
+    /// `x: Expr<Any>`.
     Any,
 }
 
@@ -47,6 +58,15 @@ impl TypeConstraint {
             // Centralise the numeric membership on `DataType::is_numeric()` so
             // there is a single source of truth matching §16 #9.
             TypeConstraint::Numeric => dt.is_numeric(),
+            // §16 #13 members: numeric ∪ string family ∪ temporal family ∪
+            // {Boolean, Blob}. Composite types, `Null`, and `Unknown` are
+            // intentionally not members.
+            TypeConstraint::Ordered => {
+                dt.is_numeric()
+                    || dt.is_string()
+                    || dt.is_temporal()
+                    || matches!(dt, DataType::Boolean | DataType::Blob)
+            }
             TypeConstraint::Any => true,
         }
     }
@@ -229,6 +249,7 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
 fn parse_inner_constraint(inner: &str) -> Option<TypeConstraint> {
     match inner {
         "Numeric" => Some(TypeConstraint::Numeric),
+        "Ordered" => Some(TypeConstraint::Ordered),
         "Any" => Some(TypeConstraint::Any),
         other => parse_type(other).ok().map(TypeConstraint::Concrete),
     }
@@ -438,6 +459,78 @@ pub fn extract_function_signature_by_name(
         .filter_map(|d| extract_signature(&d, text))
         .find(|sig| sig.name == name)
 }
+
+/// Monomorphic signature of a SQL built-in in the canonical registry.
+///
+/// Phase 7 ships a deliberately tiny shape: every parameter and the return
+/// type are [`TypeConstraint`] values. Concrete scalar entries use
+/// [`TypeConstraint::Concrete`]; the `Numeric` / `Ordered` / `Any` constraints
+/// exist for forward-compatibility but none of the Phase 7 seeds use them
+/// directly. Generics and variadics land in Phase 8 and will extend this
+/// type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature {
+    /// Canonical (upper-cased) function name.
+    pub name: String,
+    /// Positional parameter constraints, in declaration order.
+    pub params: Vec<TypeConstraint>,
+    /// Return type constraint.
+    pub return_type: TypeConstraint,
+}
+
+/// Canonical registry of SQL built-in signatures.
+///
+/// Phase 7 seeds the registry with four monomorphic scalar entries (`LOWER`,
+/// `UPPER`, `LENGTH`, `ABS`) so downstream phases (and this phase's tests)
+/// can exercise the lookup surface. The registry is populated once at
+/// program start via [`std::sync::LazyLock`], stays `'static`, and is
+/// keyed by ASCII-uppercased name — callers use [`BuiltinRegistry::resolve`]
+/// which folds case at the boundary.
+///
+/// The registry is *data only*: it has no Salsa dependency, no inference
+/// wiring, and is not yet consumed by the type checker (the hand-written
+/// match in `smelt-db::type_inference` continues to drive inference until
+/// Phase 9 rewires it).
+pub struct BuiltinRegistry;
+
+impl BuiltinRegistry {
+    /// Resolve a built-in by name, case-insensitively (ASCII folding).
+    ///
+    /// Returns `Some(&'static Signature)` when the name matches a registered
+    /// entry, `None` otherwise.
+    pub fn resolve(name: &str) -> Option<&'static Signature> {
+        REGISTRY.get(&name.to_ascii_uppercase())
+    }
+
+    /// Iterator over all canonical (upper-cased) names in the registry.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        REGISTRY.keys().map(|s| s.as_str())
+    }
+}
+
+static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
+    let mut m: HashMap<String, Signature> = HashMap::new();
+    let text = || TypeConstraint::Concrete(DataType::Text);
+    let integer = || TypeConstraint::Concrete(DataType::Integer);
+    let double = || TypeConstraint::Concrete(DataType::Double);
+    let mut insert = |name: &str, params: Vec<TypeConstraint>, return_type: TypeConstraint| {
+        m.insert(
+            name.to_string(),
+            Signature {
+                name: name.to_string(),
+                params,
+                return_type,
+            },
+        );
+    };
+    // Phase 7 seeds. All entries are monomorphic scalars; Phase 8 will
+    // add generic and variadic forms.
+    insert("LOWER", vec![text()], text());
+    insert("UPPER", vec![text()], text());
+    insert("LENGTH", vec![text()], integer());
+    insert("ABS", vec![double()], double());
+    m
+});
 
 #[cfg(test)]
 mod tests {
@@ -698,5 +791,136 @@ mod tests {
             .expect_err("should be an error");
         assert!(matches!(err, SmeltTypeParseError::UnsupportedSort { .. }));
         assert!(sigs[0].return_type_range.is_some());
+    }
+
+    // === Phase 7 TDD tests — Ordered constraint + registry skeleton ===
+
+    #[test]
+    fn ordered_members_match_decision_13() {
+        // §16 #13: Numeric ∪ {Text family, temporal family, Boolean, Interval,
+        // Blob}. This test enumerates every member exhaustively.
+        let c = TypeConstraint::Ordered;
+
+        // Numeric members (also covered by numeric_is_subset_of_ordered, but
+        // the research text explicitly enumerates them here).
+        assert!(c.satisfies(&DataType::SmallInt));
+        assert!(c.satisfies(&DataType::Integer));
+        assert!(c.satisfies(&DataType::BigInt));
+        assert!(c.satisfies(&DataType::Float));
+        assert!(c.satisfies(&DataType::Double));
+        assert!(c.satisfies(&DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        }));
+
+        // String family.
+        assert!(c.satisfies(&DataType::Text));
+        assert!(c.satisfies(&DataType::Varchar { max_length: None }));
+        assert!(c.satisfies(&DataType::Varchar {
+            max_length: Some(10)
+        }));
+        assert!(c.satisfies(&DataType::Char { length: 1 }));
+
+        // Temporal family, including both Timestamp tz variants, plus
+        // Interval.
+        assert!(c.satisfies(&DataType::Date));
+        assert!(c.satisfies(&DataType::Time));
+        assert!(c.satisfies(&DataType::Timestamp {
+            with_timezone: false
+        }));
+        assert!(c.satisfies(&DataType::Timestamp {
+            with_timezone: true
+        }));
+        assert!(c.satisfies(&DataType::Interval));
+
+        // Remaining singletons.
+        assert!(c.satisfies(&DataType::Boolean));
+        // "Binary" in §16 #13 is spelt Blob here.
+        assert!(c.satisfies(&DataType::Blob));
+    }
+
+    #[test]
+    fn ordered_excludes_composites() {
+        let c = TypeConstraint::Ordered;
+        assert!(!c.satisfies(&DataType::Array(Box::new(DataType::Integer))));
+        assert!(!c.satisfies(&DataType::Struct(vec![(
+            "a".to_string(),
+            DataType::Integer,
+        )])));
+        assert!(!c.satisfies(&DataType::Map(
+            Box::new(DataType::Text),
+            Box::new(DataType::Integer),
+        )));
+        // Null and Unknown are explicitly not Ordered members.
+        assert!(!c.satisfies(&DataType::Null));
+        assert!(!c.satisfies(&DataType::Unknown));
+    }
+
+    #[test]
+    fn numeric_is_subset_of_ordered() {
+        // Every type the Numeric constraint accepts must also satisfy the
+        // Ordered constraint (§16 #13: Numeric ⊂ Ordered).
+        let numerics = [
+            DataType::SmallInt,
+            DataType::Integer,
+            DataType::BigInt,
+            DataType::Float,
+            DataType::Double,
+            DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+        ];
+        for dt in &numerics {
+            assert!(
+                TypeConstraint::Numeric.satisfies(dt),
+                "expected Numeric to accept {dt:?}"
+            );
+            assert!(
+                TypeConstraint::Ordered.satisfies(dt),
+                "expected Ordered to accept numeric {dt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_lookup_by_name() {
+        let lower = BuiltinRegistry::resolve("LOWER").expect("LOWER present");
+        assert_eq!(lower.name, "LOWER");
+        assert_eq!(lower.params, vec![TypeConstraint::Concrete(DataType::Text)]);
+        assert_eq!(lower.return_type, TypeConstraint::Concrete(DataType::Text));
+
+        let upper = BuiltinRegistry::resolve("UPPER").expect("UPPER present");
+        assert_eq!(upper.params, vec![TypeConstraint::Concrete(DataType::Text)]);
+        assert_eq!(upper.return_type, TypeConstraint::Concrete(DataType::Text));
+
+        let length = BuiltinRegistry::resolve("LENGTH").expect("LENGTH present");
+        assert_eq!(
+            length.params,
+            vec![TypeConstraint::Concrete(DataType::Text)]
+        );
+        assert_eq!(
+            length.return_type,
+            TypeConstraint::Concrete(DataType::Integer)
+        );
+
+        let abs = BuiltinRegistry::resolve("ABS").expect("ABS present");
+        assert_eq!(abs.params, vec![TypeConstraint::Concrete(DataType::Double)]);
+        assert_eq!(abs.return_type, TypeConstraint::Concrete(DataType::Double));
+    }
+
+    #[test]
+    fn registry_lookup_case_insensitive() {
+        let canonical = BuiltinRegistry::resolve("LOWER").expect("LOWER present");
+        let lowercase = BuiltinRegistry::resolve("lower").expect("lower present");
+        let titlecase = BuiltinRegistry::resolve("Lower").expect("Lower present");
+        let mixed = BuiltinRegistry::resolve("LoWeR").expect("LoWeR present");
+
+        // All four lookups must resolve to the same `&'static Signature` —
+        // ASCII case folding happens at the lookup boundary, not by inserting
+        // multiple entries.
+        assert!(std::ptr::eq(canonical, lowercase));
+        assert!(std::ptr::eq(canonical, titlecase));
+        assert!(std::ptr::eq(canonical, mixed));
     }
 }

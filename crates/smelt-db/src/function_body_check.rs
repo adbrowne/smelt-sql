@@ -116,6 +116,10 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
     match &p.type_ref {
         Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(dt)))) => dt.clone(),
         Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => DataType::Double,
+        // `Ordered` (Phase 7) currently has no precise stand-in type —
+        // treat it like `Any` in the body checker until Phase 8 adds the
+        // generics plumbing that actually binds `T` from call-site args.
+        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
         Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
