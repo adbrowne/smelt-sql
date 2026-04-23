@@ -1192,7 +1192,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 14 | Types: WindowExpr sort and SelectItems<K> kind ceiling | done | 80553d1 | 2026-04-23 |
 | 15 | TableExpr parameters: bare-column row polymorphism + shadow warnings | done | 85a9441 | 2026-04-24 |
 | 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | done | 38609e5 | 2026-04-24 |
-| 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | done | | 2026-04-24 |
+| 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | done | 9ccd605 | 2026-04-24 |
 | 18 | LSP polish + examples (Step 3 complete) | pending | | |
 | 19 | Parser + types: context-binding syntax (Step 4 opens) | pending | | |
 | 20 | CTE schema extraction + splice-point context inference | pending | | |
