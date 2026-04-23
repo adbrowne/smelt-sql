@@ -1189,7 +1189,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 11 | Per-declaration frontmatter + `backends:` + backend namespace | done | 3bedc86 | 2026-04-23 |
 | 12 | Multi-level frame rendering + CAST-enforcement flag (Step 2 complete) | done | 2d2a1a8 | 2026-04-23 |
 | 13 | Parser: TableExpr / WindowExpr / SelectItems<K, ctx> in type refs (Step 3 opens) | done | | 2026-04-23 |
-| 14 | Types: WindowExpr sort and SelectItems<K> kind ceiling | done | | 2026-04-23 |
+| 14 | Types: WindowExpr sort and SelectItems<K> kind ceiling | done | 80553d1 | 2026-04-23 |
 | 15 | TableExpr parameters: bare-column row polymorphism + shadow warnings | pending | | |
 | 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | pending | | |
 | 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | pending | | |
