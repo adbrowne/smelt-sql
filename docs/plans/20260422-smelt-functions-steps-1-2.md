@@ -474,7 +474,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 6 | Call-site expansion + single-level frame trace (Step 1 complete) | done | a25f44f | 2026-04-22 |
 | 7 | `Ordered` constraint + canonical registry skeleton | done | 2cc7fa9 | 2026-04-23 |
 | 8 | Generics + variadics | done | deb2403 | 2026-04-23 |
-| 9 | Rewire built-in inference through the registry | pending | — | — |
+| 9 | Rewire built-in inference through the registry | done | 1567e51 | 2026-04-23 |
 | 10 | `smelt.extern` declarations | pending | — | — |
 | 11 | Per-declaration frontmatter + `backends:` + backend namespace | pending | — | — |
 | 12 | Multi-level frame rendering + CAST-enforcement flag (Step 2 complete) | pending | — | — |
