@@ -324,9 +324,74 @@ impl Param {
     }
 }
 
-/// Flat type reference. Phase 4 will parse structure (sort + constraint).
+/// Flat type reference. Phase 4 parses the text into a structured
+/// [`smelt_types::SmeltType`]; Phase 13 adds structured CST children for
+/// the non-`Expr` sorts (`TableExpr`, `AggExpr`, `WindowExpr`,
+/// `SelectItems`) so downstream phases can walk them without re-parsing
+/// the raw text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeRef(SyntaxNode);
+
+/// Classification of a `TYPE_REF`'s leading sort keyword.
+///
+/// Phase 13 recognises these heads inside `parse_type_ref` and emits
+/// structured CST children where appropriate. `Other` captures sort
+/// keywords that are not one of the recognised heads — in practice an
+/// unknown head is reported as a parse error, but a post-parse walker
+/// may still see the unknown name here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeRefHead {
+    /// `Expr<...>` — scalar-expression fragment sort.
+    Expr,
+    /// `AggExpr<...>` — aggregate-expression fragment sort.
+    AggExpr,
+    /// `WindowExpr<...>` — window-expression fragment sort.
+    WindowExpr,
+    /// `TableExpr` / `TableExpr<{...}>` — table-expression fragment sort.
+    TableExpr,
+    /// `SelectItems<...>` — select-list fragment sort.
+    SelectItems,
+    /// Unknown or missing sort keyword; the raw identifier text is carried
+    /// for diagnostic callers. `None` means the `TYPE_REF` had no leading
+    /// identifier (error-recovery shape).
+    Other(Option<String>),
+}
+
+/// Kind tag emitted on `Expr<T>` / `AggExpr<T>` / `WindowExpr<T>` type refs.
+///
+/// Phase 14 attaches this kind to every typed AST node during inference;
+/// Phase 13 only records it on the signature's parameter type refs so the
+/// signature extractor can thread the kind through without re-parsing the
+/// raw text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprKindTag {
+    /// `Expr<T>` — scalar expression.
+    Scalar,
+    /// `AggExpr<T>` — aggregate expression.
+    Agg,
+    /// `WindowExpr<T>` — window expression.
+    Window,
+}
+
+/// Trailing row-polymorphism marker inside a `ROW_REQUIREMENT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowTail {
+    /// No tail was written.
+    None,
+    /// `..` — anonymous fresh row variable, cannot be referenced.
+    Anon,
+    /// `..name` — named row variable.
+    Named(String),
+}
+
+/// Structured view over a `ROW_REQUIREMENT` child of a `TableExpr<{...}>`
+/// type reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowRequirement(SyntaxNode);
+
+/// A single `name: TypeRef` field inside a `ROW_REQUIREMENT`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowField(SyntaxNode);
 
 impl TypeRef {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
@@ -344,6 +409,140 @@ impl TypeRef {
     /// Raw text of the type reference (including internal whitespace).
     pub fn text(&self) -> String {
         self.0.text().to_string()
+    }
+
+    /// Classify the `TYPE_REF`'s leading sort keyword.
+    ///
+    /// Looks at the first `IDENT` token in document order (skipping any
+    /// error / trivia tokens). Returns [`TypeRefHead::Other(None)`] if
+    /// no leading identifier is present.
+    pub fn kind(&self) -> TypeRefHead {
+        let head = leading_ident_text(&self.0);
+        match head.as_deref() {
+            Some("Expr") => TypeRefHead::Expr,
+            Some("AggExpr") => TypeRefHead::AggExpr,
+            Some("WindowExpr") => TypeRefHead::WindowExpr,
+            Some("TableExpr") => TypeRefHead::TableExpr,
+            Some("SelectItems") => TypeRefHead::SelectItems,
+            Some(other) => TypeRefHead::Other(Some(other.to_string())),
+            None => TypeRefHead::Other(None),
+        }
+    }
+
+    /// Return the [`ExprKindTag`] attached to this type ref, if any.
+    ///
+    /// Populated only for `Expr<T>`, `AggExpr<T>`, and `WindowExpr<T>`
+    /// heads. Other heads (TableExpr, SelectItems, etc.) return `None`.
+    pub fn expr_kind(&self) -> Option<ExprKindTag> {
+        for child in self.0.children() {
+            match child.kind() {
+                EXPR_KIND_SCALAR => return Some(ExprKindTag::Scalar),
+                EXPR_KIND_AGG => return Some(ExprKindTag::Agg),
+                EXPR_KIND_WINDOW => return Some(ExprKindTag::Window),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Return the structured row requirement of a `TableExpr<{...}>`, if
+    /// present. Only `TableExpr` heads carry a `ROW_REQUIREMENT` child.
+    pub fn row_requirement(&self) -> Option<RowRequirement> {
+        self.0
+            .children()
+            .find(|n| n.kind() == ROW_REQUIREMENT)
+            .map(RowRequirement)
+    }
+
+    /// The `SELECTITEMS_KIND` argument text (e.g. `"Agg"`), if any.
+    pub fn selectitems_kind(&self) -> Option<String> {
+        let node = self.0.children().find(|n| n.kind() == SELECTITEMS_KIND)?;
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The `SELECTITEMS_CTX` argument text (e.g. `"sessionized"`), if any.
+    pub fn selectitems_ctx(&self) -> Option<String> {
+        let node = self.0.children().find(|n| n.kind() == SELECTITEMS_CTX)?;
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// First IDENT token in the sub-tree's document order, if any.
+fn leading_ident_text(node: &SyntaxNode) -> Option<String> {
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+}
+
+impl RowRequirement {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_REQUIREMENT {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// All `ROW_FIELD` children in declared order.
+    pub fn fields(&self) -> Vec<RowField> {
+        self.0.children().filter_map(RowField::cast).collect()
+    }
+
+    /// The trailing row variable marker, if any.
+    pub fn tail(&self) -> RowTail {
+        if self.0.children().any(|n| n.kind() == ROW_TAIL_ANON) {
+            return RowTail::Anon;
+        }
+        if let Some(named) = self.0.children().find(|n| n.kind() == ROW_TAIL_NAMED) {
+            if let Some(name) = named
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| t.kind() == IDENT)
+                .map(|t| t.text().to_string())
+            {
+                return RowTail::Named(name);
+            }
+        }
+        RowTail::None
+    }
+}
+
+impl RowField {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_FIELD {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The field's declared name, if present.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The field's declared `TYPE_REF`, if present.
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
     }
 }
 

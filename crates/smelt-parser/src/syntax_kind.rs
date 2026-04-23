@@ -120,6 +120,8 @@ pub enum SyntaxKind {
     CONCAT,       // || (string concatenation)
     LBRACKET,     // [
     RBRACKET,     // ]
+    LBRACE,       // { (row-requirement opener in TableExpr<{...}>, Phase 13)
+    RBRACE,       // } (row-requirement closer in TableExpr<{...}>, Phase 13)
     COLON,        // : (used in array slices)
     // JSON operators
     JSON_ARROW,      // ->
@@ -220,6 +222,25 @@ pub enum SyntaxKind {
 
     // smelt.extern top-level declaration (Phase 10)
     SMELT_EXTERN, // smelt.extern name(params) -> TypeRef
+
+    // Phase 13: structured TypeRef children for TableExpr / AggExpr /
+    // WindowExpr / SelectItems parameter sorts. These are emitted as
+    // children of a TYPE_REF node by parse_type_ref when the leading
+    // identifier matches one of the recognised sort heads.
+    //
+    // The EXPR_KIND_* nodes are zero-width markers whose variant
+    // classifies the head (Scalar / Agg / Window). They contain no
+    // tokens so they don't alter the TYPE_REF's text range — the AST
+    // wrapper classifies via SyntaxKind rather than a stored string.
+    EXPR_KIND_SCALAR, // Marker: `Expr<T>` has `Scalar` kind.
+    EXPR_KIND_AGG,    // Marker: `AggExpr<T>` has `Agg` kind.
+    EXPR_KIND_WINDOW, // Marker: `WindowExpr<T>` has `Window` kind.
+    ROW_REQUIREMENT,  // { field: Type [, ..r] } under a TableExpr<...>
+    ROW_FIELD,        // Single field inside ROW_REQUIREMENT: `name: TypeRef`
+    ROW_TAIL_NAMED,   // `..<ident>` tail in a ROW_REQUIREMENT
+    ROW_TAIL_ANON,    // bare `..` tail in a ROW_REQUIREMENT
+    SELECTITEMS_KIND, // Capital-Kind argument of SelectItems<K, ctx>
+    SELECTITEMS_CTX,  // lowercase context argument of SelectItems<K, ctx>
 
     // Error handling
     ERROR, // Invalid syntax

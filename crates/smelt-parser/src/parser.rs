@@ -23,6 +23,14 @@ pub struct ParseError {
     pub range: TextRange,
 }
 
+/// Is `name` one of the recognised SelectItems kind keywords
+/// (Scalar / Agg / Window)? Used by `parse_selectitems_tail` to
+/// distinguish the single-argument `SelectItems<Kind>` form from the
+/// single-argument `SelectItems<ctx>` form.
+fn is_selectitems_kind_name(name: &str) -> bool {
+    matches!(name, "Scalar" | "Agg" | "Window")
+}
+
 /// Parse input text into a CST
 pub fn parse(input: &str) -> Parse {
     let tokens = tokenize(input);
@@ -708,23 +716,114 @@ impl<'a> Parser<'a> {
         self.finish_node();
     }
 
-    /// Parse a flat type reference. In Phase 1 a TYPE_REF is a flat run of
-    /// tokens capturing the type name, e.g. `Expr<Numeric>` → three tokens
-    /// `Expr`, `<`, `Numeric`, `>`. Phase 4 replaces this with a structured
-    /// parse. Angle-bracket (`<`...`>`) and parenthesized (`(`...`)`) regions
-    /// are tracked for depth so commas and other separators inside them are
-    /// swallowed as part of the type.
+    /// Parse a type reference.
+    ///
+    /// History:
+    ///   - Phase 1: flat token run.
+    ///   - Phase 4: text-level structured parse in `smelt-types` (still a
+    ///     flat CST).
+    ///   - Phase 13: structured CST children for the non-`Expr` sorts
+    ///     (`TableExpr`, `AggExpr`, `WindowExpr`, `SelectItems`). The
+    ///     head identifier is still emitted as raw IDENT tokens inside
+    ///     `TYPE_REF`, with additional structured nodes (`EXPR_KIND_*`,
+    ///     `ROW_REQUIREMENT`, `SELECTITEMS_KIND`, `SELECTITEMS_CTX`)
+    ///     siblings to the raw tokens so the AST wrapper can classify
+    ///     the sort and expose structured getters.
+    ///
+    /// Boundaries at depth 0 are `,`, `)`, `=`, `AS`, `->`, and EOF (the
+    /// caller's error recovery handles the rest).
     fn parse_type_ref(&mut self) {
         self.start_node(TYPE_REF);
 
+        self.skip_trivia();
+
+        // Peek the leading IDENT (if any). This decides whether we go
+        // down a structured path (for recognised sorts) or fall back to
+        // the flat consumer used for unknown / error heads.
+        let head_text = if self.at(IDENT) {
+            Some(self.current_text().to_string())
+        } else {
+            None
+        };
+
+        match head_text.as_deref() {
+            // Scalar / Agg / Window expression sorts: emit an EXPR_KIND
+            // tag alongside the flat body so the AST can report a
+            // uniform `expr_kind()` across all three. The data-type
+            // payload is parsed textually by `smelt-types` from the
+            // TYPE_REF's raw text, so we keep that as a flat run here.
+            Some("Expr") => {
+                self.advance(); // IDENT "Expr"
+                self.emit_expr_kind_marker(EXPR_KIND_SCALAR);
+                self.consume_type_ref_tail();
+            }
+            Some("AggExpr") => {
+                self.advance(); // IDENT "AggExpr"
+                self.emit_expr_kind_marker(EXPR_KIND_AGG);
+                self.consume_type_ref_tail();
+            }
+            Some("WindowExpr") => {
+                self.advance(); // IDENT "WindowExpr"
+                self.emit_expr_kind_marker(EXPR_KIND_WINDOW);
+                self.consume_type_ref_tail();
+            }
+            Some("TableExpr") => {
+                self.advance(); // IDENT "TableExpr"
+                self.parse_tableexpr_tail();
+            }
+            Some("SelectItems") => {
+                self.advance(); // IDENT "SelectItems"
+                self.parse_selectitems_tail();
+            }
+            // Unknown / non-matching sort — emit a parse error so the
+            // Phase 4-era "unknown sort" diagnostic path still lights up
+            // without reaching into `smelt-types`. Callers still see the
+            // original tokens via the flat consumer.
+            Some(other) => {
+                let msg = format!(
+                    "Unknown type sort `{}` — expected one of Expr, AggExpr, WindowExpr, TableExpr, SelectItems",
+                    other
+                );
+                self.error(msg);
+                self.consume_type_ref_tail();
+            }
+            None => {
+                // Recovery: no leading IDENT — consume the tail anyway.
+                self.consume_type_ref_tail();
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Emit a zero-width marker node of the given kind (one of
+    /// [`EXPR_KIND_SCALAR`], [`EXPR_KIND_AGG`], or [`EXPR_KIND_WINDOW`]).
+    ///
+    /// The marker is a sibling of the leading sort IDENT inside the
+    /// `TYPE_REF`. It contains no tokens and therefore does not
+    /// contribute to the `TypeRef::text()` output — downstream
+    /// signature extraction (which parses `type_ref.text()`) sees
+    /// exactly the user-written source text. The AST wrapper classifies
+    /// it via [`TypeRef::expr_kind()`] by inspecting the marker's
+    /// `SyntaxKind`.
+    fn emit_expr_kind_marker(&mut self, kind: SyntaxKind) {
+        debug_assert!(matches!(
+            kind,
+            EXPR_KIND_SCALAR | EXPR_KIND_AGG | EXPR_KIND_WINDOW
+        ));
+        self.builder.start_node(kind.into());
+        self.builder.finish_node();
+    }
+
+    /// Parse a flat (unstructured) `TYPE_REF` that stops at row-field
+    /// boundaries: `,`, `}`, `>` (closing `<`), and usual parameter
+    /// boundaries. Used for row-field type annotations inside a
+    /// `ROW_REQUIREMENT`, where the type is a bare name like `Numeric`
+    /// or `Integer` — not an `Expr<...>` sort.
+    fn parse_flat_type_ref_stopping_on_row_field_boundary(&mut self) {
+        self.start_node(TYPE_REF);
         let mut angle_depth: i32 = 0;
         let mut paren_depth: i32 = 0;
-
-        // Consume tokens until we hit a boundary. Boundaries at depth 0 are:
-        //   `,` `)` `=` — parameter-list separators / default assignment
-        //   AS_KW       — end of return-type / param list
-        //   JSON_ARROW  — start of a return arrow (shouldn't appear inside a TypeRef)
-        //   EOF
         loop {
             self.skip_trivia();
             let k = self.current();
@@ -732,12 +831,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             if angle_depth == 0 && paren_depth == 0 {
-                if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW) {
+                if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW | RBRACE | GT) {
                     break;
                 }
-                // A smelt.define / smelt.extern on the next line would start
-                // with IDENT "smelt"; the caller's error recovery handles
-                // that — we stop here so the caller can resync.
                 if k == IDENT && (self.at_smelt_define_trigger() || self.at_smelt_extern_trigger())
                 {
                     break;
@@ -752,8 +848,275 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
-
         self.finish_node();
+    }
+
+    /// Flat-consume tokens up to a depth-0 boundary. `<` and `(` open
+    /// angle/paren depth so commas inside don't end the TypeRef.
+    fn consume_type_ref_tail(&mut self) {
+        let mut angle_depth: i32 = 0;
+        let mut paren_depth: i32 = 0;
+        loop {
+            self.skip_trivia();
+            let k = self.current();
+            if k == EOF {
+                break;
+            }
+            if angle_depth == 0 && paren_depth == 0 {
+                if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW) {
+                    break;
+                }
+                if k == IDENT && (self.at_smelt_define_trigger() || self.at_smelt_extern_trigger())
+                {
+                    break;
+                }
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => angle_depth = angle_depth.saturating_sub(1),
+                LPAREN => paren_depth += 1,
+                RPAREN => paren_depth = paren_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    /// Parse the tail of a `TableExpr` type reference: optionally
+    /// `<{ field, ..., ..tail }>`. When no `<` follows, nothing further
+    /// is emitted — a bare `TableExpr` is a valid row-polymorphic
+    /// parameter type.
+    fn parse_tableexpr_tail(&mut self) {
+        self.skip_trivia();
+        if !self.at(LT) {
+            self.consume_type_ref_tail();
+            return;
+        }
+        self.advance(); // LT
+        self.skip_trivia();
+
+        if !self.at(LBRACE) {
+            // No row-requirement between the angle brackets — consume
+            // the remainder up to the matching `>`.
+            self.skip_to_matching_gt();
+            return;
+        }
+
+        self.start_node(ROW_REQUIREMENT);
+        self.advance(); // `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Tail markers: two DOTs in a row. Decide between
+            // `..name` (ROW_TAIL_NAMED) and `..` (ROW_TAIL_ANON) by
+            // lookahead, so we only ever open one of the two nodes.
+            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+                // Peek past the two dots to see if an IDENT follows
+                // (named tail) or not (anonymous).
+                let is_named = matches!(
+                    self.peek_nth_non_trivia(2),
+                    Some(k) if k == IDENT
+                );
+                if is_named {
+                    self.start_node(ROW_TAIL_NAMED);
+                    self.advance(); // first DOT
+                    self.advance(); // second DOT
+                    self.skip_trivia();
+                    self.advance(); // IDENT
+                    self.finish_node();
+                } else {
+                    self.start_node(ROW_TAIL_ANON);
+                    self.advance(); // first DOT
+                    self.advance(); // second DOT
+                    self.finish_node();
+                }
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.error(
+                        "`..tail` must be the last element of a row requirement".to_string(),
+                    );
+                    self.advance();
+                    // keep going defensively so we don't loop forever
+                    continue;
+                }
+                break;
+            }
+
+            // Regular row field: `name: TypeRef`. The row-field TYPE_REF
+            // is a flat type name (e.g. `Numeric`, `Integer`, `Text`) —
+            // not an `Expr<...>` sort. Use the flat consumer so bare
+            // type names don't trip the sort-head dispatch.
+            if self.at(IDENT) {
+                self.start_node(ROW_FIELD);
+                self.advance(); // IDENT name
+                self.skip_trivia();
+                if self.at(COLON) {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_flat_type_ref_stopping_on_row_field_boundary();
+                } else {
+                    self.error("Expected `:` after row field name".to_string());
+                }
+                self.finish_node();
+            } else {
+                self.error("Expected row field name or `..tail`".to_string());
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected `}` to close row requirement".to_string());
+        }
+        self.finish_node(); // ROW_REQUIREMENT
+
+        // Expect the closing `>`; tolerate its absence.
+        self.skip_trivia();
+        if self.at(GT) {
+            self.advance();
+        } else {
+            self.skip_to_matching_gt();
+        }
+    }
+
+    /// Parse the tail of a `SelectItems<...>` type reference. Accepts:
+    ///   - `<Kind>`           — single uppercase-Kind argument.
+    ///   - `<ctx>`            — single lowercase context argument.
+    ///   - `<Kind, ctx>`      — two arguments, kind then context.
+    ///
+    /// The first-token heuristic for the single-arg form: if the
+    /// identifier is one of `{Scalar, Agg, Window}`, it's a
+    /// `SELECTITEMS_KIND`; otherwise it is a `SELECTITEMS_CTX`.
+    fn parse_selectitems_tail(&mut self) {
+        self.skip_trivia();
+        if !self.at(LT) {
+            self.consume_type_ref_tail();
+            return;
+        }
+        self.advance(); // LT
+        self.skip_trivia();
+
+        if !self.at(IDENT) {
+            self.error("Expected kind or context identifier inside SelectItems<...>".to_string());
+            self.skip_to_matching_gt();
+            return;
+        }
+
+        let first_text = self.current_text().to_string();
+        let first_is_kind = is_selectitems_kind_name(&first_text);
+        let has_second = self.peek_has_second_selectitems_arg();
+
+        if has_second {
+            if !first_is_kind {
+                self.error(format!(
+                    "Expected a SelectItems kind (Scalar, Agg, or Window) as the first of two arguments, got `{}`",
+                    first_text
+                ));
+            }
+            self.start_node(SELECTITEMS_KIND);
+            self.advance(); // IDENT
+            self.finish_node();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+            }
+            if self.at(IDENT) {
+                self.start_node(SELECTITEMS_CTX);
+                self.advance();
+                self.finish_node();
+            } else {
+                self.error("Expected context identifier after `,` in SelectItems<...>".to_string());
+            }
+        } else if first_is_kind {
+            self.start_node(SELECTITEMS_KIND);
+            self.advance();
+            self.finish_node();
+        } else {
+            self.start_node(SELECTITEMS_CTX);
+            self.advance();
+            self.finish_node();
+        }
+
+        self.skip_trivia();
+        if self.at(GT) {
+            self.advance();
+        } else {
+            self.skip_to_matching_gt();
+        }
+    }
+
+    /// After the current IDENT, peek whether the next non-trivia token
+    /// is `,` (two args) as opposed to `>` (single arg).
+    fn peek_has_second_selectitems_arg(&self) -> bool {
+        matches!(self.peek_nth_non_trivia(1), Some(k) if k == COMMA)
+    }
+
+    /// Peek the kind of the Nth non-trivia token after the current one
+    /// (0 == current non-trivia; 1 == the one after, etc.).
+    fn peek_nth_non_trivia(&self, n: usize) -> Option<SyntaxKind> {
+        let mut i = self.pos;
+        let mut found = 0usize;
+        // Advance through tokens, counting non-trivia as we go.
+        while let Some(t) = self.tokens.get(i) {
+            if !t.kind.is_trivia() {
+                if found == n {
+                    return Some(t.kind);
+                }
+                found += 1;
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Peek the kind of the next non-trivia token after the current one.
+    fn peek_next_non_trivia(&self) -> Option<SyntaxKind> {
+        self.peek_nth_non_trivia(1)
+    }
+
+    /// Consume tokens until a `>` at angle-depth 0 is found (and
+    /// consumed), or a type-ref boundary / EOF is reached.
+    fn skip_to_matching_gt(&mut self) {
+        let mut angle_depth: i32 = 1;
+        while !self.at(EOF) {
+            let k = self.current();
+            if matches!(k, COMMA | RPAREN | AS_KW | JSON_ARROW) && angle_depth == 1 {
+                return;
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => {
+                    angle_depth -= 1;
+                    if angle_depth == 0 {
+                        self.advance();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            self.advance();
+        }
     }
 
     /// Parse the parenthesized body of a smelt.define.
@@ -772,9 +1135,18 @@ impl<'a> Parser<'a> {
         self.advance(); // consume '('
         self.skip_trivia();
 
-        // Parse a single expression. If parsing produces an unbalanced `(` we
-        // rely on the caller's sync loop to recover at the next top-level.
-        self.parse_expression();
+        // Phase 13: allow a SELECT statement (or WITH … SELECT) as the
+        // body, in addition to the Phase-1 expression body. This keeps
+        // the simple-expression tests unchanged while enabling the
+        // TableExpr-returning fixtures introduced in Step 3.
+        if self.at(SELECT_KW) || self.at(WITH_KW) {
+            self.parse_select_stmt();
+        } else {
+            // Parse a single expression. If parsing produces an unbalanced `(`
+            // we rely on the caller's sync loop to recover at the next
+            // top-level.
+            self.parse_expression();
+        }
 
         self.skip_trivia();
         if self.at(RPAREN) {
@@ -1036,12 +1408,24 @@ impl<'a> Parser<'a> {
         self.start_node(SELECT_LIST);
         self.skip_trivia();
 
-        // Parse comma-separated select items (including *)
+        // Parse comma-separated select items (including * and table.*)
         loop {
             if self.at(STAR) {
                 // Handle SELECT * as a special select item
                 self.start_node(SELECT_ITEM);
                 self.advance();
+                self.finish_node();
+            } else if self.at(IDENT)
+                && self.peek_nth_non_trivia(1) == Some(DOT)
+                && self.peek_nth_non_trivia(2) == Some(STAR)
+            {
+                // `table.*` qualified star. Emit as a SELECT_ITEM carrying
+                // IDENT DOT STAR tokens directly — downstream consumers
+                // treat `SELECT_ITEM` with a trailing STAR as a star-item.
+                self.start_node(SELECT_ITEM);
+                self.advance(); // IDENT
+                self.advance(); // DOT
+                self.advance(); // STAR
                 self.finish_node();
             } else {
                 self.parse_select_item();
@@ -6062,5 +6446,245 @@ LIMIT 100
         let externs: Vec<SmeltExtern> = file.externs().collect();
         assert_eq!(externs[0].name().as_deref(), Some("regex_match"));
         assert!(externs[0].backend_namespace().is_none());
+    }
+
+    // ===== Phase 13: TableExpr / WindowExpr / SelectItems<K, ctx> in type refs =====
+
+    use crate::ast::{ExprKindTag, RowTail, TypeRefHead};
+
+    /// Helper: extract the first `PARAM`'s `TYPE_REF` from a single-define file.
+    fn first_param_type_ref(file: &File) -> TypeRef {
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().expect("param list").params().collect();
+        params[0].type_ref().expect("first param type ref")
+    }
+
+    #[test]
+    fn parses_tableexpr_bare() {
+        let input = "smelt.define f(source: TableExpr) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::TableExpr);
+        assert!(
+            tr.row_requirement().is_none(),
+            "no row requirement expected"
+        );
+    }
+
+    #[test]
+    fn parses_tableexpr_with_row_requirement() {
+        let input = "smelt.define f(source: TableExpr<{revenue: Numeric, cost: Numeric}>) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::TableExpr);
+
+        let req = tr
+            .row_requirement()
+            .expect("TableExpr<{...}> should have a ROW_REQUIREMENT");
+        let fields = req.fields();
+        assert_eq!(fields.len(), 2, "expected two row fields");
+        assert_eq!(fields[0].name().as_deref(), Some("revenue"));
+        assert!(
+            fields[0].type_ref().is_some(),
+            "revenue should have a TYPE_REF"
+        );
+        assert_eq!(fields[1].name().as_deref(), Some("cost"));
+        assert!(
+            fields[1].type_ref().is_some(),
+            "cost should have a TYPE_REF"
+        );
+        assert!(matches!(req.tail(), RowTail::None));
+    }
+
+    #[test]
+    fn parses_tableexpr_with_row_tail() {
+        // Named tail: ..r
+        let input_named =
+            "smelt.define f(source: TableExpr<{revenue: Numeric, ..r}>) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input_named);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let tr = first_param_type_ref(&file);
+        let req = tr.row_requirement().expect("row requirement");
+        match req.tail() {
+            RowTail::Named(name) => assert_eq!(name, "r"),
+            other => panic!("expected named tail `r`, got {other:?}"),
+        }
+        assert_eq!(req.fields().len(), 1);
+
+        // Anonymous tail: bare `..`
+        let input_anon = "smelt.define g(source: TableExpr<{..}>) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input_anon);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let tr = first_param_type_ref(&file);
+        let req = tr.row_requirement().expect("row requirement");
+        assert!(matches!(req.tail(), RowTail::Anon));
+        assert_eq!(req.fields().len(), 0);
+    }
+
+    #[test]
+    fn parses_aggexpr_and_windowexpr() {
+        let input =
+            "smelt.define f(a: Expr<Integer>, b: AggExpr<Integer>, c: WindowExpr<Integer>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().unwrap().params().collect();
+        assert_eq!(params.len(), 3);
+
+        let t0 = params[0].type_ref().unwrap();
+        let t1 = params[1].type_ref().unwrap();
+        let t2 = params[2].type_ref().unwrap();
+        assert_eq!(t0.kind(), TypeRefHead::Expr);
+        assert_eq!(t1.kind(), TypeRefHead::AggExpr);
+        assert_eq!(t2.kind(), TypeRefHead::WindowExpr);
+        assert_eq!(t0.expr_kind(), Some(ExprKindTag::Scalar));
+        assert_eq!(t1.expr_kind(), Some(ExprKindTag::Agg));
+        assert_eq!(t2.expr_kind(), Some(ExprKindTag::Window));
+    }
+
+    #[test]
+    fn parses_selectitems_kind_only() {
+        let input = "smelt.define f(items: SelectItems<Agg>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::SelectItems);
+        assert_eq!(tr.selectitems_kind().as_deref(), Some("Agg"));
+        assert!(tr.selectitems_ctx().is_none());
+    }
+
+    #[test]
+    fn parses_selectitems_kind_and_ctx() {
+        let input = "smelt.define f(items: SelectItems<Agg, sessionized>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::SelectItems);
+        assert_eq!(tr.selectitems_kind().as_deref(), Some("Agg"));
+        assert_eq!(tr.selectitems_ctx().as_deref(), Some("sessionized"));
+
+        // Declared order: kind before ctx.
+        let syntax = tr.syntax();
+        let mut seen_kind = false;
+        let mut seen_ctx = false;
+        for child in syntax.children() {
+            if child.kind() == SELECTITEMS_KIND {
+                assert!(!seen_ctx, "KIND must come before CTX");
+                seen_kind = true;
+            } else if child.kind() == SELECTITEMS_CTX {
+                assert!(seen_kind, "CTX must follow KIND");
+                seen_ctx = true;
+            }
+        }
+        assert!(seen_kind && seen_ctx);
+    }
+
+    #[test]
+    fn parses_selectitems_ctx_only() {
+        let input = "smelt.define f(items: SelectItems<sessionized>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::SelectItems);
+        assert!(tr.selectitems_kind().is_none());
+        assert_eq!(tr.selectitems_ctx().as_deref(), Some("sessionized"));
+    }
+
+    #[test]
+    fn rejects_unknown_expr_kind() {
+        let input = "smelt.define f(a: FooExpr<Integer>) AS (SELECT 1)";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for unknown sort"
+        );
+        let mentions_fooexpr = parse.errors.iter().any(|e| {
+            let m = e.message.to_lowercase();
+            m.contains("fooexpr") || m.contains("unknown sort") || m.contains("unsupported")
+        });
+        assert!(
+            mentions_fooexpr,
+            "expected an error mentioning FooExpr / unknown sort / unsupported, got {:?}",
+            parse.errors
+        );
+    }
+
+    #[test]
+    fn tableexpr_in_expression_position_is_not_special() {
+        // `TableExpr` as a bare identifier in expression position must remain a
+        // plain column reference, not a type reference or an error.
+        let input =
+            "smelt.define f(x: Expr<Integer>) AS (SELECT TableExpr FROM t WHERE TableExpr > 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let body = def.body().expect("body");
+        let body_syntax = body.syntax();
+
+        // No TYPE_REF nodes should live inside the body (the only TYPE_REF is
+        // the one on the `x: Expr<Integer>` parameter).
+        let tr_count_in_body = body_syntax
+            .descendants()
+            .filter(|n| n.kind() == TYPE_REF)
+            .count();
+        assert_eq!(tr_count_in_body, 0, "body should contain no TYPE_REF nodes");
+
+        // The bare `TableExpr` identifier must appear at least twice (SELECT
+        // list + WHERE operand) as an IDENT token inside the body.
+        let tableexpr_tokens = body_syntax
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT && t.text() == "TableExpr")
+            .count();
+        assert!(
+            tableexpr_tokens >= 2,
+            "expected at least two `TableExpr` IDENT tokens in the body, got {}",
+            tableexpr_tokens
+        );
     }
 }
