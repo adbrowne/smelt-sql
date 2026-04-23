@@ -471,6 +471,16 @@ impl TypeRef {
             .find(|t| t.kind() == IDENT)
             .map(|t| t.text().to_string())
     }
+
+    /// The `EXPR_CTX` context-binding identifier (e.g. `"source"`) from
+    /// `Expr<Boolean, source>`, if present (Phase 19).
+    pub fn expr_ctx(&self) -> Option<String> {
+        let node = self.0.children().find(|n| n.kind() == EXPR_CTX)?;
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
 }
 
 /// First IDENT token in the sub-tree's document order, if any.

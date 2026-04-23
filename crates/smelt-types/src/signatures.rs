@@ -534,7 +534,13 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
     // Sort dispatch.
     match sort {
         "Expr" => {
-            let constraint = parse_inner_constraint(inner_raw).ok_or_else(|| {
+            // Phase 19: strip optional `, ctx` context binding — the context
+            // identifier is extracted from the CST in `extract_param_spec`.
+            let type_part = inner_raw
+                .find(',')
+                .map(|i| inner_raw[..i].trim())
+                .unwrap_or(inner_raw);
+            let constraint = parse_inner_constraint(type_part).ok_or_else(|| {
                 SmeltTypeParseError::UnknownInner {
                     inner: inner_raw.to_string(),
                     span_text: text.to_string(),
@@ -574,6 +580,22 @@ fn parse_inner_constraint(inner: &str) -> Option<TypeConstraint> {
     }
 }
 
+/// Pre-resolution context binding attached to an `Expr<T, ctx>` /
+/// `AggExpr<T, ctx>` / `WindowExpr<T, ctx>` parameter (Phase 19).
+///
+/// Stores the raw identifier written by the user (e.g. `"source"`). Phase 20
+/// will add a post-resolution pointer to the actual parameter or CTE that
+/// `ctx` names. For now this is just a newtype around `String`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRef(pub String);
+
+impl ContextRef {
+    /// The raw name written in the `Expr<T, ctx>` annotation.
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Description of a single parameter in a `smelt.define`.
 ///
 /// `type_ref_text` is the raw source text of the `TypeRef` node (e.g.
@@ -603,6 +625,10 @@ pub struct ParamSpec {
     pub type_ref_range: Option<Range>,
     /// `true` when the parameter has a default value.
     pub has_default: bool,
+    /// Pre-resolution context binding from `Expr<T, ctx>` / `AggExpr<T, ctx>`
+    /// / `WindowExpr<T, ctx>` annotations (Phase 19). `None` when no context
+    /// argument is present.
+    pub context: Option<ContextRef>,
 }
 
 /// A single frame of expansion context attached to a body/call-site
@@ -953,6 +979,11 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
         start: offset_to_position(text, usize::from(r.start())),
         end: offset_to_position(text, usize::from(r.end())),
     });
+    // Phase 19: extract the optional context binding from `EXPR_CTX`.
+    let context = type_ref_node
+        .as_ref()
+        .and_then(|tr| tr.expr_ctx())
+        .map(ContextRef);
     ParamSpec {
         name: param.name().unwrap_or_default(),
         name_range,
@@ -960,6 +991,7 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
         type_ref,
         type_ref_range,
         has_default: param.default_value().is_some(),
+        context,
     }
 }
 

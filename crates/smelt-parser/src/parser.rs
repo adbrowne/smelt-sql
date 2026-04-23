@@ -752,20 +752,22 @@ impl<'a> Parser<'a> {
             // uniform `expr_kind()` across all three. The data-type
             // payload is parsed textually by `smelt-types` from the
             // TYPE_REF's raw text, so we keep that as a flat run here.
+            // Phase 19: also detect optional `, ctx` context binding
+            // and emit an `EXPR_CTX` child node.
             Some("Expr") => {
                 self.advance(); // IDENT "Expr"
                 self.emit_expr_kind_marker(EXPR_KIND_SCALAR);
-                self.consume_type_ref_tail();
+                self.parse_expr_tail();
             }
             Some("AggExpr") => {
                 self.advance(); // IDENT "AggExpr"
                 self.emit_expr_kind_marker(EXPR_KIND_AGG);
-                self.consume_type_ref_tail();
+                self.parse_expr_tail();
             }
             Some("WindowExpr") => {
                 self.advance(); // IDENT "WindowExpr"
                 self.emit_expr_kind_marker(EXPR_KIND_WINDOW);
-                self.consume_type_ref_tail();
+                self.parse_expr_tail();
             }
             Some("TableExpr") => {
                 self.advance(); // IDENT "TableExpr"
@@ -1063,6 +1065,65 @@ impl<'a> Parser<'a> {
             self.advance();
         } else {
             self.skip_to_matching_gt();
+        }
+    }
+
+    /// Parse the tail of an `Expr<T>` / `AggExpr<T>` / `WindowExpr<T>`
+    /// type reference (Phase 19). Accepts:
+    ///   - `<T>`          — single data-type argument; consumed as flat tokens.
+    ///   - `<T, ctx>`     — data-type followed by a lowercase context identifier;
+    ///                      the context identifier is wrapped in `EXPR_CTX`.
+    ///
+    /// Falls back to `consume_type_ref_tail` for the no-`<` case.
+    fn parse_expr_tail(&mut self) {
+        self.skip_trivia();
+        if !self.at(LT) {
+            self.consume_type_ref_tail();
+            return;
+        }
+        self.advance(); // LT
+
+        // Consume flat tokens until we see `,` at depth 0 (ctx follows)
+        // or `>` at depth 0 (no ctx).
+        let mut angle_depth: i32 = 0;
+        loop {
+            self.skip_trivia();
+            let k = self.current();
+            if k == EOF {
+                break;
+            }
+            if angle_depth == 0 {
+                if k == GT {
+                    self.advance();
+                    return;
+                }
+                if k == COMMA {
+                    self.advance(); // COMMA
+                    self.skip_trivia();
+                    if self.at(IDENT) {
+                        self.start_node(EXPR_CTX);
+                        self.advance(); // context identifier
+                        self.finish_node();
+                    } else {
+                        self.error(
+                            "Expected context identifier after `,` in Expr<...>".to_string(),
+                        );
+                    }
+                    self.skip_trivia();
+                    if self.at(GT) {
+                        self.advance();
+                    } else {
+                        self.skip_to_matching_gt();
+                    }
+                    return;
+                }
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => angle_depth -= 1,
+                _ => {}
+            }
+            self.advance();
         }
     }
 

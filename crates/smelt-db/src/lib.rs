@@ -314,6 +314,12 @@ pub enum DiagnosticCode {
     /// diagnostics surface from inside the callee (Phase 16 of
     /// smelt-functions).
     RowRequirementUnsatisfied,
+    /// Emitted when the context identifier in `Expr<T, ctx>` does not
+    /// resolve to any parameter in the same `smelt.define` declaration.
+    /// Anchored at the `TypeRef` span of the offending parameter
+    /// (Phase 19 of smelt-functions). CTE resolution is deferred to
+    /// Phase 20.
+    UnknownContext,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -1370,6 +1376,44 @@ pub fn invalid_function_type_ref_diagnostics_for_file(
     out
 }
 
+/// Phase 19: emit `UnknownContext` when an `Expr<T, ctx>` parameter's
+/// context name doesn't match any other parameter in the same `smelt.define`.
+/// CTE resolution is deferred to Phase 20.
+///
+/// Pure: re-uses the cached `file_signature_inputs` output.
+pub fn unknown_context_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let sigs = file_signature_inputs(db, file);
+    let mut out = Vec::new();
+    for sig in sigs.iter() {
+        let param_names: Vec<&str> = sig.params.iter().map(|p| p.name.as_str()).collect();
+        for param in &sig.params {
+            let Some(ctx_ref) = &param.context else {
+                continue;
+            };
+            let ctx_name = ctx_ref.name();
+            if !param_names.contains(&ctx_name) {
+                let Some(range) = param.type_ref_range else {
+                    continue;
+                };
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Context `{ctx_name}` in parameter `{}` does not name a parameter in `{}`",
+                        param.name, sig.name
+                    ),
+                    range,
+                    code: Some(DiagnosticCode::UnknownContext),
+                    data: None,
+                });
+            }
+        }
+    }
+    out
+}
+
 // ============================================================================
 // Semantic queries
 // ============================================================================
@@ -1450,6 +1494,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Invalid-type-ref diagnostics (Phase 4): emitted at each malformed
     // `Expr<T>` / unsupported-sort annotation on parameters or return types.
     for diag in invalid_function_type_ref_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Unknown-context diagnostics (Phase 19): emitted when `Expr<T, ctx>`
+    // context name doesn't resolve to any parameter in the same function.
+    for diag in unknown_context_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

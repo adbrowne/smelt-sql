@@ -241,6 +241,7 @@ pub enum SyntaxKind {
     ROW_TAIL_ANON,    // bare `..` tail in a ROW_REQUIREMENT
     SELECTITEMS_KIND, // Capital-Kind argument of SelectItems<K, ctx>
     SELECTITEMS_CTX,  // lowercase context argument of SelectItems<K, ctx>
+    EXPR_CTX,         // lowercase context argument of Expr<T, ctx>
 
     // Error handling
     ERROR, // Invalid syntax

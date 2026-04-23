@@ -976,6 +976,7 @@ impl Backend {
                 DbCode::WindowInScalarContext => "window-in-scalar-context",
                 DbCode::ParameterShadowsColumn => "parameter-shadows-column",
                 DbCode::RowRequirementUnsatisfied => "row-requirement-unsatisfied",
+                DbCode::UnknownContext => "unknown-context",
             };
             NumberOrString::String(code_str.to_string())
         });
