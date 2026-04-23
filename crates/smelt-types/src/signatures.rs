@@ -163,6 +163,18 @@ pub enum SmeltType {
     ///   errors, and if `req.tail` is [`RowTail::Named`] the extras
     ///   are captured into the call's `row_var_env`.
     TableExpr(Option<SchemaRequirement>),
+    /// `SelectItems<Kind>` / `SelectItems<Kind, ctx>` — a typed list of
+    /// SELECT items (Phase 21).
+    ///
+    /// - `kind` is the required [`ExprKind`] ceiling for every item
+    ///   in the list (e.g. `ExprKind::Agg` requires each item to be
+    ///   at least aggregate-kind).
+    /// - `context` names the [`ContextRef`] whose column schema the
+    ///   items are validated against.
+    SelectItems {
+        kind: ExprKind,
+        context: Option<ContextRef>,
+    },
 }
 
 /// Per-column requirement inside a [`SchemaRequirement`] (Phase 16).
@@ -548,7 +560,30 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
             })?;
             Ok(SmeltType::Expr(constraint))
         }
-        "TableExpr" | "AggExpr" | "WindowExpr" | "SelectItems" | "OrderSpec" => {
+        "SelectItems" => {
+            // `SelectItems<Kind>` or `SelectItems<Kind, ctx_name>` (Phase 21).
+            let kind_part = inner_raw
+                .find(',')
+                .map(|i| inner_raw[..i].trim())
+                .unwrap_or(inner_raw);
+            let ctx_part = inner_raw
+                .find(',')
+                .map(|i| inner_raw[i + 1..].trim().to_string());
+            let kind = match kind_part {
+                "Agg" => ExprKind::Agg,
+                "Scalar" => ExprKind::Scalar,
+                "Window" => ExprKind::Window,
+                _ => {
+                    return Err(SmeltTypeParseError::UnknownInner {
+                        inner: inner_raw.to_string(),
+                        span_text: text.to_string(),
+                    });
+                }
+            };
+            let context = ctx_part.filter(|s| !s.is_empty()).map(ContextRef);
+            Ok(SmeltType::SelectItems { kind, context })
+        }
+        "TableExpr" | "AggExpr" | "WindowExpr" | "OrderSpec" => {
             Err(SmeltTypeParseError::UnsupportedSort {
                 sort: sort.to_string(),
                 span_text: text.to_string(),
@@ -2268,6 +2303,18 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
             }
             s.push_str("}>");
             s
+        }
+        SmeltType::SelectItems { kind, context } => {
+            let kind_str = match kind {
+                ExprKind::Scalar => "Scalar",
+                ExprKind::Agg => "Agg",
+                ExprKind::Window => "Window",
+            };
+            if let Some(ctx) = context {
+                format!("SelectItems<{}, {}>", kind_str, ctx.name())
+            } else {
+                format!("SelectItems<{}>", kind_str)
+            }
         }
     }
 }

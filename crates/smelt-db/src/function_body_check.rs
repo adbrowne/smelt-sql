@@ -18,16 +18,16 @@ use rowan::TextRange;
 use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
-    check_schema_requirement, unify_call, FrameInfo, FunctionSig, ParamSpec, SchemaMismatch,
-    SchemaRequirement, Signature, SmeltType, TypeConstraint, UnificationError,
+    check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
+    SchemaMismatch, SchemaRequirement, Signature, SmeltType, TypeConstraint, UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
-    check_undeclared_columns, infer_cte_columns, infer_expression_type,
-    walk_select_columns_with_visitor, TypeContext,
+    check_undeclared_columns, infer_cte_columns, infer_expression_kind, infer_expression_type,
+    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
@@ -187,6 +187,8 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // not as `function_params`. When reached here (e.g. by the
         // unified Tier-1 body seeder) we fall back to `Unknown`.
         Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
+        // `SelectItems<Kind>` (Phase 21) params are list-typed; fall back to Unknown.
+        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
@@ -847,7 +849,23 @@ pub fn check_smelt_fn_call(
             // doesn't resolve; Phase 6+ nested-call traversal fires via
             // `walk_select_columns_with_visitor` so `smelt.fn.*` calls
             // inside the body still get checked recursively.
-            check_function_select_body(&sig, select_stmt, &body_text, &body_ctx, &nested_handler)
+            let mut body_diags = check_function_select_body(
+                &sig,
+                select_stmt,
+                &body_text,
+                &body_ctx,
+                &nested_handler,
+            );
+            // Phase 21: validate caller-provided Expr<T>/SelectItems<Kind>
+            // fragment arguments against the inferred splice contexts.
+            body_diags.extend(check_fragment_context_bindings(
+                &sig,
+                select_stmt,
+                &body_ctx,
+                &bindings,
+                text,
+            ));
+            body_diags
         }
     };
 
@@ -1730,6 +1748,168 @@ pub fn context_mismatch_diagnostics_for_fn(
                 code: Some(DiagnosticCode::ContextMismatch),
                 data: None,
             });
+        }
+    }
+
+    out
+}
+
+/// Phase 21: At a `smelt.fn.*` call site, validate caller-provided `Expr<T>`
+/// and `SelectItems<Kind>` argument fragments against their inferred splice
+/// contexts.
+///
+/// For each non-`TableExpr` parameter with a caller-supplied argument:
+///
+/// 1. **Kind check** (`SelectItems<Kind, …>` params): the argument's
+///    [`ExprKind`] must not be strictly less than the declared kind ceiling.
+///    Scalar arguments for `SelectItems<Agg>` emit
+///    [`DiagnosticCode::FragmentKindMismatch`].
+///
+/// 2. **Annotation-vs-inference check** (`Expr<T, ctx_name>` params): the
+///    column set of `ctx_name` in `body_ctx` must be a *subset* of the
+///    inferred splice context (from [`infer_splice_contexts`]). Extra columns
+///    in the annotation that are not in the inferred context emit
+///    [`DiagnosticCode::AnnotationTooWide`] at the argument span.
+///
+/// 3. **Fragment column check**: column references inside the argument
+///    expression must resolve against the inferred splice context columns.
+///    Unknown column references emit [`DiagnosticCode::FragmentColumnMissing`].
+///
+/// `body_ctx` must already be seeded with the call-site [`TableExpr`] schemas
+/// (as `check_smelt_fn_call` does before calling this function).
+/// `text` is the call-site source text used to convert [`TextRange`]s to
+/// [`Range`]s.
+///
+/// Pure — does not touch Salsa.
+pub fn check_fragment_context_bindings(
+    sig: &FunctionSig,
+    select: &SelectStmt,
+    body_ctx: &TypeContext,
+    bindings: &std::collections::HashMap<String, (Expr, TextRange)>,
+    text: &str,
+) -> Vec<Diagnostic> {
+    let inferred = infer_splice_contexts(sig, select, body_ctx);
+    let mut out = Vec::new();
+
+    for param in &sig.params {
+        if is_tableexpr_param(param) {
+            continue;
+        }
+
+        // 1. Kind check for SelectItems<Kind> parameters.
+        if let Some(Ok(SmeltType::SelectItems { kind: req_kind, .. })) = &param.type_ref {
+            if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
+                let found_kind = infer_expression_kind(arg_expr, body_ctx);
+                let kind_ok = match req_kind {
+                    ExprKind::Scalar => true,
+                    ExprKind::Agg => matches!(found_kind, ExprKind::Agg | ExprKind::Window),
+                    ExprKind::Window => matches!(found_kind, ExprKind::Window),
+                };
+                if !kind_ok {
+                    let req_str = match req_kind {
+                        ExprKind::Scalar => "Scalar",
+                        ExprKind::Agg => "Agg",
+                        ExprKind::Window => "Window",
+                    };
+                    let found_str = match found_kind {
+                        ExprKind::Scalar => "Scalar",
+                        ExprKind::Agg => "Agg",
+                        ExprKind::Window => "Window",
+                    };
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument for `{}` in `{}` must be {}-kind or higher, \
+                             but found {}-kind expression",
+                            param.name, sig.name, req_str, found_str
+                        ),
+                        range: to_range(*arg_range, text),
+                        code: Some(DiagnosticCode::FragmentKindMismatch),
+                        data: None,
+                    });
+                }
+            }
+        }
+
+        // Determine the effective inferred column set for this parameter.
+        // For SelectItems<Kind, ctx_name>, use the ctx_name schema directly.
+        // For Expr<T> params, use the splice-point inferred context.
+        let effective_inferred: Option<Vec<(String, TypedColumn)>> =
+            if let Some(Ok(SmeltType::SelectItems {
+                context: Some(ContextRef(ctx_name)),
+                ..
+            })) = &param.type_ref
+            {
+                body_ctx
+                    .tableexpr_param_columns(ctx_name)
+                    .map(|cols| cols.to_vec())
+            } else {
+                inferred.get(&param.name).cloned()
+            };
+
+        let Some(inferred_cols) = effective_inferred else {
+            continue;
+        };
+
+        let inferred_set: std::collections::HashSet<String> =
+            inferred_cols.iter().map(|(n, _)| n.clone()).collect();
+
+        // 2. Annotation-vs-inference check for Expr<T, ctx_name> parameters.
+        if let Some(ContextRef(ctx_name)) = &param.context {
+            if let Some(ann_cols) = body_ctx.tableexpr_param_columns(ctx_name) {
+                let wider: Vec<&str> = ann_cols
+                    .iter()
+                    .filter(|(n, _)| !inferred_set.contains(n.as_str()))
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                if !wider.is_empty() {
+                    if let Some((_, arg_range)) = bindings.get(&param.name) {
+                        out.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "Annotation `{}` for `{}` in `{}` is wider than the inferred \
+                                 splice context: columns `{}` are declared but not available \
+                                 at the splice point",
+                                ctx_name,
+                                param.name,
+                                sig.name,
+                                wider.join(", ")
+                            ),
+                            range: to_range(*arg_range, text),
+                            code: Some(DiagnosticCode::AnnotationTooWide),
+                            data: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 3. Fragment column validation.
+        if let Some((arg_expr, _)) = bindings.get(&param.name) {
+            walk_expression_columns_with_visitor(
+                arg_expr,
+                body_ctx,
+                None,
+                &mut |_qualifier, col_name, _, col_range| {
+                    let lower = col_name.to_lowercase();
+                    if matches!(lower.as_str(), "true" | "false" | "null") {
+                        return;
+                    }
+                    if !inferred_set.contains(col_name) {
+                        out.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "Column `{}` is not available in the splice context for `{}` \
+                                 in `{}`",
+                                col_name, param.name, sig.name
+                            ),
+                            range: to_range(col_range, text),
+                            code: Some(DiagnosticCode::FragmentColumnMissing),
+                            data: None,
+                        });
+                    }
+                },
+            );
         }
     }
 

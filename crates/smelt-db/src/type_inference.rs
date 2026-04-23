@@ -941,6 +941,8 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
         // inferred output schema; for now the call-site sees an opaque
         // Unknown.
         Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
+        // `SelectItems<Kind>` (Phase 21) is not a scalar type.
+        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };

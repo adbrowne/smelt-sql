@@ -198,6 +198,20 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::CteCycle,
         message_substring: "cyclic",
     },
+    // Phase 21: fragment references a column not in the inferred splice context.
+    Case {
+        fixture: "fn_fragment_col_missing.sql",
+        companion: Some("fn_fragment_col_missing_other.sql"),
+        code: DiagnosticCode::FragmentColumnMissing,
+        message_substring: "nonexistent",
+    },
+    // Phase 21: annotation claims columns beyond the inferred HAVING context.
+    Case {
+        fixture: "fn_annotation_too_wide.sql",
+        companion: Some("fn_annotation_too_wide_other.sql"),
+        code: DiagnosticCode::AnnotationTooWide,
+        message_substring: "wider",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

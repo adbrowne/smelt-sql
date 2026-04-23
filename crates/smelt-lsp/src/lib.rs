@@ -979,6 +979,9 @@ impl Backend {
                 DbCode::UnknownContext => "unknown-context",
                 DbCode::CteCycle => "cte-cycle",
                 DbCode::ContextMismatch => "context-mismatch",
+                DbCode::FragmentColumnMissing => "fragment-column-missing",
+                DbCode::AnnotationTooWide => "annotation-too-wide",
+                DbCode::FragmentKindMismatch => "fragment-kind-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });

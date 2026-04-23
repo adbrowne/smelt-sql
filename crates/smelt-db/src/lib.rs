@@ -38,7 +38,8 @@ pub mod type_inference;
 pub mod yaml_edits;
 
 pub use function_body_check::{
-    extract_function_body_cte_schemas, infer_splice_contexts, infer_tableexpr_return_schema,
+    check_fragment_context_bindings, extract_function_body_cte_schemas, infer_splice_contexts,
+    infer_tableexpr_return_schema,
 };
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
@@ -330,6 +331,23 @@ pub enum DiagnosticCode {
     /// body. Anchored at the `TypeRef` span of the offending parameter.
     /// Introduced in Phase 20 of smelt-functions.
     ContextMismatch,
+    /// Emitted at a `smelt.fn.*` call site when a caller-provided fragment
+    /// argument for a context-annotated `Expr<T>` parameter references a
+    /// column that is not in the parameter's inferred splice context. Anchored
+    /// at the offending column reference inside the argument expression.
+    /// Introduced in Phase 21 of smelt-functions.
+    FragmentColumnMissing,
+    /// Emitted when an explicit `Expr<T, ctx_name>` annotation claims access
+    /// to columns that are not present in the inferred splice context for that
+    /// parameter. The annotation is "wider" than what the body actually
+    /// exposes. Anchored at the argument expression at the call site.
+    /// Introduced in Phase 21 of smelt-functions.
+    AnnotationTooWide,
+    /// Emitted when a caller-provided fragment for a `SelectItems<Kind>`
+    /// parameter is of a lower expression kind than required (e.g., scalar
+    /// expression passed for `SelectItems<Agg>`). Anchored at the argument
+    /// expression. Introduced in Phase 21 of smelt-functions.
+    FragmentKindMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions
