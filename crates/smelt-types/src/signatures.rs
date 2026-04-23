@@ -150,6 +150,11 @@ pub enum SmeltType {
     /// [`DataType`] or one of the abstract constraints in
     /// [`TypeConstraint`].
     Expr(TypeConstraint),
+    /// Bare `TableExpr` — a row-polymorphic table parameter whose
+    /// schema is bound at call-site expansion from whatever the caller
+    /// supplies (Phase 15, §16 #7). Phase 16 adds the
+    /// `TableExpr<{col: Type, ..r}>` row-requirement variant.
+    TableExpr,
 }
 
 /// Error produced when a type-reference annotation can't be resolved into a
@@ -220,6 +225,13 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
         return Err(SmeltTypeParseError::Malformed {
             span_text: text.to_string(),
         });
+    }
+
+    // Bare `TableExpr` (no `<...>`) is a valid row-polymorphic table
+    // parameter (Phase 15). `TableExpr<{...}>` row requirements still
+    // go through the UnsupportedSort branch below (Phase 16).
+    if trimmed == "TableExpr" {
+        return Ok(SmeltType::TableExpr);
     }
 
     // Split on the first '<'. We intentionally require brackets — bare

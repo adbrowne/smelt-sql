@@ -1520,6 +1520,29 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
         }
 
+        // Phase 15: `smelt.fn.<path>(...)` can appear in a FROM clause
+        // when the callee returns `TableExpr`. Recognise the trigger
+        // before falling through to the generic identifier path — the
+        // trigger consumes four tokens (IDENT "smelt" DOT IDENT "fn")
+        // which the generic path would split into two dotted IDENTs
+        // plus an un-parsed suffix, losing the SMELT_FN_CALL structure.
+        if self.at(IDENT) && self.at_smelt_fn_trigger() {
+            self.parse_smelt_fn_call();
+            // Fall through to the shared trailing-shape handling below
+            // (TABLESAMPLE, PIVOT/UNPIVOT, AS-alias) so a call in FROM
+            // reads as `smelt.fn.f(args) [AS alias]`, etc.
+            self.skip_trivia();
+            if self.at(AS_KW) {
+                self.advance();
+                self.skip_trivia();
+                self.expect(IDENT);
+            } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
+                self.advance();
+            }
+            self.finish_node(); // TABLE_REF
+            return;
+        }
+
         if self.at(LPAREN) {
             // Could be a subquery
             let checkpoint = self.builder.checkpoint();

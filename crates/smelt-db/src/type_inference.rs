@@ -41,6 +41,11 @@ pub struct TypeContext {
     /// contexts — pure type inference doesn't care whether the resolver
     /// came from Salsa or an in-memory map.
     function_signatures: HashMap<String, FunctionSig>,
+    /// `TableExpr`-parameter name → caller-supplied columns (Phase 15).
+    /// Populated at call-site expansion so the body's SQL FROM scope
+    /// sees bare column names from the caller's schema, and shadow-
+    /// warning detection can enumerate columns per parameter.
+    tableexpr_param_schemas: HashMap<String, Vec<(String, TypedColumn)>>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -54,6 +59,7 @@ impl PartialEq for TypeContext {
             && self.aliases == other.aliases
             && self.function_params == other.function_params
             && self.function_signatures == other.function_signatures
+            && self.tableexpr_param_schemas == other.tableexpr_param_schemas
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -70,6 +76,7 @@ impl Clone for TypeContext {
             aliases: self.aliases.clone(),
             function_params: self.function_params.clone(),
             function_signatures: self.function_signatures.clone(),
+            tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -269,6 +276,57 @@ impl TypeContext {
     /// Is `name` bound as a function parameter in this context?
     pub fn has_function_param(&self, name: &str) -> bool {
         self.function_params.contains_key(name)
+    }
+
+    /// Seed a `TableExpr` parameter's caller-supplied schema as a
+    /// FROM-scope entry (Phase 15, §16 #7).
+    ///
+    /// The columns are registered both as bare-column lookups (so
+    /// unqualified `revenue` inside the body resolves via
+    /// [`TypeContext::lookup_column`]) and as qualified lookups under
+    /// the parameter's name (so `source.revenue` resolves through the
+    /// same path any other model alias would).
+    ///
+    /// Parameter names are also tracked separately via
+    /// [`TypeContext::tableexpr_param_columns`] so the Phase-15 shadow
+    /// warning checker can enumerate which columns a caller supplied.
+    ///
+    /// Pure — no Salsa interaction. Called at call-site expansion by the
+    /// `smelt-functions` call-site checker.
+    pub fn add_tableexpr_param(&mut self, param_name: &str, columns: &[(String, TypedColumn)]) {
+        for (col_name, typed_col) in columns {
+            // `add_model_column` keys on `param_name.col_name`; the
+            // existing unqualified-suffix lookup in `lookup_column_inner`
+            // then resolves bare `col_name` via this entry.
+            self.add_model_column(param_name, col_name, typed_col.clone());
+        }
+        // Bind the parameter name as an alias to itself so
+        // `describe_qualifier` / qualified lookups succeed without
+        // special-casing.
+        self.add_alias(param_name, param_name);
+        // Record the schema separately — used by the shadow-warning
+        // check which needs to enumerate columns by parameter without
+        // round-tripping through `model_columns` keys.
+        self.tableexpr_param_schemas
+            .insert(param_name.to_string(), columns.to_vec());
+    }
+
+    /// Return the caller-supplied columns for a `TableExpr` parameter,
+    /// if one with this name has been seeded via
+    /// [`TypeContext::add_tableexpr_param`].
+    pub fn tableexpr_param_columns(&self, param_name: &str) -> Option<&[(String, TypedColumn)]> {
+        self.tableexpr_param_schemas
+            .get(param_name)
+            .map(|v| v.as_slice())
+    }
+
+    /// Iterate all `TableExpr` parameter schemas seeded in this context.
+    pub fn tableexpr_param_schemas_iter(
+        &self,
+    ) -> impl Iterator<Item = (&str, &[(String, TypedColumn)])> {
+        self.tableexpr_param_schemas
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
     }
 
     /// Register a resolved [`FunctionSig`] so `smelt.fn.<name>` call-site
@@ -830,6 +888,11 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
         // known yet, surface `Unknown` like `Any`.
         Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
         Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
+        // `TableExpr` return (Phase 15) — scalar inference has no
+        // DataType for a whole row set. Downstream Phase 17 plumbs the
+        // inferred output schema; for now the call-site sees an opaque
+        // Unknown.
+        Some(Ok(SmeltType::TableExpr)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };

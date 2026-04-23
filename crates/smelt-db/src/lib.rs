@@ -296,6 +296,13 @@ pub enum DiagnosticCode {
     /// expressions — currently `WHERE` and `GROUP BY`. Anchored at the
     /// offending expression's span (Phase 14 of smelt-functions, §16 #24).
     WindowInScalarContext,
+    /// Emitted at call-site expansion when an `Expr<T>`-kinded parameter
+    /// name overlaps a column in a sibling `TableExpr`-kinded parameter's
+    /// caller-supplied schema (§16 #1). Warning severity — the body still
+    /// typechecks because parameters resolve before FROM-scope columns,
+    /// but the user probably meant the column. Anchored at the Expr<T>
+    /// parameter's declaration range (Phase 15 of smelt-functions).
+    ParameterShadowsColumn,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -816,7 +823,7 @@ pub fn function_body_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
-    use smelt_types::signatures::SmeltTypeParseError;
+    use smelt_types::signatures::{SmeltType, SmeltTypeParseError};
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let text_raw = file.text(db);
@@ -825,21 +832,25 @@ pub fn function_body_diagnostics_for_file(
         return Vec::new();
     };
     let sigs = file_signature_inputs(db, file);
-    // Phase 13: TableExpr body check deferred to Phase 14–15. If any
-    // parameter's type_ref is one of the row/kind-polymorphic sorts
-    // introduced in Step 3, skip the body check so spurious
-    // `UnknownIdentifier` / type-mismatch diagnostics don't fire
-    // against the demo fixtures before the type-system wiring lands.
+    // Phase 13 deferred sorts: `AggExpr`, `WindowExpr`, and `SelectItems`
+    // still produce `UnsupportedSort` at signature-parse time (Phases
+    // 17+). Skip their bodies here to keep `example_diagnostics` green.
+    // Phase 15: bare `TableExpr` is a valid sort whose body check must
+    // happen at call-site expansion (no caller schema is available
+    // here), so we also skip signature-time body checking for defines
+    // with any `TableExpr` parameter.
     let has_deferred_phase13_param = |sig: &FunctionSig| -> bool {
-        sig.params.iter().any(|p| {
-            matches!(
-                &p.type_ref,
-                Some(Err(SmeltTypeParseError::UnsupportedSort { sort, .. }))
-                    if matches!(
-                        sort.as_str(),
-                        "TableExpr" | "AggExpr" | "WindowExpr" | "SelectItems"
-                    )
-            )
+        sig.params.iter().any(|p| match &p.type_ref {
+            Some(Err(SmeltTypeParseError::UnsupportedSort { sort, .. }))
+                if matches!(
+                    sort.as_str(),
+                    "TableExpr" | "AggExpr" | "WindowExpr" | "SelectItems"
+                ) =>
+            {
+                true
+            }
+            Some(Ok(SmeltType::TableExpr)) => true,
+            _ => false,
         })
     };
     let mut out = Vec::new();
@@ -1082,7 +1093,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
         type_inference::promote_types(&lhs, &rhs).data_type
     };
 
-    let body_lookup = |sig: &FunctionSig| -> Option<(String, smelt_parser::ast::Expr)> {
+    let body_lookup = |sig: &FunctionSig| -> Option<(String, function_body_check::BodyShape)> {
         // Externs have no body — skip. Defines alone carry a re-walkable body.
         if sig.origin == smelt_types::SigOrigin::Extern {
             return None;
@@ -1098,8 +1109,24 @@ pub fn smelt_fn_call_diagnostics_for_file(
                 if let Some(ast) = AstFile::cast(f_syntax) {
                     for define in ast.defines() {
                         if define.name().as_deref() == Some(&sig.name) {
-                            if let Some(body_expr) = define.body().and_then(|b| b.expression()) {
-                                return Some((f_clean, body_expr));
+                            if let Some(body) = define.body() {
+                                // Phase 15: prefer the SELECT shape when
+                                // present (e.g. `TableExpr`-returning
+                                // defines). Fall back to the scalar
+                                // expression shape for Phase-5-shaped
+                                // bodies.
+                                if let Some(select_stmt) = body.select_stmt() {
+                                    return Some((
+                                        f_clean,
+                                        function_body_check::BodyShape::Select(select_stmt),
+                                    ));
+                                }
+                                if let Some(body_expr) = body.expression() {
+                                    return Some((
+                                        f_clean,
+                                        function_body_check::BodyShape::Expression(body_expr),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1123,6 +1150,87 @@ pub fn smelt_fn_call_diagnostics_for_file(
         None
     };
 
+    // Phase 15: resolve a `TableExpr` argument expression to its
+    // caller-supplied column schema. Today we recognise two shapes:
+    //   - `smelt.ref('model_name')` — look up the referenced model's
+    //     typed schema through the Salsa provider.
+    //   - `smelt.source('src.table')` — look up the source's declared
+    //     columns (Phase 15 fixtures only use `smelt.ref`, but extending
+    //     is cheap).
+    // Any other shape (bare subquery, another function call, …)
+    // resolves to `None`; the body checker then sees no FROM-scope
+    // entries for that parameter and bare columns emit
+    // `UnknownIdentifier` with a frame rooted at the call site.
+    let tableexpr_schema_lookup = |arg_expr: &smelt_parser::ast::Expr,
+                                   _ctx: &TypeContext|
+     -> Option<Vec<(String, TypedColumn)>> {
+        // Try to extract a `smelt.ref('X')` from the argument's function
+        // call node, if any. We accept the call nested inside an
+        // EXPRESSION wrapper.
+        use smelt_parser::ast::{FunctionCall, RefCall, SourceCall};
+        use smelt_parser::syntax_kind::SyntaxKind as Sk;
+
+        for node in arg_expr.syntax().descendants() {
+            if node.kind() == Sk::FUNCTION_CALL {
+                let func = FunctionCall::cast(node)?;
+                if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
+                    if let Some(model_name) = ref_call.model_name() {
+                        let provider = SalsaRefSchemaProvider::new(db, workspace);
+                        if let Some(cols) = provider
+                            .resolved_columns(&model_name)
+                            .or_else(|| provider.seed_columns(&model_name))
+                        {
+                            return Some(cols);
+                        }
+                    }
+                }
+                if let Some(src_call) = SourceCall::from_function_call(func) {
+                    if let (Some(source_name), Some(table_name)) =
+                        (src_call.source_name(), src_call.table_name())
+                    {
+                        // Look up the source schema via the project's
+                        // sources.yml. We build a minimal provider-free
+                        // lookup against `sources_config`.
+                        let sources = sources_config(
+                            db,
+                            *workspace
+                                .projects(db)
+                                .first()
+                                .expect("at least one project"),
+                        );
+                        for s in &sources.sources {
+                            if s.name != source_name {
+                                continue;
+                            }
+                            for t in &s.tables {
+                                if t.name == table_name {
+                                    let cols: Vec<(String, TypedColumn)> = t
+                                        .columns
+                                        .iter()
+                                        .map(|c| {
+                                            (
+                                                c.name.clone(),
+                                                TypedColumn {
+                                                    data_type: c
+                                                        .data_type
+                                                        .clone()
+                                                        .unwrap_or(DataType::Unknown),
+                                                    nullable: true,
+                                                },
+                                            )
+                                        })
+                                        .collect();
+                                    return Some(cols);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
     let mut out = Vec::new();
     for call in &call_nodes {
         out.extend(function_body_check::check_smelt_fn_call(
@@ -1134,6 +1242,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &lub,
             &body_lookup,
             &decl_lookup,
+            &tableexpr_schema_lookup,
         ));
     }
     out

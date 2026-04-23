@@ -149,6 +149,25 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::WindowInScalarContext,
         message_substring: "ROW_NUMBER",
     },
+    // Phase 15 — a `TableExpr`-taking function is called with a caller
+    // whose schema lacks the column the body references. The body
+    // check runs at call-site expansion; the bare `revenue` reference
+    // surfaces as `UnknownIdentifier` rooted at the call site.
+    Case {
+        fixture: "fn_tableexpr_missing_col.sql",
+        companion: Some("fn_tableexpr_missing_col_other.sql"),
+        code: DiagnosticCode::UnknownIdentifier,
+        message_substring: "revenue",
+    },
+    // Phase 15 — an `Expr<Text>` parameter shadows a column of the
+    // same name in a sibling `TableExpr` parameter's caller schema.
+    // Warning severity, anchored at the parameter declaration.
+    Case {
+        fixture: "fn_tableexpr_shadow_warning.sql",
+        companion: Some("fn_tableexpr_shadow_warning_other.sql"),
+        code: DiagnosticCode::ParameterShadowsColumn,
+        message_substring: "user_id",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

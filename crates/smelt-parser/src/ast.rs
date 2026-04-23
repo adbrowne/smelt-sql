@@ -567,6 +567,16 @@ impl DefineBody {
     pub fn expression(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
     }
+
+    /// The body's SELECT statement, if the body is shaped as a bare
+    /// top-level SELECT (e.g. a `TableExpr`-returning define whose
+    /// body is `(SELECT ... FROM source)`). Distinct from
+    /// [`DefineBody::expression`] which returns `None` for SELECT-shaped
+    /// bodies because `Expr::cast(SELECT_STMT)` does not recognise
+    /// SELECT as an expression in this grammar.
+    pub fn select_stmt(&self) -> Option<SelectStmt> {
+        self.0.children().find_map(SelectStmt::cast)
+    }
 }
 
 // ===== smelt.fn.* user-declared function call (Phase 2) =====
@@ -760,9 +770,13 @@ impl SelectStmt {
             .any(|t| t.kind() == DISTINCT_KW)
     }
 
-    /// Get the underlying syntax node (for printer)
-    #[allow(dead_code)] // Used by printer module
-    pub(crate) fn syntax(&self) -> &SyntaxNode {
+    /// Get the underlying syntax node.
+    ///
+    /// Originally `pub(crate)` and named for the printer module; made
+    /// `pub` in Phase 15 so the SELECT-body walker in smelt-db can
+    /// descendants-walk a SELECT_STMT body to dispatch nested
+    /// `smelt.fn.*` calls.
+    pub fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
 

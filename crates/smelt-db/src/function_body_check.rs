@@ -15,7 +15,7 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Expr, SmeltFnCall};
+use smelt_parser::ast::{BinaryExpr, Expr, SelectStmt, SmeltFnCall};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     unify_call, FrameInfo, FunctionSig, ParamSpec, Signature, SmeltType, TypeConstraint,
@@ -24,8 +24,27 @@ use smelt_types::signatures::{
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
 
-use crate::type_inference::{infer_expression_type, TypeContext};
+use crate::type_inference::{
+    check_undeclared_columns, infer_expression_type, walk_select_columns_with_visitor, TypeContext,
+};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
+
+/// Shape of a function body returned by `body_lookup`.
+///
+/// Phase 15 introduces the `Select` variant for `TableExpr`-returning
+/// defines whose body is a bare top-level `(SELECT ... FROM source)`.
+/// The walker paths are different — SELECT bodies use
+/// [`check_undeclared_columns`] against the FROM-seeded `TypeContext`;
+/// Expression bodies use the Phase 5 `walk_body` recursion.
+#[derive(Debug, Clone)]
+pub enum BodyShape {
+    /// Parenthesised scalar expression body (Phase 5).
+    Expression(Expr),
+    /// Top-level SELECT body (Phase 15+). Introduced by `TableExpr`-
+    /// returning `smelt.define`s whose body is a SELECT rather than a
+    /// scalar expression.
+    Select(SelectStmt),
+}
 
 /// Callback type for dispatching nested `smelt.fn.*` calls encountered
 /// during body-recursion (Phase 12).
@@ -162,9 +181,23 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // generics plumbing that actually binds `T` from call-site args.
         Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
         Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
+        // `TableExpr` (Phase 15) params are bound as FROM-scope entries,
+        // not as `function_params`. When reached here (e.g. by the
+        // unified Tier-1 body seeder) we fall back to `Unknown`.
+        Some(Ok(SmeltType::TableExpr)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
+}
+
+/// Is this parameter a `TableExpr` sort?
+///
+/// Phase 15 treats `TableExpr` parameters differently from `Expr<T>`
+/// ones: they contribute their caller-supplied schema to the body's
+/// FROM-scope rather than binding a single typed column under the
+/// parameter's name.
+pub(crate) fn is_tableexpr_param(p: &ParamSpec) -> bool {
+    matches!(&p.type_ref, Some(Ok(SmeltType::TableExpr)))
 }
 
 /// Convert a Rowan [`TextRange`] to a line/column [`Range`] against `text`.
@@ -426,8 +459,16 @@ pub fn check_smelt_fn_call(
     sig_lookup: &dyn Fn(&str) -> Option<FunctionSig>,
     builtin_lookup: &dyn Fn(&str) -> Option<&'static Signature>,
     lub: &dyn Fn(&DataType, &DataType) -> DataType,
-    body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, Expr)>,
+    body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, BodyShape)>,
     decl_lookup: &dyn Fn(&FunctionSig) -> Option<PathBuf>,
+    // Phase 15: resolve a `TableExpr`-argument expression to its
+    // caller-supplied schema. Called once per `TableExpr` parameter at
+    // call-site expansion. Returns `None` when the arg shape is not
+    // resolvable (e.g. a nested expression whose schema can't be
+    // inferred here) — the body check then proceeds with no seeded
+    // schema for that parameter, which surfaces as `UnknownIdentifier`
+    // on bare column references inside the body.
+    tableexpr_schema_lookup: &dyn Fn(&Expr, &TypeContext) -> Option<Vec<(String, TypedColumn)>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -504,6 +545,33 @@ pub fn check_smelt_fn_call(
 
     for param in &sig.params {
         if param.name.is_empty() {
+            continue;
+        }
+
+        // Phase 15: `TableExpr` parameters contribute the caller-supplied
+        // schema as a FROM-scope entry, not as a scalar `function_param`.
+        // We resolve the arg via `tableexpr_schema_lookup` and seed the
+        // body ctx; shape/row-requirement checking is Phase 16.
+        if is_tableexpr_param(param) {
+            if let Some((arg_expr, _arg_range)) = bindings.get(&param.name) {
+                let cols = tableexpr_schema_lookup(arg_expr, ctx).unwrap_or_default();
+                body_ctx.add_tableexpr_param(&param.name, &cols);
+                frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
+            } else if !param.has_default {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Missing required argument `{}` for `smelt.fn.{}`",
+                        param.name, sig.name
+                    ),
+                    range: path_range,
+                    code: Some(DiagnosticCode::MissingArgument),
+                    data: None,
+                });
+                frame_bindings.push((param.name.clone(), "<missing>".to_string()));
+            } else {
+                frame_bindings.push((param.name.clone(), "<default>".to_string()));
+            }
             continue;
         }
 
@@ -593,10 +661,29 @@ pub fn check_smelt_fn_call(
         }
     }
 
-    // If there were any call-site diagnostics (unknown/missing/type-mismatch),
-    // stop here — re-walking the body would cascade errors that are already
-    // subsumed by the call-site issue.
+    // Phase 15 shadow warnings: flag every `Expr<T>`-kinded parameter whose
+    // name collides with a column in any `TableExpr`-kinded parameter's
+    // caller-supplied schema (§16 #1). The warning anchors at the
+    // parameter's declaration span inside the signature. Body still
+    // typechecks because `function_params` resolve before FROM-scope
+    // columns in `lookup_identifier`.
+    diagnostics.extend(compute_shadow_warnings(&sig, &body_ctx));
+
+    // Phase 15: shadow warnings are not cascade-causing errors. Partition
+    // them out so they don't suppress the body re-walk below.
+    let shadow_warnings: Vec<Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ParameterShadowsColumn))
+        .cloned()
+        .collect();
+    diagnostics.retain(|d| d.code != Some(DiagnosticCode::ParameterShadowsColumn));
+
+    // If there were any non-warning call-site diagnostics
+    // (unknown/missing/type-mismatch), stop here — re-walking the body
+    // would cascade errors that are already subsumed by the call-site
+    // issue. Shadow warnings are re-appended at the tail so they survive.
     if !diagnostics.is_empty() {
+        diagnostics.extend(shadow_warnings);
         return diagnostics;
     }
 
@@ -611,7 +698,8 @@ pub fn check_smelt_fn_call(
     //    across arbitrary expansion depth. Each level appends its frame
     //    after the inner-merged stack, yielding the canonical
     //    innermost-first → outermost-last ordering.
-    let Some((body_text, body_expr)) = body_lookup(&sig) else {
+    let Some((body_text, body_shape)) = body_lookup(&sig) else {
+        diagnostics.extend(shadow_warnings);
         return diagnostics;
     };
 
@@ -628,10 +716,26 @@ pub fn check_smelt_fn_call(
             lub,
             body_lookup,
             decl_lookup,
+            tableexpr_schema_lookup,
         )
     };
 
-    let inner = check_function_body_with_expansion(&sig, &body_expr, &body_text, &nested_handler);
+    let inner = match &body_shape {
+        BodyShape::Expression(body_expr) => {
+            check_function_body_with_expansion(&sig, body_expr, &body_text, &nested_handler)
+        }
+        BodyShape::Select(select_stmt) => {
+            // Phase 15: a SELECT-shaped body (e.g. `add_margin`'s
+            // `(SELECT source.*, revenue - cost AS margin FROM source)`)
+            // is checked with the TableExpr params' caller schemas
+            // already seeded into `body_ctx`. We emit
+            // `UnknownIdentifier` for any bare column / alias that
+            // doesn't resolve; Phase 6+ nested-call traversal fires via
+            // `walk_select_columns_with_visitor` so `smelt.fn.*` calls
+            // inside the body still get checked recursively.
+            check_function_select_body(&sig, select_stmt, &body_text, &body_ctx, &nested_handler)
+        }
+    };
 
     // Resolve this frame's decl-site info once — reused for every
     // cascading diagnostic. LSP clients use these fields to render a
@@ -685,7 +789,131 @@ pub fn check_smelt_fn_call(
         diagnostics.push(d);
     }
 
+    // Phase 15: re-append the shadow warnings we set aside above —
+    // they're not cascade errors so they must survive even when inner
+    // body-check diagnostics are empty.
+    diagnostics.extend(shadow_warnings);
+
     diagnostics
+}
+
+/// Walk a SELECT-shaped function body (Phase 15) against a pre-seeded
+/// body context and produce body-level diagnostics.
+///
+/// `body_ctx` must already have any `TableExpr` parameter schemas seeded
+/// via [`TypeContext::add_tableexpr_param`] and any `Expr<T>`
+/// parameters seeded via [`TypeContext::add_function_param`]. The
+/// pre-existing SELECT-walker infrastructure handles:
+///   - bare-column resolution through the param-first/FROM-scope chain;
+///   - unresolved identifiers surface as `UnknownIdentifier` anchored at
+///     the usage site (Phase 15 §16 #7);
+///   - nested `smelt.fn.*` calls inside the SELECT-list expressions
+///     dispatch through `nested_handler` so frames stack across
+///     expansion depth (Phase 12 contract).
+fn check_function_select_body(
+    _sig: &FunctionSig,
+    select_stmt: &SelectStmt,
+    text: &str,
+    body_ctx: &TypeContext,
+    nested_handler: &NestedCallHandler<'_>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // 1. Bare-column / qualified-access resolution. Any identifier the
+    //    SELECT references that does not resolve in `body_ctx` emits
+    //    `UnknownIdentifier`. Select-list aliases are handled by
+    //    `check_undeclared_columns` already.
+    for info in check_undeclared_columns(select_stmt, body_ctx) {
+        diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "Unknown identifier `{}` — not a parameter or in any enclosing scope",
+                info.column_name
+            ),
+            range: to_range(info.range, text),
+            code: Some(DiagnosticCode::UnknownIdentifier),
+            data: None,
+        });
+    }
+
+    // 2. Dispatch nested `smelt.fn.*` calls so frames stack up across
+    //    expansion depth. We walk every expression in the SELECT and
+    //    hand any SMELT_FN_CALL node to `nested_handler`.
+    walk_select_columns_with_visitor(
+        select_stmt,
+        body_ctx,
+        None,
+        &mut |_qualifier, _name, _expr_type, _range| {
+            // `walk_select_columns_with_visitor` hits leaf column refs,
+            // not nested function calls. We walk SMELT_FN_CALL nodes
+            // separately below.
+        },
+    );
+
+    // Walk every `SMELT_FN_CALL` in the SELECT statement and let the
+    // nested handler produce diagnostics with merged frame stacks.
+    use smelt_parser::syntax_kind::SyntaxKind;
+    for node in select_stmt.syntax().descendants() {
+        if node.kind() == SyntaxKind::SMELT_FN_CALL {
+            if let Some(call) = SmeltFnCall::cast(node) {
+                diagnostics.extend(nested_handler(&call, body_ctx, text));
+            }
+        }
+    }
+
+    diagnostics
+}
+
+/// Compute Phase-15 shadow warnings: for each `Expr<T>`-kinded parameter
+/// whose name matches a column in any `TableExpr`-kinded parameter's
+/// caller-supplied schema, emit a warning anchored at the parameter's
+/// declaration span.
+///
+/// §16 #1: parameters shadow FROM-scope columns, so the body still
+/// typechecks, but the user probably meant the column — hence a warning,
+/// not an error.
+fn compute_shadow_warnings(sig: &FunctionSig, body_ctx: &TypeContext) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    // Collect all column names supplied by TableExpr parameters.
+    let mut column_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_param, cols) in body_ctx.tableexpr_param_schemas_iter() {
+        for (col_name, _) in cols {
+            column_set.insert(col_name.clone());
+        }
+    }
+    if column_set.is_empty() {
+        return out;
+    }
+    for param in &sig.params {
+        if param.name.is_empty() {
+            continue;
+        }
+        // Only `Expr<T>`-kinded parameters shadow FROM-scope columns
+        // (TableExpr parameters BECOME the FROM-scope; they don't
+        // shadow).
+        if is_tableexpr_param(param) {
+            continue;
+        }
+        if !column_set.contains(&param.name) {
+            continue;
+        }
+        let Some(range) = param.name_range else {
+            continue;
+        };
+        out.push(Diagnostic {
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "Parameter `{}` shadows a column of the same name in the caller-supplied table schema. \
+                 Inside the body, the bare identifier resolves to the parameter; use a qualified reference (e.g. `<table>.{name}`) to access the column.",
+                param.name,
+                name = param.name,
+            ),
+            range,
+            code: Some(DiagnosticCode::ParameterShadowsColumn),
+            data: None,
+        });
+    }
+    out
 }
 
 /// Dispatch a `smelt.fn.<name>(...)` call against a built-in registry

@@ -974,6 +974,7 @@ impl Backend {
                 DbCode::ExternCollidesWithBuiltin => "extern-collides-with-builtin",
                 DbCode::BackendsWideningNotAllowed => "backends-widening-not-allowed",
                 DbCode::WindowInScalarContext => "window-in-scalar-context",
+                DbCode::ParameterShadowsColumn => "parameter-shadows-column",
             };
             NumberOrString::String(code_str.to_string())
         });
