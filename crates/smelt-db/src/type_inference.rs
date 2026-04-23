@@ -8,7 +8,7 @@ use smelt_parser::ast::{
     SelectStmt, SmeltFnCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
-    unify_call, BuiltinRegistry, FunctionSig, SmeltType, TypeConstraint,
+    kind_ceiling, unify_call, BuiltinRegistry, ExprKind, FunctionSig, SmeltType, TypeConstraint,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -447,6 +447,185 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try literal inference (also handles typed literals like DATE '2025-01-15')
     infer_literal_type(&text)
+}
+
+/// Infer the [`ExprKind`] (Scalar / Agg / Window) of an expression
+/// (Phase 14, §16 #24).
+///
+/// The kind is synthesised in the same pure pass as [`infer_expression_type`]
+/// — column references and literals are `Scalar`; arithmetic / case / cast
+/// take the ceiling of their sub-kinds; function calls consult the
+/// [`BuiltinRegistry`]. A call site that carries an `OVER (…)` clause
+/// produces [`ExprKind::Window`] regardless of the callee's seeded kind
+/// (the canonical SQL dual-mode behaviour for aggregates).
+///
+/// Pure: no Salsa access, deterministic, side-effect free.
+pub fn infer_expression_kind(expr: &Expr, ctx: &TypeContext) -> ExprKind {
+    // Any expression with an attached OVER (...) clause is a window
+    // expression. This dominates the callee's seeded kind — `SUM(x) OVER
+    // (...)` is `Window`, not `Agg`.
+    if expr.window_spec().is_some() {
+        return ExprKind::Window;
+    }
+
+    // CAST(<inner> AS T) inherits the inner expression's kind.
+    if let Some(cast_expr) = expr.as_cast() {
+        return cast_expr
+            .expression()
+            .as_ref()
+            .map(|inner| infer_expression_kind(inner, ctx))
+            .unwrap_or(ExprKind::Scalar);
+    }
+
+    // CASE: ceiling over WHEN result branches and the optional ELSE.
+    if let Some(case_expr) = expr.as_case() {
+        let mut kinds: Vec<ExprKind> = Vec::new();
+        for when in case_expr.when_clauses() {
+            if let Some(result) = when.result() {
+                kinds.push(infer_expression_kind(&result, ctx));
+            }
+            if let Some(cond) = when.condition() {
+                kinds.push(infer_expression_kind(&cond, ctx));
+            }
+        }
+        if let Some(else_expr) = case_expr.else_expr() {
+            kinds.push(infer_expression_kind(&else_expr, ctx));
+        }
+        return kind_ceiling(&kinds);
+    }
+
+    // EXTRACT(field FROM expr) inherits the inner expression's kind.
+    if let Some(extract_expr) = expr.as_extract() {
+        return extract_expr
+            .expression()
+            .as_ref()
+            .map(|inner| infer_expression_kind(inner, ctx))
+            .unwrap_or(ExprKind::Scalar);
+    }
+
+    // Subquery: scalar — the subquery's inner kinds are checked against
+    // its own splice points, not propagated outward. The subquery itself
+    // is a Scalar value at the outer position.
+    if expr.as_subquery().is_some() {
+        return ExprKind::Scalar;
+    }
+
+    // SQL built-in / aggregate / window function call.
+    if let Some(func) = expr.as_function_call() {
+        return infer_function_call_kind(&func, ctx);
+    }
+
+    // smelt.fn.* user-defined call: scalar today (Phase 14 doesn't track
+    // kind through user-defined fragments; that's a later phase). Until
+    // then, treat as the most permissive kind so call sites in WHERE
+    // don't false-positive.
+    if expr.as_smelt_fn_call().is_some() {
+        return ExprKind::Scalar;
+    }
+
+    // Binary expr: ceiling over LHS and RHS.
+    if let Some(binary) = expr.as_binary() {
+        let lhs = binary
+            .left()
+            .as_ref()
+            .map(|e| infer_expression_kind(e, ctx))
+            .unwrap_or(ExprKind::Scalar);
+        let rhs = binary
+            .right()
+            .as_ref()
+            .map(|e| infer_expression_kind(e, ctx))
+            .unwrap_or(ExprKind::Scalar);
+        return kind_ceiling(&[lhs, rhs]);
+    }
+
+    // BETWEEN / IN / EXISTS / array / row / struct: walk children and
+    // take their ceiling. Most are scalar but if any sub-expr is Agg or
+    // Window the wrapper inherits it.
+    let mut kinds: Vec<ExprKind> = Vec::new();
+    for child in expr.syntax().children() {
+        if let Some(child_expr) = Expr::cast(child) {
+            kinds.push(infer_expression_kind(&child_expr, ctx));
+        }
+    }
+    if !kinds.is_empty() {
+        return kind_ceiling(&kinds);
+    }
+
+    // Column refs, literals, identifiers — Scalar.
+    let _ = ctx; // ctx held for symmetry with infer_expression_type signatures
+    ExprKind::Scalar
+}
+
+/// Compute the [`ExprKind`] of a SQL function-call site.
+///
+/// Looks the function up in the [`BuiltinRegistry`] for its seeded kind.
+/// Unknown functions fall back to [`ExprKind::Scalar`]. (Aggregates with
+/// an attached `OVER (…)` clause are handled by the caller — see
+/// [`infer_expression_kind`]'s window check.)
+fn infer_function_call_kind(func: &FunctionCall, _ctx: &TypeContext) -> ExprKind {
+    let Some(name) = func.name() else {
+        return ExprKind::Scalar;
+    };
+    let upper = name.to_uppercase();
+    BuiltinRegistry::resolve(&upper)
+        .map(|sig| sig.kind)
+        .unwrap_or(ExprKind::Scalar)
+}
+
+/// Structured info about a window-in-scalar-context error (Phase 14).
+///
+/// Returned by [`check_window_in_scalar_contexts`] for each WHERE /
+/// GROUP BY position whose expression resolves to [`ExprKind::Window`].
+/// The caller (`check_file_diagnostics`) maps these into
+/// [`crate::DiagnosticCode::WindowInScalarContext`] entries.
+#[derive(Debug, Clone)]
+pub struct WindowInScalarContextInfo {
+    /// Free-form clause name (`"WHERE"`, `"GROUP BY"`) for the message.
+    pub clause: &'static str,
+    /// Source span of the offending expression.
+    pub range: TextRange,
+    /// Trimmed text of the offending expression — quoted in the message.
+    pub expression_text: String,
+}
+
+/// Pure check: collect every expression in WHERE / GROUP BY whose synthesised
+/// kind is [`ExprKind::Window`] (Phase 14, §16 #24).
+///
+/// Returns one entry per offending expression. HAVING / ORDER BY / ON
+/// clauses are deliberately not checked here — Phase 14's scope is
+/// `WHERE` and `GROUP BY` only (the two TDD tests). Future phases may
+/// extend the helper.
+pub fn check_window_in_scalar_contexts(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<WindowInScalarContextInfo> {
+    let mut out = Vec::new();
+
+    if let Some(where_clause) = select_stmt.where_clause() {
+        if let Some(expr) = where_clause.expression() {
+            if infer_expression_kind(&expr, ctx) == ExprKind::Window {
+                out.push(WindowInScalarContextInfo {
+                    clause: "WHERE",
+                    range: expr.text_range(),
+                    expression_text: expr.text().trim().to_string(),
+                });
+            }
+        }
+    }
+
+    if let Some(group_by) = select_stmt.group_by_clause() {
+        for expr in group_by.expressions() {
+            if infer_expression_kind(&expr, ctx) == ExprKind::Window {
+                out.push(WindowInScalarContextInfo {
+                    clause: "GROUP BY",
+                    range: expr.text_range(),
+                    expression_text: expr.text().trim().to_string(),
+                });
+            }
+        }
+    }
+
+    out
 }
 
 /// Infer the type of a CAST expression.

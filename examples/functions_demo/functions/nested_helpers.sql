@@ -22,3 +22,14 @@ smelt.define middle(z) AS (smelt.fn.inner_unary(z))
 backends: [duckdb]
 ---
 smelt.define outer_call(y) AS (smelt.fn.middle(y))
+
+-- Phase 14 (§16 #24): a window-function call in scalar position. The
+-- SELECT-list splice point accepts every kind, so a `ROW_NUMBER() OVER
+-- (...)` call type-checks cleanly. The fixture exists to keep the
+-- happy-path diagnostic-clean while the broken pair
+-- (`examples/broken/models/fn_window_in_where.sql`) exercises the
+-- WHERE-clause rejection.
+---
+backends: [duckdb]
+---
+smelt.define ranked_row() AS (ROW_NUMBER() OVER (ORDER BY 1))

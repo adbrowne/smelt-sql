@@ -973,6 +973,7 @@ impl Backend {
                 DbCode::ArgTypeMismatch => "arg-type-mismatch",
                 DbCode::ExternCollidesWithBuiltin => "extern-collides-with-builtin",
                 DbCode::BackendsWideningNotAllowed => "backends-widening-not-allowed",
+                DbCode::WindowInScalarContext => "window-in-scalar-context",
             };
             NumberOrString::String(code_str.to_string())
         });

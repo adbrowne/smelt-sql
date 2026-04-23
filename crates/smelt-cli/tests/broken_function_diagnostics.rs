@@ -140,6 +140,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::UnknownIdentifier,
         message_substring: "undefined_var",
     },
+    // Phase 14 (§16 #24) — `WHERE ROW_NUMBER() OVER (...) > 1` is a
+    // window-kind expression in a scalar splice point. The diagnostic
+    // anchors at the offending expression and names ROW_NUMBER.
+    Case {
+        fixture: "fn_window_in_where.sql",
+        companion: None,
+        code: DiagnosticCode::WindowInScalarContext,
+        message_substring: "ROW_NUMBER",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

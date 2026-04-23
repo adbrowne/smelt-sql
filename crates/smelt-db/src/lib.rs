@@ -41,8 +41,9 @@ pub use schema::{
     ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
 };
 pub use type_inference::{
-    infer_cte_columns, infer_expression_type, infer_select_column_types,
-    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
+    check_window_in_scalar_contexts, infer_cte_columns, infer_expression_kind,
+    infer_expression_type, infer_select_column_types, walk_expression_columns_with_visitor,
+    walk_select_columns_with_visitor, TypeContext, WindowInScalarContextInfo,
 };
 
 // Source types re-exported from smelt-core
@@ -289,6 +290,12 @@ pub enum DiagnosticCode {
     /// itself is malformed. Anchored at the declaration's name range.
     /// Introduced in Phase 11 of smelt-functions.
     BackendsWideningNotAllowed,
+    /// Emitted when an expression carrying [`smelt_types::ExprKind::Window`]
+    /// (a window-function call, or any expression dominated by one)
+    /// appears in a splice point that only accepts scalar / aggregate
+    /// expressions — currently `WHERE` and `GROUP BY`. Anchored at the
+    /// offending expression's span (Phase 14 of smelt-functions, §16 #24).
+    WindowInScalarContext,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -1455,6 +1462,27 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         check_expression_types(&expr, db);
                     }
                 }
+            }
+
+            // Phase 14 (§16 #24): reject window-kind expressions in WHERE
+            // and GROUP BY positions. Kind synthesis is independent of any
+            // column-schema lookups (column refs are always Scalar), so
+            // the check runs on a fresh empty `TypeContext`.
+            let kind_ctx = type_inference::TypeContext::new();
+            for info in type_inference::check_window_in_scalar_contexts(&select_stmt, &kind_ctx) {
+                let range = smelt_parser::ast::text_range_to_range(text, info.range);
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Window function `{}` is not allowed in {} (only scalar / aggregate \
+                         expressions are permitted here)",
+                        info.expression_text, info.clause
+                    ),
+                    range,
+                    code: Some(DiagnosticCode::WindowInScalarContext),
+                    data: None,
+                })
+                .accumulate(db);
             }
 
             let from_sources = count_from_sources(&select_stmt);

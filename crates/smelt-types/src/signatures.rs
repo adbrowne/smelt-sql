@@ -27,6 +27,68 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+/// Linear subtyping rank of an expression-typed AST node (Phase 14, §16 #24).
+///
+/// Every typed node synthesised by the checker carries one of these alongside
+/// its [`DataType`]. The ordering `Scalar < Agg < Window` captures SQL's
+/// linear "where can this expression appear" rule:
+///
+/// * `Scalar` — a plain expression (literal, column, arithmetic, scalar
+///   function). Acceptable in every splice point.
+/// * `Agg` — an aggregate call (`SUM(x)`, `COUNT(*)`, …). Acceptable in
+///   `SELECT`, `HAVING`, `ORDER BY`, but not in `WHERE` / `GROUP BY` / `ON`.
+/// * `Window` — an aggregate or window function with an `OVER (...)` clause
+///   (`ROW_NUMBER() OVER (…)`, `SUM(x) OVER (…)`). Acceptable only in `SELECT`
+///   and `QUALIFY`; rejected in `WHERE`, `GROUP BY`, `ON`, etc.
+///
+/// The check at every splice point is `subkind_of(found, expected)` — O(1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExprKind {
+    /// Plain scalar expression — acceptable in every splice point.
+    Scalar,
+    /// Aggregate call — `SUM(x)`, `COUNT(*)`, etc.
+    Agg,
+    /// Aggregate / window call carrying an `OVER (…)` clause.
+    Window,
+}
+
+impl ExprKind {
+    /// Linear rank: `Scalar` = 0, `Agg` = 1, `Window` = 2.
+    fn rank(self) -> u8 {
+        match self {
+            ExprKind::Scalar => 0,
+            ExprKind::Agg => 1,
+            ExprKind::Window => 2,
+        }
+    }
+}
+
+/// Linear subkind check (§16 #24).
+///
+/// Returns `true` iff `found` may appear in a context that expects `expected`.
+/// The chain is `Scalar <= Agg <= Window`, so a context that accepts `Window`
+/// accepts everything; a context that accepts `Scalar` rejects both `Agg`
+/// and `Window`.
+pub fn subkind_of(found: ExprKind, expected: ExprKind) -> bool {
+    found.rank() <= expected.rank()
+}
+
+/// Compute the kind ceiling of a list of items (§16 #24, `SelectItems<K>`).
+///
+/// Returns the maximum kind in the slice. An empty slice is by convention
+/// `Scalar` — this matches the empty-default for an empty `SelectItems<K>`
+/// value (which only arises from error recovery; well-formed SELECT lists
+/// have at least one item).
+pub fn kind_ceiling(items: &[ExprKind]) -> ExprKind {
+    let mut max = ExprKind::Scalar;
+    for &k in items {
+        if k.rank() > max.rank() {
+            max = k;
+        }
+    }
+    max
+}
+
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
 ///
 /// `Concrete(dt)` pins the parameter to a single [`DataType`]. The abstract
@@ -984,6 +1046,18 @@ pub struct Signature {
     /// need no override (the canonical type is also the native type on
     /// every backend).
     pub engine_native: HashMap<String, DataType>,
+    /// Default [`ExprKind`] for a call to this signature when no `OVER (…)`
+    /// clause is present (Phase 14, §16 #24).
+    ///
+    /// Aggregates (`SUM`, `AVG`, `MIN`, `MAX`, `COUNT`) seed `Agg`. Window
+    /// functions that are *only* meaningful with an `OVER (…)` clause
+    /// (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`) seed `Window`.
+    /// Everything else seeds `Scalar`.
+    ///
+    /// The type checker overrides this at the call site: an aggregate call
+    /// with an attached `OVER (…)` clause is treated as `Window` regardless
+    /// of the seeded kind (the canonical SQL dual-mode behaviour).
+    pub kind: ExprKind,
 }
 
 impl Signature {
@@ -1044,7 +1118,17 @@ impl Signature {
             return_type,
             canonical_return: None,
             engine_native: HashMap::new(),
+            kind: ExprKind::Scalar,
         })
+    }
+
+    /// Attach an [`ExprKind`] to this signature (Phase 14).
+    ///
+    /// Builder-style — used by the registry seed to mark aggregates and
+    /// window functions. Defaults to [`ExprKind::Scalar`] if never called.
+    pub fn with_kind(mut self, kind: ExprKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Attach a canonical return type to this signature (Phase 12).
@@ -1496,32 +1580,99 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 precision: 38,
                 scale: 0,
             },
-        ),
+        )
+        .with_kind(ExprKind::Agg),
     );
-    insert(Signature::new(
-        "AVG",
-        vec![tp("T", TypeConstraint::Numeric)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
-    ));
-    insert(Signature::new(
-        "MIN",
-        vec![tp("T", TypeConstraint::Ordered)],
-        vec![var("T")],
-        TypeExpr::Var("T".into()),
-    ));
-    insert(Signature::new(
-        "MAX",
-        vec![tp("T", TypeConstraint::Ordered)],
-        vec![var("T")],
-        TypeExpr::Var("T".into()),
-    ));
-    insert(Signature::new(
-        "COUNT",
-        vec![],
-        vec![SigParam::Concrete(TypeConstraint::Any)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
-    ));
+    insert(
+        Signature::new(
+            "AVG",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "MIN",
+            vec![tp("T", TypeConstraint::Ordered)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "MAX",
+            vec![tp("T", TypeConstraint::Ordered)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "COUNT",
+            vec![],
+            vec![SigParam::Concrete(TypeConstraint::Any)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+
+    // ─── Window-only built-ins (Phase 14, §16 #24).
+    //
+    // These are dispatched only at call sites that carry an `OVER (…)`
+    // clause; calling them without `OVER` is a runtime error in every
+    // backend. Phase 14 records the kind only — argument-list checks for
+    // these signatures land in a later phase. The placeholder `Any` arg
+    // lists keep the existing `unify_call` happy without imposing a
+    // false constraint.
+    insert(
+        Signature::new(
+            "ROW_NUMBER",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "RANK",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "DENSE_RANK",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "LAG",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "LEAD",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Window),
+    );
 
     // ─── Null / coalesce / comparison family.
     insert(Signature::new(
@@ -2436,5 +2587,97 @@ mod tests {
         assert!(frame.decl_path.is_none());
         assert!(frame.decl_range.is_none());
         assert!(frame.call_site_range.is_none());
+    }
+
+    // === Phase 14 TDD tests — ExprKind helpers + registry kind seeding ===
+
+    /// `subkind_of` realises the linear `Scalar <= Agg <= Window` chain
+    /// (§16 #24). Every kind is its own subkind; non-comparable pairs in
+    /// the *reverse* direction return `false`.
+    #[test]
+    fn kind_subtype_chain() {
+        // Reflexive.
+        assert!(subkind_of(ExprKind::Scalar, ExprKind::Scalar));
+        assert!(subkind_of(ExprKind::Agg, ExprKind::Agg));
+        assert!(subkind_of(ExprKind::Window, ExprKind::Window));
+
+        // Forward chain: Scalar <= Agg <= Window.
+        assert!(subkind_of(ExprKind::Scalar, ExprKind::Agg));
+        assert!(subkind_of(ExprKind::Scalar, ExprKind::Window));
+        assert!(subkind_of(ExprKind::Agg, ExprKind::Window));
+
+        // Reverse direction is disallowed — Window does NOT fit a Scalar
+        // splice point and Agg does NOT fit a Scalar splice point.
+        assert!(!subkind_of(ExprKind::Window, ExprKind::Scalar));
+        assert!(!subkind_of(ExprKind::Window, ExprKind::Agg));
+        assert!(!subkind_of(ExprKind::Agg, ExprKind::Scalar));
+    }
+
+    /// `kind_ceiling` returns the maximum kind in the slice (§16 #24).
+    /// Empty slice degrades to `Scalar` per the documented invariant.
+    #[test]
+    fn selectitems_kind_ceiling() {
+        // Empty: Scalar by convention.
+        assert_eq!(kind_ceiling(&[]), ExprKind::Scalar);
+
+        // [Scalar] → Scalar.
+        assert_eq!(kind_ceiling(&[ExprKind::Scalar]), ExprKind::Scalar);
+
+        // [user_id, COUNT(*)] → Agg (one Agg item lifts the whole list).
+        assert_eq!(
+            kind_ceiling(&[ExprKind::Scalar, ExprKind::Agg]),
+            ExprKind::Agg
+        );
+
+        // [COUNT(*) OVER (...)] → Window.
+        assert_eq!(kind_ceiling(&[ExprKind::Window]), ExprKind::Window);
+
+        // Window dominates Agg in mixed lists.
+        assert_eq!(
+            kind_ceiling(&[ExprKind::Agg, ExprKind::Window, ExprKind::Scalar]),
+            ExprKind::Window
+        );
+    }
+
+    /// Registry seed: aggregates carry [`ExprKind::Agg`].
+    #[test]
+    fn registry_aggregates_seeded_with_agg_kind() {
+        for name in ["SUM", "AVG", "MIN", "MAX", "COUNT"] {
+            let sig = BuiltinRegistry::resolve(name)
+                .unwrap_or_else(|| panic!("{name} should be registered"));
+            assert_eq!(
+                sig.kind,
+                ExprKind::Agg,
+                "{name} should be seeded with ExprKind::Agg"
+            );
+        }
+    }
+
+    /// Registry seed: window-only built-ins carry [`ExprKind::Window`].
+    #[test]
+    fn registry_window_funcs_seeded_with_window_kind() {
+        for name in ["ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD"] {
+            let sig = BuiltinRegistry::resolve(name)
+                .unwrap_or_else(|| panic!("{name} should be registered"));
+            assert_eq!(
+                sig.kind,
+                ExprKind::Window,
+                "{name} should be seeded with ExprKind::Window"
+            );
+        }
+    }
+
+    /// Registry seed: plain scalar built-ins default to [`ExprKind::Scalar`].
+    #[test]
+    fn registry_scalar_defaults() {
+        for name in ["LOWER", "UPPER", "ABS", "CONCAT", "POWER", "NOW"] {
+            let sig = BuiltinRegistry::resolve(name)
+                .unwrap_or_else(|| panic!("{name} should be registered"));
+            assert_eq!(
+                sig.kind,
+                ExprKind::Scalar,
+                "{name} should default to ExprKind::Scalar"
+            );
+        }
     }
 }
