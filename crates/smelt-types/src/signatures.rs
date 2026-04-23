@@ -2195,6 +2195,60 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     m
 });
 
+/// Format a [`SmeltType`] as a concise hover string (Phase 18).
+///
+/// Used by the LSP hover handler to display parameter types in
+/// `smelt.define` signatures. Examples:
+///   - `Expr<Integer>` → `"Expr<Integer>"`
+///   - `Expr<Numeric>` → `"Expr<Numeric>"`
+///   - `TableExpr` → `"TableExpr"`
+///   - `TableExpr<{revenue: Numeric, cost: Numeric}>` → `"TableExpr<{revenue: Numeric, cost: Numeric}>"`
+///   - With named tail `..r` → `"TableExpr<{revenue: Numeric, ..r}>"`
+pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
+    match ty {
+        SmeltType::Expr(tc) => format!("Expr<{}>", format_type_constraint_hover(tc)),
+        SmeltType::TableExpr(None) => "TableExpr".to_string(),
+        SmeltType::TableExpr(Some(req)) => {
+            let mut s = String::from("TableExpr<{");
+            for (i, (col, req)) in req.required.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(col);
+                s.push_str(": ");
+                s.push_str(&req.render());
+            }
+            match &req.tail {
+                RowTail::None => {}
+                RowTail::Anon => {
+                    if !req.required.is_empty() {
+                        s.push_str(", ");
+                    }
+                    s.push_str("..");
+                }
+                RowTail::Named(name) => {
+                    if !req.required.is_empty() {
+                        s.push_str(", ");
+                    }
+                    s.push_str("..");
+                    s.push_str(name);
+                }
+            }
+            s.push_str("}>");
+            s
+        }
+    }
+}
+
+fn format_type_constraint_hover(tc: &TypeConstraint) -> String {
+    match tc {
+        TypeConstraint::Concrete(dt) => dt.to_sql().to_string(),
+        TypeConstraint::Numeric => "Numeric".to_string(),
+        TypeConstraint::Ordered => "Ordered".to_string(),
+        TypeConstraint::Any => "Any".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3166,5 +3220,65 @@ mod tests {
         };
         let schema = vec![("notes".to_string(), DataType::Varchar { max_length: None })];
         assert!(check_schema_requirement(&req, &schema).is_ok());
+    }
+
+    // Phase 18 TDD tests — hover formatter
+
+    #[test]
+    fn lsp_hover_tableexpr_shows_schema() {
+        let req = SchemaRequirement {
+            required: vec![
+                (
+                    "revenue".to_string(),
+                    DataTypeReq::Constraint(TypeConstraint::Numeric),
+                ),
+                (
+                    "cost".to_string(),
+                    DataTypeReq::Constraint(TypeConstraint::Numeric),
+                ),
+            ],
+            tail: RowTail::None,
+        };
+        let ty = SmeltType::TableExpr(Some(req));
+        let hover = format_smelt_type_hover(&ty);
+        assert!(hover.contains("revenue"), "missing 'revenue' in: {hover}");
+        assert!(hover.contains("cost"), "missing 'cost' in: {hover}");
+        assert!(hover.contains("Numeric"), "missing 'Numeric' in: {hover}");
+        assert!(
+            hover.starts_with("TableExpr<{"),
+            "expected TableExpr<{{..}}>: {hover}"
+        );
+    }
+
+    #[test]
+    fn lsp_hover_bare_tableexpr_shows_type() {
+        assert_eq!(
+            format_smelt_type_hover(&SmeltType::TableExpr(None)),
+            "TableExpr"
+        );
+    }
+
+    #[test]
+    fn lsp_hover_tableexpr_named_tail() {
+        let req = SchemaRequirement {
+            required: vec![("id".to_string(), DataTypeReq::Concrete(DataType::BigInt))],
+            tail: RowTail::Named("r".to_string()),
+        };
+        let hover = format_smelt_type_hover(&SmeltType::TableExpr(Some(req)));
+        assert!(hover.contains("..r"), "expected ..r in: {hover}");
+    }
+
+    #[test]
+    fn lsp_hover_expr_numeric() {
+        let hover = format_smelt_type_hover(&SmeltType::Expr(TypeConstraint::Numeric));
+        assert_eq!(hover, "Expr<Numeric>");
+    }
+
+    #[test]
+    fn lsp_hover_expr_concrete() {
+        let hover = format_smelt_type_hover(&SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Integer,
+        )));
+        assert_eq!(hover, "Expr<INTEGER>");
     }
 }

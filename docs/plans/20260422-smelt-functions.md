@@ -1193,7 +1193,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 15 | TableExpr parameters: bare-column row polymorphism + shadow warnings | done | 85a9441 | 2026-04-24 |
 | 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | done | 38609e5 | 2026-04-24 |
 | 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | done | 9ccd605 | 2026-04-24 |
-| 18 | LSP polish + examples (Step 3 complete) | pending | | |
+| 18 | LSP polish + examples (Step 3 complete) | done | | 2026-04-24 |
 | 19 | Parser + types: context-binding syntax (Step 4 opens) | pending | | |
 | 20 | CTE schema extraction + splice-point context inference | pending | | |
 | 21 | Column-name validation against contexts + annotation reconciliation | pending | | |

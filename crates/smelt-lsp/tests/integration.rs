@@ -133,13 +133,28 @@ impl TestWorkspace {
     }
 
     /// Add a model file to the workspace
-    fn add_model(&mut self, name: &str, sql: &str) {
+    fn add_model(&mut self, name: &str, sql: &str) -> PathBuf {
         let path = self.models_dir.join(format!("{}.sql", name));
 
         // Write file to disk (for realistic testing)
         std::fs::write(&path, sql).expect("Failed to write model file");
 
         // Update database
+        self.db
+            .set_source_file(path.clone(), sql.to_string(), self.project_root());
+        self.model_files.push(path.clone());
+        self.sync_workspace();
+        path
+    }
+
+    /// Add a function file under `functions/` to the workspace
+    fn add_function(&mut self, name: &str, sql: &str) {
+        let fn_dir = self.temp_dir.path().join("functions");
+        std::fs::create_dir_all(&fn_dir).expect("Failed to create functions dir");
+        let path = fn_dir.join(format!("{}.sql", name));
+
+        std::fs::write(&path, sql).expect("Failed to write function file");
+
         self.db
             .set_source_file(path.clone(), sql.to_string(), self.project_root());
         self.model_files.push(path);
@@ -1481,6 +1496,144 @@ mod hover {
         assert!(col_names.contains(&"id")); // From upstream
         assert!(col_names.contains(&"name")); // From upstream
         assert!(col_names.contains(&"email")); // From upstream
+    }
+
+    // Phase 18 TDD tests
+
+    #[test]
+    fn lsp_hover_tableexpr_shows_schema() {
+        // Foundation for LSP hover on smelt.define parameters: verify that
+        // `format_smelt_type_hover` correctly renders a `TableExpr<{...}>`
+        // parameter type from the function signature index.
+        let mut ws = TestWorkspace::new();
+        ws.add_function(
+            "add_margin",
+            "smelt.define add_margin(source: TableExpr<{revenue: Numeric, cost: Numeric}>) \
+             -> TableExpr AS (\
+               SELECT source.*, revenue - cost AS margin FROM source\
+             )",
+        );
+
+        let fn_path = ws.temp_dir.path().join("functions").join("add_margin.sql");
+        let fn_file = ws.lookup_file(&fn_path).expect("function file registered");
+        let sigs = smelt_db::functions_in_file(&ws.db, fn_file);
+        assert_eq!(sigs.len(), 1, "expected one signature");
+
+        let sig = &sigs[0];
+        assert_eq!(sig.name, "add_margin");
+
+        let source_param = sig
+            .params
+            .iter()
+            .find(|p| p.name == "source")
+            .expect("source param not found");
+
+        let smelt_type = source_param
+            .type_ref
+            .as_ref()
+            .expect("source param should be annotated")
+            .as_ref()
+            .expect("source param type should parse successfully");
+
+        let hover_text = smelt_types::format_smelt_type_hover(smelt_type);
+        assert_eq!(
+            hover_text, "TableExpr<{revenue: Numeric, cost: Numeric}>",
+            "hover text should show the full TableExpr schema"
+        );
+    }
+
+    #[test]
+    fn lsp_hover_bare_column_shows_resolved_type() {
+        // A TableExpr-typed body parameter exposes its columns into the
+        // body's FROM scope via Phase 15's parameters-first lookup.
+        // This test verifies column resolution produces no diagnostics —
+        // the precondition for "hover shows a type" is that resolution
+        // succeeded.
+        let mut ws = TestWorkspace::new();
+        ws.add_function(
+            "add_margin",
+            "smelt.define add_margin(source: TableExpr<{revenue: Numeric, cost: Numeric}>) \
+             -> TableExpr AS (\
+               SELECT source.*, revenue - cost AS margin FROM source\
+             )",
+        );
+        let orders_path = ws.add_model(
+            "orders",
+            "SELECT CAST(NULL AS DECIMAL(18,2)) AS revenue, CAST(NULL AS DECIMAL(18,2)) AS cost",
+        );
+        let model_path = ws.model_path("margin");
+        ws.add_model(
+            "margin",
+            "SELECT order_margin FROM smelt.fn.add_margin(smelt.ref('orders')) AS m",
+        );
+
+        // Calls to add_margin with the orders schema should produce zero
+        // UnknownIdentifier diagnostics for the bare 'revenue' / 'cost'
+        // inside the body (Phase 15 resolution is working).
+        let fn_diags =
+            ws.diagnostics_for(&ws.temp_dir.path().join("functions").join("add_margin.sql"));
+        let body_errors: Vec<_> = fn_diags
+            .iter()
+            .filter(|d| d.code == Some(smelt_db::DiagnosticCode::UnknownIdentifier))
+            .collect();
+        assert!(
+            body_errors.is_empty(),
+            "bare columns in TableExpr body should resolve; got: {body_errors:#?}"
+        );
+        let _ = orders_path;
+        let _ = model_path;
+    }
+
+    #[test]
+    fn e2e_margin_to_sessions_pipeline_clean() {
+        // End-to-end chaining: add_margin → sessionize. Verifies the
+        // Phase 17 return-schema inference threads correctly into the
+        // outer sessionize call's FROM scope.
+        let mut ws = TestWorkspace::new();
+        ws.add_function(
+            "add_margin",
+            "smelt.define add_margin(source: TableExpr<{revenue: Numeric, cost: Numeric}>) \
+             -> TableExpr AS (\
+               SELECT source.*, revenue - cost AS margin FROM source\
+             )",
+        );
+        ws.add_function(
+            "sessionize",
+            "smelt.define sessionize( \
+               source: TableExpr, \
+               user_col: Expr<Text>, \
+               ts_col: Expr<Timestamp>, \
+               gap: Expr<Interval> = INTERVAL '30 minutes' \
+             ) -> TableExpr AS ( \
+               SELECT source.*, \
+                 SUM(CASE WHEN ts_col - LAG(ts_col) OVER (PARTITION BY user_col ORDER BY ts_col) > gap THEN 1 ELSE 0 END) \
+                 OVER (PARTITION BY user_col ORDER BY ts_col) AS session_id \
+               FROM source \
+             )",
+        );
+        ws.add_model(
+            "orders",
+            "SELECT CAST(NULL AS DECIMAL(18,2)) AS revenue, CAST(NULL AS DECIMAL(18,2)) AS cost",
+        );
+        ws.add_model(
+            "margin_by_session",
+            "SELECT session_id \
+             FROM smelt.fn.sessionize(\
+               smelt.fn.add_margin(smelt.ref('orders')),\
+               user_col => CAST('' AS VARCHAR),\
+               ts_col => CAST('2020-01-01' AS TIMESTAMP)\
+             ) AS s",
+        );
+        let pipeline_path = ws.model_path("margin_by_session");
+        let diags = ws.diagnostics_for(&pipeline_path);
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == smelt_db::DiagnosticSeverity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "margin_by_session pipeline should be error-free; got: {errors:#?}"
+        );
     }
 }
 

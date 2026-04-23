@@ -1048,3 +1048,58 @@ fn margin_report_explicit_columns_after_return_schema_inference() {
         "base model schema should not be empty"
     );
 }
+
+// =====================================================================
+// Phase 18 — Nested smelt.fn.* call chain: add_margin → sessionize
+// =====================================================================
+
+#[test]
+fn nested_smelt_fn_call_session_id_in_scope() {
+    // Phase 18 TDD test: chaining add_margin → sessionize must make
+    // `session_id` visible in the outer model's FROM scope.
+    //
+    // This exercises `resolve_smelt_fn_call_schema` recursively:
+    // outer sessionize → resolves inner add_margin → resolves orders →
+    // feeds schema upward.
+    let root = PathBuf::from("/fake/project");
+    let add_margin_path = root.join("functions").join("add_margin.sql");
+    let sessionize_path = root.join("functions").join("sessionize.sql");
+    let orders_path = root.join("models").join("orders.sql");
+    let pipeline_path = root.join("models").join("margin_by_session.sql");
+
+    let orders_sql =
+        "SELECT CAST(NULL AS DECIMAL(18,2)) AS revenue, CAST(NULL AS DECIMAL(18,2)) AS cost\n";
+    let pipeline_sql = "SELECT session_id FROM smelt.fn.sessionize( \
+       smelt.fn.add_margin(smelt.ref('orders')), \
+       user_col => CAST('' AS VARCHAR), \
+       ts_col => CAST('2020-01-01' AS TIMESTAMP) \
+     ) AS s\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (add_margin_path, ADD_MARGIN_REQ_SRC),
+            (sessionize_path, SESSIONIZE_SRC),
+            (orders_path, orders_sql),
+            (pipeline_path, pipeline_sql),
+        ],
+    );
+    let pipeline_file = files[3];
+
+    // check_type_diagnostics accumulates UndeclaredColumn errors.
+    let type_diags = smelt_db::check_type_diagnostics::accumulated::<smelt_db::DiagnosticAcc>(
+        &db,
+        ws,
+        pipeline_file,
+    );
+    let errors: Vec<_> = type_diags
+        .iter()
+        .filter(|d| d.0.severity == DiagnosticSeverity::Error)
+        .map(|d| d.0.message.clone())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "margin_by_session pipeline should be error-free; got: {errors:#?}"
+    );
+}

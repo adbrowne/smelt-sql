@@ -19,9 +19,10 @@ pub use signatures::{
     extract_extern_signature, extract_extern_signature_with_raw,
     extract_function_signature_by_name, extract_function_signatures,
     extract_function_signatures_with_raw, extract_signature, extract_signature_with_raw,
-    kind_ceiling, numeric_lub, parse_frontmatter_backends, parse_smelt_type, subkind_of,
-    unify_call, BackendSet, BuiltinRegistry, ExprKind, FrameInfo, FrontmatterParseError,
-    FunctionSig, ParamSpec, SigOrigin, SigParam, Signature, SignatureBuildError, SmeltType,
+    format_smelt_type_hover, kind_ceiling, numeric_lub, parse_frontmatter_backends,
+    parse_smelt_type, subkind_of, unify_call, BackendSet, BuiltinRegistry, DataTypeReq, ExprKind,
+    FrameInfo, FrontmatterParseError, FunctionSig, ParamSpec, RowTail, RowVarBinding,
+    SchemaRequirement, SigOrigin, SigParam, Signature, SignatureBuildError, SmeltType,
     SmeltTypeParseError, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
 };
 

@@ -2105,6 +2105,14 @@ impl SalsaRefSchemaProvider<'_> {
             if matches!(&param.type_ref, Some(Ok(SmeltType::TableExpr(_)))) {
                 // Resolve the TableExpr argument to its column schema.
                 if let Some(arg_expr) = bindings.get(&param.name) {
+                    // If the argument is itself a smelt.fn.* call, resolve
+                    // it recursively to get the inner call's output schema.
+                    if let Some(nested) = arg_expr.as_smelt_fn_call() {
+                        if let Some(cols) = self.resolve_smelt_fn_call_schema(&nested) {
+                            body_ctx.add_tableexpr_param(&param.name, &cols);
+                        }
+                        continue;
+                    }
                     // Walk the arg expression for a smelt.ref('X') call
                     // and resolve its schema.
                     for node in arg_expr.syntax().descendants() {

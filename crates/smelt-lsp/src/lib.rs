@@ -13,7 +13,7 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
-    check_type_diagnostics, file_diagnostics,
+    check_type_diagnostics, file_diagnostics, functions_in_file,
     yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
     Database, Diagnostic as DbDiagnostic, DiagnosticAcc, DiagnosticCode as DbCode,
     DiagnosticData as DbData, DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile,
@@ -113,7 +113,7 @@ fn project_sources_yaml(db: &Database, root: &Path) -> String {
 use smelt_parser::ast::File as AstFile;
 use smelt_parser::is_valid_sql_identifier;
 use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
-use smelt_types::TypedColumn;
+use smelt_types::{format_smelt_type_hover, TypedColumn};
 
 /// Tracks errors that occurred during workspace initialization
 #[derive(Default)]
@@ -3765,6 +3765,49 @@ impl LanguageServer for Backend {
                                     }),
                                     range: None,
                                 }));
+                            }
+                        }
+                    }
+                }
+
+                // Check smelt.define parameters — Phase 18 hover
+                if let Some(file_input) = lookup_file(&db, &effective_path) {
+                    let fn_sigs = functions_in_file(&db, file_input);
+                    for define in file.defines() {
+                        let fn_name = define.name().unwrap_or_default();
+                        if let Some(param_list) = define.param_list() {
+                            for param in param_list.params() {
+                                let param_range = param.syntax().text_range();
+                                let start: usize = param_range.start().into();
+                                let end: usize = param_range.end().into();
+                                if cursor_offset >= start && cursor_offset <= end {
+                                    let param_name = param.name().unwrap_or_default();
+                                    let type_display = fn_sigs
+                                        .iter()
+                                        .find(|s| s.name == fn_name)
+                                        .and_then(|s| {
+                                            s.params.iter().find(|p| p.name == param_name)
+                                        })
+                                        .and_then(|p| {
+                                            p.type_ref
+                                                .as_ref()?
+                                                .as_ref()
+                                                .ok()
+                                                .map(format_smelt_type_hover)
+                                        })
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let content = format!(
+                                        "**`{param_name}`** (parameter of `{fn_name}`)\n\n\
+                                         `{param_name}: {type_display}`"
+                                    );
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: content,
+                                        }),
+                                        range: None,
+                                    }));
+                                }
                             }
                         }
                     }
