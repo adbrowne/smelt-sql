@@ -302,6 +302,112 @@ fn e2e_example_diagnostics_clean() {
 }
 
 #[test]
+fn nested_call_error_renders_all_frames() {
+    // Phase 12 TDD test 1: a three-level chain
+    //   `outer_call(y) AS (smelt.fn.middle(y))`
+    //   `middle(z) AS (smelt.fn.inner_unary(z))`
+    //   `inner_unary(x) AS (x + undefined_var)`
+    // produces exactly one `UnknownIdentifier` diagnostic at the model's
+    // `smelt.fn.outer_call(1)` call site whose `ExpansionFrames` payload
+    // carries three frames — innermost-first (`inner_unary`) → outermost-last
+    // (`outer_call`) — matching the renderer contract. Each frame also
+    // carries a `decl_path` + `decl_range` so the LSP can attach
+    // `DiagnosticRelatedInformation` entries pointing back to each
+    // declaration site.
+    let root = PathBuf::from("/fake/project");
+    let inner_path = root.join("functions").join("inner_unary.sql");
+    let middle_path = root.join("functions").join("middle.sql");
+    let outer_path = root.join("functions").join("outer_call.sql");
+    let model_path = root.join("models").join("chain_call.sql");
+
+    let inner_src = "smelt.define inner_unary(x) AS (x + undefined_var)\n";
+    let middle_src = "smelt.define middle(z) AS (smelt.fn.inner_unary(z))\n";
+    let outer_src = "smelt.define outer_call(y) AS (smelt.fn.middle(y))\n";
+    let model_src = "SELECT smelt.fn.outer_call(1) AS r\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        &[
+            (inner_path, inner_src),
+            (middle_path, middle_src),
+            (outer_path, outer_src),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[3];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let three_frame: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::UnknownIdentifier)
+                && matches!(
+                    &d.data,
+                    Some(DiagnosticData::ExpansionFrames(frames)) if frames.len() == 3
+                )
+        })
+        .collect();
+    assert_eq!(
+        three_frame.len(),
+        1,
+        "expected exactly one UnknownIdentifier diagnostic with three frames at the model call site, got {diags:#?}"
+    );
+    let diag = three_frame[0];
+
+    let frames = match &diag.data {
+        Some(DiagnosticData::ExpansionFrames(frames)) => frames,
+        other => panic!("expected ExpansionFrames payload, got {other:?}"),
+    };
+    // Innermost-first → outermost-last.
+    assert_eq!(frames[0].function, "inner_unary");
+    assert_eq!(frames[1].function, "middle");
+    assert_eq!(frames[2].function, "outer_call");
+
+    // Each frame must carry a decl_path and decl_range so the LSP can
+    // build `DiagnosticRelatedInformation` entries.
+    for frame in frames {
+        assert!(
+            frame.decl_path.is_some(),
+            "frame {} missing decl_path — LSP would lose the clickable link for this frame",
+            frame.function
+        );
+        assert!(
+            frame.decl_range.is_some(),
+            "frame {} missing decl_range",
+            frame.function
+        );
+    }
+}
+
+#[test]
+fn single_level_call_unchanged() {
+    // Phase 12 TDD test 2: a direct 1-level call with a call-site
+    // ArgTypeMismatch still emits data=None (no frames) — Phase 6 behaviour
+    // is preserved verbatim. This guards against the Phase 12 renderer
+    // upgrade accidentally inflating simple call-site errors with frame
+    // metadata.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("safe_divide.sql");
+    let model_path = root.join("models").join("single_bad_call.sql");
+    let model_src = "SELECT smelt.fn.safe_divide('bad_text', 1) AS r\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, SAFE_DIVIDE_SRC), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = diags_with_code(&db, ws, model_file, DiagnosticCode::ArgTypeMismatch);
+    assert_eq!(
+        diags.len(),
+        1,
+        "single-level mismatch should still yield exactly one ArgTypeMismatch, got {diags:?}"
+    );
+    let diag = &diags[0];
+    assert!(
+        diag.data.is_none(),
+        "direct call-site diagnostics stay data=None under Phase 12 renderer"
+    );
+}
+
+#[test]
 fn frame_stack_only_innermost_rendered() {
     // TDD test 8: `outer_fn(inner_fn('text'))` — the outermost call
     // mismatches Text on a Numeric parameter. The resulting diagnostic

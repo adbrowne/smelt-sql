@@ -1081,6 +1081,20 @@ pub fn smelt_fn_call_diagnostics_for_file(
         None
     };
 
+    // Phase 12: resolve the declaring file path for a `FunctionSig` so that
+    // each expansion frame records `decl_path` + `decl_range`. The renderer
+    // and the LSP use these to build outer-to-inner frame trailers and
+    // `DiagnosticRelatedInformation` entries linking back to each declaration.
+    let decl_lookup = |sig: &smelt_types::signatures::FunctionSig| -> Option<std::path::PathBuf> {
+        for f in &files {
+            let sigs = file_signature_inputs(db, *f);
+            if sigs.iter().any(|s| s.name == sig.name) {
+                return Some(f.path(db).clone());
+            }
+        }
+        None
+    };
+
     let mut out = Vec::new();
     for call in &call_nodes {
         out.extend(function_body_check::check_smelt_fn_call(
@@ -1091,6 +1105,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &builtin_lookup,
             &lub,
             &body_lookup,
+            &decl_lookup,
         ));
     }
     out

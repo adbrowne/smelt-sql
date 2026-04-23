@@ -24,6 +24,7 @@ use smelt_parser::ast::{
 };
 use smelt_parser::offset_to_position;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
@@ -293,18 +294,29 @@ pub struct ParamSpec {
 /// A single frame of expansion context attached to a body/call-site
 /// diagnostic.
 ///
-/// Phase 6 populates a 0-or-1-element `Vec<FrameInfo>` on every
-/// `smelt.fn.*`-originated diagnostic:
+/// Phase 6 populated a 0-or-1-element `Vec<FrameInfo>` on every
+/// `smelt.fn.*`-originated diagnostic. Phase 12 extends the checker to
+/// stack frames at each level of recursive body expansion, producing
+/// multi-level diagnostics:
 ///
 /// - When the body's own type-check surfaces an error (no expansion
 ///   happened), the vec is empty.
 /// - When the error fires *inside* an expanded body, the vec contains
-///   one frame for each nested expansion, innermost-first → outermost-last
-///   (Phase 12 upgrades the renderer to emit multi-level; Phase 6 only renders
-///   the innermost).
+///   one frame per nested expansion, **innermost-first →
+///   outermost-last**. `frames.last()` is the outermost call site
+///   (the one the user wrote in their source); `frames.first()` is the
+///   deepest nested call. The renderer in `smelt-lsp` reverses this
+///   iteration to present frames outer-to-inner in the message body.
 ///
 /// `bound_type` is the concrete type that the parameter was bound to at the
 /// call site, rendered via `DataType::to_string()` for display.
+///
+/// Phase 12 also adds decl-site and call-site location data so LSP
+/// clients can surface each frame as a `DiagnosticRelatedInformation`
+/// pointing at the declaring file / call-path. All three location fields
+/// are `Option` — older frames (or sig-lookup misses during degraded
+/// scenarios) simply carry `None` and the LSP renderer falls back to
+/// inline-only messaging for those frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameInfo {
     /// Name of the function whose expansion is responsible for this frame
@@ -316,6 +328,18 @@ pub struct FrameInfo {
     /// Textual rendering of the type that `param` was bound to at this
     /// call site (e.g. `"INTEGER"`, `"VARCHAR"`).
     pub bound_type: String,
+    /// Path to the file that declares the function (`decl_path`). `None`
+    /// when the declaration couldn't be located (e.g. sig-lookup miss
+    /// during degraded scenarios).
+    pub decl_path: Option<PathBuf>,
+    /// Range of the `DEFINE_NAME` / `EXTERN_NAME` identifier in
+    /// `decl_path`. Used by LSP clients to open the declaration site
+    /// when a user clicks the frame's related-information link.
+    pub decl_range: Option<Range>,
+    /// Range of the call-path span at this frame's call site (in the
+    /// file that *contains* the call — distinct from `decl_path`, which
+    /// points at where the callee is defined).
+    pub call_site_range: Option<Range>,
 }
 
 /// Tier of a function, derived from annotation completeness.
@@ -940,6 +964,26 @@ pub struct Signature {
     pub params: Vec<SigParam>,
     /// Return type.
     pub return_type: TypeExpr,
+    /// Canonical return type per §16 #9's widening chain. `Some(dt)` when
+    /// the registry declares a canonical type that differs from what a
+    /// given backend natively returns (e.g. `SUM(INTEGER)` canonical is
+    /// `BigInt` even though DuckDB returns `HUGEINT`). `None` means
+    /// "derive from [`Signature::return_type`] at call time" — the common
+    /// case for monomorphic signatures.
+    ///
+    /// Phase 12: recording-only. Step 7+ will consume this via a CAST
+    /// emitter when `needs_cast_for(engine)` returns `true`.
+    pub canonical_return: Option<DataType>,
+    /// Per-backend native return-type overrides. Keyed on lowercase
+    /// backend id (e.g. `"duckdb"`, `"spark"`). An entry here means
+    /// "this backend natively returns a type that differs from
+    /// [`Self::canonical_return`]" — Step 7+ emits a CAST at emit-time
+    /// to preserve the canonical type.
+    ///
+    /// Phase 12: recording-only. `HashMap::default()` on entries that
+    /// need no override (the canonical type is also the native type on
+    /// every backend).
+    pub engine_native: HashMap<String, DataType>,
 }
 
 impl Signature {
@@ -998,7 +1042,50 @@ impl Signature {
             type_params,
             params,
             return_type,
+            canonical_return: None,
+            engine_native: HashMap::new(),
         })
+    }
+
+    /// Attach a canonical return type to this signature (Phase 12).
+    ///
+    /// Builder-style — intended for static registry initialisation. The
+    /// canonical type is compared to each `engine_native` entry to decide
+    /// whether a CAST should be emitted on that backend.
+    pub fn with_canonical_return(mut self, dt: DataType) -> Self {
+        self.canonical_return = Some(dt);
+        self
+    }
+
+    /// Declare a per-backend native return-type override (Phase 12).
+    ///
+    /// The `engine` key is lowercased on insert. Calling this multiple
+    /// times with different engines builds up the full override table.
+    pub fn with_engine_native(mut self, engine: &str, dt: DataType) -> Self {
+        self.engine_native
+            .insert(engine.trim().to_ascii_lowercase(), dt);
+        self
+    }
+
+    /// Does the signature require a CAST back to the canonical return
+    /// type when executed on `engine`? (§16 #9 / Phase 12, recording
+    /// only — Step 7+ consumes this.)
+    ///
+    /// Returns `false` when no canonical type is declared (the common
+    /// case — the signature's own [`Self::return_type`] is already
+    /// canonical) or when the engine's native type equals the canonical
+    /// type. Returns `true` when the engine is listed in
+    /// [`Self::engine_native`] with a type that differs from
+    /// [`Self::canonical_return`].
+    pub fn needs_cast_for(&self, engine: &str) -> bool {
+        let Some(canonical) = &self.canonical_return else {
+            return false;
+        };
+        let key = engine.trim().to_ascii_lowercase();
+        match self.engine_native.get(&key) {
+            Some(native) => native != canonical,
+            None => false,
+        }
     }
 
     /// Look up a declared type parameter by name.
@@ -1387,12 +1474,30 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
 
     // ─── Aggregates (treated like scalars here; aggregate-ness is Phase 3+
     //     of the broader roadmap and has no bearing on unification).
-    insert(Signature::new(
-        "SUM",
-        vec![tp("T", TypeConstraint::Numeric)],
-        vec![var("T")],
-        TypeExpr::Var("T".into()),
-    ));
+    //
+    // Phase 12: SUM is the canonical example of §16 #9 engine-divergence.
+    // `SUM(INTEGER)` returns `BigInt` in the smelt type system (the
+    // "canonical" widening), but DuckDB natively returns `HUGEINT` — a
+    // 128-bit type smelt models as `Decimal(38, 0)` in v1 (no dedicated
+    // `Hugeint` variant until we have a concrete consumer). The
+    // divergence flag feeds Step 7+'s CAST emitter; Phase 12 records
+    // only.
+    insert(
+        Signature::new(
+            "SUM",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_canonical_return(DataType::BigInt)
+        .with_engine_native(
+            "duckdb",
+            DataType::Decimal {
+                precision: 38,
+                scale: 0,
+            },
+        ),
+    );
     insert(Signature::new(
         "AVG",
         vec![tp("T", TypeConstraint::Numeric)],
@@ -2251,5 +2356,85 @@ mod tests {
                 scale: 10,
             }
         );
+    }
+
+    // === Phase 12 TDD tests — multi-level frame rendering + CAST flag ===
+
+    #[test]
+    fn cast_flag_set_when_canonical_differs_from_engine() {
+        // Phase 12 TDD test 3 (§16 #9): `SUM` is seeded with
+        // canonical = BigInt and engine_native[duckdb] = DECIMAL(38,0)
+        // — the smelt stand-in for DuckDB's HUGEINT return. The
+        // `needs_cast_for("duckdb")` hook must flag divergence so
+        // Step 7+ can emit a CAST back to BigInt.
+        let sum = BuiltinRegistry::resolve("SUM").expect("SUM seeded");
+        assert_eq!(sum.canonical_return, Some(DataType::BigInt));
+        assert_eq!(
+            sum.engine_native.get("duckdb"),
+            Some(&DataType::Decimal {
+                precision: 38,
+                scale: 0,
+            })
+        );
+        assert!(
+            sum.needs_cast_for("duckdb"),
+            "SUM on DuckDB returns HUGEINT (DECIMAL(38,0)) but canonical is BigInt \
+             — needs_cast_for must flag the divergence"
+        );
+        // Engines that aren't listed default to "native == canonical".
+        assert!(
+            !sum.needs_cast_for("spark"),
+            "No override for spark → canonical matches native → no cast needed"
+        );
+        // Key lookup is case-insensitive / trimmed.
+        assert!(sum.needs_cast_for("  DuckDB  "));
+    }
+
+    #[test]
+    fn cast_flag_false_for_canonical_less_signatures() {
+        // The majority of signatures don't declare a canonical — their
+        // native return IS their canonical. `needs_cast_for(...)` must
+        // return `false` unconditionally for those.
+        let lower = BuiltinRegistry::resolve("LOWER").expect("LOWER seeded");
+        assert!(lower.canonical_return.is_none());
+        assert!(!lower.needs_cast_for("duckdb"));
+        assert!(!lower.needs_cast_for("spark"));
+        assert!(!lower.needs_cast_for(""));
+    }
+
+    #[test]
+    fn cast_flag_false_when_native_matches_canonical() {
+        // Explicit divergence-negation: a signature that declares a
+        // canonical AND a matching native override still reports false.
+        let sig = Signature::new(
+            "SAME",
+            vec![],
+            vec![SigParam::Concrete(TypeConstraint::Concrete(
+                DataType::Integer,
+            ))],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+        )
+        .with_canonical_return(DataType::Integer)
+        .with_engine_native("duckdb", DataType::Integer);
+        assert!(!sig.needs_cast_for("duckdb"));
+    }
+
+    #[test]
+    fn frame_info_location_fields_default_none() {
+        // Phase 12 added `decl_path`, `decl_range`, `call_site_range`
+        // to `FrameInfo`. Constructors that don't populate them must
+        // default to `None` so legacy callers (tests, mock harnesses)
+        // continue to compile and behave identically.
+        let frame = FrameInfo {
+            function: "f".into(),
+            param: "x".into(),
+            bound_type: "INTEGER".into(),
+            decl_path: None,
+            decl_range: None,
+            call_site_range: None,
+        };
+        assert!(frame.decl_path.is_none());
+        assert!(frame.decl_range.is_none());
+        assert!(frame.call_site_range.is_none());
     }
 }

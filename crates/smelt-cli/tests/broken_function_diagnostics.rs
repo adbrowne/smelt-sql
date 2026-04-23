@@ -127,6 +127,19 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::BackendsWideningNotAllowed,
         message_substring: "load_broken",
     },
+    // Phase 12 — `outer_call(1)` cascades through three untyped helpers;
+    // `inner_unary`'s body references an `undefined_var` identifier,
+    // triggering an `UnknownIdentifier` cascade. That diagnostic is
+    // wrapped by frames for `middle` and `outer_call` on the way back,
+    // yielding three expansion frames. Full outer-to-inner frame
+    // ordering is asserted in the dedicated
+    // `nested_call_error_renders_all_frames` test below.
+    Case {
+        fixture: "fn_nested_call_error.sql",
+        companion: None,
+        code: DiagnosticCode::UnknownIdentifier,
+        message_substring: "undefined_var",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {
@@ -199,6 +212,115 @@ fn no_orphan_fn_fixtures() {
         missing.is_empty(),
         "CASES references fixtures that don't exist on disk: {missing:?}",
     );
+}
+
+/// Phase 12 TDD test: verify the multi-frame renderer emits all three
+/// frame names in outer-to-inner order on the broken nested fixture.
+///
+/// The fixture chain is `outer_call → middle → inner_unary` and the
+/// body-cascade in `inner_unary` produces three expansion frames. The
+/// LSP / CLI trailer format prints the outermost frame first (after the
+/// primary error message) and the innermost frame last. The rendered
+/// message (error + trailers) must therefore contain the frame names in
+/// exactly that order: `outer_call < middle < inner_unary`.
+#[test]
+fn nested_call_error_renders_all_frames() {
+    use smelt_db::DiagnosticData;
+
+    let models_dir = broken_models_dir();
+    let project_root = models_dir.parent().unwrap().to_path_buf();
+    let fixture_path = models_dir.join("fn_nested_call_error.sql");
+    let fixture_content =
+        std::fs::read_to_string(&fixture_path).expect("fn_nested_call_error.sql must exist");
+
+    let (db, ws, handles) = build_db(project_root, &[(fixture_path.clone(), fixture_content)]);
+    let fixture_handle = handles[0];
+
+    let diags = file_diagnostics(&db, ws, fixture_handle);
+
+    // The fixture produces several UnknownIdentifier diagnostics:
+    //   - one "raw" diagnostic from file-level `check_function_body`
+    //     on `inner_unary`'s body (no expansion frames).
+    //   - cascade copies produced by each outer call site's body re-walk,
+    //     carrying progressively more frames (1, 2, 3).
+    // The 3-frame diagnostic is the one anchored at the outermost
+    // (model-level) `smelt.fn.outer_call(1)` call site — that's the
+    // rendered user-facing error.
+    let cascades: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::UnknownIdentifier)
+                && matches!(
+                    &d.data,
+                    Some(DiagnosticData::ExpansionFrames(frames)) if frames.len() == 3
+                )
+        })
+        .collect();
+    assert_eq!(
+        cascades.len(),
+        1,
+        "expected exactly one UnknownIdentifier diagnostic carrying three expansion frames, got {diags:#?}"
+    );
+    let diag = cascades[0];
+
+    // The diagnostic must carry an ExpansionFrames payload with exactly
+    // three frames (innermost-first → outermost-last, matching the data
+    // convention `check_smelt_fn_call` follows).
+    let frames = match &diag.data {
+        Some(DiagnosticData::ExpansionFrames(frames)) => frames,
+        other => panic!("expected ExpansionFrames on the cascade diagnostic, got {other:?}"),
+    };
+    assert_eq!(
+        frames.len(),
+        3,
+        "expected three expansion frames, got {frames:#?}"
+    );
+    assert_eq!(frames[0].function, "inner_unary");
+    assert_eq!(frames[1].function, "middle");
+    assert_eq!(frames[2].function, "outer_call");
+
+    // Render the outer-to-inner trailer chain the same way the LSP does:
+    // iterate frames in reverse and append one line per frame. The
+    // resulting message must list `outer_call` before `middle` before
+    // `inner_unary` — the §16 #16 Step 2 renderer contract.
+    let mut rendered = diag.message.clone();
+    for f in frames.iter().rev() {
+        rendered.push_str(&format!(
+            "\nin expansion of `{}`, `{}` was bound to {}",
+            f.function, f.param, f.bound_type,
+        ));
+    }
+    let pos_outer = rendered
+        .find("outer_call")
+        .expect("rendered message must mention outer_call");
+    let pos_middle = rendered
+        .find("middle")
+        .expect("rendered message must mention middle");
+    let pos_inner = rendered
+        .find("inner_unary")
+        .expect("rendered message must mention inner_unary");
+    assert!(
+        pos_outer < pos_middle && pos_middle < pos_inner,
+        "frames must render outer-to-inner; got outer@{pos_outer}, middle@{pos_middle}, inner@{pos_inner} — rendered:\n{rendered}"
+    );
+
+    // Every frame must carry its declaration-site metadata — the LSP uses
+    // these to build `DiagnosticRelatedInformation` entries linking back
+    // to each `smelt.define`. `decl_path` may legitimately be `None` only
+    // when the declaring file is not in the workspace; in this fixture
+    // all three are present, so none should be `None`.
+    for frame in frames {
+        assert!(
+            frame.decl_path.is_some(),
+            "frame {} missing decl_path; LSP would fall back to inline-only rendering",
+            frame.function
+        );
+        assert!(
+            frame.decl_range.is_some(),
+            "frame {} missing decl_range",
+            frame.function
+        );
+    }
 }
 
 #[test]

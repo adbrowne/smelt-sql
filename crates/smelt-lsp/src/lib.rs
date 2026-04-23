@@ -797,6 +797,70 @@ fn build_python_context(all_files: &[PathBuf], config: &smelt_core::Config) -> S
 /// (virtual_path, start_line_offset) for each section in a multi-model file.
 type MultiModelEntry = Vec<(PathBuf, u32)>;
 
+/// Render a database diagnostic into the LSP message body + per-frame
+/// `related_information` list.
+///
+/// Pulled out of [`Backend::to_lsp_diagnostic`] as a pure function so it
+/// can be unit-tested without needing to construct a live `Backend`/LSP
+/// `Client`. The returned tuple is `(message, related_information)`:
+///
+/// * `message` — the primary diagnostic text. If the diagnostic carries
+///   an `ExpansionFrames` payload, one trailer line per frame is appended
+///   in outer-to-inner order (Phase 12 §16 #16 Step 2 renderer).
+/// * `related_information` — `Some(..)` with one entry per frame that
+///   carries both `decl_path` and `decl_range`; `None` otherwise (no
+///   frames, or no frame had resolvable location metadata).
+///
+/// The underlying `FrameInfo` vector is stored innermost-first →
+/// outermost-last (the canonical merge order used by
+/// `smelt_db::check_smelt_fn_call`), so we iterate in reverse to render
+/// the outermost (user-visible) call first, then walk down to the
+/// innermost cause.
+pub(crate) fn render_expansion_frames(
+    diag: &DbDiagnostic,
+) -> (String, Option<Vec<DiagnosticRelatedInformation>>) {
+    let mut message = diag.message.clone();
+    let Some(DbData::ExpansionFrames(frames)) = diag.data.as_ref() else {
+        return (message, None);
+    };
+    let mut related: Vec<DiagnosticRelatedInformation> = Vec::new();
+    for frame in frames.iter().rev() {
+        message.push_str(&format!(
+            "\nin expansion of `{}`, `{}` was bound to {}",
+            frame.function, frame.param, frame.bound_type,
+        ));
+        if let (Some(path), Some(range)) = (&frame.decl_path, frame.decl_range.as_ref()) {
+            if let Ok(uri) = Url::from_file_path(path) {
+                related.push(DiagnosticRelatedInformation {
+                    location: Location {
+                        uri,
+                        range: Range {
+                            start: Position {
+                                line: range.start.line,
+                                character: range.start.column,
+                            },
+                            end: Position {
+                                line: range.end.line,
+                                character: range.end.column,
+                            },
+                        },
+                    },
+                    message: format!(
+                        "in expansion of `{}`, `{}` was bound to {}",
+                        frame.function, frame.param, frame.bound_type,
+                    ),
+                });
+            }
+        }
+    }
+    let related_information = if related.is_empty() {
+        None
+    } else {
+        Some(related)
+    };
+    (message, related_information)
+}
+
 pub struct Backend {
     client: Client,
     /// The salsa database. `Database: Clone` with internally-Arc'd storage, so
@@ -964,21 +1028,11 @@ impl Backend {
             }
         });
 
-        // Phase 6 (smelt-functions Step 1): append a single-line "in expansion
-        // of `F`, `p` was bound to <type>" trailer using the innermost
-        // (last-pushed) frame. Phase 12 upgrades this to a multi-level
-        // rendering via `DiagnosticRelatedInformation`; for now we keep it
-        // inline so the message is visible in every LSP client, not just ones
-        // that surface related info.
-        let mut message = diag.message.clone();
-        if let Some(DbData::ExpansionFrames(frames)) = diag.data.as_ref() {
-            if let Some(innermost) = frames.last() {
-                message.push_str(&format!(
-                    "\nin expansion of `{}`, `{}` was bound to {}",
-                    innermost.function, innermost.param, innermost.bound_type,
-                ));
-            }
-        }
+        // Phase 12 (smelt-functions Step 1): expand the message body and
+        // `DiagnosticRelatedInformation` list from the diagnostic's
+        // `ExpansionFrames` payload. The pure helper below is unit-testable
+        // directly (see `render_expansion_frames` tests).
+        let (message, related_information) = render_expansion_frames(diag);
 
         lsp_types::Diagnostic {
             range: Range {
@@ -1000,6 +1054,7 @@ impl Backend {
             source: Some("smelt".to_string()),
             code,
             data,
+            related_information,
             ..Default::default()
         }
     }
@@ -4404,5 +4459,172 @@ mod tests {
     fn test_not_from_position_complete_table_ref() {
         // After a complete table ref with alias, we're past the position
         assert!(!is_in_from_position("SELECT * FROM TABLE_A T"));
+    }
+
+    // =====================================================================
+    // Phase 12 — multi-level frame rendering (smelt-functions Step 2).
+    //
+    // These tests exercise `render_expansion_frames` directly because it
+    // is a pure function over a `DbDiagnostic` — we don't need a running
+    // `Backend` / tower-lsp `Client` to validate the renderer contract.
+    // =====================================================================
+
+    use smelt_db::{
+        Diagnostic as DbDiagnosticT, DiagnosticCode, DiagnosticData,
+        DiagnosticSeverity as DbSeverityT, Range as DbRange,
+    };
+    use smelt_parser::ast::Position as DbPosition;
+    use smelt_types::FrameInfo;
+
+    fn make_db_range(line: u32, col: u32) -> DbRange {
+        DbRange {
+            start: DbPosition { line, column: col },
+            end: DbPosition {
+                line,
+                column: col + 1,
+            },
+        }
+    }
+
+    fn make_frame(function: &str, param: &str, bound_type: &str, decl_line: u32) -> FrameInfo {
+        // Use a temp-dir file path so `Url::from_file_path` succeeds on
+        // Linux/macOS (the path must be absolute). We can't reach for a
+        // real tempfile in a unit test without pulling tempfile into
+        // dev-deps; using the conventional `/tmp/...` absolute path keeps
+        // the URL builder happy on the CI runner.
+        let path = PathBuf::from(format!("/tmp/smelt-lsp-test-{function}.sql"));
+        FrameInfo {
+            function: function.to_string(),
+            param: param.to_string(),
+            bound_type: bound_type.to_string(),
+            decl_path: Some(path),
+            decl_range: Some(make_db_range(decl_line, 0)),
+            call_site_range: Some(make_db_range(decl_line + 10, 0)),
+        }
+    }
+
+    fn make_db_diag(message: &str, frames: Vec<FrameInfo>) -> DbDiagnosticT {
+        DbDiagnosticT {
+            severity: DbSeverityT::Error,
+            message: message.to_string(),
+            range: make_db_range(0, 0),
+            code: Some(DiagnosticCode::UnknownIdentifier),
+            data: Some(DiagnosticData::ExpansionFrames(frames)),
+        }
+    }
+
+    /// Phase 12 TDD test #4 — LSP e2e: nested-call error includes
+    /// `relatedInformation` per frame. A three-level expansion chain
+    /// (`outer_call → middle → inner_unary`) must yield exactly three
+    /// related-info entries and a message with three trailer lines, all
+    /// in outer-to-inner order.
+    #[test]
+    fn lsp_diagnostic_formats_frames_as_related_information() {
+        // Innermost-first → outermost-last data layout, matching the
+        // `check_smelt_fn_call` merge contract.
+        let frames = vec![
+            make_frame("inner_unary", "x", "INTEGER", 1),
+            make_frame("middle", "z", "INTEGER", 2),
+            make_frame("outer_call", "y", "INTEGER", 3),
+        ];
+        let diag = make_db_diag("unknown identifier `undefined_var`", frames);
+
+        let (message, related) = render_expansion_frames(&diag);
+
+        // 1. The related-information list must have one entry per frame.
+        let related = related.expect("expected three-level chain to produce related_information");
+        assert_eq!(
+            related.len(),
+            3,
+            "expected one DiagnosticRelatedInformation per frame, got {related:#?}"
+        );
+
+        // 2. Frame order in related-information is outer-to-inner
+        //    (`frames.iter().rev()` in the renderer).
+        assert!(
+            related[0].message.contains("outer_call"),
+            "first related-info entry must be the outermost frame, got: {}",
+            related[0].message
+        );
+        assert!(
+            related[1].message.contains("middle"),
+            "second related-info entry must be the middle frame, got: {}",
+            related[1].message
+        );
+        assert!(
+            related[2].message.contains("inner_unary"),
+            "third related-info entry must be the innermost frame, got: {}",
+            related[2].message
+        );
+
+        // 3. URIs must resolve to a real file-scheme URL.
+        for info in &related {
+            assert_eq!(info.location.uri.scheme(), "file");
+            assert!(
+                info.location.uri.to_file_path().is_ok(),
+                "related-info URI must round-trip to a file path: {}",
+                info.location.uri
+            );
+        }
+
+        // 4. The message body is expanded with one trailer line per frame,
+        //    outer-to-inner.
+        let pos_outer = message
+            .find("outer_call")
+            .expect("rendered message must mention outer_call");
+        let pos_middle = message
+            .find("middle")
+            .expect("rendered message must mention middle");
+        let pos_inner = message
+            .find("inner_unary")
+            .expect("rendered message must mention inner_unary");
+        assert!(
+            pos_outer < pos_middle && pos_middle < pos_inner,
+            "message trailers must render outer-to-inner; got {pos_outer}/{pos_middle}/{pos_inner} — rendered:\n{message}"
+        );
+    }
+
+    /// Phase 12 — single-frame diagnostics still render one trailer line
+    /// and exactly one related-information entry (Phase 6 behaviour
+    /// preserved).
+    #[test]
+    fn lsp_single_level_frame_preserves_phase6_rendering() {
+        let frames = vec![make_frame("safe_divide", "numerator", "TEXT", 0)];
+        let diag = make_db_diag("type mismatch in body", frames);
+
+        let (message, related) = render_expansion_frames(&diag);
+
+        let related = related.expect("single frame must still produce related_information");
+        assert_eq!(
+            related.len(),
+            1,
+            "single-frame diagnostics must emit exactly one related-info entry"
+        );
+        assert!(related[0].message.contains("safe_divide"));
+
+        // Exactly one trailer line was appended.
+        let trailer_count = message.matches("\nin expansion of `").count();
+        assert_eq!(
+            trailer_count, 1,
+            "single-frame diagnostic must have exactly one trailer line, got: {message}"
+        );
+    }
+
+    /// Phase 12 — diagnostics without any `ExpansionFrames` payload must
+    /// pass through untouched. This is the common case for non-function
+    /// diagnostics (unknown model refs, type mismatches in model SQL,
+    /// etc.) and must stay zero-cost.
+    #[test]
+    fn lsp_non_frame_diagnostics_unaffected() {
+        let diag = DbDiagnosticT {
+            severity: DbSeverityT::Error,
+            message: "undefined model `foo`".to_string(),
+            range: make_db_range(0, 0),
+            code: Some(DiagnosticCode::UndefinedModelRef),
+            data: None,
+        };
+        let (message, related) = render_expansion_frames(&diag);
+        assert_eq!(message, "undefined model `foo`");
+        assert!(related.is_none());
     }
 }

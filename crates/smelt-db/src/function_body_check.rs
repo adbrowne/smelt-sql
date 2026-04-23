@@ -22,9 +22,21 @@ use smelt_types::signatures::{
     UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
+use std::path::PathBuf;
 
 use crate::type_inference::{infer_expression_type, TypeContext};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
+
+/// Callback type for dispatching nested `smelt.fn.*` calls encountered
+/// during body-recursion (Phase 12).
+///
+/// When `check_smelt_fn_call` re-walks a body with the call-site-derived
+/// bindings, the walker encounters further nested `smelt.fn.*` calls.
+/// This closure lets us recursively invoke the same checker so frames
+/// stack up across arbitrary expansion depth. In unit tests and the
+/// legacy `check_function_body` entrypoint this is `None` — body walks
+/// that never expand further work exactly as they did in Phase 6.
+pub type NestedCallHandler<'a> = dyn Fn(&SmeltFnCall, &TypeContext, &str) -> Vec<Diagnostic> + 'a;
 
 /// Check a single `smelt.define` body, producing Phase-5 diagnostics.
 ///
@@ -40,6 +52,32 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Rang
 /// `DiagnosticData::ExpansionFrames`. Emitting `None` avoids stamping an
 /// empty frame-stack on every body diagnostic.
 pub fn check_function_body(sig: &FunctionSig, body: &Expr, text: &str) -> Vec<Diagnostic> {
+    check_function_body_inner(sig, body, text, None)
+}
+
+/// Phase-12 variant of [`check_function_body`] that dispatches nested
+/// `smelt.fn.*` calls through `nested` so frames stack up across
+/// arbitrary expansion depth.
+///
+/// Callers pass a closure that invokes [`check_smelt_fn_call`] on each
+/// nested call with the re-bound context. The plain
+/// [`check_function_body`] entrypoint delegates here with `None` and
+/// therefore matches its pre-Phase-12 behaviour exactly.
+pub fn check_function_body_with_expansion(
+    sig: &FunctionSig,
+    body: &Expr,
+    text: &str,
+    nested: &NestedCallHandler<'_>,
+) -> Vec<Diagnostic> {
+    check_function_body_inner(sig, body, text, Some(nested))
+}
+
+fn check_function_body_inner(
+    sig: &FunctionSig,
+    body: &Expr,
+    text: &str,
+    nested: Option<&NestedCallHandler<'_>>,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // 1. Duplicate parameter names — anchor at the second occurrence's name
@@ -58,7 +96,7 @@ pub fn check_function_body(sig: &FunctionSig, body: &Expr, text: &str) -> Vec<Di
     // 3. Walk the body recursively, emitting:
     //    - `UnknownIdentifier` for bare identifiers that don't resolve.
     //    - `FunctionBodyTypeMismatch` for type-incompatible subexpressions.
-    walk_body(body, &ctx, text, &mut diagnostics);
+    walk_body(body, &ctx, text, &mut diagnostics, nested);
 
     diagnostics
 }
@@ -141,17 +179,39 @@ fn to_range(tr: TextRange, text: &str) -> Range {
 /// binary-expression type mismatches. Returns the inferred type of the
 /// sub-expression (so parents can detect mismatches), or `None` if no type
 /// could be inferred.
+///
+/// `nested` is the Phase-12 hook for recursively dispatching nested
+/// `smelt.fn.*` calls through [`check_smelt_fn_call`]. When `Some`, every
+/// nested `SMELT_FN_CALL` encountered in the body is checked via the
+/// closure so frames stack up across arbitrary expansion depth. When
+/// `None` the walker matches its pre-Phase-12 behaviour — useful for
+/// unit tests and the [`check_function_body`] legacy entry.
 fn walk_body(
     expr: &Expr,
     ctx: &TypeContext,
     text: &str,
     out: &mut Vec<Diagnostic>,
+    nested: Option<&NestedCallHandler<'_>>,
 ) -> Option<TypedColumn> {
+    // Phase 12: nested `smelt.fn.*` call — dispatch through the handler so
+    // the call-site checker recurses with the caller's bindings visible.
+    // The handler emits any call-site diagnostics (and body-cascade
+    // diagnostics with `ExpansionFrames`). We still fall through to
+    // generic inference for the return type below.
+    if let (Some(call), Some(nested)) = (expr.as_smelt_fn_call(), nested) {
+        let nested_diags = nested(&call, ctx, text);
+        out.extend(nested_diags);
+        // Still compute a return type via the inference engine — when the
+        // call checks clean, the inferred type flows up to the parent
+        // expression (e.g. a binary-op) for further type checking.
+        return infer_expression_type(expr, ctx);
+    }
+
     // Binary expression: recurse into each operand, then check the operator's
     // type-compatibility constraint. The mismatch is anchored at the binary
     // node itself — the smallest subexpression that exhibits the error.
     if let Some(binary) = expr.as_binary() {
-        return walk_binary(expr, &binary, ctx, text, out);
+        return walk_binary(expr, &binary, ctx, text, out, nested);
     }
 
     // Bare column reference: if the identifier doesn't resolve through the
@@ -191,7 +251,7 @@ fn walk_body(
     if expr.as_subquery().is_none() && expr.as_exists().is_none() {
         for child in expr.syntax().children() {
             if let Some(child_expr) = Expr::cast(child) {
-                walk_body(&child_expr, ctx, text, out);
+                walk_body(&child_expr, ctx, text, out, nested);
             }
         }
     }
@@ -210,6 +270,7 @@ fn walk_binary(
     ctx: &TypeContext,
     text: &str,
     out: &mut Vec<Diagnostic>,
+    nested: Option<&NestedCallHandler<'_>>,
 ) -> Option<TypedColumn> {
     let before_len = out.len();
 
@@ -217,7 +278,7 @@ fn walk_binary(
     let child_exprs: Vec<Expr> = binary.node().children().filter_map(Expr::cast).collect();
     let mut operand_types = Vec::with_capacity(child_exprs.len());
     for child in &child_exprs {
-        operand_types.push(walk_body(child, ctx, text, out));
+        operand_types.push(walk_body(child, ctx, text, out, nested));
     }
 
     // If recursion already emitted a mismatch/unknown *inside* the operands,
@@ -350,7 +411,14 @@ fn has_expr_children(expr: &Expr) -> bool {
 /// (Phase 6) or full-stack (Phase 12) get a deterministic ordering.
 ///
 /// Pure: no Salsa access. Callers in `smelt-db/src/lib.rs` build the closures.
-#[allow(clippy::type_complexity)]
+///
+/// `decl_lookup` resolves the file path that declares the given
+/// [`FunctionSig`] — used to populate `FrameInfo::decl_path` so LSP
+/// clients can render each frame's related-information link against
+/// the correct file (Phase 12, §16 #16). Returns `None` on lookup-miss;
+/// the frame then carries `decl_path: None` and the LSP falls back to
+/// inline-only rendering for that frame.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn check_smelt_fn_call(
     call: &SmeltFnCall,
     ctx: &TypeContext,
@@ -359,6 +427,7 @@ pub fn check_smelt_fn_call(
     builtin_lookup: &dyn Fn(&str) -> Option<&'static Signature>,
     lub: &dyn Fn(&DataType, &DataType) -> DataType,
     body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, Expr)>,
+    decl_lookup: &dyn Fn(&FunctionSig) -> Option<PathBuf>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -536,11 +605,40 @@ pub fn check_smelt_fn_call(
     //    where they wrote the call, not inside the function they imported.
     //    The original span is preserved on the diagnostic — only the message
     //    range is rewritten — and a FrameInfo is attached.
+    //
+    //    Phase 12: the re-walk dispatches nested `smelt.fn.*` calls
+    //    recursively through `check_smelt_fn_call`, so frames stack up
+    //    across arbitrary expansion depth. Each level appends its frame
+    //    after the inner-merged stack, yielding the canonical
+    //    innermost-first → outermost-last ordering.
     let Some((body_text, body_expr)) = body_lookup(&sig) else {
         return diagnostics;
     };
 
-    let inner = check_function_body(&sig, &body_expr, &body_text);
+    let nested_handler = |nested_call: &SmeltFnCall,
+                          nested_ctx: &TypeContext,
+                          nested_text: &str|
+     -> Vec<Diagnostic> {
+        check_smelt_fn_call(
+            nested_call,
+            nested_ctx,
+            nested_text,
+            sig_lookup,
+            builtin_lookup,
+            lub,
+            body_lookup,
+            decl_lookup,
+        )
+    };
+
+    let inner = check_function_body_with_expansion(&sig, &body_expr, &body_text, &nested_handler);
+
+    // Resolve this frame's decl-site info once — reused for every
+    // cascading diagnostic. LSP clients use these fields to render a
+    // `DiagnosticRelatedInformation` link per frame (§16 #16).
+    let decl_path = decl_lookup(&sig);
+    let decl_range = Some(sig.name_range);
+    let call_site_range = Some(path_range);
 
     // Build the frames list. For each *inner* diagnostic we push:
     //   - any frames it already carried (from nested calls), unchanged
@@ -548,9 +646,10 @@ pub fn check_smelt_fn_call(
     //     the last element is the outermost (current) call — matching the
     //     renderer contract in `smelt-lsp::to_lsp_diagnostic`.
     for mut d in inner {
-        // Re-anchor the range to the call-site call-path span. Phase 6's
-        // single-level renderer shows only the outermost site; future phases
-        // can walk the frame stack to reconstruct inner spans.
+        // Re-anchor the range to the call-site call-path span so the
+        // editor squiggle lands where the user wrote the call. The
+        // original inner anchor is preserved on the corresponding frame
+        // via `call_site_range` for LSP related-info (Phase 12).
         d.range = path_range;
 
         // Merge any pre-existing ExpansionFrames with this call's frame.
@@ -568,12 +667,18 @@ pub fn check_smelt_fn_call(
                 function: sig.name.clone(),
                 param: param_name,
                 bound_type,
+                decl_path: decl_path.clone(),
+                decl_range,
+                call_site_range,
             });
         } else {
             frames.push(FrameInfo {
                 function: sig.name.clone(),
                 param: String::new(),
                 bound_type: String::new(),
+                decl_path: decl_path.clone(),
+                decl_range,
+                call_site_range,
             });
         }
         d.data = Some(DiagnosticData::ExpansionFrames(frames));
