@@ -476,7 +476,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 8 | Generics + variadics | done | deb2403 | 2026-04-23 |
 | 9 | Rewire built-in inference through the registry | done | 1567e51 | 2026-04-23 |
 | 10 | `smelt.extern` declarations | done | f8641ef | 2026-04-23 |
-| 11 | Per-declaration frontmatter + `backends:` + backend namespace | pending | — | — |
+| 11 | Per-declaration frontmatter + `backends:` + backend namespace | done | 3bedc86 | 2026-04-23 |
 | 12 | Multi-level frame rendering + CAST-enforcement flag (Step 2 complete) | pending | — | — |
 
 ### Deferred during implementation
