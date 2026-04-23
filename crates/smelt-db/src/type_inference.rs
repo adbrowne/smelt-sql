@@ -46,6 +46,16 @@ pub struct TypeContext {
     /// sees bare column names from the caller's schema, and shadow-
     /// warning detection can enumerate columns per parameter.
     tableexpr_param_schemas: HashMap<String, Vec<(String, TypedColumn)>>,
+    /// Per-call row-variable bindings produced by a successful
+    /// [`smelt_types::signatures::check_schema_requirement`] against a
+    /// named row tail (`..r`). Phase 16 records the captured extras
+    /// so later phases (17 / 37) can reference the variable from the
+    /// body and return type. In Phase 16 itself the map is write-only
+    /// from the call-site's point of view — body expressions cannot
+    /// reference `r` yet, so no lookup path consults it.
+    ///
+    /// Doc-hidden pub accessor; exposed for unit tests only.
+    row_var_env: HashMap<String, Vec<(String, smelt_types::DataType)>>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -60,6 +70,7 @@ impl PartialEq for TypeContext {
             && self.function_params == other.function_params
             && self.function_signatures == other.function_signatures
             && self.tableexpr_param_schemas == other.tableexpr_param_schemas
+            && self.row_var_env == other.row_var_env
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -77,6 +88,7 @@ impl Clone for TypeContext {
             function_params: self.function_params.clone(),
             function_signatures: self.function_signatures.clone(),
             tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
+            row_var_env: self.row_var_env.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -327,6 +339,42 @@ impl TypeContext {
         self.tableexpr_param_schemas
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    /// Record a named row-variable binding in the per-call
+    /// `row_var_env` (Phase 16).
+    ///
+    /// `name` is the variable's source name (e.g. `"r"`); `extras` is
+    /// the ordered `(column_name, data_type)` list of caller columns
+    /// captured by the row tail. Overwrites any previous binding for
+    /// `name` — matching the simple "innermost wins" rule; later
+    /// phases may introduce scope stacking if user code can actually
+    /// reference `r`.
+    ///
+    /// Doc-hidden — Phase 16 only needs this to exist so subsequent
+    /// phases can build atop it; user-visible binding behaviour lands
+    /// in Phases 17+.
+    #[doc(hidden)]
+    pub fn set_row_var_binding(
+        &mut self,
+        name: &str,
+        extras: Vec<(String, smelt_types::DataType)>,
+    ) {
+        self.row_var_env.insert(name.to_string(), extras);
+    }
+
+    /// Unit-test-only accessor for the named row-variable bindings
+    /// recorded by [`TypeContext::set_row_var_binding`] (Phase 16).
+    ///
+    /// Returns the captured `(column_name, data_type)` pairs for the
+    /// named row variable, or `None` when no binding exists. The
+    /// [`doc(hidden)`] marker keeps this out of the public surface
+    /// while still permitting cross-crate tests to observe the map
+    /// — matches the project's existing pattern for internal hooks
+    /// exposed for test access (e.g. property-test infrastructure).
+    #[doc(hidden)]
+    pub fn row_var_binding(&self, name: &str) -> Option<&[(String, smelt_types::DataType)]> {
+        self.row_var_env.get(name).map(|v| v.as_slice())
     }
 
     /// Register a resolved [`FunctionSig`] so `smelt.fn.<name>` call-site
@@ -892,7 +940,7 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
         // DataType for a whole row set. Downstream Phase 17 plumbs the
         // inferred output schema; for now the call-site sees an opaque
         // Unknown.
-        Some(Ok(SmeltType::TableExpr)) => DataType::Unknown,
+        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };

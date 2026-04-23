@@ -1191,7 +1191,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 13 | Parser: TableExpr / WindowExpr / SelectItems<K, ctx> in type refs (Step 3 opens) | done | | 2026-04-23 |
 | 14 | Types: WindowExpr sort and SelectItems<K> kind ceiling | done | 80553d1 | 2026-04-23 |
 | 15 | TableExpr parameters: bare-column row polymorphism + shadow warnings | done | 85a9441 | 2026-04-24 |
-| 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | pending | | |
+| 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | done | | 2026-04-24 |
 | 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | pending | | |
 | 18 | LSP polish + examples (Step 3 complete) | pending | | |
 | 19 | Parser + types: context-binding syntax (Step 4 opens) | pending | | |
@@ -1217,6 +1217,9 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 
 ### Deferred during implementation
 
+- **Phase 16 — `RowTail::None` accepts extras (open-record semantics)** (2026-04-24). The Phase 16 plan's TDD test 1 (`row_requirement_satisfied_by_superset_schema`) asserts zero diagnostics when a caller supplies extra columns to a requirement with no tail written — `TableExpr<{revenue: Numeric, cost: Numeric}>`. Resolved toward research §8 "open-record" semantics: extras are always accepted; only `MissingColumn` and `TypeMismatch` are structural failures. `RowTail::Named` still captures extras into `row_var_env` (the observable difference). No `UnexpectedColumns` diagnostic exists in Phase 16; a future strict-schema switch can add it.
+- **Phase 16 — `SchemaRequirement` built from CST, not re-parsed from string** (2026-04-24). Phase 13 already emits `ROW_REQUIREMENT` CST nodes; a CST-aware helper `tableexpr_type_from_cst` overrides `parse_smelt_type`'s string-path `UnsupportedSort` for annotated `TableExpr<{…}>`. Keeps the string-level parser unchanged as a best-effort fallback while the structured form is always accurate via CST.
+- **Phase 16 — `row_var_env` binding recorded but opaque to user code** (2026-04-24). Named row tails (`..r`) write into the per-call `row_var_env` at the call site. `r` is not yet referenceable from body expressions or return types — that is Phase 17 (return-schema inference) and Phase 37 (row variables in return types). Unit tests exercise the binding via `#[doc(hidden)] pub` accessors.
 - **Phase 15 — `add_margin.sql` temporarily downgraded to bare `TableExpr`** (2026-04-24). Phase 13's CST-only fixture used `TableExpr<{revenue: Numeric, cost: Numeric}>`, but Phase 15 scope is bare `TableExpr` (row requirements are Phase 16). The fixture was simplified to bare `TableExpr` so it type-checks end-to-end under Phase 15's semantics; Phase 16 re-tightens per its own "Example fixtures" instructions.
 - **Phase 15 — SELECT-shaped function bodies** (2026-04-24). Phase 5's `walk_body` only walks `Expression` bodies; `TableExpr`-returning functions parse as `DEFINE_BODY → SELECT_STMT`. Added `BodyShape { Expression, Select }` discriminator plus `check_function_select_body` reusing `walk_select_columns_with_visitor`. No new abstractions — existing machinery is now branched on body shape.
 - **Phase 15 — `parse_table_ref` now recognises `smelt.fn.<path>(...)` in FROM position** (2026-04-24). Required so Phase 15's end-to-end fixture can call `TableExpr`-returning functions. Parser-only change mirroring the existing `smelt.ref(...)` / `smelt.source(...)` triggers in FROM. No type-checker behaviour change.

@@ -303,6 +303,15 @@ pub enum DiagnosticCode {
     /// but the user probably meant the column. Anchored at the Expr<T>
     /// parameter's declaration range (Phase 15 of smelt-functions).
     ParameterShadowsColumn,
+    /// Emitted at call-site expansion when a `TableExpr<{…}>` parameter
+    /// has a row requirement the caller's schema cannot satisfy — a
+    /// required column is missing, has an incompatible type, or there
+    /// are extra columns when the requirement declared no tail. The
+    /// diagnostic is anchored at the argument expression (not inside
+    /// the body), and the body check is short-circuited so no cascade
+    /// diagnostics surface from inside the callee (Phase 16 of
+    /// smelt-functions).
+    RowRequirementUnsatisfied,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -849,7 +858,7 @@ pub fn function_body_diagnostics_for_file(
             {
                 true
             }
-            Some(Ok(SmeltType::TableExpr)) => true,
+            Some(Ok(SmeltType::TableExpr(_))) => true,
             _ => false,
         })
     };

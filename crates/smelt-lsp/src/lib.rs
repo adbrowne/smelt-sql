@@ -975,6 +975,7 @@ impl Backend {
                 DbCode::BackendsWideningNotAllowed => "backends-widening-not-allowed",
                 DbCode::WindowInScalarContext => "window-in-scalar-context",
                 DbCode::ParameterShadowsColumn => "parameter-shadows-column",
+                DbCode::RowRequirementUnsatisfied => "row-requirement-unsatisfied",
             };
             NumberOrString::String(code_str.to_string())
         });

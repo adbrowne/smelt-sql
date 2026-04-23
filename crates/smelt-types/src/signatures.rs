@@ -150,11 +150,246 @@ pub enum SmeltType {
     /// [`DataType`] or one of the abstract constraints in
     /// [`TypeConstraint`].
     Expr(TypeConstraint),
-    /// Bare `TableExpr` — a row-polymorphic table parameter whose
-    /// schema is bound at call-site expansion from whatever the caller
-    /// supplies (Phase 15, §16 #7). Phase 16 adds the
-    /// `TableExpr<{col: Type, ..r}>` row-requirement variant.
-    TableExpr,
+    /// `TableExpr` / `TableExpr<{…}>` — a row-polymorphic table parameter.
+    ///
+    /// - `TableExpr(None)` — bare `TableExpr` (Phase 15, §16 #7). The
+    ///   caller's schema is accepted in full at call-site expansion,
+    ///   no shape check runs.
+    /// - `TableExpr(Some(req))` — `TableExpr<{col: Type, ..r}>`
+    ///   (Phase 16). The caller's schema is verified against `req`
+    ///   *before* the body is re-walked: missing columns and
+    ///   constraint violations surface as
+    ///   [`DiagnosticCode::RowRequirementUnsatisfied`] call-site
+    ///   errors, and if `req.tail` is [`RowTail::Named`] the extras
+    ///   are captured into the call's `row_var_env`.
+    TableExpr(Option<SchemaRequirement>),
+}
+
+/// Per-column requirement inside a [`SchemaRequirement`] (Phase 16).
+///
+/// Introduced by `TableExpr<{col: Type, ..}>` type annotations. Each
+/// field can be:
+///   - [`DataTypeReq::Concrete`] — a single concrete [`DataType`]
+///     (e.g. `order_id: BigInt`). The caller's column must match
+///     exactly via [`types_compatible_for_row_requirement`].
+///   - [`DataTypeReq::Constraint`] — a constraint set from
+///     [`TypeConstraint`] (e.g. `revenue: Numeric`). The caller's
+///     column's data type must satisfy the constraint via
+///     [`TypeConstraint::satisfies`].
+///
+/// The enum mirrors [`TypeConstraint`] / [`DataType`] so existing
+/// constraint-satisfaction code applies unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataTypeReq {
+    /// The caller's column must be (exactly) this [`DataType`].
+    Concrete(DataType),
+    /// The caller's column's data type must satisfy this
+    /// [`TypeConstraint`] (e.g. `Numeric`, `Ordered`).
+    Constraint(TypeConstraint),
+}
+
+impl DataTypeReq {
+    /// Is the caller's [`DataType`] compatible with this requirement?
+    ///
+    /// - `Concrete(expected)`: matched against `actual` via the shared
+    ///   row-requirement compatibility helper (equal, or a normalized
+    ///   `Text ↔ Varchar` pair).
+    /// - `Constraint(c)`: delegated to [`TypeConstraint::satisfies`].
+    ///
+    /// `Unknown` / `Null` actuals are always accepted — row-requirement
+    /// checking is a best-effort pre-expansion guard; a truly unknown
+    /// column type shouldn't generate a call-site error we can't act
+    /// upon.
+    pub fn is_satisfied_by(&self, actual: &DataType) -> bool {
+        if matches!(actual, DataType::Unknown | DataType::Null) {
+            return true;
+        }
+        match self {
+            DataTypeReq::Concrete(expected) => {
+                types_compatible_for_row_requirement(expected, actual)
+            }
+            DataTypeReq::Constraint(c) => c.satisfies(actual),
+        }
+    }
+
+    /// Human-readable rendering for diagnostic messages. Mirrors the
+    /// user-facing syntax: `Integer`, `Numeric`, `Any`, …
+    pub fn render(&self) -> String {
+        match self {
+            DataTypeReq::Concrete(dt) => dt.to_string(),
+            DataTypeReq::Constraint(TypeConstraint::Concrete(dt)) => dt.to_string(),
+            DataTypeReq::Constraint(TypeConstraint::Numeric) => "Numeric".to_string(),
+            DataTypeReq::Constraint(TypeConstraint::Ordered) => "Ordered".to_string(),
+            DataTypeReq::Constraint(TypeConstraint::Any) => "Any".to_string(),
+        }
+    }
+}
+
+/// Structural check used by [`DataTypeReq::is_satisfied_by`] for the
+/// `Concrete` branch. Callers should not use this directly; it is
+/// published so row-requirement unit tests can mimic the canonical
+/// compatibility rule.
+///
+/// Accepts:
+///   - Exact equality of `DataType` (after normalization of the
+///     `Text ↔ Varchar` family).
+pub fn types_compatible_for_row_requirement(expected: &DataType, actual: &DataType) -> bool {
+    if expected == actual {
+        return true;
+    }
+    expected.normalize() == actual.normalize()
+}
+
+/// Trailing row-polymorphism marker on a [`SchemaRequirement`].
+///
+/// Introduced by the grammar `TableExpr<{col: Type, ..r}>` or
+/// `TableExpr<{col: Type, ..}>`:
+///   - [`RowTail::None`] — no trailing marker; the caller's schema
+///     must exactly match `required` (no extras allowed).
+///   - [`RowTail::Anon`] — `..`; extras are allowed but not observable.
+///   - [`RowTail::Named(name)`] — `..<name>`; extras are bound to the
+///     named row variable on the per-call `row_var_env`. In Phase 16
+///     the binding exists but is not yet user-referenceable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowTail {
+    /// No tail marker — the schema must match exactly.
+    None,
+    /// `..` — extras accepted, not bound.
+    Anon,
+    /// `..<name>` — extras accepted and bound as a row variable.
+    Named(String),
+}
+
+/// Structured row requirement on a `TableExpr<{…}>` parameter
+/// (Phase 16).
+///
+/// `required` is the ordered list of `(column_name, requirement)`
+/// pairs declared in the signature. `tail` is the trailing marker
+/// decision: no tail, anonymous tail, or a named row variable.
+///
+/// The check at the call site is performed by
+/// [`check_schema_requirement`] — a pure function that takes the
+/// requirement, the caller's schema, and returns either a
+/// [`RowVarBinding`] (the extras captured by a named tail, empty for
+/// `None` / `Anon`) or a [`SchemaMismatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaRequirement {
+    /// The declared `(column_name, requirement)` pairs in source order.
+    pub required: Vec<(String, DataTypeReq)>,
+    /// Trailing row-variable behaviour.
+    pub tail: RowTail,
+}
+
+/// Per-call binding produced by a successful [`check_schema_requirement`]
+/// against a [`RowTail::Named`] tail (Phase 16).
+///
+/// `name` is the row variable's source name (e.g. `"r"`). `extras` is
+/// the ordered list of caller columns not matched by any `required`
+/// entry. For [`RowTail::None`] and [`RowTail::Anon`] the binding is
+/// `None`; for [`RowTail::Named`] with no extras `extras` is the
+/// empty vector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowVarBinding {
+    /// Source name of the row variable from the signature.
+    pub name: String,
+    /// Caller columns not covered by `required`, in caller-supplied
+    /// order. Each element is `(column_name, column_data_type)`.
+    pub extras: Vec<(String, DataType)>,
+}
+
+/// Structured failure describing why a [`check_schema_requirement`]
+/// check failed (Phase 16).
+///
+/// The call-site checker converts this into a user-facing
+/// [`DiagnosticCode::RowRequirementUnsatisfied`] diagnostic.
+///
+/// In Phase 16 we accept extras by default — i.e. even when the
+/// requirement declared no explicit tail we behave as open-record
+/// row polymorphism dictates (research §8). Future phases may opt in
+/// to strict-schema enforcement; for now the row-requirement check
+/// reports only `MissingColumn` and `TypeMismatch` failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaMismatch {
+    /// The caller's schema does not contain a column declared in the
+    /// requirement. `column` is the declared name; `required` is the
+    /// declared constraint rendered for diagnostics.
+    MissingColumn {
+        column: String,
+        required: DataTypeReq,
+    },
+    /// The caller's column has a type that does not satisfy the
+    /// declared requirement. `actual` is the caller's reported
+    /// [`DataType`] rendering.
+    TypeMismatch {
+        column: String,
+        required: DataTypeReq,
+        actual: String,
+    },
+}
+
+/// Pure check: does the caller's schema satisfy the
+/// [`SchemaRequirement`] declared on a `TableExpr<{…}>` parameter?
+///
+/// On success, returns the optional [`RowVarBinding`] that the tail's
+/// named row variable — if any — should map to on the per-call
+/// `row_var_env`. For [`RowTail::None`] / [`RowTail::Anon`] the
+/// binding is `None`.
+///
+/// On failure, returns the first structural problem detected. We
+/// report the first problem only (not a batch) because the
+/// diagnostics layer generally benefits from one concrete, actionable
+/// message per check; later phases can extend this to batched
+/// reporting if needed.
+///
+/// Pure — no Salsa, no I/O.
+pub fn check_schema_requirement(
+    req: &SchemaRequirement,
+    arg_schema: &[(String, DataType)],
+) -> Result<Option<RowVarBinding>, SchemaMismatch> {
+    // 1. Every required column must be present and type-compatible.
+    //    We report the first structural problem in declaration order.
+    for (col_name, col_req) in &req.required {
+        let Some((_, actual_dt)) = arg_schema.iter().find(|(n, _)| n == col_name) else {
+            return Err(SchemaMismatch::MissingColumn {
+                column: col_name.clone(),
+                required: col_req.clone(),
+            });
+        };
+        if !col_req.is_satisfied_by(actual_dt) {
+            return Err(SchemaMismatch::TypeMismatch {
+                column: col_name.clone(),
+                required: col_req.clone(),
+                actual: actual_dt.to_string(),
+            });
+        }
+    }
+
+    // 2. Extras handling. Compute the set of required column names
+    //    once, then collect every caller column not in that set —
+    //    this is the row-variable's extras list (or the
+    //    "unexpected" list when `RowTail::None`).
+    let required_names: std::collections::HashSet<&str> =
+        req.required.iter().map(|(n, _)| n.as_str()).collect();
+    let extras: Vec<(String, DataType)> = arg_schema
+        .iter()
+        .filter(|(n, _)| !required_names.contains(n.as_str()))
+        .cloned()
+        .collect();
+
+    match &req.tail {
+        // Phase 16: extras are accepted regardless of tail — the
+        // open-record semantics in research §8 treat missing /
+        // wrong-type columns as the only structural failures.
+        // `RowTail::None` and `RowTail::Anon` simply discard extras;
+        // `RowTail::Named` captures them into the per-call
+        // `row_var_env` for future reference by the body / return
+        // type (Phases 17+ / 37).
+        RowTail::None | RowTail::Anon => Ok(None),
+        RowTail::Named(name) => Ok(Some(RowVarBinding {
+            name: name.clone(),
+            extras,
+        })),
+    }
 }
 
 /// Error produced when a type-reference annotation can't be resolved into a
@@ -228,10 +463,15 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
     }
 
     // Bare `TableExpr` (no `<...>`) is a valid row-polymorphic table
-    // parameter (Phase 15). `TableExpr<{...}>` row requirements still
-    // go through the UnsupportedSort branch below (Phase 16).
+    // parameter (Phase 15). `TableExpr<{...}>` row requirements are
+    // parsed by the signature extractor directly off the CST
+    // (`extract_param_spec`) — the string-level parser here has no
+    // structured grammar for row requirements, so it returns
+    // `UnsupportedSort`, and the extractor overrides that with a
+    // structured `SmeltType::TableExpr(Some(req))` when the CST
+    // carries a `ROW_REQUIREMENT` (Phase 16).
     if trimmed == "TableExpr" {
-        return Ok(SmeltType::TableExpr);
+        return Ok(SmeltType::TableExpr(None));
     }
 
     // Split on the first '<'. We intentionally require brackets — bare
@@ -688,10 +928,26 @@ fn type_ref_range(type_ref: &TypeRef, text: &str) -> Range {
 ///
 /// Pure: does not consult Salsa. Takes only the AST node and the source text
 /// (for the range conversion).
+///
+/// Phase 16: when the parameter's `TYPE_REF` is a `TableExpr` head
+/// with a `ROW_REQUIREMENT` child, we bypass the string-level
+/// `parse_smelt_type` (which has no structured row-requirement
+/// grammar) and build a [`SmeltType::TableExpr(Some(req))`] directly
+/// from the CST via [`row_requirement_from_type_ref`].
 fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
     let type_ref_node = param.type_ref();
     let type_ref_text = type_ref_node.as_ref().map(|t| t.text());
-    let type_ref = type_ref_text.as_deref().map(parse_smelt_type);
+    let mut type_ref: Option<Result<SmeltType, SmeltTypeParseError>> =
+        type_ref_text.as_deref().map(parse_smelt_type);
+
+    // Phase 16 override: replace the string-parser's best guess with
+    // a CST-derived structured row-requirement when applicable.
+    if let Some(tr) = &type_ref_node {
+        if let Some(structured) = tableexpr_type_from_cst(tr) {
+            type_ref = Some(Ok(structured));
+        }
+    }
+
     let type_ref_range = type_ref_node.as_ref().map(|t| type_ref_range(t, text));
     let name_range = param.name_range().map(|r| Range {
         start: offset_to_position(text, usize::from(r.start())),
@@ -705,6 +961,64 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
         type_ref_range,
         has_default: param.default_value().is_some(),
     }
+}
+
+/// Phase 16 CST-aware extractor: if `type_ref` is a `TableExpr` head,
+/// build a [`SmeltType::TableExpr`] that carries any structured
+/// [`SchemaRequirement`] declared between its angle brackets.
+///
+/// Returns `None` when the head isn't `TableExpr` (so the string-level
+/// `parse_smelt_type` wins), and when the head is `TableExpr` but
+/// contains no `ROW_REQUIREMENT` (bare case — the string parser
+/// already produces the same `SmeltType::TableExpr(None)`).
+///
+/// Pure — walks only the CST node.
+fn tableexpr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
+    use smelt_parser::ast::{RowTail as AstRowTail, TypeRefHead};
+    if tr.kind() != TypeRefHead::TableExpr {
+        return None;
+    }
+    let Some(req_node) = tr.row_requirement() else {
+        // Bare `TableExpr` — let the string-parser's
+        // `SmeltType::TableExpr(None)` stand.
+        return None;
+    };
+
+    // Build the ordered `(name, DataTypeReq)` list from the CST's
+    // ROW_FIELD children.
+    let mut required: Vec<(String, DataTypeReq)> = Vec::new();
+    for field in req_node.fields() {
+        let Some(name) = field.name() else { continue };
+        // Inner type is a flat type reference (e.g. `Numeric`,
+        // `Integer`, `Text`) — reuse `parse_inner_constraint` so
+        // constraint keywords and concrete types go through the same
+        // classifier as `Expr<T>`'s inner.
+        let inner_text = field.type_ref().map(|t| t.text()).unwrap_or_default();
+        let req = match parse_inner_constraint(inner_text.trim()) {
+            Some(TypeConstraint::Concrete(dt)) => DataTypeReq::Concrete(dt),
+            Some(c) => DataTypeReq::Constraint(c),
+            None => {
+                // Unknown inner type — fall back to `Any` so
+                // downstream code doesn't panic, and the failure
+                // surfaces as a match against `Any` (always accepts).
+                // A later phase can lift this into a dedicated
+                // `RowRequirementUnknownInner` diagnostic.
+                DataTypeReq::Constraint(TypeConstraint::Any)
+            }
+        };
+        required.push((name, req));
+    }
+
+    let tail = match req_node.tail() {
+        AstRowTail::None => RowTail::None,
+        AstRowTail::Anon => RowTail::Anon,
+        AstRowTail::Named(n) => RowTail::Named(n),
+    };
+
+    Some(SmeltType::TableExpr(Some(SchemaRequirement {
+        required,
+        tail,
+    })))
 }
 
 fn compute_tier(params: &[ParamSpec], return_type_text: Option<&str>) -> Tier {
@@ -760,7 +1074,13 @@ pub fn extract_signature_with_raw(
 
     let return_type_node = define.return_type();
     let return_type_text = return_type_node.as_ref().map(|t| t.text());
-    let return_type = return_type_text.as_deref().map(parse_smelt_type);
+    let mut return_type: Option<Result<SmeltType, SmeltTypeParseError>> =
+        return_type_text.as_deref().map(parse_smelt_type);
+    if let Some(tr) = &return_type_node {
+        if let Some(structured) = tableexpr_type_from_cst(tr) {
+            return_type = Some(Ok(structured));
+        }
+    }
     let return_type_range = return_type_node
         .as_ref()
         .map(|t| type_ref_range(t, stripped_text));
@@ -833,7 +1153,13 @@ pub fn extract_extern_signature_with_raw(
 
     let return_type_node = ext.return_type();
     let return_type_text = return_type_node.as_ref().map(|t| t.text());
-    let return_type = return_type_text.as_deref().map(parse_smelt_type);
+    let mut return_type: Option<Result<SmeltType, SmeltTypeParseError>> =
+        return_type_text.as_deref().map(parse_smelt_type);
+    if let Some(tr) = &return_type_node {
+        if let Some(structured) = tableexpr_type_from_cst(tr) {
+            return_type = Some(Ok(structured));
+        }
+    }
     let return_type_range = return_type_node
         .as_ref()
         .map(|t| type_ref_range(t, stripped_text));
@@ -2691,5 +3017,154 @@ mod tests {
                 "{name} should default to ExprKind::Scalar"
             );
         }
+    }
+
+    // =================================================================
+    // Phase 16 — SchemaRequirement / check_schema_requirement tests
+    // =================================================================
+
+    fn req_numeric_rev_cost(tail: RowTail) -> SchemaRequirement {
+        SchemaRequirement {
+            required: vec![
+                (
+                    "revenue".to_string(),
+                    DataTypeReq::Constraint(TypeConstraint::Numeric),
+                ),
+                (
+                    "cost".to_string(),
+                    DataTypeReq::Constraint(TypeConstraint::Numeric),
+                ),
+            ],
+            tail,
+        }
+    }
+
+    #[test]
+    fn schema_requirement_happy_path_matches_required_columns_exactly() {
+        let req = req_numeric_rev_cost(RowTail::None);
+        let schema = vec![
+            ("revenue".to_string(), DataType::Double),
+            (
+                "cost".to_string(),
+                DataType::Decimal {
+                    precision: 18,
+                    scale: 2,
+                },
+            ),
+        ];
+        let out = check_schema_requirement(&req, &schema).expect("match");
+        // No tail → no binding.
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn schema_requirement_missing_column_returns_structured_error() {
+        // `cost` is absent from the caller's schema.
+        let req = req_numeric_rev_cost(RowTail::None);
+        let schema = vec![("revenue".to_string(), DataType::Double)];
+        let err = check_schema_requirement(&req, &schema).unwrap_err();
+        match err {
+            SchemaMismatch::MissingColumn { column, required } => {
+                assert_eq!(column, "cost");
+                assert!(matches!(
+                    required,
+                    DataTypeReq::Constraint(TypeConstraint::Numeric)
+                ));
+            }
+            other => panic!("expected MissingColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_requirement_type_mismatch_returns_structured_error() {
+        // `revenue` is Text — not numeric.
+        let req = req_numeric_rev_cost(RowTail::None);
+        let schema = vec![
+            ("revenue".to_string(), DataType::Text),
+            ("cost".to_string(), DataType::Double),
+        ];
+        let err = check_schema_requirement(&req, &schema).unwrap_err();
+        match err {
+            SchemaMismatch::TypeMismatch {
+                column,
+                required,
+                actual,
+            } => {
+                assert_eq!(column, "revenue");
+                assert!(matches!(
+                    required,
+                    DataTypeReq::Constraint(TypeConstraint::Numeric)
+                ));
+                assert!(actual.contains("TEXT") || actual.contains("Text"));
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_requirement_tail_none_accepts_extras_without_binding() {
+        // Phase 16 accepts extras by default — `RowTail::None` still
+        // succeeds on a superset schema; the open-record semantics
+        // from research §8 mean only `MissingColumn` / `TypeMismatch`
+        // produce structural failures. No binding is recorded because
+        // the tail is not named.
+        let req = req_numeric_rev_cost(RowTail::None);
+        let schema = vec![
+            ("revenue".to_string(), DataType::Double),
+            ("cost".to_string(), DataType::Double),
+            ("extra".to_string(), DataType::Text),
+        ];
+        let out = check_schema_requirement(&req, &schema).expect("extras accepted");
+        assert!(
+            out.is_none(),
+            "tail `None` does not bind extras; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn schema_requirement_tail_anon_accepts_extras_without_binding() {
+        let req = req_numeric_rev_cost(RowTail::Anon);
+        let schema = vec![
+            ("revenue".to_string(), DataType::Double),
+            ("cost".to_string(), DataType::Double),
+            ("extra".to_string(), DataType::Text),
+        ];
+        let out = check_schema_requirement(&req, &schema).expect("accept");
+        assert!(out.is_none(), "anon tail does not bind; got {out:?}");
+    }
+
+    #[test]
+    fn schema_requirement_named_tail_binds_extras_in_caller_order() {
+        let req = req_numeric_rev_cost(RowTail::Named("r".to_string()));
+        let schema = vec![
+            ("revenue".to_string(), DataType::Double),
+            ("cost".to_string(), DataType::Double),
+            ("notes".to_string(), DataType::Text),
+            ("extra".to_string(), DataType::BigInt),
+        ];
+        let binding = check_schema_requirement(&req, &schema)
+            .expect("match")
+            .expect("named tail produces binding");
+        assert_eq!(binding.name, "r");
+        assert_eq!(
+            binding.extras,
+            vec![
+                ("notes".to_string(), DataType::Text),
+                ("extra".to_string(), DataType::BigInt),
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_requirement_concrete_match_accepts_text_varchar() {
+        // `notes: Text` required, caller supplies canonical `Varchar`
+        // — same family, compatible under our row-requirement rule
+        // (Text normalizes to Varchar { max_length: None }).
+        let req = SchemaRequirement {
+            required: vec![("notes".to_string(), DataTypeReq::Concrete(DataType::Text))],
+            tail: RowTail::Anon,
+        };
+        let schema = vec![("notes".to_string(), DataType::Varchar { max_length: None })];
+        assert!(check_schema_requirement(&req, &schema).is_ok());
     }
 }

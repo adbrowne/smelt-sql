@@ -168,6 +168,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::ParameterShadowsColumn,
         message_substring: "user_id",
     },
+    // Phase 16 — call a `TableExpr<{revenue: Numeric, cost: Numeric}>`
+    // function against a caller whose schema lacks `cost`. The row-
+    // requirement check fires at the call site before body expansion.
+    Case {
+        fixture: "fn_row_requirement_missing.sql",
+        companion: Some("fn_row_requirement_missing_other.sql"),
+        code: DiagnosticCode::RowRequirementUnsatisfied,
+        message_substring: "cost",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

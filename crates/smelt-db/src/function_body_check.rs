@@ -18,8 +18,8 @@ use rowan::TextRange;
 use smelt_parser::ast::{BinaryExpr, Expr, SelectStmt, SmeltFnCall};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
-    unify_call, FrameInfo, FunctionSig, ParamSpec, Signature, SmeltType, TypeConstraint,
-    UnificationError,
+    check_schema_requirement, unify_call, FrameInfo, FunctionSig, ParamSpec, SchemaMismatch,
+    SchemaRequirement, Signature, SmeltType, TypeConstraint, UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
@@ -184,7 +184,7 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `TableExpr` (Phase 15) params are bound as FROM-scope entries,
         // not as `function_params`. When reached here (e.g. by the
         // unified Tier-1 body seeder) we fall back to `Unknown`.
-        Some(Ok(SmeltType::TableExpr)) => DataType::Unknown,
+        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
@@ -197,7 +197,65 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
 /// FROM-scope rather than binding a single typed column under the
 /// parameter's name.
 pub(crate) fn is_tableexpr_param(p: &ParamSpec) -> bool {
-    matches!(&p.type_ref, Some(Ok(SmeltType::TableExpr)))
+    matches!(&p.type_ref, Some(Ok(SmeltType::TableExpr(_))))
+}
+
+/// Return the [`SchemaRequirement`] declared on a `TableExpr<{…}>`
+/// parameter, if any (Phase 16).
+///
+/// Returns `None` for bare `TableExpr` parameters and for non-
+/// `TableExpr` parameters. Callers that already know the parameter is
+/// a `TableExpr` via [`is_tableexpr_param`] can treat a returned
+/// `None` as "no row requirement to check".
+pub(crate) fn tableexpr_schema_requirement(p: &ParamSpec) -> Option<&SchemaRequirement> {
+    match &p.type_ref {
+        Some(Ok(SmeltType::TableExpr(req))) => req.as_ref(),
+        _ => None,
+    }
+}
+
+/// Build a [`Diagnostic`] describing a row-requirement failure
+/// (Phase 16).
+///
+/// Anchored at the argument expression's span. Message shape mirrors
+/// the other call-site diagnostics (`ArgTypeMismatch`,
+/// `MissingArgument`) so users see consistent wording. The structured
+/// [`SchemaMismatch`] variant drives the message — missing column,
+/// type mismatch, or unexpected extras.
+fn row_requirement_diagnostic(
+    mismatch: &SchemaMismatch,
+    fn_name: &str,
+    param_name: &str,
+    arg_range: Range,
+) -> Diagnostic {
+    let message = match mismatch {
+        SchemaMismatch::MissingColumn { column, required } => format!(
+            "Argument for parameter `{}` of `smelt.fn.{}` is missing required column `{}: {}`",
+            param_name,
+            fn_name,
+            column,
+            required.render()
+        ),
+        SchemaMismatch::TypeMismatch {
+            column,
+            required,
+            actual,
+        } => format!(
+            "Column `{}` in argument for parameter `{}` of `smelt.fn.{}` has type `{}`, expected `{}`",
+            column,
+            param_name,
+            fn_name,
+            actual,
+            required.render()
+        ),
+    };
+    Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        message,
+        range: arg_range,
+        code: Some(DiagnosticCode::RowRequirementUnsatisfied),
+        data: None,
+    }
 }
 
 /// Convert a Rowan [`TextRange`] to a line/column [`Range`] against `text`.
@@ -548,15 +606,57 @@ pub fn check_smelt_fn_call(
             continue;
         }
 
-        // Phase 15: `TableExpr` parameters contribute the caller-supplied
-        // schema as a FROM-scope entry, not as a scalar `function_param`.
-        // We resolve the arg via `tableexpr_schema_lookup` and seed the
-        // body ctx; shape/row-requirement checking is Phase 16.
+        // Phase 15/16: `TableExpr` parameters contribute the
+        // caller-supplied schema as a FROM-scope entry. For
+        // `TableExpr<{…}>` (Phase 16) we first run the structured
+        // row-requirement check; on failure we emit
+        // `RowRequirementUnsatisfied` at the argument span, skip
+        // seeding the parameter's FROM-scope, and *short-circuit the
+        // body check below* (cleared by the presence of at least one
+        // error-severity diagnostic on `diagnostics`). On success we
+        // seed the body ctx and record any named row-variable
+        // binding into the per-call `row_var_env`.
         if is_tableexpr_param(param) {
-            if let Some((arg_expr, _arg_range)) = bindings.get(&param.name) {
+            if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
                 let cols = tableexpr_schema_lookup(arg_expr, ctx).unwrap_or_default();
-                body_ctx.add_tableexpr_param(&param.name, &cols);
-                frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
+
+                if let Some(req) = tableexpr_schema_requirement(param) {
+                    // Convert the columns to the (name, DataType)
+                    // shape expected by the pure checker.
+                    let arg_schema: Vec<(String, DataType)> = cols
+                        .iter()
+                        .map(|(n, tc)| (n.clone(), tc.data_type.clone()))
+                        .collect();
+                    match check_schema_requirement(req, &arg_schema) {
+                        Ok(binding) => {
+                            // Success: bind the FROM-scope and record
+                            // any named row-variable binding.
+                            body_ctx.add_tableexpr_param(&param.name, &cols);
+                            if let Some(b) = binding {
+                                body_ctx.set_row_var_binding(&b.name, b.extras);
+                            }
+                            frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
+                        }
+                        Err(mismatch) => {
+                            // Failure: emit a RowRequirementUnsatisfied
+                            // diagnostic at the argument span. The
+                            // non-empty `diagnostics` then short-
+                            // circuits the body re-walk below.
+                            diagnostics.push(row_requirement_diagnostic(
+                                &mismatch,
+                                &sig.name,
+                                &param.name,
+                                to_range(*arg_range, text),
+                            ));
+                            frame_bindings
+                                .push((param.name.clone(), "<row-req-failed>".to_string()));
+                        }
+                    }
+                } else {
+                    // Bare `TableExpr` — no row requirement to run.
+                    body_ctx.add_tableexpr_param(&param.name, &cols);
+                    frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
+                }
             } else if !param.has_default {
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Error,

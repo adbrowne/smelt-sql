@@ -22,6 +22,11 @@
 //!      as `Expr<Text>`.
 //!   5. `qualified_access_escapes_shadow` — `source.user_id` still
 //!      resolves to the column despite the shadow warning.
+//!
+//! Phase 16 extends this file with row-requirement annotation tests:
+//! `TableExpr<{col: Type, ..r}>` is verified at the call site *before*
+//! body expansion. See the `row_requirement_*` tests at the bottom of
+//! this file.
 
 use std::path::PathBuf;
 
@@ -325,5 +330,323 @@ fn qualified_access_escapes_shadow() {
         shadow.len(),
         1,
         "shadow warning is structural — must still fire when body uses qualified access, got {diags:#?}"
+    );
+}
+
+// =====================================================================
+// Phase 16 — Row-requirement annotations: TableExpr<{…}> pre-expansion
+// =====================================================================
+
+/// A row-requirement-annotated `add_margin` used by several Phase-16
+/// tests. Declares `source: TableExpr<{revenue: Numeric, cost: Numeric}>`.
+const ADD_MARGIN_REQ_SRC: &str =
+    "smelt.define add_margin(source: TableExpr<{revenue: Numeric, cost: Numeric}>) \
+     -> TableExpr AS (SELECT source.*, revenue - cost AS margin FROM source)\n";
+
+#[test]
+fn row_requirement_satisfied_by_superset_schema() {
+    // Phase 16 TDD test 1: caller supplies `{order_id, revenue, cost,
+    // extra_col}` — a strict superset of `{revenue: Numeric, cost:
+    // Numeric}`. Zero diagnostics; call-site row-requirement check
+    // passes and the body check runs normally.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("add_margin.sql");
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("margin_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.add_margin(smelt.ref('orders')) AS m\n";
+
+    let orders_sql = orders_model_sql(&[
+        ("order_id", "BIGINT"),
+        ("revenue", "DECIMAL(18, 2)"),
+        ("cost", "DECIMAL(18, 2)"),
+        ("extra_col", "TEXT"),
+    ]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, ADD_MARGIN_REQ_SRC),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let bad: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::ArgTypeMismatch)
+                    | Some(DiagnosticCode::MissingArgument)
+                    | Some(DiagnosticCode::UnknownSmeltFn)
+                    | Some(DiagnosticCode::FunctionBodyTypeMismatch)
+                    | Some(DiagnosticCode::UnknownIdentifier)
+                    | Some(DiagnosticCode::RowRequirementUnsatisfied)
+                    | Some(DiagnosticCode::InvalidFunctionTypeRef)
+            )
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "superset-schema caller should satisfy row requirement; got {bad:#?}"
+    );
+}
+
+#[test]
+fn row_requirement_missing_column_errors_at_call_site() {
+    // Phase 16 TDD test 2: caller supplies `{order_id, revenue}` only
+    // — missing `cost`. A `RowRequirementUnsatisfied` diagnostic must
+    // fire naming `cost`. The body must NOT be re-checked, so no
+    // `UnknownIdentifier` for `revenue - cost` in the body. Frame
+    // stack rooted at call site.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("add_margin.sql");
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("margin_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.add_margin(smelt.ref('orders')) AS m\n";
+
+    // Missing `cost` — only revenue present.
+    let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("revenue", "DECIMAL(18, 2)")]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, ADD_MARGIN_REQ_SRC),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+
+    // 1. Exactly one RowRequirementUnsatisfied mentioning `cost`.
+    let req_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::RowRequirementUnsatisfied) && d.message.contains("cost")
+        })
+        .collect();
+    assert!(
+        !req_diags.is_empty(),
+        "expected RowRequirementUnsatisfied mentioning `cost`, got {diags:#?}"
+    );
+
+    // 2. Body was NOT re-checked — no UnknownIdentifier on `cost` from
+    //    the body's bare-reference expansion.
+    let body_unknowns: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::UnknownIdentifier)
+                && matches!(&d.data, Some(DiagnosticData::ExpansionFrames(_)))
+        })
+        .collect();
+    assert!(
+        body_unknowns.is_empty(),
+        "row requirement failure must short-circuit body check; got cascade UnknownIdentifier diagnostics {body_unknowns:#?}"
+    );
+}
+
+#[test]
+fn row_requirement_wrong_type_errors_at_call_site() {
+    // Phase 16 TDD test 3: caller supplies `{revenue: Text, cost:
+    // Decimal}`. `Text` does not satisfy the `Numeric` constraint on
+    // `revenue`. Expect a RowRequirementUnsatisfied diagnostic naming
+    // `revenue` and the expected constraint `Numeric`.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("add_margin.sql");
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("margin_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.add_margin(smelt.ref('orders')) AS m\n";
+
+    // `revenue` is Text — violates the Numeric constraint.
+    let orders_sql = orders_model_sql(&[
+        ("order_id", "BIGINT"),
+        ("revenue", "TEXT"),
+        ("cost", "DECIMAL(18, 2)"),
+    ]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, ADD_MARGIN_REQ_SRC),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let req_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::RowRequirementUnsatisfied)
+                && d.message.contains("revenue")
+                && d.message.contains("Numeric")
+        })
+        .collect();
+    assert!(
+        !req_diags.is_empty(),
+        "expected RowRequirementUnsatisfied mentioning `revenue` and `Numeric`, got {diags:#?}"
+    );
+}
+
+#[test]
+fn row_tail_allows_extra_columns() {
+    // Phase 16 TDD test 4: parameter declared
+    // `TableExpr<{revenue: Numeric, ..r}>`. The caller supplies
+    // `{revenue, cost, notes}` — extras allowed by the row-tail. No
+    // diagnostics. (Observability of `r` via an accessor is exercised
+    // by the unit test in `smelt-types`; here we assert zero
+    // diagnostics end-to-end.)
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("add_revenue.sql");
+    let fn_src = "smelt.define add_revenue(source: TableExpr<{revenue: Numeric, ..r}>) \
+         -> TableExpr AS (SELECT source.*, revenue AS r2 FROM source)\n";
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("tail_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.add_revenue(smelt.ref('orders')) AS m\n";
+
+    let orders_sql = orders_model_sql(&[
+        ("revenue", "DECIMAL(18, 2)"),
+        ("cost", "DECIMAL(18, 2)"),
+        ("notes", "TEXT"),
+    ]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, fn_src),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let bad: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::RowRequirementUnsatisfied)
+                    | Some(DiagnosticCode::UnknownIdentifier)
+                    | Some(DiagnosticCode::ArgTypeMismatch)
+            )
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "named-tail `..r` should accept extras; got {bad:#?}"
+    );
+}
+
+#[test]
+fn row_tail_anonymous_allows_any_extras() {
+    // Phase 16 TDD test 5: parameter declared
+    // `TableExpr<{revenue: Numeric, ..}>`. Anonymous tail accepts the
+    // same extras as a named tail but records no binding. Zero
+    // diagnostics.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("anon_tail.sql");
+    let fn_src = "smelt.define anon_tail(source: TableExpr<{revenue: Numeric, ..}>) \
+         -> TableExpr AS (SELECT source.* FROM source)\n";
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("tail_report.sql");
+    let model_src = "SELECT * FROM smelt.fn.anon_tail(smelt.ref('orders')) AS m\n";
+
+    let orders_sql = orders_model_sql(&[
+        ("revenue", "DECIMAL(18, 2)"),
+        ("cost", "DECIMAL(18, 2)"),
+        ("notes", "TEXT"),
+    ]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, fn_src),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let bad: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::RowRequirementUnsatisfied)
+                    | Some(DiagnosticCode::UnknownIdentifier)
+                    | Some(DiagnosticCode::ArgTypeMismatch)
+            )
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "anonymous tail `..` should accept extras; got {bad:#?}"
+    );
+}
+
+#[test]
+fn row_requirement_at_tier1_function_body_still_checks_on_expansion() {
+    // Phase 16 TDD test 6: when the row requirement is satisfied the
+    // body is still checked. Prove this by using a body that references
+    // a non-existent bare column (`missing_col`) — the body check must
+    // still fire `UnknownIdentifier` because we didn't short-circuit.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("with_body_bug.sql");
+    let fn_src =
+        "smelt.define with_body_bug(source: TableExpr<{revenue: Numeric, cost: Numeric}>) \
+         -> TableExpr AS (SELECT source.*, missing_col AS x FROM source)\n";
+    let orders_path = root.join("models").join("orders.sql");
+    let model_path = root.join("models").join("report.sql");
+    let model_src = "SELECT * FROM smelt.fn.with_body_bug(smelt.ref('orders')) AS m\n";
+
+    let orders_sql = orders_model_sql(&[("revenue", "DECIMAL(18, 2)"), ("cost", "DECIMAL(18, 2)")]);
+
+    let (db, ws, files) = build_db(
+        root,
+        "version: 1\nsources: []\n",
+        &[
+            (fn_path, fn_src),
+            (orders_path, orders_sql.as_str()),
+            (model_path, model_src),
+        ],
+    );
+    let model_file = files[2];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+
+    // Row-requirement is satisfied, so we expect NO
+    // RowRequirementUnsatisfied diagnostic.
+    let req_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::RowRequirementUnsatisfied))
+        .collect();
+    assert!(
+        req_diags.is_empty(),
+        "row requirement is satisfied; should not emit RowRequirementUnsatisfied, got {req_diags:#?}"
+    );
+
+    // Body check must still run — `missing_col` surfaces as a cascade
+    // UnknownIdentifier with ExpansionFrames.
+    let body_unknowns: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::UnknownIdentifier) && d.message.contains("missing_col")
+        })
+        .collect();
+    assert!(
+        !body_unknowns.is_empty(),
+        "body check must still run when row requirement is satisfied; got {diags:#?}"
     );
 }
