@@ -1195,7 +1195,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 17 | `sessionize` end-to-end: TableExpr + WindowExpr in body | done | 9ccd605 | 2026-04-24 |
 | 18 | LSP polish + examples (Step 3 complete) | done | 0c7abfd | 2026-04-24 |
 | 19 | Parser + types: context-binding syntax (Step 4 opens) | done | 76cb0bd | 2026-04-24 |
-| 20 | CTE schema extraction + splice-point context inference | done | | 2026-04-24 |
+| 20 | CTE schema extraction + splice-point context inference | done | a4d64c9 | 2026-04-24 |
 | 21 | Column-name validation against contexts + annotation reconciliation | pending | | |
 | 22 | `session_rollup` end-to-end (Step 4 complete) | pending | | |
 | 23 | Tier 2 body check in isolation (Step 5 opens) | pending | | |
