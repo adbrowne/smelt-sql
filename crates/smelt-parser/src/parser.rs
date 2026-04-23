@@ -241,6 +241,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if self.at_smelt_extern_trigger() {
+                self.parse_smelt_extern();
+                self.skip_trivia();
+                continue;
+            }
+
             if self.at(SELECT_KW) || self.at(WITH_KW) {
                 // Bare SELECT/WITH model body. We only parse the first one; any
                 // following top-level tokens are consumed silently (preserving
@@ -335,6 +341,53 @@ impl<'a> Parser<'a> {
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a top-level `smelt.extern` declaration. Does not consume
+    /// any tokens. The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("extern")
+    fn at_smelt_extern_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "extern".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("extern")
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
     /// the start of a `smelt.fn.<path>(...)` call. Does not consume any tokens.
     /// The trigger is exactly three non-trivia tokens:
     ///   IDENT("smelt")  DOT  IDENT("fn")
@@ -394,7 +447,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            if self.at_smelt_define_trigger() {
+            if self.at_smelt_define_trigger() || self.at_smelt_extern_trigger() {
                 return;
             }
             self.start_node(ERROR);
@@ -457,7 +510,11 @@ impl<'a> Parser<'a> {
         } else {
             self.error("Expected 'AS' in smelt.define".to_string());
             // Sync to the start of the body `(` or next top-level / EOF.
-            while !self.at(EOF) && !self.at(LPAREN) && !self.at_smelt_define_trigger() {
+            while !self.at(EOF)
+                && !self.at(LPAREN)
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
                 self.start_node(ERROR);
                 self.advance();
                 self.finish_node();
@@ -485,6 +542,63 @@ impl<'a> Parser<'a> {
         self.finish_node();
     }
 
+    /// Parse a top-level `smelt.extern` declaration. The caller must have
+    /// verified `at_smelt_extern_trigger()` first.
+    ///
+    /// Grammar (Phase 10):
+    ///   smelt.extern NAME ( params ) -> TypeRef
+    ///
+    /// Unlike `smelt.define`, there is no body — externs are signature-only
+    /// declarations that bind a user-chosen name to a backend-provided function.
+    fn parse_smelt_extern(&mut self) {
+        self.start_node(SMELT_EXTERN);
+
+        // Consume the three trigger tokens: `smelt`, `.`, `extern`.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "extern"
+
+        // DEFINE_NAME: wrap the next identifier. (Reusing DEFINE_NAME here so
+        // downstream AST helpers can read the extern's name with the same
+        // getter used for smelt.define.)
+        self.skip_trivia();
+        if self.at(IDENT) {
+            self.start_node(DEFINE_NAME);
+            self.advance();
+            self.finish_node();
+        } else {
+            self.error("Expected function name after smelt.extern".to_string());
+            self.sync_to(&[LPAREN, JSON_ARROW, EOF]);
+        }
+
+        // Parameter list.
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_param_list();
+        } else {
+            self.error("Expected '(' after function name".to_string());
+            self.sync_to(&[JSON_ARROW, EOF]);
+        }
+
+        // Return arrow: `-> <TypeRef>`. Required for externs — the extern
+        // signature must declare its return type.
+        self.skip_trivia();
+        if self.at(JSON_ARROW) {
+            self.start_node(RETURN_ARROW);
+            self.advance(); // JSON_ARROW (->)
+            self.skip_trivia();
+            self.parse_type_ref();
+            self.finish_node();
+        } else {
+            self.error("Expected '->' return type in smelt.extern".to_string());
+        }
+
+        self.finish_node(); // SMELT_EXTERN
+    }
+
     /// Parse the parenthesized parameter list of a smelt.define.
     fn parse_param_list(&mut self) {
         self.start_node(PARAM_LIST);
@@ -494,7 +608,7 @@ impl<'a> Parser<'a> {
         while !self.at(RPAREN) && !self.at(EOF) {
             // If we see a top-level resync point, break out to let error
             // recovery kick in at the caller.
-            if self.at(AS_KW) || self.at_smelt_define_trigger() {
+            if self.at(AS_KW) || self.at_smelt_define_trigger() || self.at_smelt_extern_trigger() {
                 self.error("Expected ')' to close parameter list".to_string());
                 break;
             }
@@ -584,10 +698,11 @@ impl<'a> Parser<'a> {
                 if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW) {
                     break;
                 }
-                // A smelt.define on the next line would start with IDENT
-                // "smelt"; the caller's error recovery handles that — we stop
-                // here so the caller can resync.
-                if k == IDENT && self.at_smelt_define_trigger() {
+                // A smelt.define / smelt.extern on the next line would start
+                // with IDENT "smelt"; the caller's error recovery handles
+                // that — we stop here so the caller can resync.
+                if k == IDENT && (self.at_smelt_define_trigger() || self.at_smelt_extern_trigger())
+                {
                     break;
                 }
             }
@@ -630,8 +745,11 @@ impl<'a> Parser<'a> {
         } else {
             self.error("Expected ')' to close smelt.define body".to_string());
             // Sync to EOF or the next top-level declaration so a following
-            // smelt.define still parses.
-            while !self.at(EOF) && !self.at_smelt_define_trigger() {
+            // smelt.define / smelt.extern still parses.
+            while !self.at(EOF)
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
                 self.start_node(ERROR);
                 self.advance();
                 self.finish_node();
@@ -5541,6 +5659,90 @@ LIMIT 100
                 err
             );
         }
+    }
+
+    // ===== Phase 10: smelt.extern top-level grammar =====
+
+    use crate::ast::SmeltExtern;
+
+    #[test]
+    fn parses_smelt_extern_minimal() {
+        // Phase 10 TDD test 1.
+        let input =
+            "smelt.extern regex_match(text: Expr<Text>, pattern: Expr<Text>) -> Expr<Boolean>";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs.len(), 1, "expected exactly one smelt.extern");
+        let ext = &externs[0];
+
+        assert_eq!(ext.name().as_deref(), Some("regex_match"));
+
+        let params: Vec<Param> = ext
+            .param_list()
+            .expect("should have a param list")
+            .params()
+            .collect();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name().as_deref(), Some("text"));
+        let t0 = params[0].type_ref().expect("typed param");
+        let t0_compact: String = t0.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(t0_compact, "Expr<Text>");
+
+        assert_eq!(params[1].name().as_deref(), Some("pattern"));
+
+        let ret: TypeRef = ext.return_type().expect("return type");
+        let ret_compact: String = ret.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(ret_compact, "Expr<Boolean>");
+
+        // No smelt.define declarations in this file.
+        assert_eq!(file.defines().count(), 0);
+    }
+
+    #[test]
+    fn extern_with_frontmatter_backends() {
+        // Phase 10 TDD test 2. The existing file-level `---` frontmatter
+        // block must coexist with a `smelt.extern` — the legacy single-block
+        // rule applies. The frontmatter is stripped by
+        // `smelt_parser::strip_frontmatter` before reaching the parser, so
+        // the extern must parse identically to the minimal case.
+        let input = "---\nbackends: [duckdb]\n---\n\
+                     smelt.extern read_parquet(path: Expr<Text>) -> Expr<Text>\n";
+        let clean = crate::strip_frontmatter(input);
+        let (parse, file) = parse_file_text(&clean);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs.len(), 1);
+        assert_eq!(externs[0].name().as_deref(), Some("read_parquet"));
+        let params: Vec<Param> = externs[0].param_list().unwrap().params().collect();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name().as_deref(), Some("path"));
+    }
+
+    #[test]
+    fn smelt_extern_and_define_in_same_file() {
+        // Mixed file: one of each. The iterators should partition cleanly.
+        let input = "\
+            smelt.extern ext_fn(a: Expr<Text>) -> Expr<Text>\n\
+            smelt.define my_plus(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        assert_eq!(file.externs().count(), 1);
+        assert_eq!(file.defines().count(), 1);
     }
 
     // ===== Phase 2: smelt.fn.* call syntax =====

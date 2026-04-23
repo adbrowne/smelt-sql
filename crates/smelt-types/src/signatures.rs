@@ -19,7 +19,9 @@
 //! deferred to later phases of the smelt-functions plan.
 
 use crate::{parse_type, DataType};
-use smelt_parser::ast::{File as AstFile, Param as AstParam, Range, SmeltDefine, TypeRef};
+use smelt_parser::ast::{
+    File as AstFile, Param as AstParam, Range, SmeltDefine, SmeltExtern, TypeRef,
+};
 use smelt_parser::offset_to_position;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -332,7 +334,23 @@ pub enum Tier {
     Three,
 }
 
-/// Signature of a single `smelt.define` declaration.
+/// Origin of a user-declared function signature.
+///
+/// Phase 10 introduces `smelt.extern` declarations alongside the existing
+/// `smelt.define`. Externs have no body (they bind a name to a
+/// backend-provided function), but otherwise share the same indexing,
+/// resolution, and type-check surface as user `smelt.define` declarations.
+/// The two share `FunctionSig` with this discriminator so downstream lookups
+/// stay uniform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigOrigin {
+    /// A `smelt.define` declaration with a body.
+    Define,
+    /// A `smelt.extern` declaration — signature only.
+    Extern,
+}
+
+/// Signature of a single `smelt.define` or `smelt.extern` declaration.
 ///
 /// The `name_range` field points at the `DEFINE_NAME` token in the source
 /// file; diagnostic-emitting code (duplicate-definition detection, etc.)
@@ -355,6 +373,9 @@ pub struct FunctionSig {
     pub tier: Tier,
     /// Line/column range of the function-name identifier, for diagnostics.
     pub name_range: Range,
+    /// Whether this signature comes from a `smelt.define` (has a body) or
+    /// a `smelt.extern` (signature-only).
+    pub origin: SigOrigin,
 }
 
 fn type_ref_range(type_ref: &TypeRef, text: &str) -> Range {
@@ -433,18 +454,69 @@ pub fn extract_signature(define: &SmeltDefine, text: &str) -> Option<FunctionSig
         return_type_range,
         tier,
         name_range,
+        origin: SigOrigin::Define,
+    })
+}
+
+/// Convert a `SmeltExtern` AST node into a `FunctionSig`.
+///
+/// Externs have no body but share the same signature surface as defines.
+/// Returns `None` when the declaration is missing a name.
+pub fn extract_extern_signature(ext: &SmeltExtern, text: &str) -> Option<FunctionSig> {
+    let name = ext.name()?;
+    let name_text_range = ext.name_range()?;
+    let name_range = Range {
+        start: offset_to_position(text, usize::from(name_text_range.start())),
+        end: offset_to_position(text, usize::from(name_text_range.end())),
+    };
+
+    let params: Vec<ParamSpec> = ext
+        .param_list()
+        .map(|pl| pl.params().map(|p| extract_param_spec(&p, text)).collect())
+        .unwrap_or_default();
+
+    let return_type_node = ext.return_type();
+    let return_type_text = return_type_node.as_ref().map(|t| t.text());
+    let return_type = return_type_text.as_deref().map(parse_smelt_type);
+    let return_type_range = return_type_node.as_ref().map(|t| type_ref_range(t, text));
+    let tier = compute_tier(&params, return_type_text.as_deref());
+
+    Some(FunctionSig {
+        name,
+        params,
+        return_type_text,
+        return_type,
+        return_type_range,
+        tier,
+        name_range,
+        origin: SigOrigin::Extern,
     })
 }
 
 /// Extract all function signatures from a parsed file.
 ///
 /// Pure function: takes an AST + source text and returns a freshly
-/// allocated vector of signatures in declaration order. Callers in
-/// `smelt-db` wrap this in a Salsa tracked query.
+/// allocated vector of signatures in declaration order. Includes both
+/// `smelt.define` and `smelt.extern` declarations — callers inspect
+/// `FunctionSig::origin` to distinguish them.
+///
+/// Order: externs interleave with defines in the order they appear in the
+/// syntax tree, so downstream per-declaration diagnostics fire in source
+/// order regardless of origin.
 pub fn extract_function_signatures(file: &AstFile, text: &str) -> Vec<FunctionSig> {
-    file.defines()
-        .filter_map(|d| extract_signature(&d, text))
-        .collect()
+    let mut out: Vec<FunctionSig> = Vec::new();
+    for child in file.syntax().children() {
+        if let Some(d) = SmeltDefine::cast(child.clone()) {
+            if let Some(sig) = extract_signature(&d, text) {
+                out.push(sig);
+            }
+        } else if let Some(e) = SmeltExtern::cast(child) {
+            if let Some(sig) = extract_extern_signature(&e, text) {
+                out.push(sig);
+            }
+        }
+    }
+    out
 }
 
 /// Extract the signature for a single named define, if present.

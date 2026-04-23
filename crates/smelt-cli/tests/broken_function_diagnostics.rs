@@ -86,6 +86,38 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::UnknownSmeltFn,
         message_substring: "does_not_exist",
     },
+    // Phase 8 (landed in Phase 10) — `COALESCE(text, int)` violates the
+    // shared-type-variable constraint on the variadic generic built-in.
+    Case {
+        fixture: "fn_coalesce_text_int.sql",
+        companion: None,
+        code: DiagnosticCode::ArgTypeMismatch,
+        message_substring: "COALESCE",
+    },
+    // Phase 8 (landed in Phase 10) — `GREATEST()` has no args; registry
+    // arity check yields MissingArgument.
+    Case {
+        fixture: "fn_greatest_no_args.sql",
+        companion: None,
+        code: DiagnosticCode::MissingArgument,
+        message_substring: "GREATEST",
+    },
+    // Phase 10 — `smelt.extern LOWER(...)` collides with the canonical
+    // built-in of the same name.
+    Case {
+        fixture: "fn_extern_collides_with_builtin.sql",
+        companion: None,
+        code: DiagnosticCode::ExternCollidesWithBuiltin,
+        message_substring: "LOWER",
+    },
+    // Phase 10 — two `smelt.extern`s with the same name across sibling
+    // files. Diagnostic anchors on the alphabetically-later file.
+    Case {
+        fixture: "fn_extern_duplicate_other.sql",
+        companion: Some("fn_extern_duplicate.sql"),
+        code: DiagnosticCode::DuplicateFunctionDefinition,
+        message_substring: "extern_twice",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

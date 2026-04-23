@@ -16,10 +16,10 @@ pub mod signatures;
 pub use functions::{FunctionCategory, SqlFunction};
 pub use parse::{parse_type, TypeParseError};
 pub use signatures::{
-    extract_function_signature_by_name, extract_function_signatures, extract_signature,
-    numeric_lub, parse_smelt_type, unify_call, BuiltinRegistry, FrameInfo, FunctionSig, ParamSpec,
-    SigParam, Signature, SignatureBuildError, SmeltType, SmeltTypeParseError, Tier, TypeConstraint,
-    TypeExpr, TypeParam, UnificationError, UnifyResult,
+    extract_extern_signature, extract_function_signature_by_name, extract_function_signatures,
+    extract_signature, numeric_lub, parse_smelt_type, unify_call, BuiltinRegistry, FrameInfo,
+    FunctionSig, ParamSpec, SigOrigin, SigParam, Signature, SignatureBuildError, SmeltType,
+    SmeltTypeParseError, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
 };
 
 /// SQL data types supported by smelt

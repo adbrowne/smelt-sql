@@ -361,3 +361,104 @@ fn frame_stack_only_innermost_rendered() {
         );
     }
 }
+
+// ─── Phase 10 — `smelt.extern` declarations + unified resolver ────────────────
+
+#[test]
+fn extern_call_typed_like_builtin() {
+    // Phase 10 TDD test 3: a `smelt.extern` declaration makes a call-site
+    // resolvable through the unified resolver. Calling the extern with
+    // correct argument types yields zero diagnostics; the call-site
+    // checker's user-defined branch handles externs identically to
+    // `smelt.define`, modulo the no-body skip.
+    let root = PathBuf::from("/fake/project");
+    let ext_path = root.join("functions").join("ext.sql");
+    let model_path = root.join("models").join("uses_extern.sql");
+    let ext_src =
+        "smelt.extern regex_match(text: Expr<Text>, pattern: Expr<Text>) -> Expr<Boolean>\n";
+    // Correct types: two Text literals. The checker must not emit any
+    // diagnostic, and must NOT try to re-walk the body (externs have none).
+    let model_src = "SELECT smelt.fn.regex_match('abc', 'a.*') AS r\n";
+
+    let (db, ws, files) = build_db(root, &[(ext_path, ext_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let call_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::ArgTypeMismatch)
+                    | Some(DiagnosticCode::MissingArgument)
+                    | Some(DiagnosticCode::UnknownSmeltFn)
+                    | Some(DiagnosticCode::FunctionBodyTypeMismatch)
+                    | Some(DiagnosticCode::UnknownIdentifier)
+            )
+        })
+        .collect();
+    assert!(
+        call_diags.is_empty(),
+        "correct-typed call to an extern should produce no call diagnostics, got {call_diags:?}"
+    );
+}
+
+#[test]
+fn extern_collision_with_builtin_is_error() {
+    // Phase 10 TDD test 4: declaring `smelt.extern LOWER(...)` collides
+    // with the built-in `LOWER`. The workspace-level diagnostic fires on
+    // the file declaring the extern.
+    let root = PathBuf::from("/fake/project");
+    let ext_path = root.join("functions").join("bad_lower.sql");
+    let ext_src = "smelt.extern LOWER(s: Expr<Text>) -> Expr<Text>\n";
+
+    let (db, ws, files) = build_db(root, &[(ext_path, ext_src)]);
+    let ext_file = files[0];
+
+    let diags = file_diagnostics(&db, ws, ext_file);
+    let matching: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ExternCollidesWithBuiltin))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one ExternCollidesWithBuiltin diagnostic, got {diags:#?}"
+    );
+    assert!(
+        matching[0].message.to_ascii_lowercase().contains("lower"),
+        "message should name the colliding function, got: {}",
+        matching[0].message
+    );
+}
+
+#[test]
+fn extern_duplicate_declaration_is_error() {
+    // Phase 10 TDD test 5: two `smelt.extern`s with the same name across
+    // files produce a DuplicateFunctionDefinition diagnostic, just like
+    // two `smelt.define`s. The diagnostic anchors on the alphabetically
+    // later file (matching Phase 3's deterministic ordering).
+    let root = PathBuf::from("/fake/project");
+    let ext_a = root.join("functions").join("ext_a.sql");
+    let ext_b = root.join("functions").join("ext_b.sql");
+    let ext_src_a = "smelt.extern shared_ext(x: Expr<Integer>) -> Expr<Integer>\n";
+    let ext_src_b = "smelt.extern shared_ext(y: Expr<Integer>) -> Expr<Integer>\n";
+
+    let (db, ws, files) = build_db(root, &[(ext_a, ext_src_a), (ext_b.clone(), ext_src_b)]);
+    // Diagnostic anchors on the alphabetically-later file (ext_b).
+    let ext_b_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, ext_b_file);
+    let matching: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::DuplicateFunctionDefinition)
+                && d.message.contains("shared_ext")
+        })
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one DuplicateFunctionDefinition diagnostic mentioning shared_ext, got {diags:#?}"
+    );
+}

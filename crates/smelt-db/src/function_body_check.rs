@@ -17,7 +17,10 @@
 use rowan::TextRange;
 use smelt_parser::ast::{BinaryExpr, Expr, SmeltFnCall};
 use smelt_parser::offset_to_position;
-use smelt_types::signatures::{FrameInfo, FunctionSig, ParamSpec, SmeltType, TypeConstraint};
+use smelt_types::signatures::{
+    unify_call, FrameInfo, FunctionSig, ParamSpec, Signature, SmeltType, TypeConstraint,
+    UnificationError,
+};
 use smelt_types::{DataType, TypedColumn};
 
 use crate::type_inference::{infer_expression_type, TypeContext};
@@ -317,9 +320,20 @@ fn has_expr_children(expr: &Expr) -> bool {
 /// - `sig_lookup`: resolves a bare function name to its
 ///   [`FunctionSig`]. Pure dependency — in Salsa it is a thin closure over
 ///   `resolve_function`; in unit tests it is an in-memory `HashMap` lookup.
+///   Covers user-declared `smelt.define` and `smelt.extern` functions.
+/// - `builtin_lookup`: resolves a bare function name to its
+///   [`Signature`] in the built-in registry. Pure dependency — in Salsa
+///   it is a thin closure over `smelt_types::BuiltinRegistry::resolve`.
+///   Consulted when `sig_lookup` misses so the checker dispatches through
+///   `unify_call` for built-ins (Phase 10 unified-resolver path).
+/// - `lub`: numeric least-upper-bound adapter for `unify_call` (§16 #14);
+///   shaped to match the signature of `smelt_types::signatures::unify_call`.
+///   Only used on the built-in branch.
 /// - `body_lookup`: given a resolved function, produces the stripped source
 ///   text and the body [`Expr`] so the checker can re-walk the body with
 ///   the call-site-derived bindings. Pure — the closure owns any I/O.
+///   Returns `None` for externs (no body) and for any signature without a
+///   define body — the checker skips body re-walk in that case.
 ///
 /// Returns a list of diagnostics:
 ///   - [`DiagnosticCode::UnknownSmeltFn`] at the call-path span.
@@ -342,6 +356,8 @@ pub fn check_smelt_fn_call(
     ctx: &TypeContext,
     text: &str,
     sig_lookup: &dyn Fn(&str) -> Option<FunctionSig>,
+    builtin_lookup: &dyn Fn(&str) -> Option<&'static Signature>,
+    lub: &dyn Fn(&DataType, &DataType) -> DataType,
     body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, Expr)>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -361,6 +377,12 @@ pub fn check_smelt_fn_call(
     };
 
     let Some(sig) = sig_lookup(&name) else {
+        // No user-declared function — try the built-in registry.
+        // On a hit, dispatch through `unify_call` which yields
+        // `ArgTypeMismatch` / `MissingArgument` / arity diagnostics.
+        if let Some(builtin_sig) = builtin_lookup(&name) {
+            return check_builtin_call(call, &name, path_range, builtin_sig, ctx, text, lub);
+        }
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!("Unknown function `smelt.fn.{}`", name),
@@ -559,6 +581,170 @@ pub fn check_smelt_fn_call(
     }
 
     diagnostics
+}
+
+/// Dispatch a `smelt.fn.<name>(...)` call against a built-in registry
+/// [`Signature`] via [`unify_call`] (Phase 10 unified-resolver path).
+///
+/// This is reached when `sig_lookup` misses but `builtin_lookup` hits —
+/// i.e. the user is calling a built-in like `COALESCE`/`GREATEST` through
+/// the `smelt.fn.*` syntax.
+///
+/// Mapped diagnostics (all pinned to the smallest useful span):
+///   - [`UnificationError::ConstraintViolation`] →
+///     [`DiagnosticCode::ArgTypeMismatch`] at the offending positional arg.
+///   - [`UnificationError::MissingArgs`] →
+///     [`DiagnosticCode::MissingArgument`] at the call-path span.
+///   - [`UnificationError::TooManyArgs`] → ignored in Phase 10 (no
+///     too-many diagnostic code today); silently accepted.
+///   - [`UnificationError::InconsistentBinding`] →
+///     [`DiagnosticCode::ArgTypeMismatch`] at the first conflicting arg.
+///   - [`UnificationError::EmptyVariadicTypeVar`] → ignored (cannot bind
+///     without surrounding context; Phase 12+).
+///
+/// Named arguments are not modelled on built-ins (the registry is
+/// positional-only), so any `name => value` pairs are ignored for
+/// unification and named-value spans fall back to positional order.
+fn check_builtin_call(
+    call: &SmeltFnCall,
+    name: &str,
+    path_range: Range,
+    sig: &Signature,
+    ctx: &TypeContext,
+    text: &str,
+    lub: &dyn Fn(&DataType, &DataType) -> DataType,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Collect positional arg expressions + their inferred DataTypes.
+    // Named args on built-ins have no declared parameter names in the
+    // registry, so they contribute positionally if present but are rare —
+    // callers use `smelt.fn.COALESCE(a, b)` style. We treat named-arg
+    // value exprs as trailing positional args, keeping order stable.
+    let arg_list = call.arg_list();
+    let positional_exprs: Vec<Expr> = arg_list
+        .as_ref()
+        .map(|al| al.positional_args())
+        .unwrap_or_default();
+    let named_values: Vec<Expr> = arg_list
+        .as_ref()
+        .map(|al| al.named_params().filter_map(|np| np.value_expr()).collect())
+        .unwrap_or_default();
+
+    let mut arg_exprs: Vec<Expr> = Vec::with_capacity(positional_exprs.len() + named_values.len());
+    arg_exprs.extend(positional_exprs);
+    arg_exprs.extend(named_values);
+
+    let mut arg_types: Vec<DataType> = Vec::with_capacity(arg_exprs.len());
+    for arg in &arg_exprs {
+        let dt = infer_expression_type(arg, ctx)
+            .map(|t| t.data_type)
+            .unwrap_or(DataType::Unknown);
+        arg_types.push(dt);
+    }
+
+    match unify_call(sig, &arg_types, lub) {
+        Ok(_) => {} // no diagnostics to emit — type is already inferred elsewhere
+        Err(UnificationError::MissingArgs { expected, got }) => {
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "`smelt.fn.{}` expects at least {} argument(s), got {}",
+                    name, expected, got
+                ),
+                range: path_range,
+                code: Some(DiagnosticCode::MissingArgument),
+                data: None,
+            });
+        }
+        Err(UnificationError::ConstraintViolation {
+            position,
+            param_constraint,
+            actual,
+        }) => {
+            // `position` is 1-based — index into our flat positional list.
+            let arg_range = arg_exprs
+                .get(position.saturating_sub(1))
+                .map(|e| to_range(e.text_range(), text))
+                .unwrap_or(path_range);
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "Argument at position {} has type `{}`, which does not satisfy constraint `{}` of `smelt.fn.{}`",
+                    position,
+                    actual,
+                    format_constraint(&param_constraint),
+                    name
+                ),
+                range: arg_range,
+                code: Some(DiagnosticCode::ArgTypeMismatch),
+                data: None,
+            });
+        }
+        Err(UnificationError::InconsistentBinding {
+            var_name,
+            positions,
+            types,
+        }) => {
+            // Anchor at the second inconsistent position if possible — the
+            // first one set the binding, the second one violated it.
+            let anchor_pos = positions.get(1).copied().unwrap_or(1);
+            let arg_range = arg_exprs
+                .get(anchor_pos.saturating_sub(1))
+                .map(|e| to_range(e.text_range(), text))
+                .unwrap_or(path_range);
+            let type_list = types
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "Type variable `{}` in `smelt.fn.{}` inferred inconsistently across positions {:?}: {}",
+                    var_name, name, positions, type_list
+                ),
+                range: arg_range,
+                code: Some(DiagnosticCode::ArgTypeMismatch),
+                data: None,
+            });
+        }
+        Err(UnificationError::EmptyVariadicTypeVar { .. }) => {
+            // A variadic built-in (`GREATEST`, `LEAST`, `COALESCE`) with no
+            // arguments leaves its type variable unbound. Surface this as a
+            // `MissingArgument` anchored at the call-path — the most
+            // actionable interpretation since the fix is "supply at least
+            // one arg".
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "`smelt.fn.{}` is variadic and requires at least one argument",
+                    name
+                ),
+                range: path_range,
+                code: Some(DiagnosticCode::MissingArgument),
+                data: None,
+            });
+        }
+        Err(UnificationError::TooManyArgs { .. }) => {
+            // Phase 10 does not emit a too-many-args diagnostic; callers
+            // see no diagnostic and fall through to legacy inference.
+        }
+    }
+
+    diagnostics
+}
+
+/// Render a [`TypeConstraint`] in a user-facing form for diagnostic
+/// messages. Mirrors the `Expr<…>` vocabulary users see on `smelt.define`
+/// parameter annotations so error text stays consistent.
+fn format_constraint(c: &TypeConstraint) -> String {
+    match c {
+        TypeConstraint::Concrete(dt) => format!("Expr<{}>", dt),
+        TypeConstraint::Numeric => "Expr<Numeric>".to_string(),
+        TypeConstraint::Ordered => "Expr<Ordered>".to_string(),
+        TypeConstraint::Any => "Expr<Any>".to_string(),
+    }
 }
 
 /// Minimal assignment-compatibility check used by `ArgTypeMismatch`.

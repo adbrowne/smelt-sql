@@ -218,6 +218,9 @@ pub enum SyntaxKind {
     SMELT_FN_CALL, // smelt.fn.namespace.name(args)
     CALL_PATH,     // The dotted call path inside a SMELT_FN_CALL (incl. `smelt.fn.` prefix)
 
+    // smelt.extern top-level declaration (Phase 10)
+    SMELT_EXTERN, // smelt.extern name(params) -> TypeRef
+
     // Error handling
     ERROR, // Invalid syntax
 

@@ -277,6 +277,10 @@ pub enum DiagnosticCode {
     /// Anchored at the offending argument's span. Introduced in Phase 6 of
     /// smelt-functions.
     ArgTypeMismatch,
+    /// Emitted when a `smelt.extern` declares a name that already exists in
+    /// the built-in registry (e.g. `smelt.extern lower(...)`). Anchored at
+    /// the extern name span. Introduced in Phase 10 of smelt-functions.
+    ExternCollidesWithBuiltin,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -711,6 +715,32 @@ pub fn workspace_function_diagnostics(
         let path = f.path(db).clone();
         let sigs = file_signature_inputs(db, f);
         for sig in sigs.iter() {
+            // Phase 10: Every `smelt.extern` whose name collides with a
+            // built-in in the canonical registry is an error. Checked before
+            // the duplicate-user-definition check so externs always surface
+            // the registry-collision message (more actionable than "already
+            // defined in <other extern>" when both are shadowing the same
+            // built-in).
+            if sig.origin == smelt_types::SigOrigin::Extern
+                && smelt_types::BuiltinRegistry::resolve(&sig.name).is_some()
+            {
+                diagnostics.push((
+                    path.clone(),
+                    Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Function `{}` is a built-in and cannot be redeclared with `smelt.extern`",
+                            sig.name
+                        ),
+                        range: sig.name_range,
+                        code: Some(DiagnosticCode::ExternCollidesWithBuiltin),
+                        data: None,
+                    },
+                ));
+                // Still fall through to the seen-map tracking so a second
+                // extern with the same name also flags DuplicateFunctionDefinition.
+            }
+
             if let Some(first_path) = seen.get(&sig.name) {
                 diagnostics.push((
                     path.clone(),
@@ -861,12 +891,36 @@ pub fn smelt_fn_call_diagnostics_for_file(
 
     // Closures for pure checker. `sig_lookup` wraps `resolve_function`;
     // `body_lookup` re-parses the declaring file and locates the matching
-    // `smelt.define` body.
+    // `smelt.define` body. `builtin_lookup` dispatches to the built-in
+    // registry so calls like `smelt.fn.COALESCE(...)` go through
+    // `unify_call` when no user-declared function shadows the name.
     let sig_lookup = |name: &str| -> Option<FunctionSig> {
         resolve_function(db, workspace, name.to_string()).map(|arc| (*arc).clone())
     };
 
+    let builtin_lookup = |name: &str| -> Option<&'static smelt_types::signatures::Signature> {
+        smelt_types::BuiltinRegistry::resolve(name)
+    };
+
+    // LUB closure for `unify_call` — forwards to the canonical numeric
+    // promotion routine in `type_inference`.
+    let lub = |a: &DataType, b: &DataType| -> DataType {
+        let lhs = TypedColumn {
+            data_type: a.clone(),
+            nullable: true,
+        };
+        let rhs = TypedColumn {
+            data_type: b.clone(),
+            nullable: true,
+        };
+        type_inference::promote_types(&lhs, &rhs).data_type
+    };
+
     let body_lookup = |sig: &FunctionSig| -> Option<(String, smelt_parser::ast::Expr)> {
+        // Externs have no body — skip. Defines alone carry a re-walkable body.
+        if sig.origin == smelt_types::SigOrigin::Extern {
+            return None;
+        }
         // Find the file declaring this function.
         for f in &files {
             let sigs = file_signature_inputs(db, *f);
@@ -896,6 +950,8 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &ctx,
             &clean_text,
             &sig_lookup,
+            &builtin_lookup,
+            &lub,
             &body_lookup,
         ));
     }

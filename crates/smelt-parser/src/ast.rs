@@ -44,6 +44,11 @@ impl File {
     pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
         self.0.children().filter_map(SmeltDefine::cast)
     }
+
+    /// Iterate over top-level `smelt.extern` declarations in this file.
+    pub fn externs(&self) -> impl Iterator<Item = SmeltExtern> + '_ {
+        self.0.children().filter_map(SmeltExtern::cast)
+    }
 }
 
 // ===== smelt.define (Step 1, Phase 1) =====
@@ -102,6 +107,63 @@ impl SmeltDefine {
     /// The body expression block.
     pub fn body(&self) -> Option<DefineBody> {
         self.0.children().find_map(DefineBody::cast)
+    }
+}
+
+/// Top-level `smelt.extern name(params) -> Type` declaration (Phase 10).
+///
+/// Shape mirrors [`SmeltDefine`] but without a body — externs bind a
+/// user-chosen name to a backend-provided function. The return type is
+/// mandatory (the extern signature is the only information the checker has
+/// about the imported function).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltExtern(SyntaxNode);
+
+impl SmeltExtern {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_EXTERN {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The declared extern's name (text of the single IDENT inside DEFINE_NAME).
+    pub fn name(&self) -> Option<String> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the DEFINE_NAME node (the extern name identifier).
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let ident = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)?;
+        Some(ident.text_range())
+    }
+
+    /// The parameter list, if parsed successfully.
+    pub fn param_list(&self) -> Option<ParamList> {
+        self.0.children().find_map(ParamList::cast)
+    }
+
+    /// The declared return type, if any (the TypeRef inside a RETURN_ARROW node).
+    pub fn return_type(&self) -> Option<TypeRef> {
+        self.0
+            .children()
+            .find(|n| n.kind() == RETURN_ARROW)?
+            .children()
+            .find_map(TypeRef::cast)
     }
 }
 

@@ -907,6 +907,7 @@ impl Backend {
                 DbCode::UnknownSmeltFn => "unknown-smelt-fn",
                 DbCode::MissingArgument => "missing-argument",
                 DbCode::ArgTypeMismatch => "arg-type-mismatch",
+                DbCode::ExternCollidesWithBuiltin => "extern-collides-with-builtin",
             };
             NumberOrString::String(code_str.to_string())
         });
