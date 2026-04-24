@@ -2352,7 +2352,7 @@ impl<'a> Parser<'a> {
         } else if self.at(EXISTS_KW) {
             self.parse_exists_expr();
         } else if self.at(LPAREN) {
-            // Could be: parenthesized expression, subquery, or function call
+            // Could be: parenthesized expression, subquery, or empty tuple `()`.
             let checkpoint = self.builder.checkpoint();
             self.advance(); // consume LPAREN
             self.skip_trivia();
@@ -2363,6 +2363,14 @@ impl<'a> Parser<'a> {
                 self.parse_select_stmt();
                 self.skip_trivia();
                 self.expect(RPAREN);
+                self.finish_node();
+            } else if self.at(RPAREN) {
+                // Empty tuple `()` — valid as a default value for
+                // `SelectItems<Kind>` parameters (Phase 22, research §6).
+                // Emit a bare EXPRESSION node with no children; the type-checker
+                // treats this as an empty fragment (no aggregates / columns).
+                self.start_node_at(checkpoint, EXPRESSION);
+                self.advance(); // consume RPAREN
                 self.finish_node();
             } else {
                 // Grouped expression

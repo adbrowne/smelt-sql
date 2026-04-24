@@ -56,6 +56,14 @@ pub struct TypeContext {
     ///
     /// Doc-hidden pub accessor; exposed for unit tests only.
     row_var_env: HashMap<String, Vec<(String, smelt_types::DataType)>>,
+    /// CTE names whose output schema could not be determined (e.g. a CTE
+    /// that does `SELECT * FROM smelt.fn.some_fn(...)` where the function's
+    /// output columns aren't known at pure-function-check time). Any unqualified
+    /// column lookup that otherwise fails will match against these names and
+    /// return `Unknown` instead of failing — suppressing false-positive
+    /// `UnknownIdentifier` diagnostics for columns that come from opaque-schema
+    /// CTEs. Introduced in Phase 22 of smelt-functions.
+    opaque_ctes: std::collections::HashSet<String>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -71,6 +79,7 @@ impl PartialEq for TypeContext {
             && self.function_signatures == other.function_signatures
             && self.tableexpr_param_schemas == other.tableexpr_param_schemas
             && self.row_var_env == other.row_var_env
+            && self.opaque_ctes == other.opaque_ctes
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -89,6 +98,7 @@ impl Clone for TypeContext {
             function_signatures: self.function_signatures.clone(),
             tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
             row_var_env: self.row_var_env.clone(),
+            opaque_ctes: self.opaque_ctes.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -132,6 +142,23 @@ impl TypeContext {
     pub fn add_alias(&mut self, alias: &str, qualified_name: &str) {
         self.aliases
             .insert(alias.to_string(), qualified_name.to_string());
+    }
+
+    /// Mark a CTE as having an opaque (unknowable at analysis time) output
+    /// schema. Any column lookup against this CTE will return
+    /// `Unknown`-typed instead of failing. Used for CTEs whose body SELECTs
+    /// from a `smelt.fn.*` call with a wildcard — we can't expand the
+    /// wildcard without the function's body AST (Phase 22).
+    pub fn mark_cte_opaque(&mut self, cte_name: &str) {
+        self.opaque_ctes.insert(cte_name.to_string());
+        // Also register as a CTE name so `is_cte` returns true.
+        self.cte_names.insert(cte_name.to_string());
+    }
+
+    /// Return `true` when `cte_name` was marked as having an opaque schema
+    /// (its output columns cannot be determined at pure-function-check time).
+    pub fn is_opaque_cte(&self, cte_name: &str) -> bool {
+        self.opaque_ctes.contains(cte_name)
     }
 
     /// Add a CTE column to the context
@@ -217,6 +244,16 @@ impl TypeContext {
         result
     }
 
+    // Static sentinel for opaque-CTE fallback returns — avoids creating a
+    // `TypedColumn` on the heap for every opaque-CTE column lookup.
+    fn opaque_column() -> &'static TypedColumn {
+        static OPAQUE: std::sync::OnceLock<TypedColumn> = std::sync::OnceLock::new();
+        OPAQUE.get_or_init(|| TypedColumn {
+            data_type: DataType::Unknown,
+            nullable: true,
+        })
+    }
+
     fn lookup_column_inner(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
         // If we have a qualifier, use it directly
         if let Some(q) = qualifier {
@@ -227,6 +264,14 @@ impl TypeContext {
             let cte_key = format!("{}.{}", resolved_qualifier, name);
             if let Some(t) = self.cte_columns.get(&cte_key) {
                 return Some(t);
+            }
+
+            // Phase 22: if the qualifier resolves to an opaque CTE (one
+            // whose schema couldn't be inferred from a `smelt.fn.*` call),
+            // return Unknown rather than failing — we can't validate column
+            // names against an unknown schema.
+            if self.opaque_ctes.contains(resolved_qualifier) {
+                return Some(Self::opaque_column());
             }
 
             // Try model columns
@@ -268,6 +313,16 @@ impl TypeContext {
             if key.ends_with(&format!(".{}", name)) {
                 return Some(typed_col);
             }
+        }
+
+        // Phase 22: if there are any opaque CTEs in scope, an unqualified
+        // column lookup that failed all known scopes may still be valid —
+        // it could reference a column from the opaque CTE's unknown schema.
+        // Return Unknown rather than None to suppress false-positive
+        // `UnknownIdentifier` diagnostics in function bodies that SELECT
+        // from `smelt.fn.*`-derived CTEs.
+        if !self.opaque_ctes.is_empty() {
+            return Some(Self::opaque_column());
         }
 
         None
@@ -389,6 +444,19 @@ impl TypeContext {
     /// Resolve a `smelt.fn.<name>` reference to its [`FunctionSig`].
     pub fn lookup_function_signature(&self, name: &str) -> Option<&FunctionSig> {
         self.function_signatures.get(name)
+    }
+
+    /// Iterate all registered function signatures.
+    ///
+    /// Used by Phase 22's CTE schema extraction to propagate the caller's
+    /// workspace-function map into the body context so nested
+    /// `smelt.fn.*` calls inside CTE bodies (e.g.
+    /// `SELECT * FROM smelt.fn.sessionize(...)`) can resolve their return
+    /// schemas during wildcard expansion.
+    pub fn function_signatures_iter(&self) -> impl Iterator<Item = (&str, &FunctionSig)> {
+        self.function_signatures
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
     }
 
     /// Unqualified-or-qualified identifier lookup that honours the

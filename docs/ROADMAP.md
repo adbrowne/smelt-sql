@@ -76,15 +76,16 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 ## Recently Completed
 
-### ~~Smelt Functions — Steps 1, 2 & 3~~ ✅ (April 22–24, 2026)
+### ~~Smelt Functions — Steps 1–4~~ ✅ (April 22–24, 2026)
 
-Implemented the first three steps of the smelt-functions experimentation roadmap (Phases 1–18 of [plan](plans/20260422-smelt-functions.md)):
+Implemented the first four steps of the smelt-functions experimentation roadmap (Phases 1–22 of [plan](plans/20260422-smelt-functions.md)):
 
 - **Step 1** (Phases 1–6, April 22): `smelt.define` / `smelt.fn.*` parser, Salsa signature index, `Expr<T>` type-reference resolution, Tier 1 body type-check, call-site expansion with single-level frame trace. `safe_divide` end-to-end demo. `examples/functions_demo/` workspace created and registered with CI.
 - **Step 2** (Phases 7–12, April 23): `Ordered` constraint, canonical built-in signature registry (~40 functions, generics + variadics), `infer_function_type` rewired through registry, `smelt.extern` declarations, per-declaration frontmatter with `backends:` inference and backend-namespace sugar, multi-level frame rendering in LSP, CAST-enforcement flag on canonical returns.
 - **Step 3** (Phases 13–18, April 23–24): `TableExpr` / `AggExpr` / `WindowExpr` / `SelectItems` type-ref grammar; `ExprKind { Scalar, Agg, Window }` with linear subtyping and `SelectItems<K>` kind ceiling; `TableExpr` bare-column row polymorphism with parameters-first scoping and shadow warnings; row-requirement annotations (`TableExpr<{col: Type, ..r}>`); `sessionize` end-to-end with TableExpr output-schema inference; LSP hover for `smelt.define` parameter types (`TableExpr<{...}>` and `Expr<...>` rendered); `add_margin → sessionize` pipeline fixture.
+- **Step 4** (Phases 19–22, April 24): Context-binding parsing and resolution for `Expr<T, ctx>` and `SelectItems<Kind, ctx>`; CTE schema extraction (`extract_function_body_cte_schemas`) with topological ordering and opaque-CTE suppression for `SELECT * FROM smelt.fn.*` patterns; `unknown_context_diagnostics_for_file` extended to accept CTE names alongside parameter names; `check_fragment_context_bindings` extended to look up CTE column schemas; `()` empty-default parser support; `session_rollup` end-to-end demo added to `examples/functions_demo/`.
 
-**Deferred during Steps 1–3**: See "Deferred during implementation" appendix in the plan for the full list. Key items: arg-position column resolution (Phase 19+ context binding), structured `Synthesized` marker for default-value provenance, broad TableExpr argument shapes beyond `smelt.ref()`/`smelt.source()`.
+**Deferred during Steps 1–4**: See "Deferred during implementation" appendix in the plan for the full list. Key items: structured `Synthesized` marker for default-value provenance, broad TableExpr argument shapes beyond `smelt.ref()`/`smelt.source()`, SQL comma-elision for empty `SelectItems` defaults (Phase 32/planner).
 
 ### ~~Type Inference, Parser & Ref Resolution Fixes~~ ✅ (April 10, 2026)
 
@@ -282,7 +283,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - Fixed bare-token problem and implicit alias detection (April 3, 2026)
 
 **Next steps**:
-- ~~Smelt Functions Steps 1–3~~ ✅ (April 22–24, 2026) — `smelt.define`, `smelt.fn.*`, `TableExpr`, call-site type checking, LSP hover. Steps 4–8 (context binding, Tier 2/3, PASSING, planner, struct row vars) remain. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
+- ~~Smelt Functions Steps 1–4~~ ✅ (April 22–24, 2026) — `smelt.define`, `smelt.fn.*`, `TableExpr`, call-site type checking, LSP hover, context binding, CTE-derived `SelectItems` contexts, `session_rollup` end-to-end. Steps 5–8 (Tier 2/3, PASSING, planner, struct row vars) remain. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
 - Metrics DSL (Layer 1 — declarative metric definitions, `smelt.metric()` resolution)
 - `smelt.param()` for parameterized models
 - PIVOT/UNPIVOT support (currently rejected with diagnostic)
@@ -454,5 +455,5 @@ Items here are interesting design problems without committed timelines.
 - **Virtual environments / plan-apply workflow**: Compare schemas across dev/prod without materializing; require approval before execution. Interesting state management problem — smelt's logical/physical graph split could enable lightweight virtual environments.
 - **OpenLineage / column-level lineage**: Export model and column-level lineage in OpenLineage format for catalog integration (DataHub, Amundsen, Atlan). Internal lineage tracking partially exists — interesting graph analysis problem.
 - **Substrait integration**: Portable plan representation, DataFusion interop
-- **Smelt Functions — Steps 4–8** (context binding, Tier 2/3 checking, PASSING clauses, planner-rule API, struct row vars): Steps 1–3 are ✅ complete (April 2026). Remaining steps continue the experimentation roadmap. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
+- **Smelt Functions — Steps 5–8** (Tier 2/3 checking, PASSING clauses, planner-rule API, struct row vars): Steps 1–4 are ✅ complete (April 2026). Remaining steps continue the experimentation roadmap. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
 - **Learning from history**: Use run statistics to suggest optimizations

@@ -841,6 +841,28 @@ pub fn check_smelt_fn_call(
             check_function_body_with_expansion(&sig, body_expr, &body_text, &nested_handler)
         }
         BodyShape::Select(select_stmt) => {
+            // Phase 22: propagate the caller's workspace function signatures
+            // into `body_ctx` so that `infer_cte_columns` can resolve nested
+            // `smelt.fn.*` calls in CTE bodies (e.g. the `sessionize(...)` call
+            // inside `session_rollup`'s `WITH sessionized AS (SELECT * FROM
+            // smelt.fn.sessionize(...))`).  Without this, wildcard expansion
+            // from a `smelt.fn.*` FROM source inside a CTE produces an empty
+            // column list and downstream column references in the outer SELECT
+            // emit false `UnknownIdentifier` errors.
+            for (name, sig) in ctx.function_signatures_iter() {
+                body_ctx.add_function_signature(name, sig.clone());
+            }
+
+            // Phase 22: seed CTE schemas from the function body's WITH
+            // clause so that context-annotated `SelectItems<Kind, cte>`
+            // parameters can resolve their column sets via `is_cte` /
+            // `cte_columns`. CTE cycle diagnostics from this extraction
+            // are discarded here — `cte_cycle_diagnostics_for_file`
+            // handles them at definition time.
+            let (body_ctx_with_ctes, _cycle_diags) =
+                extract_function_body_cte_schemas(select_stmt, &body_ctx, &body_text);
+            let body_ctx = body_ctx_with_ctes;
+
             // Phase 15: a SELECT-shaped body (e.g. `add_margin`'s
             // `(SELECT source.*, revenue - cost AS margin FROM source)`)
             // is checked with the TableExpr params' caller schemas
@@ -858,6 +880,9 @@ pub fn check_smelt_fn_call(
             );
             // Phase 21: validate caller-provided Expr<T>/SelectItems<Kind>
             // fragment arguments against the inferred splice contexts.
+            // Phase 22: `body_ctx` now includes CTE schemas so that
+            // `SelectItems<Kind, cte_name>` parameters can validate
+            // caller fragments against the CTE's column set.
             body_diags.extend(check_fragment_context_bindings(
                 &sig,
                 select_stmt,
@@ -1507,6 +1532,38 @@ pub fn extract_function_body_cte_schemas(
             ctx.add_cte_column(cte_name, col_name, typed_col.clone());
         }
         ctx.add_alias(cte_name, cte_name);
+
+        // Phase 22: if this CTE SELECTs from a `smelt.fn.*` source with a
+        // wildcard projection, its output schema cannot be determined at
+        // pure-function-check time (wildcard expansion from a
+        // user-defined-function source requires the function's body AST,
+        // which is not available here). Mark it as opaque so that column
+        // references from this CTE in the outer SELECT don't emit
+        // `UnknownIdentifier` false positives.
+        {
+            let is_wildcard_from_smelt_fn = dfs
+                .ctes
+                .get(cte_name)
+                .and_then(|c| c.query())
+                .and_then(|q| q.select_stmt())
+                .map(|s| {
+                    // Has a FROM clause with a smelt.fn.* source
+                    let has_smelt_fn_from = s
+                        .from_clause()
+                        .map(|fc| fc.table_refs().any(|tr| tr.smelt_fn_call().is_some()))
+                        .unwrap_or(false);
+                    // AND the SELECT list contains a wildcard
+                    let has_wildcard = s
+                        .select_list()
+                        .map(|sl| sl.items().any(|item| item.is_wildcard()))
+                        .unwrap_or(false);
+                    has_smelt_fn_from && has_wildcard
+                })
+                .unwrap_or(false);
+            if is_wildcard_from_smelt_fn {
+                ctx.mark_cte_opaque(cte_name);
+            }
+        }
     }
 
     (ctx, dfs.diagnostics)
@@ -1833,6 +1890,8 @@ pub fn check_fragment_context_bindings(
 
         // Determine the effective inferred column set for this parameter.
         // For SelectItems<Kind, ctx_name>, use the ctx_name schema directly.
+        // Phase 22: ctx_name may refer to a CTE in the function body rather
+        // than a TableExpr parameter — check both.
         // For Expr<T> params, use the splice-point inferred context.
         let effective_inferred: Option<Vec<(String, TypedColumn)>> =
             if let Some(Ok(SmeltType::SelectItems {
@@ -1843,6 +1902,19 @@ pub fn check_fragment_context_bindings(
                 body_ctx
                     .tableexpr_param_columns(ctx_name)
                     .map(|cols| cols.to_vec())
+                    .or_else(|| {
+                        if body_ctx.is_cte(ctx_name) {
+                            Some(
+                                body_ctx
+                                    .cte_columns(ctx_name)
+                                    .into_iter()
+                                    .map(|(n, t)| (n.to_string(), t.clone()))
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
+                    })
             } else {
                 inferred.get(&param.name).cloned()
             };

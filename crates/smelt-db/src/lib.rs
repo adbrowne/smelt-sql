@@ -1404,38 +1404,112 @@ pub fn invalid_function_type_ref_diagnostics_for_file(
     out
 }
 
-/// Phase 19: emit `UnknownContext` when an `Expr<T, ctx>` parameter's
-/// context name doesn't match any other parameter in the same `smelt.define`.
-/// CTE resolution is deferred to Phase 20.
+/// Phase 22 helper: collect the CTE names declared in the WITH clause of
+/// `fn_name`'s body SELECT inside `ast`.
+///
+/// Returns an empty vec when the function has no SELECT body, no WITH
+/// clause, or when `fn_name` isn't found.  Pure — only walks the CST.
+fn cte_names_from_define(ast: &AstFile, fn_name: &str) -> Vec<String> {
+    for define in ast.defines() {
+        if define.name().as_deref() != Some(fn_name) {
+            continue;
+        }
+        let Some(body) = define.body() else {
+            return vec![];
+        };
+        let Some(select) = body.select_stmt() else {
+            return vec![];
+        };
+        let Some(with_clause) = select.with_clause() else {
+            return vec![];
+        };
+        return with_clause.ctes().filter_map(|c| c.name()).collect();
+    }
+    vec![]
+}
+
+/// Phase 19: emit `UnknownContext` when an `Expr<T, ctx>` or
+/// `SelectItems<Kind, ctx>` parameter's context name doesn't match any other
+/// parameter **or CTE name** in the same `smelt.define`.
+///
+/// Phase 22 extends this function to:
+/// 1. Also validate the context embedded in `SelectItems<Kind, ctx>` type
+///    annotations (previously only `param.context` / `Expr<T, ctx>` was
+///    checked).
+/// 2. Accept CTE names from the function body's WITH clause as valid
+///    context names — so `metrics: SelectItems<Agg, sessionized>` does not
+///    emit `UnknownContext` when `sessionized` is defined as a CTE in the
+///    same function body.
 ///
 /// Pure: re-uses the cached `file_signature_inputs` output.
 pub fn unknown_context_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
+    use smelt_types::signatures::{ContextRef, SmeltType};
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return vec![];
+    };
+
     let sigs = file_signature_inputs(db, file);
     let mut out = Vec::new();
     for sig in sigs.iter() {
         let param_names: Vec<&str> = sig.params.iter().map(|p| p.name.as_str()).collect();
+        let cte_names = cte_names_from_define(&ast, &sig.name);
+
+        let is_valid_ctx = |ctx_name: &str| -> bool {
+            param_names.contains(&ctx_name) || cte_names.iter().any(|n| n == ctx_name)
+        };
+
         for param in &sig.params {
-            let Some(ctx_ref) = &param.context else {
-                continue;
-            };
-            let ctx_name = ctx_ref.name();
-            if !param_names.contains(&ctx_name) {
-                let Some(range) = param.type_ref_range else {
-                    continue;
-                };
-                out.push(Diagnostic {
-                    severity: DiagnosticSeverity::Error,
-                    message: format!(
-                        "Context `{ctx_name}` in parameter `{}` does not name a parameter in `{}`",
-                        param.name, sig.name
-                    ),
-                    range,
-                    code: Some(DiagnosticCode::UnknownContext),
-                    data: None,
-                });
+            // Case 1: `Expr<T, ctx>` / `AggExpr<T, ctx>` / `WindowExpr<T, ctx>` —
+            // context is stored in `param.context`.
+            if let Some(ctx_ref) = &param.context {
+                let ctx_name = ctx_ref.name();
+                if !is_valid_ctx(ctx_name) {
+                    let Some(range) = param.type_ref_range else {
+                        continue;
+                    };
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Context `{ctx_name}` in parameter `{}` does not name a parameter \
+                             or CTE in `{}`",
+                            param.name, sig.name
+                        ),
+                        range,
+                        code: Some(DiagnosticCode::UnknownContext),
+                        data: None,
+                    });
+                }
+            }
+
+            // Case 2: `SelectItems<Kind, ctx>` — context is stored inside
+            // `param.type_ref` as `SmeltType::SelectItems { context: Some(...) }`.
+            if let Some(Ok(SmeltType::SelectItems {
+                context: Some(ContextRef(ctx_name)),
+                ..
+            })) = &param.type_ref
+            {
+                if !is_valid_ctx(ctx_name) {
+                    let Some(range) = param.type_ref_range else {
+                        continue;
+                    };
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Context `{ctx_name}` in parameter `{}` does not name a parameter \
+                             or CTE in `{}`",
+                            param.name, sig.name
+                        ),
+                        range,
+                        code: Some(DiagnosticCode::UnknownContext),
+                        data: None,
+                    });
+                }
             }
         }
     }
@@ -2358,6 +2432,16 @@ impl SalsaRefSchemaProvider<'_> {
                 body_ctx.add_function_signature(&s.name, s.clone());
             }
         }
+
+        // Phase 22: extract CTE schemas from the body's WITH clause so
+        // that `infer_tableexpr_return_schema` can resolve bare column
+        // references that come from CTE-derived rows (e.g. `session_id`
+        // in `session_rollup` whose body SELECTs from a `sessionized` CTE).
+        // Cycle diagnostics are discarded — they're surfaced separately by
+        // `cte_cycle_diagnostics_for_file`.
+        let (body_ctx_with_ctes, _cycle_diags) =
+            function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
+        let body_ctx = body_ctx_with_ctes;
 
         let schema = infer_tableexpr_return_schema(&body_select, &body_ctx)?;
         // Project to (name, TypedColumn) pairs.
