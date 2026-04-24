@@ -495,6 +495,56 @@ impl TypeContext {
         self.lookup_column(qualifier, name)
     }
 
+    /// Return all `(column_name, typed_column)` pairs whose qualifier
+    /// (the part before the `.`) matches `qualifier` in any of the
+    /// source, model, or CTE column maps.
+    ///
+    /// Used by Phase 36 struct-parameter resolution to enumerate the
+    /// concrete columns reachable through a table alias passed as a
+    /// struct argument (e.g. `smelt.fn.event_hour(e)` where `e` is an
+    /// alias for `smelt.source('source.events') AS e`).
+    ///
+    /// Alias resolution is applied first so `e` maps to `events` (or
+    /// whatever the underlying table name is). Returns an empty `Vec`
+    /// when no columns are found under `qualifier`.
+    pub fn columns_for_qualifier(&self, qualifier: &str) -> Vec<(&str, &TypedColumn)> {
+        // Resolve alias first.
+        let resolved = self
+            .aliases
+            .get(qualifier)
+            .map(|s| s.as_str())
+            .unwrap_or(qualifier);
+        let prefix = format!("{}.", resolved);
+
+        let mut result: Vec<(&str, &TypedColumn)> = Vec::new();
+
+        // CTE columns.
+        for (key, tc) in &self.cte_columns {
+            if let Some(col) = key.strip_prefix(&prefix) {
+                result.push((col, tc));
+            }
+        }
+        // Model columns.
+        for (key, tc) in &self.model_columns {
+            if let Some(col) = key.strip_prefix(&prefix) {
+                result.push((col, tc));
+            }
+        }
+        // Source columns (stored as `src.tbl.col` or `tbl.col`).
+        // We match both the simple `<table>.col` form and the
+        // fully-qualified `<source>.<table>.col` form.
+        for (key, tc) in &self.source_columns {
+            if let Some(col) = key.strip_prefix(&prefix) {
+                // Avoid nested qualifiers: `col` must be a bare name.
+                if !col.contains('.') {
+                    result.push((col, tc));
+                }
+            }
+        }
+
+        result
+    }
+
     /// Take and clear the list of column lookups that returned None.
     /// Used by property-based tests to discover missing columns.
     pub fn take_missed_lookups(&self) -> Vec<(Option<String>, String)> {

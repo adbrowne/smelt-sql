@@ -18,6 +18,10 @@ sources:
             type: VARCHAR
             description: "Type of event (page_view, click, etc.)"
 
+          - name: ts
+            type: TIMESTAMP
+            description: "Event timestamp (Phase 36: used by event_hour struct param)"
+
       session_events:
         description: "Events laid out for sessionize — Phase 17 fixture"
         columns:

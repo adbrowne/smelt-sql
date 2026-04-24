@@ -1142,10 +1142,7 @@ fn struct_expr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
         return None;
     }
     // Look for a STRUCT_TYPE descendant inside the TYPE_REF.
-    let struct_node = tr
-        .syntax()
-        .descendants()
-        .find_map(StructType::cast)?;
+    let struct_node = tr.syntax().descendants().find_map(StructType::cast)?;
 
     let mut fields: Vec<(String, DataType)> = Vec::new();
     for sf in struct_node.fields() {
@@ -1155,8 +1152,7 @@ fn struct_expr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
         // concrete in v1 — constraints like `Numeric` are not yet supported
         // inside struct field positions). Fall back to Unknown for unrecognised
         // names so diagnostics don't cascade.
-        let dt = crate::parse_type(inner_text.trim())
-            .unwrap_or(DataType::Unknown);
+        let dt = crate::parse_type(inner_text.trim()).unwrap_or(DataType::Unknown);
         fields.push((name, dt));
     }
 

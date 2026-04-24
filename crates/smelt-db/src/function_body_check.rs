@@ -19,7 +19,7 @@ use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
-    SchemaMismatch, SchemaRequirement, Signature, SmeltType, Tier, TypeConstraint,
+    SchemaMismatch, SchemaRequirement, Signature, SmeltType, StructRowTail, Tier, TypeConstraint,
     UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
@@ -269,6 +269,88 @@ pub(crate) fn tableexpr_schema_requirement(p: &ParamSpec) -> Option<&SchemaRequi
     }
 }
 
+/// Is this parameter an `Expr<Struct<{…}>>` sort?
+///
+/// Phase 36 treats struct parameters similarly to `TableExpr` parameters:
+/// the caller-supplied column schema is consulted at call-site expansion
+/// to unify the declared field requirements against the concrete argument.
+pub(crate) fn is_struct_param(p: &ParamSpec) -> bool {
+    matches!(&p.type_ref, Some(Ok(SmeltType::Struct { .. })))
+}
+
+/// Extract the declared fields and tail from a `Struct<{…}>` parameter.
+///
+/// Returns `None` for non-struct parameters (shouldn't happen if the caller
+/// already checked [`is_struct_param`]).
+pub(crate) fn struct_param_fields(
+    p: &ParamSpec,
+) -> Option<(&Vec<(String, DataType)>, &StructRowTail)> {
+    match &p.type_ref {
+        Some(Ok(SmeltType::Struct { fields, tail })) => Some((fields, tail)),
+        _ => None,
+    }
+}
+
+/// Pure struct-field unification (Phase 36).
+///
+/// Given the declared fields of an `Expr<Struct<{…}>>` parameter and the
+/// concrete fields of the argument expression, verify that every declared
+/// field is present and type-compatible.
+///
+/// Returns:
+/// - `Ok(Some(extras))` when the tail is `Named` and there are extra fields.
+/// - `Ok(None)` when the requirement is satisfied with no named tail, or
+///   when the tail is `Named` but there are no extras.
+/// - `Err(mismatch)` when a declared field is missing or has an incompatible
+///   type in the concrete argument.
+///
+/// Uses the same [`SchemaMismatch`] type as `check_schema_requirement` so
+/// `row_requirement_diagnostic` can render the error message identically.
+///
+/// Pure — no Salsa, no I/O.
+pub fn check_struct_row_var_binding(
+    declared_fields: &[(String, DataType)],
+    concrete_fields: &[(String, DataType)],
+    tail: &StructRowTail,
+) -> Result<Option<Vec<(String, DataType)>>, SchemaMismatch> {
+    use smelt_types::signatures::DataTypeReq;
+
+    // 1. Every declared field must be present in the concrete set with a
+    //    compatible type.
+    for (field_name, required_type) in declared_fields {
+        let Some((_, actual_dt)) = concrete_fields.iter().find(|(n, _)| n == field_name) else {
+            return Err(SchemaMismatch::MissingColumn {
+                column: field_name.clone(),
+                required: DataTypeReq::Concrete(required_type.clone()),
+            });
+        };
+        // Use the same assignment-compatibility check used elsewhere in
+        // the checker. We only care about exact-type or widening here:
+        // `Timestamp` must be `Timestamp`, `Integer` may widen to `BigInt`.
+        if !types_assignment_compatible(required_type, actual_dt) {
+            return Err(SchemaMismatch::TypeMismatch {
+                column: field_name.clone(),
+                required: DataTypeReq::Concrete(required_type.clone()),
+                actual: actual_dt.to_string(),
+            });
+        }
+    }
+
+    // 2. Collect extras (concrete fields not in declared).
+    let declared_names: std::collections::HashSet<&str> =
+        declared_fields.iter().map(|(n, _)| n.as_str()).collect();
+    let extras: Vec<(String, DataType)> = concrete_fields
+        .iter()
+        .filter(|(n, _)| !declared_names.contains(n.as_str()))
+        .cloned()
+        .collect();
+
+    match tail {
+        StructRowTail::None | StructRowTail::Anon => Ok(None),
+        StructRowTail::Named(_name) => Ok(Some(extras)),
+    }
+}
+
 /// Build a [`Diagnostic`] describing a row-requirement failure
 /// (Phase 16).
 ///
@@ -297,6 +379,48 @@ fn row_requirement_diagnostic(
             actual,
         } => format!(
             "Column `{}` in argument for parameter `{}` of `smelt.fn.{}` has type `{}`, expected `{}`",
+            column,
+            param_name,
+            fn_name,
+            actual,
+            required.render()
+        ),
+    };
+    Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        message,
+        range: arg_range,
+        code: Some(DiagnosticCode::RowRequirementUnsatisfied),
+        data: None,
+    }
+}
+
+/// Build a [`Diagnostic`] describing a struct field-requirement failure
+/// (Phase 36).
+///
+/// Message shape: "Struct argument for `<param>` of `smelt.fn.<fn>` is missing
+/// field `<col>: <type>`" — mirrors the TableExpr wording but uses "field"
+/// instead of "column" to match struct terminology.
+fn struct_field_diagnostic(
+    mismatch: &SchemaMismatch,
+    fn_name: &str,
+    param_name: &str,
+    arg_range: Range,
+) -> Diagnostic {
+    let message = match mismatch {
+        SchemaMismatch::MissingColumn { column, required } => format!(
+            "Struct argument for `{}` of `smelt.fn.{}` is missing field `{}: {}`",
+            param_name,
+            fn_name,
+            column,
+            required.render()
+        ),
+        SchemaMismatch::TypeMismatch {
+            column,
+            required,
+            actual,
+        } => format!(
+            "Field `{}` in struct argument for `{}` of `smelt.fn.{}` has type `{}`, expected `{}`",
             column,
             param_name,
             fn_name,
@@ -771,6 +895,125 @@ pub fn check_smelt_fn_call(
             continue;
         }
 
+        // Phase 36: `Expr<Struct<{…}>>` parameters — look up the caller's
+        // schema for the argument expression (same path as TableExpr), then
+        // unify the declared struct fields against the concrete columns.
+        //
+        // On success, the parameter is bound as a scalar `DataType::Unknown`
+        // in `body_ctx` (the body references `event.ts` which is a qualified
+        // column, not a bare struct access). The named row-variable binding is
+        // also recorded so the body and return-type phases (37+) can reference
+        // the extras. On failure, emit `RowRequirementUnsatisfied` and
+        // short-circuit body re-walk.
+        if is_struct_param(param) {
+            if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
+                // Resolve the argument to a concrete column set.
+                //
+                // Primary path: `tableexpr_schema_lookup` handles the case
+                // where the argument is `smelt.ref('model')` or
+                // `smelt.source('src.tbl')` directly. This covers the
+                // TableExpr-style usage.
+                //
+                // Fallback path: the argument is a bare alias (`e`) for a
+                // FROM-clause item. Look up all columns whose qualifier
+                // matches the argument text in `ctx`.
+                let cols = tableexpr_schema_lookup(arg_expr, ctx)
+                    .or_else(|| {
+                        // Get the argument expression text and treat it as a
+                        // qualifier, collecting all source/model columns under
+                        // that qualifier from `ctx`.
+                        let qualifier = arg_expr.text().trim().to_string();
+                        if qualifier.is_empty() {
+                            return None;
+                        }
+                        let cols: Vec<(String, TypedColumn)> = ctx
+                            .columns_for_qualifier(&qualifier)
+                            .into_iter()
+                            .map(|(col_name, tc)| (col_name.to_string(), tc.clone()))
+                            .collect();
+                        if cols.is_empty() {
+                            None
+                        } else {
+                            Some(cols)
+                        }
+                    })
+                    .unwrap_or_default();
+                let concrete_fields: Vec<(String, DataType)> = cols
+                    .iter()
+                    .map(|(n, tc)| (n.clone(), tc.data_type.clone()))
+                    .collect();
+
+                if let Some((declared_fields, tail)) = struct_param_fields(param) {
+                    if concrete_fields.is_empty() {
+                        // Could not resolve argument schema — skip field
+                        // checking and bind the param to Unknown. The body
+                        // will still be walked (since Struct params are
+                        // Tier-1 call-site expansion targets) but without
+                        // concrete type information.
+                        body_ctx.add_function_param(
+                            &param.name,
+                            TypedColumn::nullable(DataType::Unknown),
+                        );
+                        frame_bindings.push((param.name.clone(), "Struct<unknown>".to_string()));
+                    } else {
+                        match check_struct_row_var_binding(declared_fields, &concrete_fields, tail)
+                        {
+                            Ok(extras_opt) => {
+                                // Bind the param as Unknown scalar (qualified
+                                // references like `event.ts` resolve through the
+                                // source columns already in `ctx`, not through this
+                                // function-param binding).
+                                body_ctx.add_function_param(
+                                    &param.name,
+                                    TypedColumn::nullable(DataType::Unknown),
+                                );
+                                // Record named row-variable binding when present.
+                                if let (StructRowTail::Named(var_name), Some(extras)) =
+                                    (tail, extras_opt)
+                                {
+                                    body_ctx.set_row_var_binding(var_name, extras);
+                                }
+                                frame_bindings.push((
+                                    param.name.clone(),
+                                    format!("Struct<{} fields>", concrete_fields.len()),
+                                ));
+                            }
+                            Err(mismatch) => {
+                                diagnostics.push(struct_field_diagnostic(
+                                    &mismatch,
+                                    &sig.name,
+                                    &param.name,
+                                    to_range(*arg_range, text),
+                                ));
+                                frame_bindings
+                                    .push((param.name.clone(), "<struct-req-failed>".to_string()));
+                            }
+                        }
+                    }
+                } else {
+                    // Malformed Struct annotation — fall back to Unknown.
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), "Struct<?>".to_string()));
+                }
+            } else if !param.has_default {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Missing required argument `{}` for `smelt.fn.{}`",
+                        param.name, sig.name
+                    ),
+                    range: path_range,
+                    code: Some(DiagnosticCode::MissingArgument),
+                    data: None,
+                });
+                frame_bindings.push((param.name.clone(), "<missing>".to_string()));
+            } else {
+                frame_bindings.push((param.name.clone(), "<default>".to_string()));
+            }
+            continue;
+        }
+
         match bindings.get(&param.name) {
             Some((arg_expr, arg_range)) => {
                 // Infer the argument's type in the *call-site* context.
@@ -894,13 +1137,16 @@ pub fn check_smelt_fn_call(
     // already ran. Re-walking the body here would only re-report errors that
     // were already surfaced at definition time (Phases 23/24).
     //
-    // Exception: functions with `TableExpr` or `SelectItems` parameters still
-    // need call-site expansion because their bodies reference caller-supplied
-    // column schemas that are only known at the call site.
+    // Exception: functions with `TableExpr`, `SelectItems`, or `Struct`
+    // parameters still need call-site expansion because their bodies
+    // reference caller-supplied column schemas that are only known at the
+    // call site. Phase 36 adds `Struct` to this set.
     let has_schema_param = sig.params.iter().any(|p| {
         matches!(
             &p.type_ref,
-            Some(Ok(SmeltType::TableExpr(_))) | Some(Ok(SmeltType::SelectItems { .. }))
+            Some(Ok(SmeltType::TableExpr(_)))
+                | Some(Ok(SmeltType::SelectItems { .. }))
+                | Some(Ok(SmeltType::Struct { .. }))
         )
     });
     if sig.tier != Tier::One && !has_schema_param {

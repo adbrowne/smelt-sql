@@ -23,8 +23,8 @@ pub use signatures::{
     parse_smelt_type, subkind_of, unify_call, unify_call_with_expected, BackendSet,
     BuiltinRegistry, ContextRef, DataTypeHash, DataTypeReq, ExprKind, FrameInfo,
     FrontmatterParseError, FunctionSig, ParamSpec, RowTail, RowVarBinding, SchemaRequirement,
-    SigOrigin, SigParam, Signature, SignatureBuildError, SmeltType, SmeltTypeParseError, Tier,
-    TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
+    SigOrigin, SigParam, Signature, SignatureBuildError, SmeltType, SmeltTypeParseError,
+    StructRowTail, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
 };
 
 /// SQL data types supported by smelt
