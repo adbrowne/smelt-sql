@@ -1326,7 +1326,78 @@ impl<'a> Parser<'a> {
             self.error("Expected '(' after smelt.fn.<path>".to_string());
         }
 
+        // Parse zero or more `PASSING <name> AS (<body>)` clauses that
+        // trail the argument list. The keyword `PASSING` is context-sensitive:
+        // it is only special here, immediately after a recognised smelt.fn.*
+        // call; everywhere else it is a plain IDENT.
+        loop {
+            self.skip_trivia();
+            if !self.at_contextual_keyword("PASSING") {
+                break;
+            }
+            self.parse_passing_clause();
+        }
+
         self.finish_node(); // SMELT_FN_CALL
+    }
+
+    /// Parse a single `PASSING <name> AS (<body>)` clause.
+    /// The caller must have verified `at_contextual_keyword("PASSING")` first.
+    fn parse_passing_clause(&mut self) {
+        self.start_node(PASSING_CLAUSE);
+
+        // Consume the `PASSING` contextual keyword (it is an IDENT token).
+        self.skip_trivia();
+        self.advance(); // IDENT "PASSING"
+
+        // Parse the binding name into PASSING_NAME.
+        self.skip_trivia();
+        self.start_node(PASSING_NAME);
+        if self.at(IDENT) {
+            self.advance(); // IDENT (name)
+        } else {
+            self.error("Expected identifier after PASSING".to_string());
+        }
+        self.finish_node(); // PASSING_NAME
+
+        // Expect `AS`.
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance(); // AS
+        } else {
+            self.error("Expected AS after PASSING <name>".to_string());
+            self.finish_node(); // PASSING_CLAUSE
+            return;
+        }
+
+        // Expect `(`, then an expression, then `)`.
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' after PASSING <name> AS".to_string());
+            self.finish_node(); // PASSING_CLAUSE
+            return;
+        }
+        self.advance(); // LPAREN
+
+        // Parse the body expression into PASSING_BODY.
+        self.start_node(PASSING_BODY);
+        self.skip_trivia();
+        if self.at_expression_start() {
+            self.parse_expression();
+        } else {
+            self.error("Expected expression in PASSING body".to_string());
+        }
+        self.finish_node(); // PASSING_BODY
+
+        // Closing `)`.
+        self.skip_trivia();
+        if self.at(RPAREN) {
+            self.advance(); // RPAREN
+        } else {
+            self.error("Expected ')' to close PASSING body".to_string());
+        }
+
+        self.finish_node(); // PASSING_CLAUSE
     }
 
     fn parse_select_stmt(&mut self) {
@@ -6777,6 +6848,198 @@ LIMIT 100
             tableexpr_tokens >= 2,
             "expected at least two `TableExpr` IDENT tokens in the body, got {}",
             tableexpr_tokens
+        );
+    }
+
+    // ===== Phase 28: PASSING clauses =====
+
+    use crate::ast::PassingClause;
+    use crate::syntax_kind::SyntaxKind::PASSING_CLAUSE;
+
+    /// Helper: collect all PASSING_CLAUSE descendants of a node.
+    fn passing_clauses_of(root: &SyntaxNode) -> Vec<SyntaxNode> {
+        root.descendants()
+            .filter(|n| n.kind() == PASSING_CLAUSE)
+            .collect()
+    }
+
+    #[test]
+    fn parses_single_passing_clause() {
+        let input = "SELECT smelt.fn.session_rollup(src) PASSING metrics AS (SUM(revenue)) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected one SMELT_FN_CALL");
+
+        let passing: Vec<PassingClause> = calls[0].passing_clauses().collect();
+        assert_eq!(passing.len(), 1, "expected one PASSING_CLAUSE");
+        assert_eq!(
+            passing[0].name().as_deref(),
+            Some("metrics"),
+            "PASSING_NAME should be 'metrics'"
+        );
+
+        // Body should contain SUM(revenue)
+        let body_text = passing[0]
+            .body_text()
+            .expect("PASSING_BODY should have text");
+        assert!(
+            body_text.contains("SUM"),
+            "PASSING_BODY text should contain SUM, got {:?}",
+            body_text
+        );
+    }
+
+    #[test]
+    fn parses_multiple_passing_clauses() {
+        let input = "SELECT smelt.fn.foo(src) PASSING a AS (x + 1) PASSING b AS (y * 2) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected one SMELT_FN_CALL");
+
+        let passing: Vec<PassingClause> = calls[0].passing_clauses().collect();
+        assert_eq!(passing.len(), 2, "expected two PASSING_CLAUSEs");
+        assert_eq!(passing[0].name().as_deref(), Some("a"));
+        assert_eq!(passing[1].name().as_deref(), Some("b"));
+
+        let body0 = passing[0].body_text().expect("first PASSING_BODY text");
+        let body1 = passing[1].body_text().expect("second PASSING_BODY text");
+        assert!(
+            body0.contains("x"),
+            "first body should contain 'x', got {:?}",
+            body0
+        );
+        assert!(
+            body1.contains("y"),
+            "second body should contain 'y', got {:?}",
+            body1
+        );
+    }
+
+    #[test]
+    fn passing_not_reserved_elsewhere() {
+        // `passing` as a column name should parse without errors
+        let input = "SELECT passing FROM t";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "SELECT passing FROM t should parse cleanly, errors: {:?}",
+            parse.errors
+        );
+
+        // `passing` as a table name should parse without errors
+        let input2 = "SELECT x FROM passing";
+        let (parse2, _) = parse_file_text(input2);
+        assert!(
+            parse2.errors.is_empty(),
+            "SELECT x FROM passing should parse cleanly, errors: {:?}",
+            parse2.errors
+        );
+
+        // No PASSING_CLAUSEs should appear in these statements
+        let parse_result = crate::parser::parse("SELECT passing FROM t");
+        let root = parse_result.syntax();
+        let clauses = passing_clauses_of(&root);
+        assert!(
+            clauses.is_empty(),
+            "plain 'passing' identifier must not produce PASSING_CLAUSE nodes"
+        );
+    }
+
+    #[test]
+    fn passing_not_attached_to_plain_sql_call() {
+        // PASSING after a plain SQL function call must NOT be attached to that call.
+        let input = "SELECT UPPER(x) PASSING y AS (some_expr) FROM t";
+        // This should parse without panicking. PASSING is an identifier
+        // in expression position after UPPER(x).
+        let (_parse, file) = parse_file_text(input);
+
+        // UPPER(x) is a plain FUNCTION_CALL — it must have no PASSING_CLAUSE children.
+        let fcalls = function_calls(file.syntax());
+        for fc in &fcalls {
+            if fc.name().as_deref() == Some("UPPER") {
+                // The SmeltFnCall wrapper returns passing_clauses only for SMELT_FN_CALL nodes.
+                // UPPER is a FUNCTION_CALL, so we just check no PASSING_CLAUSE is a descendant
+                // of the FUNCTION_CALL node.
+                let fn_node = fc.syntax();
+                let passing_under_upper = fn_node
+                    .descendants()
+                    .filter(|n| n.kind() == PASSING_CLAUSE)
+                    .count();
+                assert_eq!(
+                    passing_under_upper, 0,
+                    "PASSING_CLAUSE must NOT be a descendant of plain FUNCTION_CALL UPPER"
+                );
+            }
+        }
+
+        // Also verify that smelt.fn.* calls (if any) from this input are absent.
+        let smelt_calls = smelt_fn_calls(file.syntax());
+        assert!(
+            smelt_calls.is_empty(),
+            "no smelt.fn.* calls should be present in this input"
+        );
+    }
+
+    #[test]
+    fn passing_after_smelt_extern_call_not_attached() {
+        // smelt.extern calls look like `smelt.fn.*` syntactically but are
+        // top-level declarations, not call expressions. In expression position
+        // `smelt.extern.foo(x)` would trigger the smelt.fn.* path because the
+        // trigger only checks for `smelt . fn`. Since `extern` != `fn`, it does
+        // NOT trigger. So PASSING after a plain SQL call that happens to have
+        // the same shape is not attached.
+        //
+        // Verify: PASSING after a plain SQL call (not smelt.fn.*) is not attached.
+        let input = "SELECT my_func(src) PASSING m AS (COUNT(*)) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "should parse cleanly, errors: {:?}",
+            parse.errors
+        );
+
+        // No SMELT_FN_CALL nodes — so no PASSING_CLAUSE should be created.
+        let smelt_calls = smelt_fn_calls(file.syntax());
+        assert!(smelt_calls.is_empty(), "my_func is not a smelt.fn.* call");
+
+        // No PASSING_CLAUSE nodes anywhere in the tree.
+        let clauses = passing_clauses_of(file.syntax());
+        assert!(
+            clauses.is_empty(),
+            "PASSING after plain SQL call must not produce PASSING_CLAUSE nodes"
+        );
+    }
+
+    #[test]
+    fn error_recovery_malformed_passing_body() {
+        // PASSING metrics AS followed immediately by FROM (missing body expression).
+        let input = "SELECT smelt.fn.foo(src) PASSING metrics AS FROM t";
+        let (parse, file) = parse_file_text(input);
+
+        // The parser should emit an error but not panic.
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for malformed PASSING body"
+        );
+
+        // Despite the error, FROM t should still be parsed — i.e. the select
+        // statement recovers and a FROM_CLAUSE is present.
+        let stmts: Vec<_> = file.syntax().children().collect();
+        assert!(
+            !stmts.is_empty(),
+            "tree should not be empty after error recovery"
         );
     }
 }

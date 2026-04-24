@@ -648,6 +648,13 @@ impl SmeltFnCall {
     pub fn text_range(&self) -> TextRange {
         self.0.text_range()
     }
+
+    /// Iterate over the `PASSING_CLAUSE` children of this `SMELT_FN_CALL`, in
+    /// source order. Phase 28 attaches zero or more of these after the closing
+    /// `)` of the argument list.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
 }
 
 /// The dotted path inside a `SMELT_FN_CALL` — includes the literal
@@ -684,6 +691,46 @@ impl CallPath {
         // reason the path is shorter than expected (e.g. an error-recovery
         // case) we just return whatever remains.
         idents.into_iter().skip(2).collect()
+    }
+}
+
+/// A single `PASSING <name> AS (<body>)` clause attached to a `SMELT_FN_CALL`.
+/// Phase 28 introduces these as children of `SMELT_FN_CALL` nodes when the
+/// call is followed by one or more contextual `PASSING` keywords.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PassingClause(SyntaxNode);
+
+impl PassingClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PASSING_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The binding name — the `IDENT` text inside the `PASSING_NAME` child.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == PASSING_NAME)?
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .next()
+    }
+
+    /// Raw text of the expression inside `(...)` in the `PASSING_BODY` child,
+    /// with leading/trailing whitespace trimmed. Returns `None` if the body
+    /// node is absent (error-recovery case).
+    pub fn body_text(&self) -> Option<String> {
+        let body_node = self.0.children().find(|n| n.kind() == PASSING_BODY)?;
+        Some(body_node.text().to_string().trim().to_string())
     }
 }
 
