@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod graph;
+pub mod logical;
 #[cfg(feature = "python")]
 pub mod python_bridge;
 pub mod rules;

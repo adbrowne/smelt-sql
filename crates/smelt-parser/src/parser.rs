@@ -1070,9 +1070,10 @@ impl<'a> Parser<'a> {
 
     /// Parse the tail of an `Expr<T>` / `AggExpr<T>` / `WindowExpr<T>`
     /// type reference (Phase 19). Accepts:
-    ///   - `<T>`          — single data-type argument; consumed as flat tokens.
-    ///   - `<T, ctx>`     — data-type followed by a lowercase context identifier;
-    ///                      the context identifier is wrapped in `EXPR_CTX`.
+    ///
+    /// - `<T>` — single data-type argument; consumed as flat tokens.
+    /// - `<T, ctx>` — data-type followed by a lowercase context identifier;
+    ///   the context identifier is wrapped in `EXPR_CTX`.
     ///
     /// Falls back to `consume_type_ref_tail` for the no-`<` case.
     fn parse_expr_tail(&mut self) {

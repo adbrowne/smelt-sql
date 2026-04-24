@@ -16,5 +16,8 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 pyo3 = { workspace = true, optional = true }
 
+[dev-dependencies]
+smelt-db = { path = "../smelt-db" }
+
 [features]
 python = ["pyo3"]

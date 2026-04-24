@@ -4086,6 +4086,7 @@ dependencies = [
  "smelt-core",
  "smelt-dialect",
  "smelt-parser",
+ "smelt-planner",
  "smelt-types",
  "tempfile",
 ]
@@ -4153,6 +4154,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "smelt-core",
+ "smelt-db",
  "smelt-parser",
  "smelt-types",
 ]
