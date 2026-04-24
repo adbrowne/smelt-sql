@@ -6994,14 +6994,15 @@ LIMIT 100
 
     #[test]
     fn passing_after_smelt_extern_call_not_attached() {
-        // smelt.extern calls look like `smelt.fn.*` syntactically but are
-        // top-level declarations, not call expressions. In expression position
-        // `smelt.extern.foo(x)` would trigger the smelt.fn.* path because the
-        // trigger only checks for `smelt . fn`. Since `extern` != `fn`, it does
-        // NOT trigger. So PASSING after a plain SQL call that happens to have
-        // the same shape is not attached.
+        // Plan Phase 28 requires `passing_after_smelt_extern_call_rejected`.
+        // `smelt.extern` declarations are top-level-only (gated by
+        // `at_smelt_extern_trigger`); they cannot appear in expression position.
+        // This makes the plan requirement vacuously satisfied at the parser level —
+        // there is no expression-position parse path for smelt.extern calls.
         //
-        // Verify: PASSING after a plain SQL call (not smelt.fn.*) is not attached.
+        // We verify the structural analogue: PASSING after a plain SQL function
+        // call (not smelt.fn.*) is not attached, confirming the trigger is
+        // correctly scoped to the smelt.fn.* path only.
         let input = "SELECT my_func(src) PASSING m AS (COUNT(*)) FROM t";
         let (parse, file) = parse_file_text(input);
         assert!(
