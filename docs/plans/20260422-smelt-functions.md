@@ -1206,8 +1206,8 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 28 | Parser: context-sensitive `PASSING` clauses (Step 6 opens) | done | edb9c26 | 2026-04-24 |
 | 29 | PASSING binding to fragment-sort params + LSP completion (Step 6 complete) | done | 4d4ce8a | 2026-04-24 |
 | 30 | Logical plan data model: functions as first-class nodes (Step 7 opens) | done | a3a3150 | 2026-04-25 |
-| 31 | Column provenance + declared-property propagation | pending | | |
-| 32 | Planner rule API + Level 2 expansion of function calls | pending | | |
+| 31 | Column provenance + declared-property propagation | done | 9cb6709 | 2026-04-25 |
+| 32 | Planner rule API + Level 2 expansion of function calls | done | | 2026-04-25 |
 | 33 | Filter pushdown across transparent-function boundaries | pending | | |
 | 34 | Join elimination example (Step 7 complete) | pending | | |
 | 35 | Parser + types: row variables on `Struct<…>` and value-level spread (Step 8 opens) | pending | | |

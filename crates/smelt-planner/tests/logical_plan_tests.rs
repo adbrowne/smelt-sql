@@ -98,7 +98,10 @@ fn first_function_call(node: &Arc<LogicalNode>) -> Option<FunctionCallFields> {
             .as_ref()
             .and_then(first_function_call)
             .or_else(|| filter.as_ref().and_then(first_function_call)),
-        LogicalNode::TableRef { .. } | LogicalNode::Literal(_) => None,
+        LogicalNode::Cast { inner, .. } => first_function_call(inner),
+        LogicalNode::TableRef { .. }
+        | LogicalNode::Literal(_)
+        | LogicalNode::ExpandedCall { .. } => None,
     }
 }
 

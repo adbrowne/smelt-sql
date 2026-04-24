@@ -1,0 +1,201 @@
+//! Phase 32 — Logical-plan rewrite rules.
+//!
+//! This module defines the [`PlannerRule`] trait, the fixed-point execution
+//! loop [`apply_rules_to_fixed_point`], and the first rule:
+//! [`ExpandTransparentFunctionCalls`].
+//!
+//! # Design notes
+//!
+//! These are **logical-plan-level** rules that operate on the
+//! `Arc<LogicalNode>` tree.  They are completely separate from the
+//! *graph-level* rules in `crates/smelt-planner/src/rules/`, which operate
+//! on the model dependency graph.
+//!
+//! [`RuleContext`] is intentionally empty in Phase 32.  Future phases will
+//! add filter lists (which rules to skip), backend hints, etc.
+
+use std::sync::Arc;
+
+use smelt_types::DataType;
+
+use crate::logical::{FnId, FunctionProperties, LogicalNode, Plan, Provenance};
+
+// ---------------------------------------------------------------------------
+// Public API types
+// ---------------------------------------------------------------------------
+
+/// Context available to planner rules during a pass.
+///
+/// Phase 32: intentionally empty.  Phase 33+ will add filter lists and
+/// backend configuration.
+pub struct RuleContext;
+
+/// The result of applying a [`PlannerRule`] to a plan node.
+pub enum RuleResult {
+    /// The rule rewrote the plan; the new plan is returned.
+    Changed(Plan),
+    /// The rule did not modify the plan.
+    Unchanged,
+}
+
+/// Trait for a single logical-plan rewrite rule.
+///
+/// Implementations must be `Send + Sync` so they can be stored in
+/// `Vec<Box<dyn PlannerRule>>` and used from multiple threads.
+pub trait PlannerRule: Send + Sync {
+    /// Attempt to apply this rule to `plan`.
+    ///
+    /// Return [`RuleResult::Changed`] with the new plan if the rule fired,
+    /// or [`RuleResult::Unchanged`] if the rule did not apply.
+    fn apply(&self, plan: Plan, ctx: &RuleContext) -> RuleResult;
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-point loop
+// ---------------------------------------------------------------------------
+
+/// Run all `rules` over `plan` in a fixed-point loop.
+///
+/// Each pass applies every rule in order; if any rule fires the loop repeats
+/// from the beginning with the updated plan.  The loop terminates when a full
+/// pass completes without any rule returning [`RuleResult::Changed`].
+pub fn apply_rules_to_fixed_point(mut plan: Plan, rules: &[Box<dyn PlannerRule>]) -> Plan {
+    loop {
+        let mut changed = false;
+        for rule in rules {
+            match rule.apply(plan.clone(), &RuleContext) {
+                RuleResult::Changed(new_plan) => {
+                    plan = new_plan;
+                    changed = true;
+                }
+                RuleResult::Unchanged => {}
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// Rule: ExpandTransparentFunctionCalls
+// ---------------------------------------------------------------------------
+
+/// Expand every `FunctionCall { transparent: true }` into an [`LogicalNode::ExpandedCall`]
+/// marker node.
+///
+/// If the call's [`FunctionProperties::needs_cast`] flag is `true`, the
+/// `ExpandedCall` node is additionally wrapped in a [`LogicalNode::Cast`] node
+/// so that physical-plan emission can insert the appropriate SQL `CAST(…)`.
+///
+/// The rule recurses into `Select` and `Cast` children.  It returns
+/// [`RuleResult::Unchanged`] when no transparent call is found anywhere in the
+/// subtree, allowing the fixed-point loop to terminate.
+pub struct ExpandTransparentFunctionCalls;
+
+impl PlannerRule for ExpandTransparentFunctionCalls {
+    fn apply(&self, plan: Plan, _ctx: &RuleContext) -> RuleResult {
+        expand_recursive(plan)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn expand_recursive(node: Plan) -> RuleResult {
+    match node.as_ref() {
+        // --- transparent call: expand it ---
+        LogicalNode::FunctionCall {
+            transparent: true,
+            fn_id,
+            provenance,
+            properties,
+            ..
+        } => {
+            let expanded = build_expanded_call(fn_id, provenance, properties);
+            RuleResult::Changed(expanded)
+        }
+
+        // --- opaque or already-expanded: leave intact ---
+        LogicalNode::FunctionCall {
+            transparent: false, ..
+        }
+        | LogicalNode::ExpandedCall { .. }
+        | LogicalNode::TableRef { .. }
+        | LogicalNode::Literal(_) => RuleResult::Unchanged,
+
+        // --- structural nodes: recurse into children ---
+        LogicalNode::Select {
+            projections,
+            from,
+            filter,
+        } => expand_select(projections, from, filter),
+
+        LogicalNode::Cast { inner, target_type } => match expand_recursive(inner.clone()) {
+            RuleResult::Changed(new_inner) => RuleResult::Changed(Arc::new(LogicalNode::Cast {
+                inner: new_inner,
+                target_type: target_type.clone(),
+            })),
+            RuleResult::Unchanged => RuleResult::Unchanged,
+        },
+    }
+}
+
+/// Construct the `ExpandedCall` (plus optional `Cast` wrapper) for a transparent call.
+fn build_expanded_call(
+    fn_id: &FnId,
+    provenance: &Provenance,
+    properties: &FunctionProperties,
+) -> Plan {
+    let expanded: Plan = Arc::new(LogicalNode::ExpandedCall {
+        fn_id: fn_id.clone(),
+        provenance: provenance.clone(),
+        properties: properties.clone(),
+    });
+
+    if properties.needs_cast {
+        // Phase 32: use BigInt as a placeholder target type.
+        // Phase 33+ will resolve the actual return type from the function registry.
+        Arc::new(LogicalNode::Cast {
+            inner: expanded,
+            target_type: DataType::BigInt,
+        })
+    } else {
+        expanded
+    }
+}
+
+/// Recurse into a `Select` node's `from` and `filter` children.
+fn expand_select(projections: &[String], from: &Option<Plan>, filter: &Option<Plan>) -> RuleResult {
+    let from_result = from.as_ref().map(|f| expand_recursive(f.clone()));
+    let filter_result = filter.as_ref().map(|f| expand_recursive(f.clone()));
+
+    let from_changed = from_result
+        .as_ref()
+        .map(|r| matches!(r, RuleResult::Changed(_)))
+        .unwrap_or(false);
+    let filter_changed = filter_result
+        .as_ref()
+        .map(|r| matches!(r, RuleResult::Changed(_)))
+        .unwrap_or(false);
+
+    if from_changed || filter_changed {
+        let new_from = match from_result {
+            Some(RuleResult::Changed(p)) => Some(p),
+            _ => from.clone(),
+        };
+        let new_filter = match filter_result {
+            Some(RuleResult::Changed(p)) => Some(p),
+            _ => filter.clone(),
+        };
+        RuleResult::Changed(Arc::new(LogicalNode::Select {
+            projections: projections.to_vec(),
+            from: new_from,
+            filter: new_filter,
+        }))
+    } else {
+        RuleResult::Unchanged
+    }
+}

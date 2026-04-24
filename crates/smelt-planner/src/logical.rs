@@ -36,6 +36,9 @@ pub struct FunctionProperties {
     /// The function only appends data, never deletes or modifies existing rows.
     /// Declared with `append_only: true`.
     pub append_only: bool,
+    /// The function's return type requires an explicit SQL CAST in the emitted
+    /// physical plan. Declared with `needs_cast: true`.
+    pub needs_cast: bool,
     /// Column-level provenance parsed from the `provenance:` frontmatter key.
     ///
     /// Remains `Provenance::Unknown` when the key is absent. The Salsa layer
@@ -51,6 +54,7 @@ impl Default for FunctionProperties {
             deterministic: false,
             idempotent: false,
             append_only: false,
+            needs_cast: false,
             provenance: Provenance::Unknown,
         }
     }
@@ -108,6 +112,30 @@ pub enum LogicalNode {
     },
     /// A literal value node; carries the inferred [`DataType`].
     Literal(DataType),
+    /// Marks a `FunctionCall { transparent: true }` that has already been
+    /// expanded by [`crate::logical_plan_rules::ExpandTransparentFunctionCalls`].
+    ///
+    /// Carrying this marker prevents the expansion rule from re-visiting the
+    /// same node on subsequent fixed-point passes. The node carries the same
+    /// identifying information as the original `FunctionCall`.
+    ExpandedCall {
+        /// Fully-qualified function name.
+        fn_id: FnId,
+        /// Column-level provenance copied from the original `FunctionCall`.
+        provenance: Provenance,
+        /// Properties copied from the original `FunctionCall`.
+        properties: FunctionProperties,
+    },
+    /// Wraps an inner node with an explicit SQL CAST to `target_type`.
+    ///
+    /// Emitted by the expansion rule when `FunctionProperties::needs_cast` is
+    /// `true` on a transparent `FunctionCall`.
+    Cast {
+        /// The node whose output must be cast.
+        inner: Plan,
+        /// The target SQL type for the CAST expression.
+        target_type: DataType,
+    },
 }
 
 /// The root of a logical plan tree. A thin alias over `Arc<LogicalNode>`.
@@ -139,6 +167,8 @@ pub fn parse_function_properties(yaml_text: &str) -> FunctionProperties {
             props.idempotent = parse_bool_value(rest.trim());
         } else if let Some(rest) = trimmed.strip_prefix("append_only:") {
             props.append_only = parse_bool_value(rest.trim());
+        } else if let Some(rest) = trimmed.strip_prefix("needs_cast:") {
+            props.needs_cast = parse_bool_value(rest.trim());
         } else if let Some(rest) = trimmed.strip_prefix("provenance:") {
             if let Some(prov) = parse_provenance_value(rest.trim()) {
                 props.provenance = prov;
