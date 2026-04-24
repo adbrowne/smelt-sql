@@ -1201,7 +1201,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 23 | Tier 2 body check in isolation (Step 5 opens) | done | ee3fcaa | 2026-04-24 |
 | 24 | Tier 3 return-type verification + LSP hover | done | ac49e57 | 2026-04-24 |
 | 25 | Call-site bidirectional checking (pre-expansion) | done | 9928016 | 2026-04-24 |
-| 26 | Tier 2 → Tier 1 inline expansion | done | | 2026-04-24 |
+| 26 | Tier 2 → Tier 1 inline expansion | done | 21fb270 | 2026-04-24 |
 | 27 | Generics ↔ checking-mode interaction (Step 5 complete) | pending | | |
 | 28 | Parser: context-sensitive `PASSING` clauses (Step 6 opens) | pending | | |
 | 29 | PASSING binding to fragment-sort params + LSP completion (Step 6 complete) | pending | | |
