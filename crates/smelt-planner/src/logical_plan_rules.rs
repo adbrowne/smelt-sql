@@ -167,6 +167,96 @@ fn build_expanded_call(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rule: PushFilterIntoTransparentFunction
+// ---------------------------------------------------------------------------
+
+/// Push a `WHERE` predicate from an enclosing `Select` into a transparent
+/// `FunctionCall` as a `pushed_filter` hint.
+///
+/// # Conditions for firing
+///
+/// All of the following must hold:
+/// 1. The plan is a `Select { filter: Some(pred), from: Some(FunctionCall { .. }) }`.
+/// 2. The `FunctionCall` is transparent (`transparent: true`).
+/// 3. The `FunctionCall` has `Declared` (not `Unknown`) provenance — opaque
+///    provenance means we don't know whether it's safe to push.
+/// 4. The `FunctionCall`'s `properties.deterministic` is `true` — non-deterministic
+///    functions may return different rows on each invocation, making pre-filtering
+///    incorrect in general.
+/// 5. `pushed_filter` on the `FunctionCall` is `None` — once a filter is pushed
+///    the rule is idempotent and will not push a second time.
+///
+/// # Effect
+///
+/// * The `FunctionCall` node receives `pushed_filter: Some(pred)`.
+/// * The enclosing `Select`'s `filter` is set to `None` (predicate consumed).
+pub struct PushFilterIntoTransparentFunction;
+
+impl PlannerRule for PushFilterIntoTransparentFunction {
+    fn apply(&self, plan: Plan, _ctx: &RuleContext) -> RuleResult {
+        let LogicalNode::Select {
+            ref projections,
+            from: Some(ref from_node),
+            filter: Some(ref pred),
+        } = *plan
+        else {
+            return RuleResult::Unchanged;
+        };
+
+        let LogicalNode::FunctionCall {
+            ref fn_id,
+            ref args,
+            transparent,
+            ref provenance,
+            ref properties,
+            ref pushed_filter,
+        } = *from_node.as_ref()
+        else {
+            return RuleResult::Unchanged;
+        };
+
+        // Guard: must be transparent.
+        if !transparent {
+            return RuleResult::Unchanged;
+        }
+
+        // Guard: must have declared provenance.
+        if !matches!(provenance, Provenance::Declared(_)) {
+            return RuleResult::Unchanged;
+        }
+
+        // Guard: must be deterministic.
+        if !properties.deterministic {
+            return RuleResult::Unchanged;
+        }
+
+        // Guard: idempotent — don't push if already pushed.
+        if pushed_filter.is_some() {
+            return RuleResult::Unchanged;
+        }
+
+        // Build the updated FunctionCall with the filter pushed in.
+        let new_call = Arc::new(LogicalNode::FunctionCall {
+            fn_id: fn_id.clone(),
+            args: args.clone(),
+            transparent,
+            provenance: provenance.clone(),
+            properties: properties.clone(),
+            pushed_filter: Some(pred.clone()),
+        });
+
+        // Build the new Select with the filter cleared.
+        let new_select = Arc::new(LogicalNode::Select {
+            projections: projections.clone(),
+            from: Some(new_call),
+            filter: None,
+        });
+
+        RuleResult::Changed(new_select)
+    }
+}
+
 /// Recurse into a `Select` node's `from` and `filter` children.
 fn expand_select(projections: &[String], from: &Option<Plan>, filter: &Option<Plan>) -> RuleResult {
     let from_result = from.as_ref().map(|f| expand_recursive(f.clone()));

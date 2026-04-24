@@ -3779,6 +3779,7 @@ fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logi
                 transparent: input.transparent,
                 provenance: input.provenance,
                 properties: input.properties,
+                pushed_filter: None,
             })
         })
         .collect();

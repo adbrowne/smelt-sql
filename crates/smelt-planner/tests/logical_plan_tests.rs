@@ -87,6 +87,7 @@ fn first_function_call(node: &Arc<LogicalNode>) -> Option<FunctionCallFields> {
             transparent,
             provenance,
             properties,
+            ..
         } => Some(FunctionCallFields {
             fn_id: fn_id.clone(),
             transparent: *transparent,

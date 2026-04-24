@@ -23,6 +23,7 @@ fn make_transparent_call(fn_id: &str) -> Arc<LogicalNode> {
         transparent: true,
         provenance: Provenance::Unknown,
         properties: FunctionProperties::default(),
+        pushed_filter: None,
     })
 }
 
@@ -33,6 +34,7 @@ fn make_opaque_call(fn_id: &str) -> Arc<LogicalNode> {
         transparent: false,
         provenance: Provenance::Unknown,
         properties: FunctionProperties::default(),
+        pushed_filter: None,
     })
 }
 
@@ -43,6 +45,7 @@ fn make_transparent_call_with_provenance(fn_id: &str, provenance: Provenance) ->
         transparent: true,
         provenance,
         properties: FunctionProperties::default(),
+        pushed_filter: None,
     })
 }
 
@@ -56,6 +59,7 @@ fn make_needs_cast_call(fn_id: &str) -> Arc<LogicalNode> {
             needs_cast: true,
             ..FunctionProperties::default()
         },
+        pushed_filter: None,
     })
 }
 

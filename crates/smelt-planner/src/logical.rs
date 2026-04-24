@@ -94,6 +94,11 @@ pub enum LogicalNode {
         provenance: Provenance,
         /// Properties parsed from the function declaration's frontmatter.
         properties: FunctionProperties,
+        /// A WHERE predicate pushed down from an enclosing `Select` node by
+        /// the [`crate::logical_plan_rules::PushFilterIntoTransparentFunction`]
+        /// rule (Phase 33).  `None` means no filter has been pushed yet.
+        /// Once set, the rule will not push again (idempotent).
+        pushed_filter: Option<Plan>,
     },
     /// A reference to a named table or model output.
     TableRef {
