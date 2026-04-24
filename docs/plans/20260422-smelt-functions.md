@@ -1211,7 +1211,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 33 | Filter pushdown across transparent-function boundaries | done | 677f2e3 | 2026-04-25 |
 | 34 | Join elimination example (Step 7 complete) | done | | 2026-04-25 |
 | 35 | Parser + types: row variables on `Struct<…>` and value-level spread (Step 8 opens) | done | 17b6c8f | 2026-04-25 |
-| 36 | Row unification at call sites with value-level erasure | done | | 2026-04-25 |
+| 36 | Row unification at call sites with value-level erasure | done | 836925e | 2026-04-25 |
 | 37 | Row variable in return position: pass-through fields | pending | | |
 | 38 | `smelt.as_struct()` revisit (Step 8 complete) | pending | | |
 
