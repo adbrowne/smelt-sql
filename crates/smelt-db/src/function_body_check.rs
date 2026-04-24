@@ -124,6 +124,24 @@ pub fn check_function_body_with_expansion(
     check_function_body_inner(sig, body, text, Some(nested))
 }
 
+/// Phase-26 variant: walk a function body using a *caller-supplied* `TypeContext`
+/// rather than re-building one from the signature's parameter annotations.
+///
+/// Used by [`check_smelt_fn_call`] when expanding a Tier 1 body at a call site —
+/// the call-site-bound `body_ctx` already has concrete argument types, so we skip
+/// `seed_param_context` and use it directly. Duplicate-parameter checks are also
+/// skipped (they already ran at definition time via `function_body_diagnostics_for_file`).
+pub fn walk_body_with_ctx(
+    body: &Expr,
+    ctx: &TypeContext,
+    text: &str,
+    nested: &NestedCallHandler<'_>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    walk_body(body, ctx, text, &mut diagnostics, Some(nested));
+    diagnostics
+}
+
 fn check_function_body_inner(
     sig: &FunctionSig,
     body: &Expr,
@@ -888,7 +906,12 @@ pub fn check_smelt_fn_call(
 
     let inner = match &body_shape {
         BodyShape::Expression(body_expr) => {
-            check_function_body_with_expansion(&sig, body_expr, &body_text, &nested_handler)
+            // Phase 26: Use the call-site-bound `body_ctx` (which has concrete arg
+            // types from the caller) rather than re-seeding from the callee's
+            // signature. For Tier 1 functions all params are unannotated → seeding
+            // from the sig gives Unknown for every param, which suppresses type errors.
+            // Using `body_ctx` directly gives each param its actual caller-supplied type.
+            walk_body_with_ctx(body_expr, &body_ctx, &body_text, &nested_handler)
         }
         BodyShape::Select(select_stmt) => {
             // Phase 22: propagate the caller's workspace function signatures

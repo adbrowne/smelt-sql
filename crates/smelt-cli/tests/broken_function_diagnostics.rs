@@ -237,6 +237,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::ArgTypeMismatch,
         message_substring: "mul_typed_local",
     },
+    // Phase 26: Tier 2 body calls a Tier 1 helper with a broken body. The Tier 1
+    // body `x + 'text'` fails under Integer arg from the Tier 2 caller.
+    // Expected: FunctionBodyTypeMismatch cascaded to the Tier 2 definition site.
+    Case {
+        fixture: "fn_tier2_calls_broken_tier1.sql",
+        companion: None,
+        code: DiagnosticCode::FunctionBodyTypeMismatch,
+        message_substring: "`+`",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

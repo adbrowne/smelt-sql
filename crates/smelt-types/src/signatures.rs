@@ -2328,6 +2328,17 @@ fn format_type_constraint_hover(tc: &TypeConstraint) -> String {
     }
 }
 
+/// A cache-key-safe wrapper around a list of parameter (name, DataType) bindings.
+/// Used as a Salsa cache key for per-(callee, arg-types) expansion caching (Phase 26+).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DataTypeHash(pub Vec<(String, DataType)>);
+
+impl DataTypeHash {
+    pub fn new(bindings: Vec<(String, DataType)>) -> Self {
+        Self(bindings)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

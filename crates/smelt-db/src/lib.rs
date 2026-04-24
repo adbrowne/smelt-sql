@@ -872,13 +872,14 @@ pub fn duplicate_function_diagnostics_for_file(
 /// signature query, preserving §20H.
 pub fn function_body_diagnostics_for_file(
     db: &dyn salsa::Database,
+    workspace: Workspace,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
     use smelt_types::signatures::{SmeltType, SmeltTypeParseError};
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let text_raw = file.text(db);
-    let clean_text = smelt_parser::strip_frontmatter(text_raw);
+    let clean_text = smelt_parser::strip_frontmatter(text_raw).to_string();
     let Some(ast) = AstFile::cast(syntax) else {
         return Vec::new();
     };
@@ -904,6 +905,132 @@ pub fn function_body_diagnostics_for_file(
             _ => false,
         })
     };
+
+    // Phase 26: Build closures for nested Tier 1 expansion, mirroring the
+    // closure setup in `smelt_fn_call_diagnostics_for_file`. When the Tier 2
+    // body contains a `smelt.fn.*` call to a Tier 1 callee, we expand it
+    // using the Tier 2 context's concrete parameter types so errors cascade
+    // to the Tier 2 body check site with full frame stacks.
+    let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
+    files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+
+    let sig_lookup = |name: &str| -> Option<FunctionSig> {
+        resolve_function(db, workspace, name.to_string()).map(|arc| (*arc).clone())
+    };
+
+    let builtin_lookup = |name: &str| -> Option<&'static smelt_types::signatures::Signature> {
+        smelt_types::BuiltinRegistry::resolve(name)
+    };
+
+    let lub = |a: &DataType, b: &DataType| -> DataType {
+        let lhs = TypedColumn {
+            data_type: a.clone(),
+            nullable: true,
+        };
+        let rhs = TypedColumn {
+            data_type: b.clone(),
+            nullable: true,
+        };
+        type_inference::promote_types(&lhs, &rhs).data_type
+    };
+
+    let body_lookup = |sig: &FunctionSig| -> Option<(String, function_body_check::BodyShape)> {
+        if sig.origin == smelt_types::SigOrigin::Extern {
+            return None;
+        }
+        for f in &files {
+            let sigs = file_signature_inputs(db, *f);
+            if sigs.iter().any(|s| s.name == sig.name) {
+                let f_text = f.text(db);
+                let f_clean = smelt_parser::strip_frontmatter(f_text).to_string();
+                let f_parse = parse_file(db, *f);
+                let f_syntax = f_parse.syntax();
+                if let Some(ast) = AstFile::cast(f_syntax) {
+                    for define in ast.defines() {
+                        if define.name().as_deref() == Some(&sig.name) {
+                            if let Some(body) = define.body() {
+                                if let Some(select_stmt) = body.select_stmt() {
+                                    return Some((
+                                        f_clean,
+                                        function_body_check::BodyShape::Select(select_stmt),
+                                    ));
+                                }
+                                if let Some(body_expr) = body.expression() {
+                                    return Some((
+                                        f_clean,
+                                        function_body_check::BodyShape::Expression(body_expr),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let decl_lookup = |sig: &smelt_types::signatures::FunctionSig| -> Option<std::path::PathBuf> {
+        for f in &files {
+            let sigs = file_signature_inputs(db, *f);
+            if sigs.iter().any(|s| s.name == sig.name) {
+                return Some(f.path(db).clone());
+            }
+        }
+        None
+    };
+
+    let tableexpr_schema_lookup = |_arg_expr: &smelt_parser::ast::Expr,
+                                   _ctx: &TypeContext|
+     -> Option<Vec<(String, TypedColumn)>> {
+        // Tier 2 body checks have no call-site schema for TableExpr params.
+        // Those are skipped by `has_deferred_phase13_param` above anyway.
+        None
+    };
+
+    let default_type_lookup = |sig: &FunctionSig, param_name: &str| -> Option<DataType> {
+        let decl_path = decl_lookup(sig)?;
+        let f = files.iter().find(|f| f.path(db) == &decl_path)?;
+        let f_parse = parse_file(db, *f);
+        let ast = AstFile::cast(f_parse.syntax())?;
+        for define in ast.defines() {
+            if define.name().as_deref() != Some(&sig.name) {
+                continue;
+            }
+            let Some(param_list) = define.param_list() else {
+                continue;
+            };
+            for p in param_list.params() {
+                if p.name().as_deref() != Some(param_name) {
+                    continue;
+                }
+                let default_expr = p.default_value_expr()?;
+                let empty_ctx = TypeContext::new();
+                return type_inference::infer_expression_type(&default_expr, &empty_ctx)
+                    .map(|t| t.data_type);
+            }
+        }
+        None
+    };
+
+    let nested_handler = |call: &smelt_parser::ast::SmeltFnCall,
+                          nested_ctx: &TypeContext,
+                          nested_text: &str|
+     -> Vec<Diagnostic> {
+        function_body_check::check_smelt_fn_call(
+            call,
+            nested_ctx,
+            nested_text,
+            &sig_lookup,
+            &builtin_lookup,
+            &lub,
+            &body_lookup,
+            &decl_lookup,
+            &tableexpr_schema_lookup,
+            &default_type_lookup,
+        )
+    };
+
     let mut out = Vec::new();
     for define in ast.defines() {
         let Some(name) = define.name() else {
@@ -918,10 +1045,18 @@ pub fn function_body_diagnostics_for_file(
         let Some(body_expr) = define.body().and_then(|b| b.expression()) else {
             continue;
         };
-        out.extend(function_body_check::check_function_body(
+        // Phase 26: Use `check_function_body_with_expansion` for Tier 2/3
+        // functions so that nested `smelt.fn.*` calls to Tier 1 callees are
+        // expanded inline using the Tier 2 context's concrete parameter types.
+        // For Tier 1 functions (unannotated), `check_function_body` already
+        // runs expansion at call-site only; the nested handler still handles
+        // Tier 1 → Tier 1 chains correctly via the same guard in
+        // `check_smelt_fn_call`.
+        out.extend(function_body_check::check_function_body_with_expansion(
             sig,
             &body_expr,
             &clean_text,
+            &nested_handler,
         ));
         // Phase 24: Tier 3 return type check.
         if sig.tier == smelt_types::signatures::Tier::Three {
@@ -1705,7 +1840,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // regardless of whether the file contains a SELECT statement — pure
     // function files (functions/*.sql with no model) still surface body
     // diagnostics.
-    for diag in function_body_diagnostics_for_file(db, file) {
+    for diag in function_body_diagnostics_for_file(db, workspace, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 
