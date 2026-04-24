@@ -38,8 +38,9 @@ pub mod type_inference;
 pub mod yaml_edits;
 
 pub use function_body_check::{
-    check_fragment_context_bindings, extract_function_body_cte_schemas, infer_splice_contexts,
-    infer_tableexpr_return_schema, is_tier2_function,
+    check_fragment_context_bindings, check_tier3_return_type, declared_return_hover_text,
+    extract_function_body_cte_schemas, infer_splice_contexts, infer_tableexpr_return_schema,
+    is_tier2_function,
 };
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
@@ -348,6 +349,11 @@ pub enum DiagnosticCode {
     /// expression passed for `SelectItems<Agg>`). Anchored at the argument
     /// expression. Introduced in Phase 21 of smelt-functions.
     FragmentKindMismatch,
+    /// Emitted when a Tier 3 function's body synthesises a return type that
+    /// does not match the declared `-> Expr<T>` return annotation. Anchored
+    /// at the body expression span (not the function name). Introduced in
+    /// Phase 24 of smelt-functions.
+    ReturnTypeMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -917,6 +923,14 @@ pub fn function_body_diagnostics_for_file(
             &body_expr,
             &clean_text,
         ));
+        // Phase 24: Tier 3 return type check.
+        if sig.tier == smelt_types::signatures::Tier::Three {
+            out.extend(function_body_check::check_tier3_return_type(
+                sig,
+                &body_expr,
+                &clean_text,
+            ));
+        }
     }
     out
 }

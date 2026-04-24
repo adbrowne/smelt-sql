@@ -982,6 +982,7 @@ impl Backend {
                 DbCode::FragmentColumnMissing => "fragment-column-missing",
                 DbCode::AnnotationTooWide => "annotation-too-wide",
                 DbCode::FragmentKindMismatch => "fragment-kind-mismatch",
+                DbCode::ReturnTypeMismatch => "return-type-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });

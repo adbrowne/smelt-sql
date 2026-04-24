@@ -2018,6 +2018,81 @@ pub fn check_fragment_context_bindings(
     out
 }
 
+/// Check that a Tier 3 function's body synthesises a return type that is
+/// compatible with the declared `-> Expr<T>` annotation.
+///
+/// Only `Expr<T>` return annotations are checked — `TableExpr`, `SelectItems`,
+/// and other sorts are deferred to later phases. For non-`Expr<T>` annotations
+/// this function returns an empty vec (skip the check).
+///
+/// Returns a single `ReturnTypeMismatch` diagnostic anchored at the body
+/// expression when the synthesised type doesn't satisfy the declared
+/// constraint.
+///
+/// Pure — no Salsa dependency.
+pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr, text: &str) -> Vec<Diagnostic> {
+    use smelt_types::signatures::Tier;
+
+    // Only Tier 3 has a declared return type.
+    if sig.tier != Tier::Three {
+        return Vec::new();
+    }
+
+    // Extract the declared return constraint — only handle `Expr<T>` here.
+    // Skip `TableExpr`, `SelectItems`, and any parse error / absent annotation.
+    let declared_constraint = match &sig.return_type {
+        Some(Ok(SmeltType::Expr(constraint))) => constraint.clone(),
+        _ => return Vec::new(), // non-Expr<T> or missing — skip
+    };
+
+    // Build a seeded param context and infer the body's return type.
+    let ctx = seed_param_context(&sig.params);
+    let inferred = match infer_expression_type(body, &ctx) {
+        Some(tc) => tc.data_type,
+        None => return Vec::new(), // can't infer — skip
+    };
+
+    // Unknown / Null bodies can't be verified.
+    if matches!(inferred, DataType::Unknown | DataType::Null) {
+        return Vec::new();
+    }
+
+    // Check whether the inferred type satisfies the declared constraint.
+    if declared_constraint.satisfies(&inferred) {
+        return Vec::new();
+    }
+
+    // Mismatch — anchor at the body expression.
+    let body_range = to_range(body.text_range(), text);
+    let declared_text = sig
+        .return_type_text
+        .as_deref()
+        .unwrap_or("<unknown return type>");
+    vec![Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+            "Return type mismatch: declared `-> {}` but body evaluates to `{}`",
+            declared_text, inferred
+        ),
+        range: body_range,
+        code: Some(DiagnosticCode::ReturnTypeMismatch),
+        data: None,
+    }]
+}
+
+/// For a Tier 3 function, return the declared return type as a hover-ready
+/// string (e.g. `"-> Expr<Double>"`). Returns `None` for Tier 1/2 or when
+/// the return annotation is unparseable or absent.
+///
+/// Pure — no Salsa dependency.
+pub fn declared_return_hover_text(sig: &FunctionSig) -> Option<String> {
+    use smelt_types::signatures::Tier;
+    if sig.tier != Tier::Three {
+        return None;
+    }
+    sig.return_type_text.as_deref().map(|t| format!("-> {t}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

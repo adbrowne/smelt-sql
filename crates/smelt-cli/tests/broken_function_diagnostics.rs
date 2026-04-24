@@ -221,6 +221,14 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::FunctionBodyTypeMismatch,
         message_substring: "TEXT",
     },
+    // Phase 24: Tier 3 return type mismatch. Body returns Text but
+    // declaration says Expr<Integer>.
+    Case {
+        fixture: "fn_tier3_return_mismatch.sql",
+        companion: None,
+        code: DiagnosticCode::ReturnTypeMismatch,
+        message_substring: "TEXT",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {
