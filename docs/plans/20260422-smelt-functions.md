@@ -1204,7 +1204,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 26 | Tier 2 → Tier 1 inline expansion | done | 21fb270 | 2026-04-24 |
 | 27 | Generics ↔ checking-mode interaction (Step 5 complete) | done | 8f61b94 | 2026-04-24 |
 | 28 | Parser: context-sensitive `PASSING` clauses (Step 6 opens) | done | edb9c26 | 2026-04-24 |
-| 29 | PASSING binding to fragment-sort params + LSP completion (Step 6 complete) | done | TBD | 2026-04-24 |
+| 29 | PASSING binding to fragment-sort params + LSP completion (Step 6 complete) | done | 4d4ce8a | 2026-04-24 |
 | 30 | Logical plan data model: functions as first-class nodes (Step 7 opens) | pending | | |
 | 31 | Column provenance + declared-property propagation | pending | | |
 | 32 | Planner rule API + Level 2 expansion of function calls | pending | | |
