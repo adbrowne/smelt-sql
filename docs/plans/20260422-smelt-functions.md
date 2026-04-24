@@ -1200,7 +1200,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 22 | `session_rollup` end-to-end (Step 4 complete) | done | f09eeb4 | 2026-04-24 |
 | 23 | Tier 2 body check in isolation (Step 5 opens) | done | ee3fcaa | 2026-04-24 |
 | 24 | Tier 3 return-type verification + LSP hover | done | ac49e57 | 2026-04-24 |
-| 25 | Call-site bidirectional checking (pre-expansion) | done | | 2026-04-24 |
+| 25 | Call-site bidirectional checking (pre-expansion) | done | 9928016 | 2026-04-24 |
 | 26 | Tier 2 → Tier 1 inline expansion | pending | | |
 | 27 | Generics ↔ checking-mode interaction (Step 5 complete) | pending | | |
 | 28 | Parser: context-sensitive `PASSING` clauses (Step 6 opens) | pending | | |
