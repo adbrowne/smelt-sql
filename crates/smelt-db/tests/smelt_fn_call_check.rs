@@ -642,6 +642,21 @@ fn passing_clause_name_mismatch_errors() {
         "message should name the unknown parameter, got: {}",
         unknown_passing[0].message
     );
+
+    // Span must be anchored at the PASSING_NAME token ("wrong_name"), not the
+    // whole call-path fallback. Verify start column matches "wrong_name" offset.
+    let name_text = "wrong_name";
+    let name_start = model_src.find(name_text).unwrap();
+    assert_eq!(
+        unknown_passing[0].range.start.line, 0,
+        "expected name span on line 0, got {:?}",
+        unknown_passing[0].range
+    );
+    assert_eq!(
+        unknown_passing[0].range.start.column as usize, name_start,
+        "expected range start at `wrong_name` (col {name_start}), got {:?}",
+        unknown_passing[0].range
+    );
 }
 
 #[test]
