@@ -3104,3 +3104,184 @@ impl Cte {
         columns
     }
 }
+
+// ===== Phase 35: Struct type references and brace-struct literals =====
+
+/// Structured view over a `STRUCT_TYPE` CST node produced by
+/// `Expr<Struct<{field: Type, ..tail}>>` type references (Phase 35).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructType(SyntaxNode);
+
+impl StructType {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_TYPE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over the declared `STRUCT_FIELD` children in source order.
+    pub fn fields(&self) -> impl Iterator<Item = StructField> + '_ {
+        self.0.children().filter_map(StructField::cast)
+    }
+
+    /// The trailing row-tail marker, if any.
+    pub fn row_tail(&self) -> Option<StructRowTailNode> {
+        self.0.children().find_map(StructRowTailNode::cast)
+    }
+}
+
+/// A single `name: Type` field declaration inside a `STRUCT_TYPE` node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructField(SyntaxNode);
+
+impl StructField {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_FIELD {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The field's declared name (first IDENT token).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The field's declared `TYPE_REF`, if present.
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
+    }
+}
+
+/// The trailing row-variable marker (`ROW_TAIL` node) inside a `STRUCT_TYPE`.
+///
+/// A `ROW_TAIL` with an IDENT child is a *named* tail (`..r`).
+/// A `ROW_TAIL` with no IDENT child is an *anonymous* tail (`..`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructRowTailNode(SyntaxNode);
+
+impl StructRowTailNode {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_TAIL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The row-variable name for a named tail (e.g. `r` for `..r`).
+    /// Returns `None` for an anonymous tail (`..`).
+    pub fn var_name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// A `{expr AS name, ..spread}` brace-struct literal (Phase 35).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BraceStructLiteral(SyntaxNode);
+
+impl BraceStructLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == BRACE_STRUCT_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over `STRUCT_FIELD_ITEM` children.
+    pub fn field_items(&self) -> impl Iterator<Item = StructFieldItem> + '_ {
+        self.0.children().filter_map(StructFieldItem::cast)
+    }
+
+    /// Iterate over `SPREAD_ITEM` children.
+    pub fn spread_items(&self) -> impl Iterator<Item = SpreadItem> + '_ {
+        self.0.children().filter_map(SpreadItem::cast)
+    }
+}
+
+/// A single `expr AS alias` field inside a `BRACE_STRUCT_LITERAL`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructFieldItem(SyntaxNode);
+
+impl StructFieldItem {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_FIELD_ITEM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The value expression (before `AS`).
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The declared alias (after `AS`).
+    pub fn alias(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// A `..name` spread item inside a `BRACE_STRUCT_LITERAL`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpreadItem(SyntaxNode);
+
+impl SpreadItem {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SPREAD_ITEM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The identifier being spread (e.g. `event` for `..event`).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}

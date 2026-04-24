@@ -228,6 +228,14 @@ pub enum SyntaxKind {
     // smelt.extern top-level declaration (Phase 10)
     SMELT_EXTERN, // smelt.extern name(params) -> TypeRef
 
+    // Phase 35: Struct type references and brace-struct literals
+    STRUCT_TYPE,          // Struct<{field: Type, ..tail}> in a type reference
+    STRUCT_FIELD,         // Single `name: Type` pair inside a STRUCT_TYPE
+    ROW_TAIL,             // The trailing `..r` or `..` inside a STRUCT_TYPE
+    BRACE_STRUCT_LITERAL, // {expr AS name, ..spread} struct-literal expression
+    STRUCT_FIELD_ITEM,    // Single `expr AS name` item inside a BRACE_STRUCT_LITERAL
+    SPREAD_ITEM,          // `..name` spread item inside a BRACE_STRUCT_LITERAL
+
     // Phase 13: structured TypeRef children for TableExpr / AggExpr /
     // WindowExpr / SelectItems parameter sorts. These are emitted as
     // children of a TYPE_REF node by parse_type_ref when the leading

@@ -51,6 +51,11 @@ struct Parser<'a> {
     builder: GreenNodeBuilder<'static>,
     errors: Vec<ParseError>,
     depth: u32,
+    /// Named row-variable names collected while parsing the current
+    /// `smelt.define` param list (Phase 35). Reset at the start of each
+    /// `smelt.define`; checked after the param list to enforce the v1
+    /// constraint that at most one distinct name may appear.
+    current_define_row_vars: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -63,6 +68,7 @@ impl<'a> Parser<'a> {
             builder: GreenNodeBuilder::new(),
             errors: Vec::new(),
             depth: 0,
+            current_define_row_vars: Vec::new(),
         }
     }
 
@@ -226,7 +232,7 @@ impl<'a> Parser<'a> {
     fn at_expression_start(&self) -> bool {
         self.at_any(&[
             IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXTRACT_KW, EXISTS_KW,
-            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS,
+            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS, LBRACE,
         ])
     }
 
@@ -469,6 +475,9 @@ impl<'a> Parser<'a> {
     fn parse_smelt_define(&mut self) {
         self.start_node(SMELT_DEFINE);
 
+        // Reset row-variable tracking for this define (Phase 35).
+        self.current_define_row_vars.clear();
+
         // Consume the three trigger tokens: `smelt`, `.`, `define`.
         // They are three separate tokens in the lexer.
         self.skip_trivia();
@@ -498,6 +507,25 @@ impl<'a> Parser<'a> {
             self.error("Expected '(' after function name".to_string());
             // Try to sync to AS_KW so we can still parse the body.
             self.sync_to(&[AS_KW, EOF]);
+        }
+
+        // Phase 35: v1 constraint — at most one distinct named row variable
+        // per signature. Two distinct names (e.g. `..r` and `..s`) are an
+        // error; the same name in multiple params is fine (the checker
+        // enforces unification later).
+        {
+            let mut seen: Vec<String> = Vec::new();
+            for name in self.current_define_row_vars.drain(..) {
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+            }
+            if seen.len() > 1 {
+                self.error(format!(
+                    "v1 constraint: at most one named row variable per signature (found: {})",
+                    seen.join(", ")
+                ));
+            }
         }
 
         // Optional return arrow: `-> <TypeRef>`. The lexer produces a single
@@ -1074,6 +1102,8 @@ impl<'a> Parser<'a> {
     /// - `<T>` — single data-type argument; consumed as flat tokens.
     /// - `<T, ctx>` — data-type followed by a lowercase context identifier;
     ///   the context identifier is wrapped in `EXPR_CTX`.
+    /// - `<Struct<{field: Type, ..tail}>>` — Phase 35 struct type; the inner
+    ///   `Struct<{...}>` is parsed as a `STRUCT_TYPE` node.
     ///
     /// Falls back to `consume_type_ref_tail` for the no-`<` case.
     fn parse_expr_tail(&mut self) {
@@ -1083,6 +1113,21 @@ impl<'a> Parser<'a> {
             return;
         }
         self.advance(); // LT
+
+        // Phase 35: if the inner type is `Struct<{...}>`, hand off to
+        // the structured struct-type parser instead of the flat consumer.
+        // `STRUCT` is lexed as STRUCT_KW (a keyword), not IDENT.
+        self.skip_trivia();
+        if self.at(STRUCT_KW) && self.is_struct_type_start() {
+            self.parse_struct_type();
+            self.skip_trivia();
+            if self.at(GT) {
+                self.advance(); // closing `>` of `Expr<Struct<...>>`
+            } else {
+                self.skip_to_matching_gt();
+            }
+            return;
+        }
 
         // Consume flat tokens until we see `,` at depth 0 (ctx follows)
         // or `>` at depth 0 (no ctx).
@@ -1179,6 +1224,208 @@ impl<'a> Parser<'a> {
             }
             self.advance();
         }
+    }
+
+    /// Peek ahead (without consuming) to check whether the current token is the
+    /// start of a `Struct<{...}>` type — i.e. `STRUCT_KW` followed by `<` then `{`.
+    fn is_struct_type_start(&self) -> bool {
+        // Current token must be STRUCT_KW (already confirmed by caller).
+        // Peek for: [trivia*] LT [trivia*] LBRACE
+        let mut i = 1;
+        while let Some(t) = self.tokens.get(self.pos + i) {
+            if t.kind.is_trivia() {
+                i += 1;
+                continue;
+            }
+            if t.kind == LT {
+                // found `<`, now look for `{`
+                i += 1;
+                while let Some(t2) = self.tokens.get(self.pos + i) {
+                    if t2.kind.is_trivia() {
+                        i += 1;
+                        continue;
+                    }
+                    return t2.kind == LBRACE;
+                }
+                return false;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// Parse `Struct<{field: Type, ..tail}>` into a `STRUCT_TYPE` node.
+    ///
+    /// Caller has already confirmed the leading `STRUCT_KW` and that the
+    /// next significant tokens are `<` `{`. The caller must consume the
+    /// trailing `>` of the outer `Expr<...>` wrapper.
+    fn parse_struct_type(&mut self) {
+        self.start_node(STRUCT_TYPE);
+
+        // Consume `Struct` (tokenized as STRUCT_KW)
+        self.skip_trivia();
+        self.advance(); // STRUCT_KW
+        self.skip_trivia();
+        self.advance(); // LT `<`
+        self.skip_trivia();
+        self.advance(); // LBRACE `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Tail markers: two DOTs.
+            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+                // ROW_TAIL: either `..ident` (named) or `..` (anonymous).
+                let is_named = matches!(
+                    self.peek_nth_non_trivia(2),
+                    Some(k) if k == IDENT
+                );
+                self.start_node(ROW_TAIL);
+                self.advance(); // first DOT
+                self.advance(); // second DOT
+                if is_named {
+                    self.skip_trivia();
+                    // Record the row-variable name for the per-define constraint check.
+                    let name = self.current_text().to_string();
+                    self.current_define_row_vars.push(name);
+                    self.advance(); // IDENT
+                }
+                self.finish_node(); // ROW_TAIL
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.error("`..tail` must be the last element of a struct type".to_string());
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+
+            // Regular field: `name: Type`.
+            if self.at(IDENT) {
+                self.start_node(STRUCT_FIELD);
+                self.advance(); // IDENT name
+                self.skip_trivia();
+                if self.at(COLON) {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_flat_type_ref_stopping_on_row_field_boundary();
+                } else {
+                    self.error("Expected `:` after struct field name".to_string());
+                }
+                self.finish_node(); // STRUCT_FIELD
+            } else {
+                self.error("Expected struct field name or `..tail`".to_string());
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected `}` to close struct type".to_string());
+        }
+
+        self.skip_trivia();
+        if self.at(GT) {
+            self.advance(); // `>` closing `Struct<{...}>`
+        } else {
+            self.error("Expected `>` to close Struct<{...}>".to_string());
+        }
+
+        self.finish_node(); // STRUCT_TYPE
+    }
+
+    /// Parse a brace-struct literal: `{expr AS name, ..spread}`.
+    ///
+    /// Items are:
+    ///   - `STRUCT_FIELD_ITEM`: `expr AS alias`
+    ///   - `SPREAD_ITEM`: `..ident`
+    fn parse_brace_struct_literal(&mut self) {
+        self.start_node(BRACE_STRUCT_LITERAL);
+        self.advance(); // consume `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Spread item: `..ident`
+            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+                self.start_node(SPREAD_ITEM);
+                self.advance(); // first DOT
+                self.advance(); // second DOT
+                self.skip_trivia();
+                if self.at(IDENT) {
+                    self.advance(); // IDENT name
+                } else {
+                    self.error("Expected identifier after `..` in struct spread".to_string());
+                }
+                self.finish_node(); // SPREAD_ITEM
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                }
+                // Spread is typically last, but we allow trailing items for error recovery.
+                continue;
+            }
+
+            // Field item: `expr AS alias`
+            self.start_node(STRUCT_FIELD_ITEM);
+            self.parse_expression();
+            self.skip_trivia();
+            if self.at(AS_KW) {
+                self.advance(); // AS
+                self.skip_trivia();
+                if self.at(IDENT) {
+                    self.advance(); // alias
+                } else {
+                    self.error("Expected alias after AS in struct field".to_string());
+                }
+            } else {
+                self.error("Expected AS alias in struct field item".to_string());
+            }
+            self.finish_node(); // STRUCT_FIELD_ITEM
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected `}` to close brace struct literal".to_string());
+        }
+
+        self.finish_node(); // BRACE_STRUCT_LITERAL
     }
 
     /// Parse the parenthesized body of a smelt.define.
@@ -2415,6 +2662,9 @@ impl<'a> Parser<'a> {
             self.parse_row_constructor();
         } else if self.at(STRUCT_KW) && self.is_keyword_followed_by_lparen() {
             self.parse_struct_literal();
+        } else if self.at(LBRACE) {
+            // Phase 35: brace-struct literal `{expr AS alias, ..spread}`
+            self.parse_brace_struct_literal();
         } else if self.at(CASE_KW) {
             self.parse_case_expr();
         } else if self.at(CAST_KW) {
@@ -7042,6 +7292,158 @@ LIMIT 100
         assert!(
             !stmts.is_empty(),
             "tree should not be empty after error recovery"
+        );
+    }
+
+    // ===== Phase 35: Struct row variables and value-level spread =====
+
+    #[test]
+    fn parses_struct_with_named_row_var() {
+        let input = "smelt.define f(e: Expr<Struct<{ts: Timestamp, ..r}>>) AS (e)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 1, "expected exactly one SMELT_DEFINE");
+
+        // The TYPE_REF for parameter `e` must contain a STRUCT_TYPE child.
+        let def = &defines[0];
+        let params: Vec<Param> = def.param_list().expect("param list").params().collect();
+        let tr = params[0].type_ref().expect("param type ref");
+        let tr_syntax = tr.syntax();
+
+        let struct_type_node = tr_syntax
+            .descendants()
+            .find(|n| n.kind() == STRUCT_TYPE)
+            .expect("TYPE_REF must contain a STRUCT_TYPE node");
+
+        // The STRUCT_TYPE must contain a ROW_TAIL child with identifier `r`.
+        let row_tail_node = struct_type_node
+            .children()
+            .find(|n| n.kind() == ROW_TAIL)
+            .expect("STRUCT_TYPE must contain a ROW_TAIL node");
+
+        let tail_ident = row_tail_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .expect("ROW_TAIL must contain an identifier for named tail");
+        assert_eq!(
+            tail_ident.text(),
+            "r",
+            "ROW_TAIL identifier must be `r`, got {}",
+            tail_ident.text()
+        );
+    }
+
+    #[test]
+    fn parses_struct_with_anonymous_row_tail() {
+        let input = "smelt.define f(e: Expr<Struct<{ts: Timestamp, ..}>>) AS (e)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().expect("param list").params().collect();
+        let tr = params[0].type_ref().expect("param type ref");
+
+        let struct_type_node = tr
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == STRUCT_TYPE)
+            .expect("TYPE_REF must contain a STRUCT_TYPE node");
+
+        let row_tail_node = struct_type_node
+            .children()
+            .find(|n| n.kind() == ROW_TAIL)
+            .expect("STRUCT_TYPE must contain a ROW_TAIL node");
+
+        // Anonymous tail: no IDENT inside the ROW_TAIL.
+        let has_ident = row_tail_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == IDENT);
+        assert!(!has_ident, "anonymous ROW_TAIL must not contain an IDENT");
+    }
+
+    #[test]
+    fn parses_struct_literal_spread_in_body() {
+        let input =
+            "smelt.define f(event: Expr<Struct<{ts: Timestamp, ..r}>>) AS ({CAST(event.ts AS TIMESTAMP) AS ts, ..event})";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let body = def.body().expect("body");
+        let body_syntax = body.syntax();
+
+        // DEFINE_BODY must contain a BRACE_STRUCT_LITERAL node.
+        let brace_struct = body_syntax
+            .descendants()
+            .find(|n| n.kind() == BRACE_STRUCT_LITERAL)
+            .expect("DEFINE_BODY must contain a BRACE_STRUCT_LITERAL node");
+
+        // The BRACE_STRUCT_LITERAL must have a SPREAD_ITEM child for `..event`.
+        let spread = brace_struct
+            .children()
+            .find(|n| n.kind() == SPREAD_ITEM)
+            .expect("BRACE_STRUCT_LITERAL must contain a SPREAD_ITEM child");
+
+        let spread_ident = spread
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .expect("SPREAD_ITEM must contain an IDENT for the spread name");
+        assert_eq!(
+            spread_ident.text(),
+            "event",
+            "SPREAD_ITEM identifier must be `event`, got {}",
+            spread_ident.text()
+        );
+    }
+
+    #[test]
+    fn two_named_row_vars_in_one_signature_errors() {
+        // v1 constraint: at most one named row variable per signature.
+        // `..r` and `..s` are two distinct names — must produce an error.
+        let input = "smelt.define f(a: Expr<Struct<{x: Integer, ..r}>>, b: Expr<Struct<{y: Integer, ..s}>>) AS (a)";
+        let (parse, _file) = parse_file_text(input);
+        // Must not panic.
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for two distinct named row variables, got none"
+        );
+        let mentions_row_var = parse.errors.iter().any(|e| {
+            let m = e.message.to_lowercase();
+            m.contains("row variable") || m.contains("named row") || m.contains("at most one")
+        });
+        assert!(
+            mentions_row_var,
+            "expected an error mentioning row variable constraint, got {:?}",
+            parse.errors
+        );
+    }
+
+    #[test]
+    fn anonymous_tail_unreferenced_in_body_ok() {
+        // Anonymous `..` without a body spread is fine — no parser errors.
+        let input = "smelt.define f(e: Expr<Struct<{ts: Timestamp, ..}>>) AS (e.ts)";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "anonymous tail with no spread in body must not produce errors, got: {:?}",
+            parse.errors
         );
     }
 }

@@ -1033,6 +1033,8 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
         Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
         // `SelectItems<Kind>` (Phase 21) is not a scalar type.
         Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
+        // `Struct<{…}>` (Phase 35) params — runtime type unknown until Phase 36.
+        Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };

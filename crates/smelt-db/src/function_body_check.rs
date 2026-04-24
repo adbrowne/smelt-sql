@@ -238,6 +238,8 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
         // `SelectItems<Kind>` (Phase 21) params are list-typed; fall back to Unknown.
         Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
+        // `Struct<{…}>` (Phase 35) params — runtime type unknown until Phase 36.
+        Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }

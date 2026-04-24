@@ -175,6 +175,38 @@ pub enum SmeltType {
         kind: ExprKind,
         context: Option<ContextRef>,
     },
+    /// `Expr<Struct<{field: Type, ..tail}>>` — a row-polymorphic struct
+    /// parameter (Phase 35).
+    ///
+    /// This is the **type-level** struct descriptor for a *parameter*
+    /// declared with `Struct<{...}>` inside an `Expr<...>` wrapper. It
+    /// differs from [`crate::DataType::Struct`], which represents the
+    /// *runtime value type* of a struct expression.
+    ///
+    /// - `fields` is the ordered list of `(field_name, required_type)`
+    ///   pairs declared in the signature.
+    /// - `tail` is the trailing row-variable marker: none, anonymous, or
+    ///   named.
+    Struct {
+        fields: Vec<(String, DataType)>,
+        tail: StructRowTail,
+    },
+}
+
+/// Trailing row-polymorphism marker on a `Struct<{…}>` parameter type
+/// (Phase 35).
+///
+/// Mirrors the shape of [`RowTail`] used by `TableExpr<{…}>` parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructRowTail {
+    /// No tail marker — the struct shape is fully concrete.
+    None,
+    /// `..` — anonymous row variable; extra fields accepted but not
+    /// observable by name in the function body.
+    Anon,
+    /// `..<name>` — named row variable; extra fields are bound to this
+    /// name and may be referenced / spread in the function body.
+    Named(String),
 }
 
 /// Per-column requirement inside a [`SchemaRequirement`] (Phase 16).
@@ -1007,6 +1039,11 @@ fn extract_param_spec(param: &AstParam, text: &str) -> ParamSpec {
         if let Some(structured) = tableexpr_type_from_cst(tr) {
             type_ref = Some(Ok(structured));
         }
+        // Phase 35 override: replace the string-parser error for
+        // `Expr<Struct<{…}>>` with a CST-derived SmeltType::Struct.
+        if let Some(structured) = struct_expr_type_from_cst(tr) {
+            type_ref = Some(Ok(structured));
+        }
     }
 
     let type_ref_range = type_ref_node.as_ref().map(|t| type_ref_range(t, text));
@@ -1086,6 +1123,52 @@ fn tableexpr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
         required,
         tail,
     })))
+}
+
+/// Phase 35 CST-aware extractor: if `type_ref` is an `Expr<Struct<{…}>>` head,
+/// build a [`SmeltType::Struct`] that carries the declared field list and tail.
+///
+/// Returns `None` when the head isn't `Expr` wrapping a `STRUCT_TYPE` (so the
+/// string-level `parse_smelt_type` wins or already succeeded). When a
+/// `STRUCT_TYPE` is found, this always overrides the string-parser's error
+/// (which reports `UnknownInner` because the string parser can't handle the
+/// nested `Struct<{…}>` form).
+///
+/// Pure — walks only the CST node.
+fn struct_expr_type_from_cst(tr: &TypeRef) -> Option<SmeltType> {
+    use smelt_parser::ast::{StructType, TypeRefHead};
+
+    if tr.kind() != TypeRefHead::Expr {
+        return None;
+    }
+    // Look for a STRUCT_TYPE descendant inside the TYPE_REF.
+    let struct_node = tr
+        .syntax()
+        .descendants()
+        .find_map(StructType::cast)?;
+
+    let mut fields: Vec<(String, DataType)> = Vec::new();
+    for sf in struct_node.fields() {
+        let Some(name) = sf.name() else { continue };
+        let inner_text = sf.type_ref().map(|t| t.text()).unwrap_or_default();
+        // Parse the field's type as a concrete DataType (struct fields must be
+        // concrete in v1 — constraints like `Numeric` are not yet supported
+        // inside struct field positions). Fall back to Unknown for unrecognised
+        // names so diagnostics don't cascade.
+        let dt = crate::parse_type(inner_text.trim())
+            .unwrap_or(DataType::Unknown);
+        fields.push((name, dt));
+    }
+
+    let tail = match struct_node.row_tail() {
+        None => StructRowTail::None,
+        Some(t) => match t.var_name() {
+            None => StructRowTail::Anon,
+            Some(n) => StructRowTail::Named(n),
+        },
+    };
+
+    Some(SmeltType::Struct { fields, tail })
 }
 
 fn compute_tier(params: &[ParamSpec], return_type_text: Option<&str>) -> Tier {
@@ -2376,6 +2459,36 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
             } else {
                 format!("SelectItems<{}>", kind_str)
             }
+        }
+        SmeltType::Struct { fields, tail } => {
+            let mut s = String::from("Expr<Struct<{");
+            for (i, (name, dt)) in fields.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(name);
+                s.push_str(": ");
+                s.push_str(&dt.to_string());
+            }
+            match tail {
+                StructRowTail::None => {}
+                StructRowTail::Anon => {
+                    if !fields.is_empty() {
+                        s.push_str(", ");
+                    }
+                    s.push_str("..");
+                }
+                StructRowTail::Named(name) => {
+                    if !fields.is_empty() {
+                        s.push_str(", ");
+                    }
+                    s.push_str("..");
+                    s.push_str(name);
+                }
+            }
+            s.push_str("}>");
+            s.push('>');
+            s
         }
     }
 }
