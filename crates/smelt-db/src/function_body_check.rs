@@ -2089,7 +2089,14 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr, text: &str) -> Ve
     };
 
     // Build a seeded param context and infer the body's return type.
-    let ctx = seed_param_context(&sig.params);
+    // Phase 27: Set `expected_return` on the context when we have a concrete
+    // declared return type (e.g. `-> Expr<Double>`). This allows built-in
+    // generics like `COALESCE` to widen their type-variable binding to the
+    // expected return type (§16 #14 Decision 14).
+    let mut ctx = seed_param_context(&sig.params);
+    if let TypeConstraint::Concrete(ref dt) = declared_constraint {
+        ctx.expected_return = Some(dt.clone());
+    }
     let inferred = match infer_expression_type(body, &ctx) {
         Some(tc) => tc.data_type,
         None => return Vec::new(), // can't infer — skip

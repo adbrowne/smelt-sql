@@ -1678,24 +1678,45 @@ impl std::fmt::Display for UnificationError {
 
 impl std::error::Error for UnificationError {}
 
-/// Unify a signature against a list of concrete argument types.
+/// Unify a signature against a list of concrete argument types, optionally
+/// incorporating an expected return type for bidirectional inference (§16 #14,
+/// Decision 14 — Phase 27).
 ///
-/// For each signature, the checker collects every position where a type
-/// variable appears (argument positions only in v1; bidirectional
-/// checking is deferred to Step 5). Variables whose constraint is
-/// [`TypeConstraint::Numeric`] reduce by LUB via the caller-supplied
-/// `lub` closure (the only promotion-chain constraint in v1, §16 #14);
-/// every other constraint requires exact equality across positions.
+/// When `expected_return` is `Some(dt)` and the signature's `return_type` is
+/// [`TypeExpr::Var(name)`], `dt` is injected as an additional position at
+/// **index 0** ("return context") before the binding-reduction step.  This
+/// means the expected return participates in LUB (for `Numeric`-constrained
+/// variables) or exact-equality checks (for `Ordered`/`Any`/`Concrete`
+/// variables) alongside the argument-derived positions.
+///
+/// Concretely: `COALESCE(1, 2)` in a `Double` context has positions
+/// `{(0, Double), (1, Integer), (2, Integer)}`; LUB under the Numeric chain
+/// = `Double`, so the call successfully types as `Double`.
+///
+/// When `expected_return` is `None` this function is equivalent to
+/// the plain [`unify_call`].
+///
+/// ### Position encoding
+/// - Positions 1, 2, … are argument positions (1-based, as in v1).
+/// - Position 0 is reserved for the "return context" when
+///   `expected_return` is `Some(_)`.
 ///
 /// The `lub` closure lives outside this crate because the real LUB
 /// computation is in `smelt-db::type_inference::promote_types`, and
-/// `smelt-types` must remain dependency-free. Tests in this module use
-/// a small inline LUB that matches §16 #9's promotion chain.
-pub fn unify_call(
+/// `smelt-types` must remain dependency-free.
+pub fn unify_call_with_expected(
     sig: &Signature,
     args: &[DataType],
+    expected_return: Option<&DataType>,
     lub: &dyn Fn(&DataType, &DataType) -> DataType,
 ) -> Result<UnifyResult, UnificationError> {
+    // Determine whether the return type is a naked type variable —
+    // only then does `expected_return` contribute a position.
+    let return_var: Option<&str> = match &sig.return_type {
+        TypeExpr::Var(name) => Some(name.as_str()),
+        _ => None,
+    };
+
     // Split leading vs (optional) trailing variadic.
     let (leading, variadic) = match sig.params.last() {
         Some(SigParam::Variadic(inner)) => {
@@ -1730,6 +1751,25 @@ pub fn unify_call(
     let mut var_positions: HashMap<String, Vec<(usize, DataType)>> = HashMap::new();
     for tp in &sig.type_params {
         var_positions.insert(tp.name.clone(), Vec::new());
+    }
+
+    // Inject expected_return at position 0 for the return type variable.
+    if let (Some(var_name), Some(expected)) = (return_var, expected_return) {
+        if let Some(positions) = var_positions.get_mut(var_name) {
+            // Check that the expected return satisfies the constraint first.
+            let tp = sig
+                .type_param(var_name)
+                .expect("validated in Signature::new");
+            if !tp.constraint.satisfies(expected) {
+                // ConstraintViolation at position 0 (return context).
+                return Err(UnificationError::ConstraintViolation {
+                    position: 0,
+                    param_constraint: tp.constraint.clone(),
+                    actual: expected.clone(),
+                });
+            }
+            positions.push((0, expected.clone()));
+        }
     }
 
     let check_concrete = |position: usize,
@@ -1807,8 +1847,6 @@ pub fn unify_call(
                 for (_, ty) in iter {
                     acc = lub(&acc, ty);
                 }
-                // Widen via `lub` may produce any numeric; constraint is
-                // already satisfied per-position, so no re-check needed.
                 acc
             }
             // All non-Numeric constraints (Ordered, Any, Concrete): require
@@ -1821,8 +1859,6 @@ pub fn unify_call(
                     .cloned()
                     .collect();
                 if !disagreements.is_empty() {
-                    // Cite every position, including the first (which
-                    // established the "winning" type), per §16 #14.
                     let all_positions: Vec<usize> = positions.iter().map(|(p, _)| *p).collect();
                     let all_types: Vec<DataType> =
                         positions.iter().map(|(_, t)| t.clone()).collect();
@@ -1854,6 +1890,31 @@ pub fn unify_call(
         return_type,
         bindings,
     })
+}
+
+/// Unify a signature against a list of concrete argument types.
+///
+/// For each signature, the checker collects every position where a type
+/// variable appears (argument positions only in v1; bidirectional
+/// checking is deferred to Step 5). Variables whose constraint is
+/// [`TypeConstraint::Numeric`] reduce by LUB via the caller-supplied
+/// `lub` closure (the only promotion-chain constraint in v1, §16 #14);
+/// every other constraint requires exact equality across positions.
+///
+/// The `lub` closure lives outside this crate because the real LUB
+/// computation is in `smelt-db::type_inference::promote_types`, and
+/// `smelt-types` must remain dependency-free. Tests in this module use
+/// a small inline LUB that matches §16 #9's promotion chain.
+///
+/// This is a thin wrapper around [`unify_call_with_expected`] with
+/// `expected_return = None`. All existing callers continue to compile
+/// unchanged.
+pub fn unify_call(
+    sig: &Signature,
+    args: &[DataType],
+    lub: &dyn Fn(&DataType, &DataType) -> DataType,
+) -> Result<UnifyResult, UnificationError> {
+    unify_call_with_expected(sig, args, None, lub)
 }
 
 /// A minimal Numeric LUB matching §16 #9 — the only promotion chain in v1.
@@ -3370,5 +3431,97 @@ mod tests {
             DataType::Integer,
         )));
         assert_eq!(hover, "Expr<INTEGER>");
+    }
+
+    // === Phase 27 TDD tests — bidirectional generics (§16 #14, Decision 14) ===
+
+    #[test]
+    fn coalesce_expected_double_literals_widen() {
+        // Decision 14: when context expects Double and the call has Integer
+        // args, the expected return type is an additional position for `T`
+        // under the Numeric chain.  LUB({Integer, Integer, Double}) = Double.
+        let sig = Signature::new(
+            "numeric_coalesce",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![variadic(var("T"))],
+            TypeExpr::Var("T".into()),
+        );
+        let res = unify_call_with_expected(
+            &sig,
+            &[DataType::Integer, DataType::Integer],
+            Some(&DataType::Double),
+            &numeric_lub,
+        )
+        .expect("unification ok");
+        assert_eq!(res.return_type, DataType::Double);
+    }
+
+    #[test]
+    fn no_expected_return_positions_unchanged() {
+        // Without an expected return, LUB({Integer, Integer}) = Integer.
+        let sig = Signature::new(
+            "numeric_coalesce",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![variadic(var("T"))],
+            TypeExpr::Var("T".into()),
+        );
+        let res = unify_call_with_expected(
+            &sig,
+            &[DataType::Integer, DataType::Integer],
+            None,
+            &numeric_lub,
+        )
+        .expect("unification ok");
+        assert_eq!(res.return_type, DataType::Integer);
+    }
+
+    #[test]
+    fn expected_return_conflict_local_error() {
+        // MIN<T: Ordered>(T) → T with arg=BigInt; expected return=Integer
+        // conflicts (Ordered uses exact equality, not LUB).
+        // The error must cite both positions: argument position 1 AND return context (0).
+        let sig = BuiltinRegistry::resolve("MIN").expect("MIN present");
+        let err = unify_call_with_expected(
+            sig,
+            &[DataType::BigInt],
+            Some(&DataType::Integer),
+            &numeric_lub,
+        )
+        .expect_err("BigInt arg vs Integer expected-return must conflict");
+        match err {
+            UnificationError::InconsistentBinding {
+                var_name,
+                positions,
+                types,
+            } => {
+                assert_eq!(var_name, "T");
+                // Position 0 = return context; position 1 = first argument.
+                assert!(
+                    positions.contains(&0),
+                    "return context (pos 0) must be cited, got {positions:?}"
+                );
+                assert!(
+                    positions.contains(&1),
+                    "argument position 1 must be cited, got {positions:?}"
+                );
+                assert!(types.contains(&DataType::BigInt));
+                assert!(types.contains(&DataType::Integer));
+            }
+            other => panic!("expected InconsistentBinding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generics_within_tier2_body() {
+        // MIN<T: Ordered>(T) → T with Decimal arg and no expected return
+        // must preserve the Decimal type.
+        let sig = BuiltinRegistry::resolve("MIN").expect("MIN present");
+        let dt = DataType::Decimal {
+            precision: 18,
+            scale: 6,
+        };
+        let res = unify_call_with_expected(sig, std::slice::from_ref(&dt), None, &numeric_lub)
+            .expect("unification ok");
+        assert_eq!(res.return_type, dt);
     }
 }

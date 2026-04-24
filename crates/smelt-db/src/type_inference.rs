@@ -8,7 +8,8 @@ use smelt_parser::ast::{
     SelectStmt, SmeltFnCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
-    kind_ceiling, unify_call, BuiltinRegistry, ExprKind, FunctionSig, SmeltType, TypeConstraint,
+    kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, SmeltType,
+    TypeConstraint,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -64,6 +65,18 @@ pub struct TypeContext {
     /// `UnknownIdentifier` diagnostics for columns that come from opaque-schema
     /// CTEs. Introduced in Phase 22 of smelt-functions.
     opaque_ctes: std::collections::HashSet<String>,
+    /// Expected return type for the expression currently being inferred
+    /// (bidirectional inference, Phase 27, §16 #14 Decision 14).
+    ///
+    /// Set by the caller when a specific return type is expected (e.g. a
+    /// `Tier2CallSite(expected_ret)` check mode). `try_registry_inference`
+    /// passes this to [`unify_call_with_expected`] so that a built-in generic
+    /// call in a checking context can widen its type-variable binding to match
+    /// the expected type (e.g. `COALESCE(1, 2)` in a `Double` context yields
+    /// `Double` rather than `Integer`).
+    ///
+    /// `None` in all other contexts — preserves the pre-Phase-27 behaviour.
+    pub expected_return: Option<DataType>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -80,6 +93,7 @@ impl PartialEq for TypeContext {
             && self.tableexpr_param_schemas == other.tableexpr_param_schemas
             && self.row_var_env == other.row_var_env
             && self.opaque_ctes == other.opaque_ctes
+            && self.expected_return == other.expected_return
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -99,6 +113,7 @@ impl Clone for TypeContext {
             tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
             row_var_env: self.row_var_env.clone(),
             opaque_ctes: self.opaque_ctes.clone(),
+            expected_return: self.expected_return.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -1122,7 +1137,7 @@ fn try_registry_inference(
         }
     }
 
-    match unify_call(sig, &arg_types, &registry_lub) {
+    match unify_call_with_expected(sig, &arg_types, ctx.expected_return.as_ref(), &registry_lub) {
         Ok(result) => {
             let nullable = registry_result_nullable(upper_name, &arg_nullable);
             Some(Some(TypedColumn {
