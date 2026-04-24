@@ -284,7 +284,8 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 - Fixed bare-token problem and implicit alias detection (April 3, 2026)
 
 **Next steps**:
-- ~~Smelt Functions Steps 1–5~~ ✅ (April 22–24, 2026) — `smelt.define`, `smelt.fn.*`, `TableExpr`, call-site type checking, LSP hover, context binding, CTE-derived `SelectItems` contexts, `session_rollup` end-to-end, Tier 2/3 body/return checking, Tier 2 → Tier 1 inline expansion, bidirectional generics. Steps 6–8 (PASSING, planner, struct row vars) remain. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
+- ~~Smelt Functions Steps 1–5~~ ✅ (April 22–24, 2026) — `smelt.define`, `smelt.fn.*`, `TableExpr`, call-site type checking, LSP hover, context binding, CTE-derived `SelectItems` contexts, `session_rollup` end-to-end, Tier 2/3 body/return checking, Tier 2 → Tier 1 inline expansion, bidirectional generics. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
+- ~~Smelt Functions Step 6 (PASSING clauses)~~ ✅ (April 24, 2026) — Phase 28 (parser: context-sensitive `PASSING name AS (...)` syntax) and Phase 29 (binding + type-checking) complete. `session_rollup` demonstrated with block-syntax `PASSING metrics AS (COUNT(*))` in `examples/functions_demo/`. `UnknownPassingParameter` diagnostic, LSP code mapping, and basic `body_expr()` / `name_range()` AST helpers added. LSP cursor-in-body column completion deferred (see Phase 29 deferral note in plan). Steps 7–8 (planner, struct row vars) remain. See [plan](plans/20260422-smelt-functions.md).
 - Metrics DSL (Layer 1 — declarative metric definitions, `smelt.metric()` resolution)
 - `smelt.param()` for parameterized models
 - PIVOT/UNPIVOT support (currently rejected with diagnostic)

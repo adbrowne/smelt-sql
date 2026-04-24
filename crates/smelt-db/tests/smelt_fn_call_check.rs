@@ -568,3 +568,139 @@ fn extern_duplicate_declaration_is_error() {
         "expected exactly one DuplicateFunctionDefinition diagnostic mentioning shared_ext, got {diags:#?}"
     );
 }
+
+// ─── Phase 29 — PASSING clause binding ───────────────────────────────────────
+
+/// Source for a `with_filter` function used across Phase 29 tests.
+/// `pred` is declared as `Expr<Boolean>` — PASSING clauses supply it.
+const WITH_FILTER_SRC: &str =
+    "smelt.define with_filter(source: TableExpr, pred: Expr<Boolean>) -> TableExpr AS (\
+     SELECT * FROM source WHERE pred\
+     )\n";
+
+#[test]
+fn passing_clause_binds_to_named_parameter() {
+    // Phase 29 TDD test 1: a PASSING clause supplies `pred: Expr<Boolean>`
+    // correctly. `TRUE` is a Boolean literal — zero diagnostics expected.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("with_filter.sql");
+    let model_path = root.join("models").join("filtered.sql");
+    // Call with a TableExpr positional arg and PASSING for pred.
+    let model_src =
+        "SELECT * FROM smelt.fn.with_filter(smelt.ref('orders')) PASSING pred AS (TRUE)\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        &[(fn_path, WITH_FILTER_SRC), (model_path.clone(), model_src)],
+    );
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let bad_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::UnknownSmeltFn)
+                    | Some(DiagnosticCode::ArgTypeMismatch)
+                    | Some(DiagnosticCode::MissingArgument)
+                    | Some(DiagnosticCode::FunctionBodyTypeMismatch)
+                    | Some(DiagnosticCode::UnknownIdentifier)
+            )
+        })
+        .collect();
+    assert!(
+        bad_diags.is_empty(),
+        "expected no diagnostics when PASSING supplies pred correctly, got {bad_diags:?}"
+    );
+}
+
+#[test]
+fn passing_clause_name_mismatch_errors() {
+    // Phase 29 TDD test 2: PASSING uses a name that doesn't match any parameter.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("with_filter.sql");
+    let model_path = root.join("models").join("bad_passing_name.sql");
+    let model_src =
+        "SELECT * FROM smelt.fn.with_filter(smelt.ref('orders')) PASSING wrong_name AS (TRUE)\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, WITH_FILTER_SRC), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let unknown_passing: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UnknownPassingParameter))
+        .collect();
+    assert_eq!(
+        unknown_passing.len(),
+        1,
+        "expected one UnknownPassingParameter diagnostic, got {diags:?}"
+    );
+    assert!(
+        unknown_passing[0].message.contains("wrong_name"),
+        "message should name the unknown parameter, got: {}",
+        unknown_passing[0].message
+    );
+}
+
+#[test]
+fn passing_clause_type_checked_same_as_inline() {
+    // Phase 29 TDD test 3: PASSING body type-checked: Integer where Boolean expected.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("with_filter.sql");
+    let model_path = root.join("models").join("bad_passing_type.sql");
+    let model_src =
+        "SELECT * FROM smelt.fn.with_filter(smelt.ref('orders')) PASSING pred AS (123)\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, WITH_FILTER_SRC), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let type_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ArgTypeMismatch))
+        .collect();
+    assert_eq!(
+        type_diags.len(),
+        1,
+        "expected one ArgTypeMismatch from PASSING body type error, got {diags:?}"
+    );
+    assert!(
+        type_diags[0].message.contains("pred"),
+        "message should name the parameter `pred`, got: {}",
+        type_diags[0].message
+    );
+}
+
+#[test]
+fn default_fills_omitted_passing() {
+    // Phase 29 TDD test 4: parameter with a default is not required via PASSING.
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("with_default_filter.sql");
+    let fn_src = "smelt.define with_default_filter(source: TableExpr, pred: Expr<Boolean> = TRUE) \
+         -> TableExpr AS (\
+         SELECT * FROM source WHERE pred\
+         )\n";
+    let model_path = root.join("models").join("uses_default_filter.sql");
+    // No PASSING clause — `pred` should be filled by its default.
+    let model_src = "SELECT * FROM smelt.fn.with_default_filter(smelt.ref('orders'))\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let bad_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::MissingArgument) | Some(DiagnosticCode::ArgTypeMismatch)
+            )
+        })
+        .collect();
+    assert!(
+        bad_diags.is_empty(),
+        "omitted PASSING for defaulted parameter should produce no diagnostics, got {bad_diags:?}"
+    );
+}

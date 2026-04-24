@@ -983,6 +983,7 @@ impl Backend {
                 DbCode::AnnotationTooWide => "annotation-too-wide",
                 DbCode::FragmentKindMismatch => "fragment-kind-mismatch",
                 DbCode::ReturnTypeMismatch => "return-type-mismatch",
+                DbCode::UnknownPassingParameter => "unknown-passing-parameter",
             };
             NumberOrString::String(code_str.to_string())
         });

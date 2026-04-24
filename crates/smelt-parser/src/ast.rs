@@ -732,6 +732,23 @@ impl PassingClause {
         let body_node = self.0.children().find(|n| n.kind() == PASSING_BODY)?;
         Some(body_node.text().to_string().trim().to_string())
     }
+
+    /// The expression AST node inside the `PASSING_BODY`. Returns `None` when
+    /// the body node is absent or contains no parseable expression (error-recovery
+    /// path). Use this for type-checking the body at the call site (Phase 29).
+    pub fn body_expr(&self) -> Option<Expr> {
+        let body_node = self.0.children().find(|n| n.kind() == PASSING_BODY)?;
+        body_node.children().find_map(Expr::cast)
+    }
+
+    /// The text range of the `PASSING_NAME` child — used to anchor
+    /// `UnknownPassingParameter` diagnostics at the name token (Phase 29).
+    pub fn name_range(&self) -> Option<TextRange> {
+        self.0
+            .children()
+            .find(|n| n.kind() == PASSING_NAME)
+            .map(|n| n.text_range())
+    }
 }
 
 /// Argument list node (`(arg, arg, ...)`) used by both `FUNCTION_CALL` and

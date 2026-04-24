@@ -655,6 +655,42 @@ pub fn check_smelt_fn_call(
         }
     }
 
+    // Phase 29: PASSING clauses. Each `PASSING name AS (body)` provides an
+    // alternative binding for a fragment-sort parameter. Unknown names emit
+    // `UnknownPassingParameter`; known names contribute to `bindings` like any
+    // other argument, augmenting or overriding positional/named bindings for
+    // the same parameter (last writer wins — positional args should not supply
+    // the same param as a PASSING clause, but we don't error on that here).
+    let passing_clauses: Vec<smelt_parser::ast::PassingClause> = call.passing_clauses().collect();
+    for clause in &passing_clauses {
+        let Some(clause_name) = clause.name() else {
+            continue;
+        };
+        // Check if this name matches a declared parameter in the signature.
+        let param_exists = sig.params.iter().any(|p| p.name == clause_name);
+        if !param_exists {
+            let clause_range = clause
+                .name_range()
+                .map(|r| to_range(r, text))
+                .unwrap_or(path_range);
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "PASSING clause names `{}` which is not a parameter of `smelt.fn.{}`",
+                    clause_name, sig.name
+                ),
+                range: clause_range,
+                code: Some(DiagnosticCode::UnknownPassingParameter),
+                data: None,
+            });
+            continue;
+        }
+        if let Some(body_expr) = clause.body_expr() {
+            let body_range = body_expr.text_range();
+            bindings.insert(clause_name, (body_expr, body_range));
+        }
+    }
+
     // 3. Build call-site binding types + detect missing / type-mismatched args.
     let mut body_ctx = TypeContext::new();
     let mut frame_bindings: Vec<(String, String)> = Vec::new(); // (param, bound_type_str)

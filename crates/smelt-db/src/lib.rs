@@ -354,6 +354,10 @@ pub enum DiagnosticCode {
     /// at the body expression span (not the function name). Introduced in
     /// Phase 24 of smelt-functions.
     ReturnTypeMismatch,
+    /// Emitted when a `PASSING name AS (...)` clause names a parameter that is
+    /// not declared in the callee's signature. Anchored at the `PASSING_NAME`
+    /// span. Introduced in Phase 29 of smelt-functions.
+    UnknownPassingParameter,
 }
 
 /// Structured metadata attached to diagnostics for code actions
