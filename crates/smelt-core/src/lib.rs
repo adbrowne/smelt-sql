@@ -14,8 +14,9 @@ pub mod sources;
 pub mod text;
 
 pub use config::{
-    BackendType, Config, ConfigError, DataLatency, Granularity, IncrementalConfig,
-    IncrementalSafetyOverrides, IncrementalStrategy, Materialization, ModelConfig, Target, Weekday,
+    parse_unstable_schema_flag, BackendType, Config, ConfigError, DataLatency, Granularity,
+    IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy, Materialization,
+    ModelConfig, Target, Weekday,
 };
 pub use discovery::{ModelDiscovery, ModelFile};
 pub use graph::{DependencyGraph, GraphError};

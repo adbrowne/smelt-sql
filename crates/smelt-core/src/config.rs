@@ -346,6 +346,21 @@ pub struct IncrementalConfig {
     pub safety_overrides: IncrementalSafetyOverrides,
 }
 
+/// Parse the `unstable_schema:` flag from the text of a `smelt.yml` file.
+///
+/// Returns `true` when the text contains `unstable_schema: true`.
+/// Returns `false` when the key is absent or set to anything else.
+/// Pure function — takes the text rather than a path.
+pub fn parse_unstable_schema_flag(text: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("unstable_schema:") {
+            return rest.trim() == "true";
+        }
+    }
+    false
+}
+
 impl Config {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let config_path = project_dir.join("smelt.yml");

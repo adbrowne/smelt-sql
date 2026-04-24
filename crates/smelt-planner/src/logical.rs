@@ -23,9 +23,9 @@ pub type FnId = String;
 
 /// Per-function properties extracted from the declaration's frontmatter.
 ///
-/// All fields default to `false` when the corresponding frontmatter key is
-/// absent or unparseable.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// All fields default to `false` / `Unknown` when the corresponding frontmatter
+/// key is absent or unparseable.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionProperties {
     /// The function always returns the same output for the same inputs
     /// (no side-effects, no randomness). Declared with `deterministic: true`.
@@ -36,6 +36,24 @@ pub struct FunctionProperties {
     /// The function only appends data, never deletes or modifies existing rows.
     /// Declared with `append_only: true`.
     pub append_only: bool,
+    /// Column-level provenance parsed from the `provenance:` frontmatter key.
+    ///
+    /// Remains `Provenance::Unknown` when the key is absent. The Salsa layer
+    /// in `smelt-db` enforces that `provenance:` is only honoured when the
+    /// workspace's `smelt.yml` has `unstable_schema: true`; if the flag is
+    /// absent the field is reset to `Unknown` and a diagnostic is emitted.
+    pub provenance: Provenance,
+}
+
+impl Default for FunctionProperties {
+    fn default() -> Self {
+        FunctionProperties {
+            deterministic: false,
+            idempotent: false,
+            append_only: false,
+            provenance: Provenance::Unknown,
+        }
+    }
 }
 
 /// Column-level data provenance information attached to a [`LogicalNode`].
@@ -95,16 +113,22 @@ pub enum LogicalNode {
 /// The root of a logical plan tree. A thin alias over `Arc<LogicalNode>`.
 pub type Plan = Arc<LogicalNode>;
 
-/// Parse `deterministic`, `idempotent`, and `append_only` boolean keys out of
-/// a frontmatter YAML block.
+/// Parse `deterministic`, `idempotent`, `append_only`, and `provenance` keys
+/// out of a frontmatter YAML block.
 ///
-/// This is a pure, minimal parser — we avoid pulling in a full YAML library
-/// for three well-known boolean keys. Unknown keys are silently ignored.
+/// This is a pure, minimal parser — we avoid pulling in a full YAML library.
+/// Unknown keys are silently ignored.
 ///
-/// Accepted shapes for each key:
-///   `deterministic: true`   → `true`
-///   `deterministic: false`  → `false`
-///   absent                  → `false`
+/// Accepted shapes:
+///   `deterministic: true`                              → `true`
+///   `deterministic: false`                             → `false`
+///   absent                                             → `false`
+///   `provenance: { col: [src.a, src.b] }`             → `Declared([("col", ["src.a", "src.b"])])`
+///   `provenance:` absent                               → `Provenance::Unknown`
+///
+/// Note: `provenance:` is an **unstable** key. The Salsa layer in `smelt-db`
+/// is responsible for enforcing the `unstable_schema: true` workspace flag and
+/// resetting the provenance to `Unknown` when the flag is absent.
 pub fn parse_function_properties(yaml_text: &str) -> FunctionProperties {
     let mut props = FunctionProperties::default();
     for line in yaml_text.lines() {
@@ -115,9 +139,71 @@ pub fn parse_function_properties(yaml_text: &str) -> FunctionProperties {
             props.idempotent = parse_bool_value(rest.trim());
         } else if let Some(rest) = trimmed.strip_prefix("append_only:") {
             props.append_only = parse_bool_value(rest.trim());
+        } else if let Some(rest) = trimmed.strip_prefix("provenance:") {
+            if let Some(prov) = parse_provenance_value(rest.trim()) {
+                props.provenance = prov;
+            }
         }
     }
     props
+}
+
+/// Parse a `provenance:` value from a single-line inline YAML map.
+///
+/// Accepts the shape `{ col1: [src.a, src.b], col2: [src.c] }`.
+/// Returns `None` if the input cannot be parsed as a valid provenance map.
+///
+/// This is intentionally minimal: it handles the specific subset of YAML
+/// produced by smelt frontmatter authors (single-line inline maps). Full YAML
+/// parsing would pull in an external dependency we don't need.
+pub fn parse_provenance_value(s: &str) -> Option<Provenance> {
+    // Must start with `{` and end with `}`
+    let inner = s.strip_prefix('{')?.strip_suffix('}')?;
+    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+
+    // Split on `,` that are not inside `[…]`
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let chars: Vec<char> = inner.chars().collect();
+    let mut segments: Vec<String> = Vec::new();
+
+    for (i, &ch) in chars.iter().enumerate() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                segments.push(inner[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    // Final segment
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        segments.push(tail.to_string());
+    }
+
+    for seg in segments {
+        // Each segment is `col: [src.a, src.b]`
+        let colon_pos = seg.find(':')?;
+        let col = seg[..colon_pos].trim().to_string();
+        let list_str = seg[colon_pos + 1..].trim();
+        // Must be `[…]`
+        let list_inner = list_str.strip_prefix('[')?.strip_suffix(']')?;
+        let sources: Vec<String> = list_inner
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        entries.push((col, sources));
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(Provenance::Declared(entries))
+    }
 }
 
 fn parse_bool_value(s: &str) -> bool {
@@ -140,6 +226,7 @@ mod tests {
         assert!(props.deterministic);
         assert!(!props.idempotent);
         assert!(!props.append_only);
+        assert_eq!(props.provenance, Provenance::Unknown);
     }
 
     #[test]
@@ -156,5 +243,53 @@ mod tests {
         let yaml = "backends: [duckdb]\ndeterministic: false\n";
         let props = parse_function_properties(yaml);
         assert!(!props.deterministic);
+    }
+
+    #[test]
+    fn parse_provenance_single_output_column() {
+        let yaml = "provenance: { margin: [source.revenue, source.cost] }\n";
+        let props = parse_function_properties(yaml);
+        assert_eq!(
+            props.provenance,
+            Provenance::Declared(vec![(
+                "margin".to_string(),
+                vec!["source.revenue".to_string(), "source.cost".to_string()],
+            )])
+        );
+    }
+
+    #[test]
+    fn parse_provenance_multiple_output_columns() {
+        let yaml = "provenance: { a: [x.col1], b: [x.col2, x.col3] }\n";
+        let props = parse_function_properties(yaml);
+        assert_eq!(
+            props.provenance,
+            Provenance::Declared(vec![
+                ("a".to_string(), vec!["x.col1".to_string()]),
+                (
+                    "b".to_string(),
+                    vec!["x.col2".to_string(), "x.col3".to_string()]
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_provenance_absent_is_unknown() {
+        let yaml = "deterministic: true\n";
+        let props = parse_function_properties(yaml);
+        assert_eq!(props.provenance, Provenance::Unknown);
+    }
+
+    #[test]
+    fn parse_provenance_value_roundtrip() {
+        let result = parse_provenance_value("{ margin: [source.revenue, source.cost] }");
+        assert_eq!(
+            result,
+            Some(Provenance::Declared(vec![(
+                "margin".to_string(),
+                vec!["source.revenue".to_string(), "source.cost".to_string()],
+            )]))
+        );
     }
 }

@@ -80,6 +80,11 @@ pub struct ProjectInput {
     pub root: PathBuf,
     #[returns(ref)]
     pub sources_yaml: String,
+    /// Raw text of the workspace's `smelt.yml` file. Empty string when not
+    /// loaded (treated as no unstable flags set). Updated by the LSP whenever
+    /// the file changes on disk, keeping Salsa's change detection valid.
+    #[returns(ref)]
+    pub smelt_yml_text: String,
 }
 
 /// Workspace-level singleton input tracking the full set of files and projects.
@@ -144,18 +149,35 @@ impl Database {
     }
 
     /// Create or retrieve the `ProjectInput` for `root`, seeding its yaml.
+    ///
+    /// Also reads `smelt.yml` from `root` (if present) and stores it in
+    /// `smelt_yml_text` so that `project_unstable_schema` is Salsa-tracked
+    /// without further call-site changes. The LSP can call
+    /// `set_project_smelt_yml` later to propagate in-editor edits.
     pub fn set_project_input(&mut self, root: PathBuf, sources_yaml: String) -> ProjectInput {
+        let smelt_yml_text = std::fs::read_to_string(root.join("smelt.yml")).unwrap_or_default();
         let existing = self.projects.read().unwrap().get(&root).copied();
         match existing {
             Some(project) => {
                 project.set_sources_yaml(self).to(sources_yaml);
+                project.set_smelt_yml_text(self).to(smelt_yml_text);
                 project
             }
             None => {
-                let project = ProjectInput::new(self, root.clone(), sources_yaml);
+                let project = ProjectInput::new(self, root.clone(), sources_yaml, smelt_yml_text);
                 self.projects.write().unwrap().insert(root, project);
                 project
             }
+        }
+    }
+
+    /// Update the `smelt.yml` text for an already-registered project. Called by
+    /// the LSP whenever the file changes on disk; Salsa propagates the
+    /// invalidation through `project_unstable_schema` and any query that reads it.
+    pub fn set_project_smelt_yml(&mut self, root: &Path, smelt_yml_text: String) {
+        let project = self.projects.read().unwrap().get(root).copied();
+        if let Some(project) = project {
+            project.set_smelt_yml_text(self).to(smelt_yml_text);
         }
     }
 
@@ -358,6 +380,12 @@ pub enum DiagnosticCode {
     /// not declared in the callee's signature. Anchored at the `PASSING_NAME`
     /// span. Introduced in Phase 29 of smelt-functions.
     UnknownPassingParameter,
+    /// Emitted when a function's frontmatter uses the `provenance:` key but
+    /// the workspace's `smelt.yml` does not have `unstable_schema: true`.
+    /// The `provenance:` key is an unstable feature gated behind this flag.
+    /// Anchored at the function declaration's name span. Introduced in
+    /// Phase 31 of smelt-functions.
+    UnstableSchemaRequired,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -527,6 +555,16 @@ pub fn sources_config(db: &dyn salsa::Database, project: ProjectInput) -> Arc<So
         Ok(config) => Arc::new(config),
         Err(_) => Arc::new(SourcesConfig::default()),
     }
+}
+
+/// Return `true` when the project's `smelt.yml` contains `unstable_schema: true`.
+///
+/// Reads from `ProjectInput::smelt_yml_text`, which is tracked by Salsa.
+/// The LSP updates the text whenever `smelt.yml` changes on disk, so this
+/// query is automatically invalidated and re-evaluated on each change.
+#[salsa::tracked]
+pub fn project_unstable_schema(db: &dyn salsa::Database, project: ProjectInput) -> bool {
+    smelt_core::parse_unstable_schema_flag(project.smelt_yml_text(db))
 }
 
 /// Discover seed CSV files for a project root and infer their column types.
@@ -1200,6 +1238,101 @@ pub fn backends_widening_diagnostics_for_file(
     out
 }
 
+/// Per-file diagnostics for the Phase 31 `provenance:` unstable-schema gate.
+///
+/// For each `smelt.define` or `smelt.extern` in `file` that declares
+/// `provenance:` in its frontmatter, emits
+/// [`DiagnosticCode::UnstableSchemaRequired`] anchored at the declaration's
+/// name range when `unstable_schema` is `false`.
+///
+/// The `unstable_schema` flag should be read from the workspace's `smelt.yml`
+/// by the caller (a Salsa tracked function) before invoking this pure helper.
+pub fn provenance_unstable_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+    unstable_schema: bool,
+) -> Vec<Diagnostic> {
+    use smelt_planner::logical::Provenance;
+
+    if unstable_schema {
+        return Vec::new();
+    }
+
+    let raw_text = file.text(db);
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+
+    // Re-use the cached signature list to get accurate name_range values.
+    let sigs = file_signature_inputs(db, file);
+
+    let mut out = Vec::new();
+
+    // Check smelt.define declarations.
+    for define in ast.defines() {
+        let Some(fm) = define.frontmatter(raw_text) else {
+            continue;
+        };
+        let props = smelt_planner::logical::parse_function_properties(&fm);
+        if matches!(props.provenance, Provenance::Declared(_)) {
+            let name = define.name().unwrap_or_default();
+            let range = sigs
+                .iter()
+                .find(|sig| sig.name == name)
+                .map(|sig| sig.name_range)
+                .unwrap_or(Range {
+                    start: Position { line: 0, column: 0 },
+                    end: Position { line: 0, column: 0 },
+                });
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "function `{name}` declares `provenance:` in its frontmatter \
+                     but the workspace does not have `unstable_schema: true` in smelt.yml; \
+                     set `unstable_schema: true` to enable this unstable feature"
+                ),
+                range,
+                code: Some(DiagnosticCode::UnstableSchemaRequired),
+                data: None,
+            });
+        }
+    }
+
+    // Check smelt.extern declarations.
+    for ext in ast.externs() {
+        let Some(fm) = ext.frontmatter(raw_text) else {
+            continue;
+        };
+        let props = smelt_planner::logical::parse_function_properties(&fm);
+        if matches!(props.provenance, Provenance::Declared(_)) {
+            let name = ext.name().unwrap_or_default();
+            let range = sigs
+                .iter()
+                .find(|sig| sig.name == name)
+                .map(|sig| sig.name_range)
+                .unwrap_or(Range {
+                    start: Position { line: 0, column: 0 },
+                    end: Position { line: 0, column: 0 },
+                });
+            out.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "function `{name}` declares `provenance:` in its frontmatter \
+                     but the workspace does not have `unstable_schema: true` in smelt.yml; \
+                     set `unstable_schema: true` to enable this unstable feature"
+                ),
+                range,
+                code: Some(DiagnosticCode::UnstableSchemaRequired),
+                data: None,
+            });
+        }
+    }
+
+    out
+}
+
 /// Per-file diagnostics for `smelt.fn.<name>(...)` call sites (Phase 6).
 ///
 /// For every `SMELT_FN_CALL` AST node in `file`, runs the pure
@@ -1858,6 +1991,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 
     // Phase 11 — backends widening / malformed frontmatter.
     for diag in backends_widening_diagnostics_for_file(db, workspace, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 31 — provenance: unstable-schema gate.
+    let unstable_schema = project
+        .map(|p| project_unstable_schema(db, p))
+        .unwrap_or(false);
+    for diag in provenance_unstable_diagnostics_for_file(db, file, unstable_schema) {
         DiagnosticAcc(diag).accumulate(db);
     }
 
@@ -3507,6 +3648,9 @@ struct FnCallInput {
     fn_id: String,
     transparent: bool,
     properties: smelt_planner::logical::FunctionProperties,
+    /// Resolved provenance: either the declared provenance (when the workspace
+    /// opted in to `unstable_schema`) or `Unknown`.
+    provenance: smelt_planner::logical::Provenance,
 }
 
 /// Build a [`smelt_planner::logical::Plan`] from a single source file.
@@ -3522,9 +3666,19 @@ pub fn logical_plan(
     workspace: Workspace,
     file: SourceFile,
 ) -> Option<smelt_planner::logical::Plan> {
+    use smelt_planner::logical::Provenance;
+
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
     let ast = AstFile::cast(syntax)?;
+
+    // Determine whether the workspace has opted in to unstable schema features.
+    // Uses the Salsa-tracked ProjectInput so changes to smelt.yml invalidate
+    // this query via Salsa's dependency graph (no raw filesystem I/O here).
+    let project_root = file.project_root(db).clone();
+    let unstable_schema = find_project(db, workspace, &project_root)
+        .map(|p| project_unstable_schema(db, p))
+        .unwrap_or(false);
 
     // Walk the CST to collect all smelt.fn.* call sites, resolving each
     // function's signature and properties via Salsa before we leave the
@@ -3549,7 +3703,7 @@ pub fn logical_plan(
                 .unwrap_or(false);
 
             // Locate the declaring file and read its frontmatter via Salsa.
-            let properties = sig_opt
+            let mut properties = sig_opt
                 .as_ref()
                 .and_then(|_| {
                     workspace
@@ -3581,10 +3735,26 @@ pub fn logical_plan(
                 })
                 .unwrap_or_default();
 
+            // Phase 31: enforce unstable_schema gate on `provenance:`.
+            // If the function declared provenance but the workspace flag is
+            // absent, silently return Unknown here. The diagnostic is emitted
+            // by `provenance_unstable_diagnostics_for_file`, which is called
+            // from `check_file_diagnostics` so it surfaces through
+            // `file_diagnostics`.
+            let resolved_provenance =
+                if matches!(properties.provenance, Provenance::Declared(_)) && !unstable_schema {
+                    Provenance::Unknown
+                } else {
+                    // Either the flag is set (use declared provenance) or
+                    // provenance is already Unknown (pass through).
+                    std::mem::replace(&mut properties.provenance, Provenance::Unknown)
+                };
+
             FnCallInput {
                 fn_id,
                 transparent,
                 properties,
+                provenance: resolved_provenance,
             }
         })
         .collect();
@@ -3597,7 +3767,7 @@ pub fn logical_plan(
 /// Constructs a minimal `Select` root with the first collected `FunctionCall`
 /// as its `from` child. Phase 32+ replaces this with a full projection tree.
 fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logical::Plan {
-    use smelt_planner::logical::{LogicalNode, Provenance};
+    use smelt_planner::logical::LogicalNode;
     use std::sync::Arc;
 
     let fn_call_nodes: Vec<Arc<LogicalNode>> = call_inputs
@@ -3607,7 +3777,7 @@ fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logi
                 fn_id: input.fn_id,
                 args: Vec::new(), // Phase 30 stub — arg sub-plans deferred to Phase 32+
                 transparent: input.transparent,
-                provenance: Provenance::Unknown,
+                provenance: input.provenance,
                 properties: input.properties,
             })
         })

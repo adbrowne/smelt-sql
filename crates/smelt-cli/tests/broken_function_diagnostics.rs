@@ -246,6 +246,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::FunctionBodyTypeMismatch,
         message_substring: "`+`",
     },
+    // Phase 31: `provenance:` in frontmatter without `unstable_schema: true` in
+    // smelt.yml. The broken workspace has no unstable_schema flag, so this
+    // declaration should trigger UnstableSchemaRequired.
+    Case {
+        fixture: "fn_provenance_no_unstable_flag.sql",
+        companion: None,
+        code: DiagnosticCode::UnstableSchemaRequired,
+        message_substring: "fn_provenance_no_flag",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

@@ -11,3 +11,6 @@ targets:
     schema: main
 
 default_materialization: view
+
+# Enable unstable schema features (e.g., provenance: frontmatter key).
+unstable_schema: true

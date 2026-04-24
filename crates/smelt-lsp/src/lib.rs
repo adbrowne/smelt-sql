@@ -984,6 +984,7 @@ impl Backend {
                 DbCode::FragmentKindMismatch => "fragment-kind-mismatch",
                 DbCode::ReturnTypeMismatch => "return-type-mismatch",
                 DbCode::UnknownPassingParameter => "unknown-passing-parameter",
+                DbCode::UnstableSchemaRequired => "unstable-schema-required",
             };
             NumberOrString::String(code_str.to_string())
         });

@@ -4157,6 +4157,7 @@ dependencies = [
  "smelt-db",
  "smelt-parser",
  "smelt-types",
+ "tempfile",
 ]
 
 [[package]]
