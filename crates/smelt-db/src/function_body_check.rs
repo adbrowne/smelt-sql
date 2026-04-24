@@ -19,7 +19,8 @@ use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
-    SchemaMismatch, SchemaRequirement, Signature, SmeltType, TypeConstraint, UnificationError,
+    SchemaMismatch, SchemaRequirement, Signature, SmeltType, Tier, TypeConstraint,
+    UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
@@ -828,6 +829,25 @@ pub fn check_smelt_fn_call(
     // would cascade errors that are already subsumed by the call-site
     // issue. Shadow warnings are re-appended at the tail so they survive.
     if !diagnostics.is_empty() {
+        diagnostics.extend(shadow_warnings);
+        return diagnostics;
+    }
+
+    // Phase 25: Tier 2/3 *pure-scalar* bodies are checked at definition time —
+    // skip expansion at call sites. Argument type-checking (step 3 above)
+    // already ran. Re-walking the body here would only re-report errors that
+    // were already surfaced at definition time (Phases 23/24).
+    //
+    // Exception: functions with `TableExpr` or `SelectItems` parameters still
+    // need call-site expansion because their bodies reference caller-supplied
+    // column schemas that are only known at the call site.
+    let has_schema_param = sig.params.iter().any(|p| {
+        matches!(
+            &p.type_ref,
+            Some(Ok(SmeltType::TableExpr(_))) | Some(Ok(SmeltType::SelectItems { .. }))
+        )
+    });
+    if sig.tier != Tier::One && !has_schema_param {
         diagnostics.extend(shadow_warnings);
         return diagnostics;
     }

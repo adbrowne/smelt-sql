@@ -229,6 +229,14 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::ReturnTypeMismatch,
         message_substring: "TEXT",
     },
+    // Phase 25: Tier 2 call with wrong argument type. `mul_typed_local` expects
+    // Expr<Integer> but the literal 'hello' is Text. Expected: ArgTypeMismatch.
+    Case {
+        fixture: "fn_tier2_call_arg_wrong.sql",
+        companion: None,
+        code: DiagnosticCode::ArgTypeMismatch,
+        message_substring: "mul_typed_local",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

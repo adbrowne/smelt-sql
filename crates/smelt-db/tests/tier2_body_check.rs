@@ -319,3 +319,129 @@ fn tier3_row_variable_in_return_abstract_checked() {
          got {diags:?}"
     );
 }
+
+// ============================================================================
+// Phase 25 — Skip body expansion for Tier 2/3 call sites
+// ============================================================================
+
+/// Build a two-file workspace: a function-definition file and a caller file.
+/// The caller file contains a SELECT statement so `smelt.fn.*` calls are
+/// dispatched with a resolvable expression context.
+fn build_two_file_db(
+    fn_src: &str,
+    caller_src: &str,
+) -> (Database, Workspace, SourceFile, SourceFile) {
+    let root = PathBuf::from("/fake/project");
+    let fn_path = root.join("functions").join("fn_def.sql");
+    let caller_path = root.join("models").join("caller_model.sql");
+
+    let files = [(fn_path.clone(), fn_src), (caller_path.clone(), caller_src)];
+    let (db, ws, handles) = build_db(root, &files);
+    let fn_file = handles[0];
+    let caller_file = handles[1];
+    (db, ws, fn_file, caller_file)
+}
+
+#[test]
+fn tier2_call_arg_checked_against_declared_param() {
+    // Tier 2 function: `mul_typed(x: Expr<Integer>, y: Expr<Integer>)`.
+    // Caller passes a Text literal `'hello'` for `x` — type mismatch.
+    // Expect: ArgTypeMismatch on the caller file, mentioning "x" and/or "Integer".
+    let fn_src = "smelt.define mul_typed(x: Expr<Integer>, y: Expr<Integer>) AS (x * y)\n";
+    // Use a literal so the arg type is concrete (Text), not Unknown.
+    let caller_src = "SELECT smelt.fn.mul_typed('hello', 1) AS r\n";
+
+    let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    let arg_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ArgTypeMismatch))
+        .collect();
+
+    assert!(
+        !arg_errors.is_empty(),
+        "Tier 2 call with Text literal for Integer param must emit ArgTypeMismatch, got {diags:?}"
+    );
+    // Must name the param and expected type.
+    let msg = &arg_errors[0].message;
+    assert!(
+        msg.contains('x') || msg.contains("Integer"),
+        "ArgTypeMismatch message must mention param or type, got: {msg}"
+    );
+}
+
+#[test]
+fn tier3_call_arg_checked_same_as_tier2() {
+    // Tier 3 function: `clamp_tier3(x: Expr<Integer>) -> Expr<Integer>`.
+    // Caller passes a Text literal — type mismatch.
+    // Expect: ArgTypeMismatch on the caller file.
+    let fn_src = "smelt.define clamp_tier3(x: Expr<Integer>) -> Expr<Integer> AS (x)\n";
+    let caller_src = "SELECT smelt.fn.clamp_tier3('hello') AS r\n";
+
+    let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    let arg_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ArgTypeMismatch))
+        .collect();
+
+    assert!(
+        !arg_errors.is_empty(),
+        "Tier 3 call with Text literal for Integer param must emit ArgTypeMismatch, got {diags:?}"
+    );
+}
+
+#[test]
+fn tier1_call_still_uses_expansion() {
+    // Tier 1 (unannotated) function: `broken_raw(x)` with body referencing
+    // an undefined identifier `undefined_var`. Expansion cascades the
+    // UnknownIdentifier error to the call site with an ExpansionFrames payload.
+    let fn_src = "smelt.define broken_raw(x) AS (x + undefined_var)\n";
+    let caller_src = "SELECT smelt.fn.broken_raw(42) AS r\n";
+
+    let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    // Expansion should cascade the UnknownIdentifier from the body to the call site,
+    // producing a diagnostic with an ExpansionFrames payload at the caller.
+    let expanded_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(DiagnosticCode::UnknownIdentifier)
+                && matches!(&d.data, Some(smelt_db::DiagnosticData::ExpansionFrames(_)))
+        })
+        .collect();
+
+    assert!(
+        !expanded_errors.is_empty(),
+        "Tier 1 call must cascade body expansion errors (with ExpansionFrames) to caller, got {diags:?}"
+    );
+}
+
+#[test]
+fn checking_mode_no_expansion_performed() {
+    // Tier 2 function with a broken body: `broken_tier2(x: Expr<Integer>)` body
+    // has `x + 'text'` — a type error caught at definition time (Phase 23).
+    // Caller passes a correct Integer literal 42.
+    // Observable proof that expansion was skipped: if body_lookup were called, the
+    // FunctionBodyTypeMismatch from `x + 'text'` would cascade to the caller file.
+    // Asserting it is absent confirms the Tier 2 call-site skips expansion entirely.
+    let fn_src = "smelt.define broken_tier2(x: Expr<Integer>) AS (x + 'text')\n";
+    let caller_src = "SELECT smelt.fn.broken_tier2(42) AS r\n";
+
+    let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
+    let diags = file_diagnostics(&db, ws, caller_file);
+
+    let body_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::FunctionBodyTypeMismatch))
+        .collect();
+
+    assert!(
+        body_errors.is_empty(),
+        "Tier 2 call with correct arg must NOT cascade body errors to caller (expansion skipped \
+         for Tier 2 means body_lookup is never called), got {diags:?}"
+    );
+}
