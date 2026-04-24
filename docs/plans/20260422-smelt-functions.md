@@ -1197,7 +1197,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 19 | Parser + types: context-binding syntax (Step 4 opens) | done | 76cb0bd | 2026-04-24 |
 | 20 | CTE schema extraction + splice-point context inference | done | a4d64c9 | 2026-04-24 |
 | 21 | Column-name validation against contexts + annotation reconciliation | done | 40b00b9 | 2026-04-24 |
-| 22 | `session_rollup` end-to-end (Step 4 complete) | done | | 2026-04-24 |
+| 22 | `session_rollup` end-to-end (Step 4 complete) | done | f09eeb4 | 2026-04-24 |
 | 23 | Tier 2 body check in isolation (Step 5 opens) | pending | | |
 | 24 | Tier 3 return-type verification + LSP hover | pending | | |
 | 25 | Call-site bidirectional checking (pre-expansion) | pending | | |
