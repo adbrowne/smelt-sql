@@ -13,9 +13,15 @@
 -- hand-written inference path, so the fixture must stay clean under the
 -- legacy checker. Phase 9 rewires the checker to drive inference through
 -- the registry directly.
+--
+-- Phase 27 fixture: exercise bidirectional widening via a Tier 3 function
+-- that declares `-> Expr<Double>` over an `Expr<Integer>` body using ABS.
+--   * smelt.fn.widen_to_double(event_id)     — Integer arg widened to Double
+--                                               by expected_return propagation
 SELECT
     MIN(event_id) AS min_event_id,
     COALESCE(user_id, 0) AS user_id_or_zero,
     GREATEST(event_id, user_id, 0) AS max_numeric,
-    CONCAT(event_type, '-', event_type) AS doubled_event_type
+    CONCAT(event_type, '-', event_type) AS doubled_event_type,
+    smelt.fn.widen_to_double(event_id) AS event_id_as_double
 FROM smelt.source('source.events')

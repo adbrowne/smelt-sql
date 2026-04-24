@@ -958,6 +958,13 @@ fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedCo
 pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
     let mut ctx = parent_ctx.clone();
 
+    // Phase 27: Do not propagate `expected_return` into subquery contexts.
+    // The outer function's bidirectional hint applies to the top-level body
+    // expression only. Propagating it into subqueries would incorrectly widen
+    // registry-migrated generics inside nested SELECT statements, producing
+    // wrong inferred types for sub-expressions that have no declared return.
+    ctx.expected_return = None;
+
     // Process any WITH clause in this subquery
     if let Some(with_clause) = select_stmt.with_clause() {
         for cte in with_clause.ctes() {
