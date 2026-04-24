@@ -31,6 +31,36 @@ use crate::type_inference::{
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
+/// Discriminates the three type-checking tiers (§8) inside
+/// `check_function_body` and `check_smelt_fn_call`.
+///
+/// - `Tier1Expansion`: call-site expansion; `arg_types` holds the
+///   concrete argument types bound from the caller. Used in Phase 26.
+/// - `Tier2Isolated`: definition-time check; declared parameter types
+///   seed the body context. Used by `function_body_diagnostics_for_file`
+///   for Tier 2 functions.
+/// - `Tier2CallSite`: pre-expansion call-site check against declared
+///   types; `expected_ret` is the type context expects the call to
+///   return (for bidirectional inference, Phase 25+).
+#[derive(Debug, Clone)]
+pub enum CheckMode {
+    Tier1Expansion(Vec<(String, DataType)>),
+    Tier2Isolated,
+    Tier2CallSite(Option<DataType>),
+}
+
+/// Return `true` when every non-`TableExpr` / non-`SelectItems` parameter
+/// in `sig` has an explicit, parseable `Expr<T>` annotation.  Exactly the
+/// condition that enables definition-time body checking in isolation (Tier 2).
+pub fn is_tier2_function(sig: &FunctionSig) -> bool {
+    sig.params.iter().all(|p| match &p.type_ref {
+        Some(Ok(SmeltType::TableExpr(_))) => true, // TableExpr params are exempt
+        Some(Ok(SmeltType::SelectItems { .. })) => true, // SelectItems are exempt
+        Some(Ok(SmeltType::Expr(_))) => true,      // annotated scalar — counts
+        _ => false,                                // unannotated or malformed → Tier 1
+    })
+}
+
 /// Shape of a function body returned by `body_lookup`.
 ///
 /// Phase 15 introduces the `Select` variant for `TableExpr`-returning

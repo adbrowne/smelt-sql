@@ -212,6 +212,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::AnnotationTooWide,
         message_substring: "wider",
     },
+    // Phase 23: Tier 2 body type error at definition time. `revenue` is
+    // Expr<Integer> but `'text'` is Text — fires FunctionBodyTypeMismatch
+    // without any call site.
+    Case {
+        fixture: "fn_tier2_body_broken.sql",
+        companion: None,
+        code: DiagnosticCode::FunctionBodyTypeMismatch,
+        message_substring: "TEXT",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {
