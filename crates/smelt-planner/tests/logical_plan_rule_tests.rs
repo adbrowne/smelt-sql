@@ -79,6 +79,9 @@ fn has_transparent_call(node: &Arc<LogicalNode>) -> bool {
                 || filter.as_ref().map(has_transparent_call).unwrap_or(false)
         }
         LogicalNode::Cast { inner, .. } => has_transparent_call(inner),
+        LogicalNode::LeftJoin { lhs, rhs, .. } => {
+            has_transparent_call(lhs) || has_transparent_call(rhs)
+        }
     }
 }
 

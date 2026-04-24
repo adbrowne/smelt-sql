@@ -73,6 +73,25 @@ pub enum Provenance {
     Declared(Vec<(String, Vec<String>)>),
 }
 
+/// Join cardinality declaration for a [`LogicalNode::LeftJoin`] node.
+///
+/// The planner trusts this declaration without verifying it against data
+/// (§20E — declared-cardinality soundness caveat). It is the caller's
+/// responsibility to ensure the declaration matches the actual data.
+///
+/// `OneToOne` is required by [`crate::logical_plan_rules::EliminateUnusedLeftJoin`]
+/// before it may elide a join; `OneToMany` always blocks elimination because
+/// such a join may multiply rows on the LHS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cardinality {
+    /// Each LHS row matches at most one RHS row. Join elimination is safe when
+    /// no RHS column appears in the parent's projection list.
+    OneToOne,
+    /// Each LHS row may match many RHS rows. Eliminating this join could change
+    /// the output row count, so it is never safe to elide.
+    OneToMany,
+}
+
 /// A node in the logical query plan.
 ///
 /// Phase 30 introduces a minimal node set sufficient to represent
@@ -140,6 +159,34 @@ pub enum LogicalNode {
         inner: Plan,
         /// The target SQL type for the CAST expression.
         target_type: DataType,
+    },
+    /// A LEFT JOIN between two sub-plans, produced when a function internally
+    /// joins a dimension table (declared via `joins:` frontmatter metadata).
+    ///
+    /// # Soundness caveat (§20E)
+    ///
+    /// The planner trusts the declared [`Cardinality`] without verifying it
+    /// against data. If the actual join is not 1:1, eliminating it via
+    /// [`crate::logical_plan_rules::EliminateUnusedLeftJoin`] is incorrect.
+    /// It is the caller's responsibility to ensure the declaration matches
+    /// runtime behaviour.
+    LeftJoin {
+        /// The left-hand side (driving) sub-plan.
+        lhs: Plan,
+        /// The right-hand side (dimension) sub-plan.
+        rhs: Plan,
+        /// Column names used to match rows between LHS and RHS.
+        join_columns: Vec<String>,
+        /// Declared join cardinality. Only [`Cardinality::OneToOne`] permits
+        /// the [`crate::logical_plan_rules::EliminateUnusedLeftJoin`] rule to
+        /// remove this join.
+        cardinality: Cardinality,
+        /// Column names that come exclusively from the RHS (the dimension table).
+        ///
+        /// If none of these appear in the parent's projection list the join
+        /// contributes nothing to the output and can be safely elided when
+        /// `cardinality == OneToOne`.
+        output_columns: Vec<String>,
     },
 }
 

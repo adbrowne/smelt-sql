@@ -230,6 +230,9 @@ fn contains_transparent_function_call(node: &Arc<LogicalNode>) -> bool {
         | LogicalNode::TableRef { .. }
         | LogicalNode::Literal(_) => false,
         LogicalNode::Cast { inner, .. } => contains_transparent_function_call(inner),
+        LogicalNode::LeftJoin { lhs, rhs, .. } => {
+            contains_transparent_function_call(lhs) || contains_transparent_function_call(rhs)
+        }
     }
 }
 

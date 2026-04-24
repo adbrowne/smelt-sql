@@ -1208,8 +1208,8 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 30 | Logical plan data model: functions as first-class nodes (Step 7 opens) | done | a3a3150 | 2026-04-25 |
 | 31 | Column provenance + declared-property propagation | done | 9cb6709 | 2026-04-25 |
 | 32 | Planner rule API + Level 2 expansion of function calls | done | 3715013 | 2026-04-25 |
-| 33 | Filter pushdown across transparent-function boundaries | done | | 2026-04-25 |
-| 34 | Join elimination example (Step 7 complete) | pending | | |
+| 33 | Filter pushdown across transparent-function boundaries | done | 677f2e3 | 2026-04-25 |
+| 34 | Join elimination example (Step 7 complete) | done | | 2026-04-25 |
 | 35 | Parser + types: row variables on `Struct<…>` and value-level spread (Step 8 opens) | pending | | |
 | 36 | Row unification at call sites with value-level erasure | pending | | |
 | 37 | Row variable in return position: pass-through fields | pending | | |

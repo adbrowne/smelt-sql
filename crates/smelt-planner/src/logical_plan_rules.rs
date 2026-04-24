@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use smelt_types::DataType;
 
-use crate::logical::{FnId, FunctionProperties, LogicalNode, Plan, Provenance};
+use crate::logical::{Cardinality, FnId, FunctionProperties, LogicalNode, Plan, Provenance};
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -140,6 +140,39 @@ fn expand_recursive(node: Plan) -> RuleResult {
             })),
             RuleResult::Unchanged => RuleResult::Unchanged,
         },
+
+        // LeftJoin: recurse into both children.
+        LogicalNode::LeftJoin {
+            lhs,
+            rhs,
+            join_columns,
+            cardinality,
+            output_columns,
+        } => {
+            let lhs_result = expand_recursive(lhs.clone());
+            let rhs_result = expand_recursive(rhs.clone());
+            let lhs_changed = matches!(lhs_result, RuleResult::Changed(_));
+            let rhs_changed = matches!(rhs_result, RuleResult::Changed(_));
+            if lhs_changed || rhs_changed {
+                let new_lhs = match lhs_result {
+                    RuleResult::Changed(p) => p,
+                    _ => lhs.clone(),
+                };
+                let new_rhs = match rhs_result {
+                    RuleResult::Changed(p) => p,
+                    _ => rhs.clone(),
+                };
+                RuleResult::Changed(Arc::new(LogicalNode::LeftJoin {
+                    lhs: new_lhs,
+                    rhs: new_rhs,
+                    join_columns: join_columns.clone(),
+                    cardinality: cardinality.clone(),
+                    output_columns: output_columns.clone(),
+                }))
+            } else {
+                RuleResult::Unchanged
+            }
+        }
     }
 }
 
@@ -254,6 +287,74 @@ impl PlannerRule for PushFilterIntoTransparentFunction {
         });
 
         RuleResult::Changed(new_select)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: EliminateUnusedLeftJoin
+// ---------------------------------------------------------------------------
+
+/// Elide a `LeftJoin` whose RHS columns are never consumed by the parent
+/// `Select`'s projection list.
+///
+/// # Conditions for firing
+///
+/// All of the following must hold:
+/// 1. The plan is a `Select { projections, from: Some(LeftJoin { .. }), .. }`.
+/// 2. The `LeftJoin` has `cardinality == OneToOne`.
+///    — `OneToMany` is never safe: dropping the join could change row counts.
+/// 3. None of the `LeftJoin::output_columns` appear in `projections`.
+///    — If any RHS column is projected, it must be produced.
+///
+/// # Effect
+///
+/// The `Select`'s `from` is replaced with the `LeftJoin`'s `lhs`, dropping
+/// the join and the RHS entirely.
+///
+/// # Soundness caveat (§20E)
+///
+/// The rule trusts the declared cardinality without verifying it against
+/// actual data. Mismatched declarations will silently produce incorrect results.
+pub struct EliminateUnusedLeftJoin;
+
+impl PlannerRule for EliminateUnusedLeftJoin {
+    fn apply(&self, plan: Plan, _ctx: &RuleContext) -> RuleResult {
+        let LogicalNode::Select {
+            ref projections,
+            from: Some(ref from_node),
+            ref filter,
+        } = *plan
+        else {
+            return RuleResult::Unchanged;
+        };
+
+        let LogicalNode::LeftJoin {
+            ref lhs,
+            cardinality: Cardinality::OneToOne,
+            ref output_columns,
+            ..
+        } = *from_node.as_ref()
+        else {
+            return RuleResult::Unchanged;
+        };
+
+        // Check that no output column from the RHS appears in the projection list.
+        let any_rhs_used = output_columns
+            .iter()
+            .any(|col| projections.iter().any(|p| p == col));
+
+        if any_rhs_used {
+            return RuleResult::Unchanged;
+        }
+
+        // Safe to elide: replace from with lhs only.
+        let new_plan = Arc::new(LogicalNode::Select {
+            projections: projections.clone(),
+            from: Some(lhs.clone()),
+            filter: filter.clone(),
+        });
+
+        RuleResult::Changed(new_plan)
     }
 }
 

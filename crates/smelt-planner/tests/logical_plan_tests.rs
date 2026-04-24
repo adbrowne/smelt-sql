@@ -103,6 +103,9 @@ fn first_function_call(node: &Arc<LogicalNode>) -> Option<FunctionCallFields> {
         LogicalNode::TableRef { .. }
         | LogicalNode::Literal(_)
         | LogicalNode::ExpandedCall { .. } => None,
+        LogicalNode::LeftJoin { lhs, rhs, .. } => {
+            first_function_call(lhs).or_else(|| first_function_call(rhs))
+        }
     }
 }
 
