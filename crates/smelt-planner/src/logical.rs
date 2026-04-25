@@ -149,6 +149,12 @@ pub enum LogicalNode {
         provenance: Provenance,
         /// Properties copied from the original `FunctionCall`.
         properties: FunctionProperties,
+        /// A WHERE predicate that was pushed into the original `FunctionCall`
+        /// by [`crate::logical_plan_rules::PushFilterIntoTransparentFunction`]
+        /// before expansion. Carrying it through expansion keeps the evidence
+        /// of pushdown visible in the final plan; `None` when no filter was
+        /// pushed.
+        pushed_filter: Option<Plan>,
     },
     /// Wraps an inner node with an explicit SQL CAST to `target_type`.
     ///

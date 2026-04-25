@@ -223,6 +223,10 @@ struct SeedArgs {
 
 #[derive(Parser)]
 struct BuildArgs {
+    /// Optional path to a single model file to plan. Required with --show-plan,
+    /// ignored otherwise.
+    file: Option<PathBuf>,
+
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
@@ -258,6 +262,11 @@ struct BuildArgs {
     /// Exclude models from the run (repeatable). Same syntax as --select.
     #[arg(long = "exclude", short = 'e')]
     exclude: Vec<String>,
+
+    /// Print the optimised logical plan for the given file and exit. Requires
+    /// a model file as a positional argument. No execution side effects.
+    #[arg(long = "show-plan")]
+    show_plan: bool,
 }
 
 #[derive(Parser)]

@@ -54,6 +54,23 @@ pub trait PlannerRule: Send + Sync {
 // Fixed-point loop
 // ---------------------------------------------------------------------------
 
+/// Build the rule list `smelt build --show-plan` runs over each model's
+/// logical plan: filter push-down into transparent calls, expansion of
+/// transparent calls, and elimination of unused 1:1 LEFT JOINs.
+///
+/// Order matters: pushdown must run before expansion. Pushdown matches
+/// `Select { from: FunctionCall { transparent: true, .. } }`, while
+/// expansion replaces that `FunctionCall` with an `ExpandedCall` marker
+/// that pushdown does not match. The same ordering is asserted by the
+/// `combined_rule_set_reaches_fixed_point` test in `pushdown_tests.rs`.
+pub fn show_plan_rules() -> Vec<Box<dyn PlannerRule>> {
+    vec![
+        Box::new(PushFilterIntoTransparentFunction),
+        Box::new(ExpandTransparentFunctionCalls),
+        Box::new(EliminateUnusedLeftJoin),
+    ]
+}
+
 /// Run all `rules` over `plan` in a fixed-point loop.
 ///
 /// Each pass applies every rule in order; if any rule fires the loop repeats
@@ -112,9 +129,10 @@ fn expand_recursive(node: Plan) -> RuleResult {
             fn_id,
             provenance,
             properties,
+            pushed_filter,
             ..
         } => {
-            let expanded = build_expanded_call(fn_id, provenance, properties);
+            let expanded = build_expanded_call(fn_id, provenance, properties, pushed_filter);
             RuleResult::Changed(expanded)
         }
 
@@ -181,11 +199,13 @@ fn build_expanded_call(
     fn_id: &FnId,
     provenance: &Provenance,
     properties: &FunctionProperties,
+    pushed_filter: &Option<Plan>,
 ) -> Plan {
     let expanded: Plan = Arc::new(LogicalNode::ExpandedCall {
         fn_id: fn_id.clone(),
         provenance: provenance.clone(),
         properties: properties.clone(),
+        pushed_filter: pushed_filter.clone(),
     });
 
     if properties.needs_cast {
