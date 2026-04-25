@@ -81,7 +81,7 @@ fn pushdown_into_transparent_function_body() {
     let plan = make_select_with_filter(call, pred.clone());
 
     let rule = PushFilterIntoTransparentFunction;
-    let result = rule.apply(plan, &RuleContext);
+    let result = rule.apply(plan, &RuleContext::default());
 
     let new_plan = match result {
         RuleResult::Changed(p) => p,
@@ -130,7 +130,7 @@ fn pushdown_blocked_by_opaque_provenance() {
     let plan = make_select_with_filter(call, pred);
 
     let rule = PushFilterIntoTransparentFunction;
-    match rule.apply(plan, &RuleContext) {
+    match rule.apply(plan, &RuleContext::default()) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(p) => {
             panic!("Expected Unchanged for opaque provenance, got Changed: {p:?}")
@@ -151,7 +151,7 @@ fn pushdown_blocked_at_black_box() {
     let plan = make_select_with_filter(call, pred);
 
     let rule = PushFilterIntoTransparentFunction;
-    match rule.apply(plan, &RuleContext) {
+    match rule.apply(plan, &RuleContext::default()) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(p) => {
             panic!("Expected Unchanged for non-transparent call, got Changed: {p:?}")
@@ -260,7 +260,7 @@ fn pushdown_blocked_by_non_deterministic_function() {
     let plan = make_select_with_filter(call, pred);
 
     let rule = PushFilterIntoTransparentFunction;
-    match rule.apply(plan, &RuleContext) {
+    match rule.apply(plan, &RuleContext::default()) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(p) => {
             panic!("Expected Unchanged for non-deterministic function, got Changed: {p:?}")
@@ -299,7 +299,7 @@ fn no_re_push_when_already_pushed() {
     });
 
     let rule = PushFilterIntoTransparentFunction;
-    match rule.apply(plan, &RuleContext) {
+    match rule.apply(plan, &RuleContext::default()) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(p) => {
             panic!("Expected Unchanged when pushed_filter already set, got Changed: {p:?}")

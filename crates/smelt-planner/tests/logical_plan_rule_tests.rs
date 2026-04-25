@@ -11,6 +11,7 @@ use smelt_planner::logical_plan_rules::{
     apply_rules_to_fixed_point, ExpandTransparentFunctionCalls, PlannerRule, RuleContext,
     RuleResult,
 };
+use smelt_types::DataType;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,7 +104,7 @@ impl PlannerRule for StubRule {
 fn planner_rule_trait_shape() {
     let plan = make_opaque_call("some_fn");
     let rule = StubRule;
-    let ctx = RuleContext;
+    let ctx = RuleContext::default();
     match rule.apply(plan, &ctx) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(_) => panic!("StubRule should return Unchanged"),
@@ -118,7 +119,7 @@ fn planner_rule_trait_shape() {
 fn expansion_rule_replaces_transparent_calls() {
     let plan = make_transparent_call("my_fn");
     let rule = ExpandTransparentFunctionCalls;
-    let ctx = RuleContext;
+    let ctx = RuleContext::default();
 
     let result = rule.apply(plan, &ctx);
     let new_plan = match result {
@@ -140,7 +141,7 @@ fn expansion_rule_replaces_transparent_calls() {
 fn black_box_calls_left_intact() {
     let plan = make_opaque_call("ext_fn");
     let rule = ExpandTransparentFunctionCalls;
-    let ctx = RuleContext;
+    let ctx = RuleContext::default();
 
     match rule.apply(plan, &ctx) {
         RuleResult::Unchanged => {}
@@ -161,7 +162,7 @@ fn black_box_calls_left_intact() {
 fn fixed_point_terminates() {
     let plan = make_transparent_call("my_fn");
     let rule = ExpandTransparentFunctionCalls;
-    let ctx = RuleContext;
+    let ctx = RuleContext::default();
 
     // First pass: must change.
     let result1 = rule.apply(plan, &ctx);
@@ -192,7 +193,7 @@ fn expansion_preserves_provenance() {
     let plan = make_transparent_call_with_provenance("prov_fn", provenance.clone());
 
     let rule = ExpandTransparentFunctionCalls;
-    let ctx = RuleContext;
+    let ctx = RuleContext::default();
     let result = rule.apply(plan, &ctx);
 
     let new_plan = match result {
@@ -226,9 +227,11 @@ fn expansion_preserves_provenance() {
 
 #[test]
 fn cast_emitted_for_needs_cast_returns() {
-    let plan = make_needs_cast_call("cast_fn");
+    // Cast emission requires both `needs_cast: true` AND a registered canonical
+    // return for the function. SUM has both, so the rule emits a Cast wrapper.
+    let plan = make_needs_cast_call("SUM");
     let rule = ExpandTransparentFunctionCalls;
-    let ctx = RuleContext;
+    let ctx = RuleContext::with_builtins();
 
     let result = rule.apply(plan, &ctx);
     let new_plan = match result {
@@ -243,7 +246,7 @@ fn cast_emitted_for_needs_cast_returns() {
             target_type: _,
         } => match inner.as_ref() {
             LogicalNode::ExpandedCall { fn_id, .. } => {
-                assert_eq!(fn_id, "cast_fn", "ExpandedCall fn_id must be preserved");
+                assert_eq!(fn_id, "SUM", "ExpandedCall fn_id must be preserved");
             }
             other => panic!("Expected ExpandedCall inside Cast, got: {other:?}"),
         },
@@ -266,4 +269,116 @@ fn apply_rules_fixed_point_runs_to_completion() {
         !has_transparent_call(&result),
         "Fixed-point loop must have removed all transparent calls; got: {result:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 40 — CAST emission resolves target type from Signature::canonical_return
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sum_integer_cast_target_is_bigint() {
+    let plan = make_needs_cast_call("SUM");
+    let rule = ExpandTransparentFunctionCalls;
+    let ctx = RuleContext::with_builtins();
+
+    let result = rule.apply(plan, &ctx);
+    let new_plan = match result {
+        RuleResult::Changed(p) => p,
+        RuleResult::Unchanged => panic!("Expected Changed for needs_cast=true SUM call"),
+    };
+
+    match new_plan.as_ref() {
+        LogicalNode::Cast { target_type, .. } => {
+            assert_eq!(
+                *target_type,
+                DataType::BigInt,
+                "SUM canonical return must resolve to BigInt; got {target_type:?}"
+            );
+        }
+        other => panic!("Expected Cast wrapping ExpandedCall, got: {other:?}"),
+    }
+}
+
+#[test]
+fn sum_decimal_cast_target_is_decimal() {
+    // Per §16 #9, Decimal precision/scale tracking is deferred for v1.
+    // SUM's canonical_return is encoded once per signature; the v1 acceptance
+    // for SUM(Decimal) is either BigInt (the registry's static canonical) or
+    // Decimal { precision: 38, scale: 0 } (the per-engine native widening).
+    let plan = make_needs_cast_call("SUM");
+    let rule = ExpandTransparentFunctionCalls;
+    let ctx = RuleContext::with_builtins();
+
+    let result = rule.apply(plan, &ctx);
+    let new_plan = match result {
+        RuleResult::Changed(p) => p,
+        RuleResult::Unchanged => panic!("Expected Changed for needs_cast=true SUM call"),
+    };
+
+    match new_plan.as_ref() {
+        LogicalNode::Cast { target_type, .. } => {
+            let acceptable = matches!(target_type, DataType::BigInt)
+                || matches!(
+                    target_type,
+                    DataType::Decimal {
+                        precision: 38,
+                        scale: 0
+                    }
+                );
+            assert!(
+                acceptable,
+                "SUM(Decimal) canonical must be BigInt or Decimal(38,0); got {target_type:?}"
+            );
+        }
+        other => panic!("Expected Cast wrapping ExpandedCall, got: {other:?}"),
+    }
+}
+
+#[test]
+fn non_cast_function_emits_no_cast_node() {
+    let plan = make_transparent_call("LOWER");
+    let rule = ExpandTransparentFunctionCalls;
+    let ctx = RuleContext::with_builtins();
+
+    let result = rule.apply(plan, &ctx);
+    let new_plan = match result {
+        RuleResult::Changed(p) => p,
+        RuleResult::Unchanged => panic!("Expected Changed for transparent LOWER call"),
+    };
+
+    match new_plan.as_ref() {
+        LogicalNode::ExpandedCall { fn_id, .. } => {
+            assert_eq!(fn_id, "LOWER");
+        }
+        LogicalNode::Cast { .. } => {
+            panic!("Cast wrapper must not be emitted for needs_cast=false; got: {new_plan:?}")
+        }
+        other => panic!("Expected ExpandedCall, got: {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_signature_falls_back_to_no_cast() {
+    // Function name not in the registry, with needs_cast=true.  The lookup
+    // returns None; the rule must omit the Cast wrapper rather than panic
+    // or emit a Cast with an arbitrary placeholder target type.
+    let plan = make_needs_cast_call("totally_unknown_extern_fn");
+    let rule = ExpandTransparentFunctionCalls;
+    let ctx = RuleContext::with_builtins();
+
+    let result = rule.apply(plan, &ctx);
+    let new_plan = match result {
+        RuleResult::Changed(p) => p,
+        RuleResult::Unchanged => panic!("Expected Changed for transparent call"),
+    };
+
+    match new_plan.as_ref() {
+        LogicalNode::ExpandedCall { fn_id, .. } => {
+            assert_eq!(fn_id, "totally_unknown_extern_fn");
+        }
+        LogicalNode::Cast { .. } => {
+            panic!("Cast must not be emitted when canonical_return is unknown; got: {new_plan:?}")
+        }
+        other => panic!("Expected ExpandedCall (no Cast wrapper), got: {other:?}"),
+    }
 }

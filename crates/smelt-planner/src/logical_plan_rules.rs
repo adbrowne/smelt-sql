@@ -11,11 +11,14 @@
 //! *graph-level* rules in `crates/smelt-planner/src/rules/`, which operate
 //! on the model dependency graph.
 //!
-//! [`RuleContext`] is intentionally empty in Phase 32.  Future phases will
-//! add filter lists (which rules to skip), backend hints, etc.
+//! [`RuleContext`] carries a [`CanonicalReturnLookup`] used by the expansion
+//! rule to resolve a function's canonical return type when emitting CASTs.
+//! Future phases will add filter lists (which rules to skip), backend hints,
+//! etc.
 
 use std::sync::Arc;
 
+use smelt_types::signatures::BuiltinRegistry;
 use smelt_types::DataType;
 
 use crate::logical::{Cardinality, FnId, FunctionProperties, LogicalNode, Plan, Provenance};
@@ -24,11 +27,70 @@ use crate::logical::{Cardinality, FnId, FunctionProperties, LogicalNode, Plan, P
 // Public API types
 // ---------------------------------------------------------------------------
 
+/// Resolves a function's canonical return type by name.
+///
+/// Phase 40 introduces this trait so the expansion rule can emit
+/// CAST nodes whose target type comes from
+/// [`smelt_types::signatures::Signature::canonical_return`] rather than a
+/// hardcoded placeholder. The trait abstracts the registry source so tests
+/// can inject custom lookups without mutating the global built-in registry.
+pub trait CanonicalReturnLookup: Send + Sync {
+    /// Return the canonical SQL return type for `fn_id`, or `None` if the
+    /// function is not registered or has no declared canonical type.
+    fn canonical_return(&self, fn_id: &str) -> Option<DataType>;
+}
+
+/// Default lookup that consults the global [`BuiltinRegistry`].
+pub struct BuiltinCanonicalReturnLookup;
+
+impl CanonicalReturnLookup for BuiltinCanonicalReturnLookup {
+    fn canonical_return(&self, fn_id: &str) -> Option<DataType> {
+        BuiltinRegistry::resolve(fn_id).and_then(|sig| sig.canonical_return.clone())
+    }
+}
+
+/// Lookup that always returns `None`. Used as the default when no registry
+/// is supplied (e.g. in legacy tests that don't exercise the cast path).
+pub struct EmptyCanonicalReturnLookup;
+
+impl CanonicalReturnLookup for EmptyCanonicalReturnLookup {
+    fn canonical_return(&self, _fn_id: &str) -> Option<DataType> {
+        None
+    }
+}
+
 /// Context available to planner rules during a pass.
 ///
-/// Phase 32: intentionally empty.  Phase 33+ will add filter lists and
-/// backend configuration.
-pub struct RuleContext;
+/// The `registry` field exposes a [`CanonicalReturnLookup`] that
+/// [`ExpandTransparentFunctionCalls`] uses to resolve CAST target types.
+/// Construct with [`RuleContext::default()`] for no-cast tests or
+/// [`RuleContext::with_builtins()`] for the production path.
+pub struct RuleContext {
+    /// Resolves canonical return types by function name.
+    pub registry: Arc<dyn CanonicalReturnLookup>,
+}
+
+impl Default for RuleContext {
+    fn default() -> Self {
+        RuleContext {
+            registry: Arc::new(EmptyCanonicalReturnLookup),
+        }
+    }
+}
+
+impl RuleContext {
+    /// Construct a [`RuleContext`] backed by the global [`BuiltinRegistry`].
+    pub fn with_builtins() -> Self {
+        RuleContext {
+            registry: Arc::new(BuiltinCanonicalReturnLookup),
+        }
+    }
+
+    /// Construct a [`RuleContext`] with a custom registry resolver.
+    pub fn with_registry(registry: Arc<dyn CanonicalReturnLookup>) -> Self {
+        RuleContext { registry }
+    }
+}
 
 /// The result of applying a [`PlannerRule`] to a plan node.
 pub enum RuleResult {
@@ -76,11 +138,25 @@ pub fn show_plan_rules() -> Vec<Box<dyn PlannerRule>> {
 /// Each pass applies every rule in order; if any rule fires the loop repeats
 /// from the beginning with the updated plan.  The loop terminates when a full
 /// pass completes without any rule returning [`RuleResult::Changed`].
-pub fn apply_rules_to_fixed_point(mut plan: Plan, rules: &[Box<dyn PlannerRule>]) -> Plan {
+///
+/// Uses [`RuleContext::default()`] (an empty registry). Call sites that need
+/// CAST target types resolved from the built-in registry should use
+/// [`apply_rules_to_fixed_point_with_ctx`] instead.
+pub fn apply_rules_to_fixed_point(plan: Plan, rules: &[Box<dyn PlannerRule>]) -> Plan {
+    apply_rules_to_fixed_point_with_ctx(plan, rules, &RuleContext::default())
+}
+
+/// Variant of [`apply_rules_to_fixed_point`] that runs the loop with a
+/// caller-provided [`RuleContext`].
+pub fn apply_rules_to_fixed_point_with_ctx(
+    mut plan: Plan,
+    rules: &[Box<dyn PlannerRule>],
+    ctx: &RuleContext,
+) -> Plan {
     loop {
         let mut changed = false;
         for rule in rules {
-            match rule.apply(plan.clone(), &RuleContext) {
+            match rule.apply(plan.clone(), ctx) {
                 RuleResult::Changed(new_plan) => {
                     plan = new_plan;
                     changed = true;
@@ -112,8 +188,8 @@ pub fn apply_rules_to_fixed_point(mut plan: Plan, rules: &[Box<dyn PlannerRule>]
 pub struct ExpandTransparentFunctionCalls;
 
 impl PlannerRule for ExpandTransparentFunctionCalls {
-    fn apply(&self, plan: Plan, _ctx: &RuleContext) -> RuleResult {
-        expand_recursive(plan)
+    fn apply(&self, plan: Plan, ctx: &RuleContext) -> RuleResult {
+        expand_recursive(plan, ctx)
     }
 }
 
@@ -121,7 +197,7 @@ impl PlannerRule for ExpandTransparentFunctionCalls {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn expand_recursive(node: Plan) -> RuleResult {
+fn expand_recursive(node: Plan, ctx: &RuleContext) -> RuleResult {
     match node.as_ref() {
         // --- transparent call: expand it ---
         LogicalNode::FunctionCall {
@@ -132,7 +208,7 @@ fn expand_recursive(node: Plan) -> RuleResult {
             pushed_filter,
             ..
         } => {
-            let expanded = build_expanded_call(fn_id, provenance, properties, pushed_filter);
+            let expanded = build_expanded_call(fn_id, provenance, properties, pushed_filter, ctx);
             RuleResult::Changed(expanded)
         }
 
@@ -149,9 +225,9 @@ fn expand_recursive(node: Plan) -> RuleResult {
             projections,
             from,
             filter,
-        } => expand_select(projections, from, filter),
+        } => expand_select(projections, from, filter, ctx),
 
-        LogicalNode::Cast { inner, target_type } => match expand_recursive(inner.clone()) {
+        LogicalNode::Cast { inner, target_type } => match expand_recursive(inner.clone(), ctx) {
             RuleResult::Changed(new_inner) => RuleResult::Changed(Arc::new(LogicalNode::Cast {
                 inner: new_inner,
                 target_type: target_type.clone(),
@@ -167,8 +243,8 @@ fn expand_recursive(node: Plan) -> RuleResult {
             cardinality,
             output_columns,
         } => {
-            let lhs_result = expand_recursive(lhs.clone());
-            let rhs_result = expand_recursive(rhs.clone());
+            let lhs_result = expand_recursive(lhs.clone(), ctx);
+            let rhs_result = expand_recursive(rhs.clone(), ctx);
             let lhs_changed = matches!(lhs_result, RuleResult::Changed(_));
             let rhs_changed = matches!(rhs_result, RuleResult::Changed(_));
             if lhs_changed || rhs_changed {
@@ -195,11 +271,17 @@ fn expand_recursive(node: Plan) -> RuleResult {
 }
 
 /// Construct the `ExpandedCall` (plus optional `Cast` wrapper) for a transparent call.
+///
+/// When `properties.needs_cast` is `true`, the cast target type is resolved
+/// from `ctx.registry.canonical_return(fn_id)`. If the registry has no entry
+/// (or no canonical return declared), the cast is omitted entirely — emitting
+/// a Cast with no known target would be incorrect.
 fn build_expanded_call(
     fn_id: &FnId,
     provenance: &Provenance,
     properties: &FunctionProperties,
     pushed_filter: &Option<Plan>,
+    ctx: &RuleContext,
 ) -> Plan {
     let expanded: Plan = Arc::new(LogicalNode::ExpandedCall {
         fn_id: fn_id.clone(),
@@ -208,15 +290,16 @@ fn build_expanded_call(
         pushed_filter: pushed_filter.clone(),
     });
 
-    if properties.needs_cast {
-        // Phase 32: use BigInt as a placeholder target type.
-        // Phase 33+ will resolve the actual return type from the function registry.
-        Arc::new(LogicalNode::Cast {
+    if !properties.needs_cast {
+        return expanded;
+    }
+
+    match ctx.registry.canonical_return(fn_id) {
+        Some(target_type) => Arc::new(LogicalNode::Cast {
             inner: expanded,
-            target_type: DataType::BigInt,
-        })
-    } else {
-        expanded
+            target_type,
+        }),
+        None => expanded,
     }
 }
 
@@ -379,9 +462,14 @@ impl PlannerRule for EliminateUnusedLeftJoin {
 }
 
 /// Recurse into a `Select` node's `from` and `filter` children.
-fn expand_select(projections: &[String], from: &Option<Plan>, filter: &Option<Plan>) -> RuleResult {
-    let from_result = from.as_ref().map(|f| expand_recursive(f.clone()));
-    let filter_result = filter.as_ref().map(|f| expand_recursive(f.clone()));
+fn expand_select(
+    projections: &[String],
+    from: &Option<Plan>,
+    filter: &Option<Plan>,
+    ctx: &RuleContext,
+) -> RuleResult {
+    let from_result = from.as_ref().map(|f| expand_recursive(f.clone(), ctx));
+    let filter_result = filter.as_ref().map(|f| expand_recursive(f.clone(), ctx));
 
     let from_changed = from_result
         .as_ref()

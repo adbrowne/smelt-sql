@@ -72,7 +72,7 @@ fn join_elimination_fires_when_no_downstream_consumer() {
     let plan = make_select(vec!["order_id", "total"], join);
 
     let rule = EliminateUnusedLeftJoin;
-    let result = rule.apply(plan, &RuleContext);
+    let result = rule.apply(plan, &RuleContext::default());
 
     let new_plan = match result {
         RuleResult::Changed(p) => p,
@@ -125,7 +125,7 @@ fn join_elimination_blocked_when_column_used() {
     let plan = make_select(vec!["order_id", "customer_name"], join);
 
     let rule = EliminateUnusedLeftJoin;
-    match rule.apply(plan, &RuleContext) {
+    match rule.apply(plan, &RuleContext::default()) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(p) => panic!(
             "Expected Unchanged when a RHS column ('customer_name') is projected, got Changed: {p:?}"
@@ -152,7 +152,7 @@ fn join_elimination_requires_declared_cardinality() {
     let plan = make_select(vec!["order_id", "total"], join);
 
     let rule = EliminateUnusedLeftJoin;
-    match rule.apply(plan, &RuleContext) {
+    match rule.apply(plan, &RuleContext::default()) {
         RuleResult::Unchanged => {}
         RuleResult::Changed(p) => panic!(
             "Expected Unchanged for OneToMany cardinality (join may change row count), got Changed: {p:?}"
