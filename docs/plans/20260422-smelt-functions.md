@@ -1799,7 +1799,7 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | Phase | Title | Status | Commit | Date |
 |---|---|---|---|---|
 | 39 | Wire logical-plan rules into `smelt compile`; add `--show-plan` (Step 9 opens) | done | 029d7fa | 2026-04-25 |
-| 40 | CAST emission resolves target type from `Signature::canonical_return` | done | e5b414f | 2026-04-25 |
+| 40 | CAST emission resolves target type from `Signature::canonical_return` | done | 1b1d613 | 2026-04-25 |
 | 41 | `ExpandedCall` body splice + list-splice comma elision | pending | | |
 | 42 | `smelt.as_struct` lowering wired in + capability gate broadened | pending | | |
 | 43 | Frontmatter YAML parser via `serde_yaml` (Step 9 complete) | pending | | |
