@@ -477,6 +477,14 @@ fn walk_body(
         return infer_expression_type(expr, ctx);
     }
 
+    // Phase 38: smelt.as_struct(alias [EXCEPT cols]) — do not recurse into
+    // children. The alias inside is a table qualifier, not a column expression,
+    // so recursing would flag it as `UnknownIdentifier`. Delegate directly to
+    // type inference for the return type.
+    if expr.as_smelt_as_struct_call().is_some() {
+        return infer_expression_type(expr, ctx);
+    }
+
     // Binary expression: recurse into each operand, then check the operator's
     // type-compatibility constraint. The mismatch is anchored at the binary
     // node itself — the smallest subexpression that exhibits the error.
@@ -2474,6 +2482,65 @@ pub fn declared_return_hover_text(sig: &FunctionSig) -> Option<String> {
         return None;
     }
     sig.return_type_text.as_deref().map(|t| format!("-> {t}"))
+}
+
+// ─── Phase 38: smelt.as_struct() backend printer ──────────────────────────────
+
+/// Returns `true` for backends that support struct literal syntax.
+///
+/// Supported: `duckdb`, `spark`, `databricks`, `postgres`.
+/// Any other backend name returns `false`.
+pub fn backend_supports_struct_literal(backend: &str) -> bool {
+    matches!(
+        backend.to_ascii_lowercase().as_str(),
+        "duckdb" | "spark" | "databricks" | "postgres"
+    )
+}
+
+/// Emit SQL for a `smelt.as_struct(alias [EXCEPT cols])` call against a
+/// target backend.
+///
+/// Returns `Ok(sql)` for backends that support struct literals:
+///   - DuckDB:    `{'col': alias.col, ...}`
+///   - Spark / Databricks: `struct(alias.col AS col, ...)`
+///   - Postgres:  `ROW(alias.col, ...)` (composite type; field names inferred)
+///
+/// Returns `Err(backend_name)` for backends without struct-literal support.
+///
+/// Pure — no Salsa dependency.
+pub fn as_struct_to_sql(
+    alias: &str,
+    fields: &[(String, DataType)],
+    backend: &str,
+) -> Result<String, String> {
+    if !backend_supports_struct_literal(backend) {
+        return Err(backend.to_string());
+    }
+    let sql = match backend.to_ascii_lowercase().as_str() {
+        "duckdb" => {
+            let items: Vec<String> = fields
+                .iter()
+                .map(|(name, _)| format!("'{name}': {alias}.{name}"))
+                .collect();
+            format!("{{{}}}", items.join(", "))
+        }
+        "spark" | "databricks" => {
+            let items: Vec<String> = fields
+                .iter()
+                .map(|(name, _)| format!("{alias}.{name} AS {name}"))
+                .collect();
+            format!("struct({})", items.join(", "))
+        }
+        "postgres" => {
+            let items: Vec<String> = fields
+                .iter()
+                .map(|(name, _)| format!("{alias}.{name}"))
+                .collect();
+            format!("ROW({})", items.join(", "))
+        }
+        _ => unreachable!("backend_supports_struct_literal should have returned false"),
+    };
+    Ok(sql)
 }
 
 #[cfg(test)]

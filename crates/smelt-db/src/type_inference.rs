@@ -5,7 +5,7 @@
 use rowan::TextRange;
 use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, SmeltFnCall, StructLiteral, Subquery,
+    SelectStmt, SmeltAsStructCall, SmeltFnCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, SmeltType,
@@ -602,6 +602,13 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_smelt_fn_call_type(&call, ctx);
     }
 
+    // Try smelt.as_struct(alias [EXCEPT cols]) — Phase 38.
+    // Resolves the alias's columns from the TypeContext, filters EXCEPT
+    // columns, and returns DataType::Struct(remaining_fields).
+    if let Some(call) = expr.as_smelt_as_struct_call() {
+        return infer_as_struct_type(&call, ctx);
+    }
+
     // Try binary expression
     if let Some(binary) = expr.as_binary() {
         return infer_binary_expr_type(&binary, ctx);
@@ -1096,9 +1103,10 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
         // corresponds to the first struct parameter.  When the extras can
         // be determined we build a concrete `DataType::Struct` from the
         // declared fields plus the extras; otherwise fall back to Unknown.
-        Some(Ok(SmeltType::Struct { fields: ret_fields, tail })) => {
-            resolve_struct_return_type(call, ctx, sig, ret_fields, tail)
-        }
+        Some(Ok(SmeltType::Struct {
+            fields: ret_fields,
+            tail,
+        })) => resolve_struct_return_type(call, ctx, sig, ret_fields, tail),
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };
@@ -1210,6 +1218,34 @@ fn resolve_struct_return_type(
     let mut concrete: Vec<(String, DataType)> = ret_fields.to_vec();
     concrete.extend(extras);
     DataType::Struct(concrete)
+}
+
+/// Infer the type of a `smelt.as_struct(alias [EXCEPT col1, col2])` call
+/// (Phase 38).
+///
+/// Algorithm:
+/// 1. Read the alias name from the `SmeltAsStructCall`.
+/// 2. Collect columns for that qualifier via `ctx.columns_for_qualifier`.
+/// 3. Remove columns named in the EXCEPT list.
+/// 4. Return `DataType::Struct(remaining_fields)`.
+///
+/// Returns `None` when the alias cannot be resolved in the context.
+fn infer_as_struct_type(call: &SmeltAsStructCall, ctx: &TypeContext) -> Option<TypedColumn> {
+    let alias = call.alias()?;
+    let except = call.except_columns();
+    let cols = ctx.columns_for_qualifier(&alias);
+    if cols.is_empty() {
+        return None;
+    }
+    let fields: Vec<(String, DataType)> = cols
+        .into_iter()
+        .filter(|(name, _)| !except.contains(&name.to_string()))
+        .map(|(name, tc)| (name.to_string(), tc.data_type.clone()))
+        .collect();
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false,
+    })
 }
 
 /// LUB adapter: the canonical numeric-promotion routine lives in

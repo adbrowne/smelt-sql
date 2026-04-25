@@ -386,6 +386,11 @@ pub enum DiagnosticCode {
     /// Anchored at the function declaration's name span. Introduced in
     /// Phase 31 of smelt-functions.
     UnstableSchemaRequired,
+    /// Emitted when `smelt.as_struct()` is used in a function body but the
+    /// function's declared backend set includes a backend that does not
+    /// support struct literal syntax. Anchored at the `smelt.as_struct` call
+    /// span. Introduced in Phase 38 of smelt-functions.
+    AsStructUnsupportedBackend,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -1238,6 +1243,74 @@ pub fn backends_widening_diagnostics_for_file(
     out
 }
 
+/// Per-file diagnostics for the Phase 38 `smelt.as_struct()` backend-
+/// capability gate.
+///
+/// For each `smelt.define` in `file` whose frontmatter declares an explicit
+/// `backends:` set, walks the body for `smelt.as_struct()` calls. If any
+/// declared backend does not support struct literal syntax, emits
+/// [`DiagnosticCode::AsStructUnsupportedBackend`] anchored at the call span.
+///
+/// Functions with `BackendSet::All` (no explicit `backends:` declaration) are
+/// skipped — the check only fires when an author has explicitly restricted the
+/// function to a named set that includes a non-struct-literal backend.
+pub fn as_struct_backend_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_parser::ast::SmeltAsStructCall;
+    use smelt_types::signatures::BackendSet;
+
+    let sigs = file_signature_inputs(db, file);
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+    let raw_text = file.text(db);
+    let text = smelt_parser::strip_frontmatter(raw_text);
+
+    let mut out = Vec::new();
+    for sig in sigs.iter() {
+        // Only check functions with an explicit (non-All) backend set.
+        let declared = match &sig.declared_backends {
+            Some(BackendSet::Only(names)) => names.clone(),
+            _ => continue,
+        };
+        // Walk the define's body looking for SMELT_AS_STRUCT_CALL nodes.
+        let define = ast
+            .defines()
+            .find(|d| d.name().as_deref() == Some(sig.name.as_str()));
+        let Some(define) = define else { continue };
+
+        // Collect all SMELT_AS_STRUCT_CALL descendants.
+        let body_syntax = define.syntax().descendants();
+        for node in body_syntax {
+            if let Some(call) = SmeltAsStructCall::cast(node) {
+                // Check each declared backend.
+                for backend in &declared {
+                    if !function_body_check::backend_supports_struct_literal(backend) {
+                        let range =
+                            smelt_parser::ast::text_range_to_range(&text, call.text_range());
+                        out.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "smelt.as_struct() is not supported on backend `{backend}` \
+                                 which does not have struct-literal capability"
+                            ),
+                            range,
+                            code: Some(DiagnosticCode::AsStructUnsupportedBackend),
+                            data: None,
+                        });
+                        break; // One diagnostic per call site is enough.
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Per-file diagnostics for the Phase 31 `provenance:` unstable-schema gate.
 ///
 /// For each `smelt.define` or `smelt.extern` in `file` that declares
@@ -1999,6 +2072,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         .map(|p| project_unstable_schema(db, p))
         .unwrap_or(false);
     for diag in provenance_unstable_diagnostics_for_file(db, file, unstable_schema) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 38 — smelt.as_struct() backend-capability gate.
+    for diag in as_struct_backend_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

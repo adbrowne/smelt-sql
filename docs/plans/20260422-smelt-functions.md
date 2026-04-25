@@ -1213,7 +1213,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 35 | Parser + types: row variables on `Struct<…>` and value-level spread (Step 8 opens) | done | 17b6c8f | 2026-04-25 |
 | 36 | Row unification at call sites with value-level erasure | done | 836925e | 2026-04-25 |
 | 37 | Row variable in return position: pass-through fields | done | | 2026-04-25 |
-| 38 | `smelt.as_struct()` revisit (Step 8 complete) | pending | | |
+| 38 | `smelt.as_struct()` revisit (Step 8 complete) | done | | 2026-04-25 |
 
 ### Deferred during implementation
 

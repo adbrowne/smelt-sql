@@ -255,6 +255,16 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::UnstableSchemaRequired,
         message_substring: "fn_provenance_no_flag",
     },
+    // Phase 38: `smelt.as_struct()` with a backend that has no struct-literal
+    // support. The declared `backends: [no_struct_db]` includes a backend
+    // unknown to `backend_supports_struct_literal`, so the checker fires
+    // `AsStructUnsupportedBackend`.
+    Case {
+        fixture: "fn_as_struct_no_backend_literal.sql",
+        companion: None,
+        code: DiagnosticCode::AsStructUnsupportedBackend,
+        message_substring: "no_struct_db",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

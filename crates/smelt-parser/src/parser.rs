@@ -452,6 +452,101 @@ impl<'a> Parser<'a> {
         text.eq_ignore_ascii_case("fn")
     }
 
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a `smelt.as_struct(...)` call. Does not consume any tokens.
+    /// The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("as_struct")
+    /// followed by `(`.
+    fn at_smelt_as_struct_trigger(&self) -> bool {
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("as_struct")
+    }
+
+    /// Parse a `smelt.as_struct(alias [EXCEPT col1, col2, ...])` expression.
+    /// Produces a `SMELT_AS_STRUCT_CALL` node.
+    fn parse_smelt_as_struct(&mut self) {
+        self.start_node(SMELT_AS_STRUCT_CALL);
+        self.advance(); // smelt
+        self.skip_trivia();
+        self.advance(); // .
+        self.skip_trivia();
+        self.advance(); // as_struct
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' after 'smelt.as_struct'".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // (
+        self.skip_trivia();
+        if !self.at(IDENT) {
+            self.error("Expected alias identifier in 'smelt.as_struct(...)'".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // alias identifier
+        self.skip_trivia();
+        if self.at(EXCEPT_KW) {
+            self.start_node(EXCEPT_COL_LIST);
+            self.advance(); // EXCEPT
+            self.skip_trivia();
+            loop {
+                if !self.at(IDENT) {
+                    break;
+                }
+                self.advance(); // column name
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance(); // ,
+                    self.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+            self.finish_node(); // EXCEPT_COL_LIST
+        }
+        self.skip_trivia();
+        if !self.at(RPAREN) {
+            self.error("Expected ')' to close 'smelt.as_struct(...)'".to_string());
+        } else {
+            self.advance(); // )
+        }
+        self.finish_node(); // SMELT_AS_STRUCT_CALL
+    }
+
     /// Sync forward to EOF or the start of the next top-level `smelt.define`.
     /// Anything skipped is wrapped in ERROR nodes (one per token).
     fn sync_to_top_level(&mut self) {
@@ -2722,6 +2817,10 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.advance(); // string literal
             self.finish_node();
+        } else if self.at(IDENT) && self.at_smelt_as_struct_trigger() {
+            // smelt.as_struct(alias [EXCEPT col1, col2]) — Phase 38.
+            // Must be checked BEFORE the generic IDENT branch.
+            self.parse_smelt_as_struct();
         } else if self.at(IDENT) && self.at_smelt_fn_trigger() {
             // smelt.fn.<path>(args) — user-declared function call. Must be
             // checked BEFORE the generic IDENT / namespaced-function branch so

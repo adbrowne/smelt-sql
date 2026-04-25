@@ -657,6 +657,61 @@ impl SmeltFnCall {
     }
 }
 
+/// A `smelt.as_struct(alias [EXCEPT col1, col2, ...])` expression (Phase 38).
+///
+/// The alias is the table/parameter qualifier whose columns are collected
+/// into a struct. The optional `EXCEPT` list excludes specific column names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltAsStructCall(SyntaxNode);
+
+impl SmeltAsStructCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_AS_STRUCT_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The alias identifier — the first `IDENT` token after the opening `(`.
+    pub fn alias(&self) -> Option<String> {
+        let mut after_paren = false;
+        for tok in self.0.children_with_tokens().filter_map(|e| e.into_token()) {
+            if tok.kind() == LPAREN {
+                after_paren = true;
+            } else if after_paren && tok.kind() == IDENT {
+                return Some(tok.text().to_string());
+            }
+        }
+        None
+    }
+
+    /// Column names that appear after `EXCEPT`, if any.
+    pub fn except_columns(&self) -> Vec<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == EXCEPT_COL_LIST)
+            .map(|except| {
+                except
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == IDENT)
+                    .map(|t| t.text().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Text range of the whole `SMELT_AS_STRUCT_CALL` node.
+    pub fn text_range(&self) -> rowan::TextRange {
+        self.0.text_range()
+    }
+}
+
 /// The dotted path inside a `SMELT_FN_CALL` — includes the literal
 /// `smelt.fn.` prefix tokens as well as all subsequent namespace / name
 /// segments.
@@ -1420,7 +1475,9 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL => Some(Self(node)),
+            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL | SMELT_AS_STRUCT_CALL => {
+                Some(Self(node))
+            }
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1529,6 +1586,14 @@ impl Expr {
             .children()
             .find_map(SmeltFnCall::cast)
             .or_else(|| SmeltFnCall::cast(self.0.clone()))
+    }
+
+    /// Check if this expression is a `smelt.as_struct(alias [EXCEPT cols])`
+    /// call (Phase 38). Matches both when this `Expr` node IS the
+    /// `SMELT_AS_STRUCT_CALL` and when it wraps one as a direct child.
+    pub fn as_smelt_as_struct_call(&self) -> Option<SmeltAsStructCall> {
+        SmeltAsStructCall::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(SmeltAsStructCall::cast))
     }
 
     /// Check if this is a CASE expression

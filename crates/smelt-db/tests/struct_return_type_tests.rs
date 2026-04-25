@@ -118,7 +118,10 @@ fn return_row_var_binds_to_param_row_var() {
 
     let schema = typed_model_schema(&db, ws, model_file);
     let ev_col = schema.columns.iter().find(|c| c.name == "ev");
-    assert!(ev_col.is_some(), "expected column `ev` in schema; got {schema:#?}");
+    assert!(
+        ev_col.is_some(),
+        "expected column `ev` in schema; got {schema:#?}"
+    );
 
     let ev_typed_col = ev_col.unwrap().data_type.clone();
     assert!(
@@ -141,7 +144,10 @@ fn return_row_var_binds_to_param_row_var() {
             );
             // Check types too
             let hour_type = fields.iter().find(|(n, _)| n == "hour").map(|(_, dt)| dt);
-            let user_id_type = fields.iter().find(|(n, _)| n == "user_id").map(|(_, dt)| dt);
+            let user_id_type = fields
+                .iter()
+                .find(|(n, _)| n == "user_id")
+                .map(|(_, dt)| dt);
             assert_eq!(
                 hour_type,
                 Some(&DataType::BigInt),

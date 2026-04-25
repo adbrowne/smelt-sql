@@ -236,6 +236,10 @@ pub enum SyntaxKind {
     STRUCT_FIELD_ITEM,    // Single `expr AS name` item inside a BRACE_STRUCT_LITERAL
     SPREAD_ITEM,          // `..name` spread item inside a BRACE_STRUCT_LITERAL
 
+    // Phase 38: smelt.as_struct() call
+    SMELT_AS_STRUCT_CALL, // smelt.as_struct(alias [EXCEPT col1, col2, ...])
+    EXCEPT_COL_LIST,      // EXCEPT col1, col2, ... inside SMELT_AS_STRUCT_CALL
+
     // Phase 13: structured TypeRef children for TableExpr / AggExpr /
     // WindowExpr / SelectItems parameter sorts. These are emitted as
     // children of a TYPE_REF node by parse_type_ref when the leading

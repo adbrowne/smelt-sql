@@ -75,3 +75,9 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - **`~*`, `!~`, `!~*`**: DuckDB only supports `~` (case-sensitive regex); `~*` (case-insensitive), `!~`, `!~*` are not available. Generator uses `~` only.
 - **TO_CHAR**: Not available in DuckDB (PostgreSQL-only). Omitted from generators.
 - **EXTRACT(part FROM col)**: The `FROM` keyword inside EXTRACT confuses the parser — it's consumed as the query-level FROM clause, breaking alias extraction and SELECT item parsing. Generator code exists but is excluded from strategies.
+
+## smelt.as_struct follow-ups (Phase 38 deferred)
+
+- [ ] **Planner-time as_struct expansion** — `as_struct_to_sql` exists but is not yet wired into the planner's physical-plan emission. When the planner encounters `SMELT_AS_STRUCT_CALL` nodes in a logical plan, it should expand them to the backend-appropriate SQL via `as_struct_to_sql`. Currently the `as_struct_to_sql` function lives in `function_body_check.rs` as a pure utility; it needs to be called from the physical plan printer.
+- [ ] **as_struct in function bodies that declare no backends** — Currently `as_struct_backend_diagnostics_for_file` only fires for functions with explicit `BackendSet::Only(names)`. Functions with no `backends:` frontmatter silently allow `smelt.as_struct()` even if the deployment backend doesn't support struct literals. Consider warning when the workspace's default backend doesn't support struct literals.
+- [ ] **ABS(Decimal) returns Double** — `prop_multi_model_type_inference` surfaced that `ABS(Decimal{p,s})` in smelt infers as `Double` but DuckDB returns `Decimal{p,s}`. Pre-existing divergence; add to `divergences.rs` registry or fix type inference.
