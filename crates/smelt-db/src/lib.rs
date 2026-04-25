@@ -1756,12 +1756,12 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // entries for that parameter and bare columns emit
     // `UnknownIdentifier` with a frame rooted at the call site.
     let tableexpr_schema_lookup = |arg_expr: &smelt_parser::ast::Expr,
-                                   _ctx: &TypeContext|
+                                   ctx: &TypeContext|
      -> Option<Vec<(String, TypedColumn)>> {
         // Try to extract a `smelt.ref('X')` from the argument's function
         // call node, if any. We accept the call nested inside an
         // EXPRESSION wrapper.
-        use smelt_parser::ast::{FunctionCall, RefCall, SourceCall};
+        use smelt_parser::ast::{FunctionCall, RefCall, SourceCall, Subquery};
         use smelt_parser::syntax_kind::SyntaxKind as Sk;
 
         for node in arg_expr.syntax().descendants() {
@@ -1822,6 +1822,43 @@ pub fn smelt_fn_call_diagnostics_for_file(
                 }
             }
         }
+
+        // Phase 46: derived-table / inline-subquery argument shape —
+        // `(SELECT … [FROM y])`. The arg expression contains a
+        // `SUBQUERY` node; infer its output schema from the inner
+        // SELECT statement using the call-site context (so any CTE /
+        // model / source qualifiers in the SELECT's FROM clause
+        // resolve).
+        for node in arg_expr.syntax().descendants() {
+            if node.kind() == Sk::SUBQUERY {
+                if let Some(sub) = Subquery::cast(node) {
+                    if let Some(inner) = sub.select_stmt() {
+                        let cols = type_inference::infer_select_output_schema(&inner, ctx);
+                        if !cols.is_empty() {
+                            return Some(cols);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 46: CTE reference — the arg is a bare identifier
+        // matching a CTE in scope. Walking the AST of a bare
+        // identifier descends through EXPRESSION → COLUMN_REF → IDENT,
+        // so we just compare the trimmed text against the CTE name
+        // table on the call-site context.
+        let trimmed = arg_expr.text().trim().to_string();
+        if !trimmed.is_empty() && ctx.is_cte(&trimmed) {
+            let cols: Vec<(String, TypedColumn)> = ctx
+                .cte_columns(&trimmed)
+                .into_iter()
+                .map(|(name, tc)| (name.to_string(), tc.clone()))
+                .collect();
+            if !cols.is_empty() {
+                return Some(cols);
+            }
+        }
+
         None
     };
 

@@ -2642,46 +2642,64 @@ pub fn check_undeclared_columns(
 /// This extracts columns from the CTE's query and optionally overrides
 /// the inferred names with explicit column names if provided.
 pub fn infer_cte_columns(cte: &Cte, ctx: &TypeContext) -> Vec<(String, TypedColumn)> {
-    let mut columns = Vec::new();
-
-    // Get explicit column names (if present)
-    let explicit_names = cte.column_names();
-
     // Get the CTE's query (SELECT statement)
     let select_stmt = match cte.query().and_then(|q| q.select_stmt()) {
         Some(s) => s,
-        None => return columns,
+        None => return Vec::new(),
     };
 
-    // Build a context that includes any nested CTEs in this CTE's query
-    let cte_ctx = build_subquery_context(&select_stmt, ctx);
+    // Phase 46: factor the per-select-item inference into a sibling
+    // helper so derived-table / inline-subquery argument resolution
+    // (in `tableexpr_schema_lookup`) can share the same path.
+    let mut columns = infer_select_output_schema(&select_stmt, ctx);
+
+    // CTE-specific concern: the WITH clause may declare explicit
+    // column names that override any inferred names from the SELECT
+    // list. Apply the override after the shared inference runs.
+    let explicit_names = cte.column_names();
+    for (i, name) in explicit_names.iter().enumerate() {
+        if i < columns.len() {
+            columns[i].0 = name.clone();
+        }
+    }
+
+    columns
+}
+
+/// Phase 46: infer the output schema of a SELECT statement (shared
+/// helper used by CTE inference and by `TableExpr` argument resolution
+/// for derived tables / inline subqueries).
+///
+/// Walks the SELECT list, deriving each column's name (from explicit
+/// `AS alias`, falling back to a name inferred from the expression, or
+/// a generated `colN` when neither applies) and inferring its type via
+/// `infer_expression_type` against a context that includes any nested
+/// `WITH` clauses in the SELECT.
+pub fn infer_select_output_schema(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<(String, TypedColumn)> {
+    let mut columns = Vec::new();
+
+    // Build a context that includes any nested CTEs in this SELECT
+    let inner_ctx = build_subquery_context(select_stmt, ctx);
 
     let select_list = match select_stmt.select_list() {
         Some(l) => l,
         None => return columns,
     };
 
-    // Process each select item
     for (i, item) in select_list.items().enumerate() {
-        // Determine column name:
-        // 1. Use explicit name from CTE column list (if available at this position)
-        // 2. Use explicit alias from AS clause
-        // 3. Try to infer from expression (column reference name)
-        // 4. Fall back to generated name
-        let col_name = if i < explicit_names.len() {
-            explicit_names[i].clone()
-        } else if let Some(alias) = item.alias() {
+        let col_name = if let Some(alias) = item.alias() {
             alias
         } else if let Some(expr) = item.expression() {
-            // Try to infer name from expression
             infer_column_name(&expr).unwrap_or_else(|| format!("col{}", i + 1))
         } else {
             format!("col{}", i + 1)
         };
 
-        // Infer type from expression using the CTE's context (includes nested CTEs)
         let typed_col = if let Some(expr) = item.expression() {
-            infer_expression_type(&expr, &cte_ctx).unwrap_or(TypedColumn {
+            infer_expression_type(&expr, &inner_ctx).unwrap_or(TypedColumn {
                 data_type: DataType::Unknown,
                 nullable: true,
             })

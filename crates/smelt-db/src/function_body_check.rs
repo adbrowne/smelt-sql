@@ -278,6 +278,39 @@ pub(crate) fn is_struct_param(p: &ParamSpec) -> bool {
     matches!(&p.type_ref, Some(Ok(SmeltType::Struct { .. })))
 }
 
+/// Phase 46: is this argument expression *clearly* not a table?
+///
+/// Returns `true` for the unambiguously-not-a-table cases that should
+/// surface a diagnostic at the argument span when passed to a
+/// `TableExpr` parameter. We deliberately scope this down to bare
+/// literals (number / string / boolean / NULL) — anything more
+/// exotic (binary expressions, function calls, etc.) might be a
+/// pattern Phase 47 widens to support, so we don't preemptively emit
+/// diagnostics for those.
+fn is_clearly_non_table(arg_expr: &Expr) -> bool {
+    use smelt_parser::syntax_kind::{SyntaxKind as Sk, SyntaxToken};
+
+    // Walk the argument expression's tokens; if all non-trivia tokens
+    // are a single literal (NUMBER, STRING, TRUE/FALSE, NULL), treat
+    // the argument as a literal.
+    let mut content_tokens: Vec<SyntaxToken> = Vec::new();
+    for tok in arg_expr.syntax().descendants_with_tokens() {
+        if let Some(t) = tok.into_token() {
+            match t.kind() {
+                Sk::WHITESPACE | Sk::COMMENT => continue,
+                _ => content_tokens.push(t),
+            }
+        }
+    }
+    if content_tokens.len() != 1 {
+        return false;
+    }
+    matches!(
+        content_tokens[0].kind(),
+        Sk::NUMBER | Sk::STRING | Sk::NULL_KW
+    )
+}
+
 /// Extract the declared fields and tail from a `Struct<{…}>` parameter.
 ///
 /// Returns `None` for non-struct parameters (shouldn't happen if the caller
@@ -857,6 +890,34 @@ pub fn check_smelt_fn_call(
         if is_tableexpr_param(param) {
             if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
                 let cols = tableexpr_schema_lookup(arg_expr, ctx).unwrap_or_default();
+
+                // Phase 46: when the lookup yields no schema *and* the
+                // argument is clearly not a table expression (a bare
+                // literal — number, string, NULL), surface an
+                // `ArgTypeMismatch` at the argument span instead of
+                // letting the body re-walk emit confusing
+                // `UnknownIdentifier` diagnostics anchored inside the
+                // body. The detector is conservative on purpose: any
+                // expression that *might* be a table reference (bare
+                // identifier, function call, …) takes the existing
+                // empty-schema path so Phase 47's CTE-body widening
+                // can later succeed without clashing.
+                if cols.is_empty() && is_clearly_non_table(arg_expr) {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument for TableExpr parameter `{}` of `smelt.fn.{}` must be a table reference, CTE, or subquery — got `{}`",
+                            param.name,
+                            sig.name,
+                            arg_expr.text().to_string().trim()
+                        ),
+                        range: to_range(*arg_range, text),
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                    frame_bindings.push((param.name.clone(), "<not-a-table>".to_string()));
+                    continue;
+                }
 
                 if let Some(req) = tableexpr_schema_requirement(param) {
                     // Convert the columns to the (name, DataType)
