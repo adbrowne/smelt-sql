@@ -1255,6 +1255,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 - **Phase 42 — TDD tests 1+2 verify the lowering helper directly, not through `smelt build`** (2026-04-25). Per the SQL-emission deferral above, `as_struct_lowering_emits_duckdb_struct_literal` and `as_struct_lowering_emits_spark_struct_constructor` exercise `smelt_planner::lowering::as_struct::as_struct_to_sql` directly. The plan's literal "compile a model … resulting SQL contains …" framing is satisfied at the unit level; full compile-path coverage waits on the body-lowering wiring.
 - **Phase 42 — broken fixture for test 4 lives inline in the cli test rather than in `examples/broken/models/`** (2026-04-25). `crates/smelt-cli/tests/broken_function_diagnostics.rs::no_orphan_fn_fixtures` enforces every `examples/broken/models/fn_*.sql` fixture must produce a diagnostic under that test's harness, which uses `set_project_input(root, "")` (no `smelt.yml`). A default-backends fixture there could not exercise the active-backend gate (the gate fires only when `smelt.yml` is parseable). The fixture content lives inside `as_struct_capability_tests.rs` to preserve the orphan invariant while still hitting the Phase 42 path end-to-end.
 - **Phase 42 — `parse_active_backends` extracted to `smelt-core::config`** (2026-04-25). Reviewer flagged that the initial implementation inlined YAML parsing inside the `project_active_backends` Salsa query; the canonical pattern in `crates/smelt-db/src/lib.rs` (e.g. `project_unstable_schema` → `smelt_core::parse_unstable_schema_flag`) is a thin tracked wrapper around a pure helper. Refactor extracts `pub fn parse_active_backends(text: &str) -> Option<Vec<String>>` to `smelt-core/src/config.rs` and reduces the Salsa query to a single-line wrapper.
+- **Phase 44 — `monitored_session_rollup` carved into Phase 44b** (2026-04-26). The plan framed Phase 44 as fixture-only but research §10 needs two compiler capabilities the codebase does not yet have: (a) the parser rejects a bare `smelt.fn.X(...) PASSING ...` as a CTE body (it expects `SELECT`/`WITH`/`VALUES`), and (b) the type checker treats a bare reference to a fragment-typed parameter (`SelectItems<…>`) as a `Scalar`-kind column reference, so the inner kind check fails (`Argument for metrics ... must be Agg-kind or higher`) and `check_fragment_context_bindings` then complains that `metrics` is missing from the splice context. Both gaps are real type-system / parser work, not fixture polish. The `safe_divide` half (finding #9) lands under Phase 44; finding #8 moves to a new Phase 44b that adds the parser support + fragment-param kind inheritance + splice-column exemption, then ships the `monitored_session_rollup.sql` and `monitored_dashboard.sql` fixtures.
 - **Phase 43 — frontmatter parse diagnostics decoupled from `unstable_schema` gate** (2026-04-26). The first implementer pass routed `FrontmatterParseError` emission through `provenance_unstable_diagnostics_for_file`, which has an early-return on `unstable_schema: true`. That meant any workspace opting into the unstable feature (e.g. `examples/functions_demo`) silently lost all malformed-YAML and unknown-key diagnostics. Reviewer flagged the gap. Fix: extract a new `frontmatter_parse_diagnostics_for_file(db, file) -> Vec<Diagnostic>` (no flag parameter), wire it into `check_file_diagnostics` parallel to the existing provenance helper, and add a `crates/smelt-db/tests/frontmatter_parse_diagnostics.rs` regression test under `unstable_schema: true` for both severities. The two surfaces stay separate: the unstable-schema helper continues to police the `provenance:` feature gate; the new helper polices syntactic parseability.
 - **Phase 43 — `KNOWN_KEYS` allowlist for cross-pass frontmatter keys** (2026-04-26). The new serde_yaml-backed parser now warns on unknown top-level keys, but several existing fixture frontmatter blocks legitimately carry keys consumed by *other* passes (`backends:` for the active-backend gate, `incremental:` / `materialization:` / `tags:` for model materialization). To prevent green-workspace fixtures from regressing, `parse_function_properties` keeps an in-crate `KNOWN_KEYS` allowlist of these cross-pass keys; encountering them is silently skipped rather than warned. The list lives next to the unknown-key check in `crates/smelt-planner/src/logical.rs`. Shrink as those passes either move under this parser or get removed.
 - **Phase 43 — `JoinSpec.cardinality` is a raw `String`, not the existing `Cardinality` enum** (2026-04-26). Phase 43 is parser-only — nothing consumes `joins:` yet. Mapping the raw string (`"1:1"`, `"1:N"`, …) to `smelt_planner::logical::Cardinality` is deferred to whatever phase first reads `FunctionProperties::joins` (Phase 51's provenance/joins validator is the natural home). Keeping the parser decoupled from the enum lets the v1 tolerant-skip policy stay in the parser without leaking validator decisions upstream.
@@ -1557,7 +1558,35 @@ Closes review findings #8–#10 (research-fidelity examples) and #20–#22 (Tabl
 
 **Review checklist.** No type-system change required — these are fixture-only edits. Phase 29's PASSING-forward path is exercised end-to-end for the first time. `safe_divide` matches research §3 verbatim.
 
-**Commit.** `examples: restore canonical safe_divide and monitored_session_rollup fixtures (Phase 44, Step 10 opens)`
+**Commit.** `examples: tighten safe_divide to research §3 spec (Phase 44, Step 10 opens)`
+
+**Status note (2026-04-26):** Phase 44 shipped as a *partial close* — finding #9 (`safe_divide` tighten) lands; finding #8 (`monitored_session_rollup` fixture) carved into a new **Phase 44b** below. Tests 3 + 4 (the `safe_divide` ones) pass; tests 1 + 2 belong to 44b.
+
+### Phase 44b — Fragment-forward parser + type-system support (closes finding #8)
+
+**Goal.** Land the parser and type-system primitives that the research §10 `monitored_session_rollup` example needs, then ship the fixtures from Phase 44's deferred half. This is *not* a fixture-only phase — it adds compiler capability.
+
+**Pre-conditions.** Phase 29 (PASSING binding), Phase 41 (body splice), Phase 44 (safe_divide tighten).
+
+**TDD tests.**
+1. **Parser** `cte_body_accepts_bare_smelt_fn_call` — a `WITH name AS (smelt.fn.<path>(...) PASSING <name> AS (...))` body parses without "Expected SELECT, WITH, or VALUES in CTE." The parser treats a bare smelt.fn-call (optionally followed by trailing PASSING clauses) as a CTE body equivalent to `SELECT * FROM <call>`.
+2. **Type system** `fragment_param_reference_in_passing_body_inherits_kind` — a `PASSING items AS (outer_metrics)` body where `outer_metrics: SelectItems<Agg>` is the enclosing function's parameter binds the inner parameter without a `FragmentKindMismatch` (the inner parameter expects `Agg`-or-higher; the outer fragment-typed parameter satisfies that).
+3. **Type system** `fragment_param_reference_exempt_from_splice_column_validation` — the same body does not surface a `FragmentColumnMissing` for the parameter name (`outer_metrics`); fragment-typed parameter references skip the splice-context column-validation walk.
+4. **Fixture** `monitored_session_rollup_typechecks_clean` — adding `examples/functions_demo/functions/monitored_session_rollup.sql` (research §10 verbatim) leaves `cargo test -p smelt-cli --test example_diagnostics` green.
+5. **Fixture** `monitored_session_rollup_passing_forward_typechecks` — adding `examples/functions_demo/models/monitored_dashboard.sql` calling `monitored_session_rollup` with `PASSING metrics AS (…)` types clean; the two-level forward expansion path is exercised.
+6. **Negative** `non_fragment_param_reference_still_kind_checked` — referencing an `Expr<Integer>` parameter inside a `SelectItems<Agg, ctx>` PASSING body still surfaces a kind error (regression guard against over-broad exemption).
+7. **Negative** `non_param_column_in_fragment_body_still_validated` — a column reference inside a fragment-param body that is *not* the fragment-typed parameter's name still hits the existing `FragmentColumnMissing` path against the splice context.
+
+**Implementation.**
+- **Parser** (`crates/smelt-parser/src/parser.rs`): when parsing a CTE body, accept `smelt.fn.<path>(...) [PASSING ... ]*` as a valid alternative to a `SELECT`/`WITH`/`VALUES` start. The CST shape can desugar to a wrapping `SELECT * FROM <call>` synthesized node, or the body can carry a new `CTE_FN_CALL` variant — choose whichever keeps the rest of the type-checker reuse cheapest.
+- **Type system** (`crates/smelt-db/src/function_body_check.rs`): teach the kind-inference and splice-column-validation walkers that a bare reference to a fragment-typed parameter (`SelectItems<…>`, future fragment sorts) inherits the parameter's declared kind and is *not* a column reference for the purpose of `check_fragment_context_bindings`. Implement as a small `lookup_fragment_param_kind` helper checked before the existing column-reference path.
+- **Fixtures**: land the `monitored_session_rollup.sql` and `monitored_dashboard.sql` files Phase 44 deferred.
+
+**Example fixtures.** As above. No new broken fixtures unless tests 6 / 7 surface new ones — the regression guards may live as unit tests instead.
+
+**Review checklist.** Parser change additive (existing CTE-body shapes still parse). Kind-inheritance and splice-exemption rules don't regress any Phase 21 / Phase 29 fixtures. The two new fixtures stay clean under `example_diagnostics`. The `--show-plan` output for `models/monitored_dashboard.sql` shows two-level expansion (outer `monitored_session_rollup` body splice + inner `session_rollup` body splice).
+
+**Commit.** `parser+db: fragment-forward through PASSING; ship monitored_session_rollup (Phase 44b, finding #8)`
 
 ### Phase 45 — JOIN aliases visible in `TableExpr`-returning function bodies
 
@@ -1815,7 +1844,8 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 41 | `ExpandedCall` body splice + list-splice comma elision | done | 7dc0ea9 | 2026-04-25 |
 | 42 | `smelt.as_struct` lowering wired in + capability gate broadened | done | 3bac61d | 2026-04-25 |
 | 43 | Frontmatter YAML parser via `serde_yaml` (Step 9 complete) | done | 9594d15 | 2026-04-26 |
-| 44 | Canonical fixture restoration: `monitored_session_rollup` + `safe_divide` tighten (Step 10 opens) | pending | | |
+| 44 | Canonical fixture restoration: `safe_divide` tighten (Step 10 opens) — partial close, #8 carved to 44b | done | | 2026-04-26 |
+| 44b | Fragment-forward parser + type-system support; ship `monitored_session_rollup` (closes finding #8) | pending | | |
 | 45 | JOIN aliases visible in `TableExpr`-returning function bodies | pending | | |
 | 46 | `TableExpr` argument shapes: CTEs, derived tables, subqueries | pending | | |
 | 47 | Cross-function CTE schema inference: drop opaque-CTE suppression (Step 10 complete) | pending | | |

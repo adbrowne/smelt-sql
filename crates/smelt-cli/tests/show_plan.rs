@@ -140,6 +140,41 @@ fn cli_show_plan_eliminates_unused_join() {
     );
 }
 
+// Phase 44 — research §3 spec body for `safe_divide` includes both an
+// `OR denominator IS NULL` guard and a second `CAST(denominator AS DOUBLE)`
+// in the divisor.  These tests assert the spec body survives end-to-end via
+// the Phase 41 transparent-function body splice into `LogicalNode::Raw`.
+#[test]
+fn safe_divide_handles_null_denominator() {
+    let output = run_show_plan("examples/functions_demo/models/uses_safe_divide.sql");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "smelt build --show-plan must exit 0; stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        stdout
+    );
+    assert!(
+        stdout.contains("OR denominator IS NULL"),
+        "expected safe_divide body to include the IS NULL guard from research §3; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn safe_divide_double_cast_preserved() {
+    let output = run_show_plan("examples/functions_demo/models/uses_safe_divide.sql");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("CAST(numerator AS DOUBLE)"),
+        "expected numerator cast to survive; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CAST(denominator AS DOUBLE)"),
+        "expected denominator cast to survive (research §3 spec); got:\n{stdout}"
+    );
+}
+
 // Test 5: default build path is unchanged. Verifying byte-for-byte
 // equality of an entire build run is brittle; instead pin the contract
 // the user observes — the show-plan banner must NOT appear unless
