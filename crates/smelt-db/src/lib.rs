@@ -318,6 +318,12 @@ pub enum DiagnosticCode {
     /// itself is malformed. Anchored at the declaration's name range.
     /// Introduced in Phase 11 of smelt-functions.
     BackendsWideningNotAllowed,
+    /// Emitted when the frontmatter YAML block on a `smelt.define` or
+    /// `smelt.extern` declaration could not be parsed (severity Error) or
+    /// contained an unknown key / malformed sub-entry (severity Warning).
+    /// Anchored at the declaration's name range. Introduced in Phase 43 of
+    /// smelt-functions.
+    FrontmatterParseError,
     /// Emitted when an expression carrying [`smelt_types::ExprKind::Window`]
     /// (a window-function call, or any expression dominated by one)
     /// appears in a splice point that only accepts scalar / aggregate
@@ -1382,6 +1388,12 @@ pub fn as_struct_backend_diagnostics_for_file(
 ///
 /// The `unstable_schema` flag should be read from the workspace's `smelt.yml`
 /// by the caller (a Salsa tracked function) before invoking this pure helper.
+///
+/// Phase 43 note: frontmatter-parse diagnostics (malformed YAML, unknown
+/// keys) are emitted by [`frontmatter_parse_diagnostics_for_file`] instead;
+/// they fire unconditionally regardless of the `unstable_schema` flag, so
+/// production workspaces that opt into `unstable_schema: true` still surface
+/// parse errors.
 pub fn provenance_unstable_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
@@ -1410,17 +1422,17 @@ pub fn provenance_unstable_diagnostics_for_file(
         let Some(fm) = define.frontmatter(raw_text) else {
             continue;
         };
-        let props = smelt_planner::logical::parse_function_properties(&fm);
+        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        let name = define.name().unwrap_or_default();
+        let range = sigs
+            .iter()
+            .find(|sig| sig.name == name)
+            .map(|sig| sig.name_range)
+            .unwrap_or(Range {
+                start: Position { line: 0, column: 0 },
+                end: Position { line: 0, column: 0 },
+            });
         if matches!(props.provenance, Provenance::Declared(_)) {
-            let name = define.name().unwrap_or_default();
-            let range = sigs
-                .iter()
-                .find(|sig| sig.name == name)
-                .map(|sig| sig.name_range)
-                .unwrap_or(Range {
-                    start: Position { line: 0, column: 0 },
-                    end: Position { line: 0, column: 0 },
-                });
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!(
@@ -1440,17 +1452,17 @@ pub fn provenance_unstable_diagnostics_for_file(
         let Some(fm) = ext.frontmatter(raw_text) else {
             continue;
         };
-        let props = smelt_planner::logical::parse_function_properties(&fm);
+        let (props, _fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        let name = ext.name().unwrap_or_default();
+        let range = sigs
+            .iter()
+            .find(|sig| sig.name == name)
+            .map(|sig| sig.name_range)
+            .unwrap_or(Range {
+                start: Position { line: 0, column: 0 },
+                end: Position { line: 0, column: 0 },
+            });
         if matches!(props.provenance, Provenance::Declared(_)) {
-            let name = ext.name().unwrap_or_default();
-            let range = sigs
-                .iter()
-                .find(|sig| sig.name == name)
-                .map(|sig| sig.name_range)
-                .unwrap_or(Range {
-                    start: Position { line: 0, column: 0 },
-                    end: Position { line: 0, column: 0 },
-                });
             out.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!(
@@ -1466,6 +1478,104 @@ pub fn provenance_unstable_diagnostics_for_file(
     }
 
     out
+}
+
+/// Per-file diagnostics for malformed / unknown-key frontmatter on
+/// `smelt.define` and `smelt.extern` declarations.
+///
+/// For each declaration's frontmatter (if any), runs the pure
+/// [`smelt_planner::logical::parse_function_properties`] parser and converts
+/// every [`smelt_planner::logical::FrontmatterDiagnostic`] it returns into a
+/// full [`Diagnostic`] anchored at the declaration's name range.
+///
+/// Unlike [`provenance_unstable_diagnostics_for_file`], this helper does
+/// **not** consult the `unstable_schema` flag — frontmatter parse errors and
+/// unknown-key warnings fire unconditionally so they remain visible on
+/// workspaces that opt into `unstable_schema: true`. (Phase 43.)
+pub fn frontmatter_parse_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let raw_text = file.text(db);
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+
+    // Re-use the cached signature list to get accurate name_range values.
+    let sigs = file_signature_inputs(db, file);
+
+    let mut out = Vec::new();
+
+    // Check smelt.define declarations.
+    for define in ast.defines() {
+        let Some(fm) = define.frontmatter(raw_text) else {
+            continue;
+        };
+        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        if fm_diags.is_empty() {
+            continue;
+        }
+        let name = define.name().unwrap_or_default();
+        let range = sigs
+            .iter()
+            .find(|sig| sig.name == name)
+            .map(|sig| sig.name_range)
+            .unwrap_or(Range {
+                start: Position { line: 0, column: 0 },
+                end: Position { line: 0, column: 0 },
+            });
+        for fm_diag in fm_diags {
+            out.push(frontmatter_diag_to_diagnostic(fm_diag, range));
+        }
+    }
+
+    // Check smelt.extern declarations.
+    for ext in ast.externs() {
+        let Some(fm) = ext.frontmatter(raw_text) else {
+            continue;
+        };
+        let (_props, fm_diags) = smelt_planner::logical::parse_function_properties(&fm);
+        if fm_diags.is_empty() {
+            continue;
+        }
+        let name = ext.name().unwrap_or_default();
+        let range = sigs
+            .iter()
+            .find(|sig| sig.name == name)
+            .map(|sig| sig.name_range)
+            .unwrap_or(Range {
+                start: Position { line: 0, column: 0 },
+                end: Position { line: 0, column: 0 },
+            });
+        for fm_diag in fm_diags {
+            out.push(frontmatter_diag_to_diagnostic(fm_diag, range));
+        }
+    }
+
+    out
+}
+
+/// Translate a parser-side [`smelt_planner::logical::FrontmatterDiagnostic`]
+/// into a full [`Diagnostic`] anchored at the declaration's name range.
+/// Phase 43.
+fn frontmatter_diag_to_diagnostic(
+    fm: smelt_planner::logical::FrontmatterDiagnostic,
+    range: Range,
+) -> Diagnostic {
+    use smelt_planner::logical::FrontmatterSeverity;
+    let severity = match fm.severity {
+        FrontmatterSeverity::Error => DiagnosticSeverity::Error,
+        FrontmatterSeverity::Warning => DiagnosticSeverity::Warning,
+    };
+    Diagnostic {
+        severity,
+        message: fm.message,
+        range,
+        code: Some(DiagnosticCode::FrontmatterParseError),
+        data: None,
+    }
 }
 
 /// Per-file diagnostics for `smelt.fn.<name>(...)` call sites (Phase 6).
@@ -2136,6 +2246,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 
     // Phase 11 — backends widening / malformed frontmatter.
     for diag in backends_widening_diagnostics_for_file(db, workspace, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 43 — frontmatter parse-error / unknown-key diagnostics.
+    // Fires unconditionally so workspaces with `unstable_schema: true` still
+    // surface malformed YAML and unknown-key warnings on `smelt.define` /
+    // `smelt.extern` declarations.
+    for diag in frontmatter_parse_diagnostics_for_file(db, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 
@@ -3903,7 +4021,14 @@ pub fn logical_plan(
                                         .find(|e| e.name().as_deref() == Some(fn_id.as_str()))
                                         .and_then(|e| e.frontmatter(&decl_raw))
                                 });
-                            fm.map(|text| smelt_planner::logical::parse_function_properties(&text))
+                            // Phase 43: ignore the frontmatter diagnostics here — they are
+                            // surfaced via `provenance_unstable_diagnostics_for_file` (called
+                            // from `check_file_diagnostics`), which has access to the
+                            // declaration's name range for proper anchoring. The logical-plan
+                            // path only needs the parsed properties.
+                            fm.map(|text| {
+                                smelt_planner::logical::parse_function_properties(&text).0
+                            })
                         })
                 })
                 .unwrap_or_default();

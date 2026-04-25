@@ -987,6 +987,7 @@ impl Backend {
                 DbCode::UnstableSchemaRequired => "unstable-schema-required",
                 DbCode::AsStructUnsupportedBackend => "as-struct-unsupported-backend",
                 DbCode::FunctionCallCycle => "function-call-cycle",
+                DbCode::FrontmatterParseError => "frontmatter-parse-error",
             };
             NumberOrString::String(code_str.to_string())
         });

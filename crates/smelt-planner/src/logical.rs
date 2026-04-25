@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use serde::Deserialize;
 use smelt_types::DataType;
 
 /// Fully-qualified function identifier, e.g. `"some_fn"` or `"core.math.safe_divide"`.
@@ -67,6 +68,14 @@ pub struct FunctionProperties {
     /// workspace's `smelt.yml` has `unstable_schema: true`; if the flag is
     /// absent the field is reset to `Unknown` and a diagnostic is emitted.
     pub provenance: Provenance,
+    /// Declared joins parsed from the `joins:` frontmatter key.
+    ///
+    /// Each entry describes a single side-joined dimension table. Phase 43
+    /// only parses these into a [`JoinSpec`] vector — they are not yet
+    /// consumed by the logical-plan-rules pipeline. The `cardinality` field
+    /// is kept as a raw string for v1; mapping into [`Cardinality`] is a
+    /// future phase.
+    pub joins: Vec<JoinSpec>,
 }
 
 impl Default for FunctionProperties {
@@ -77,8 +86,51 @@ impl Default for FunctionProperties {
             append_only: false,
             needs_cast: false,
             provenance: Provenance::Unknown,
+            joins: Vec::new(),
         }
     }
+}
+
+/// A single join entry parsed from a `joins:` frontmatter list.
+///
+/// V1 representation: `cardinality` is the raw string from frontmatter
+/// (e.g. `"1:1"`, `"1:N"`). Mapping to the structured [`Cardinality`] enum
+/// is deferred to a later phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinSpec {
+    /// The dimension table or model name being joined to.
+    pub table: String,
+    /// The join condition expression (raw SQL fragment text).
+    pub on: String,
+    /// Declared cardinality, kept as a raw string for v1.
+    pub cardinality: String,
+}
+
+/// A diagnostic produced by the frontmatter YAML parser.
+///
+/// Kept minimal (no spans) so the planner crate stays free of `smelt-db`
+/// types. The Salsa wrapper in `smelt-db` is responsible for turning these
+/// into full [`smelt_db::Diagnostic`]s anchored at the declaring node's name
+/// range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterDiagnostic {
+    /// Severity (Error for fatal YAML parse failures, Warning for unknown
+    /// keys or malformed sub-structures the parser was able to skip past).
+    pub severity: FrontmatterSeverity,
+    /// Human-readable message. The Salsa wrapper passes this through to the
+    /// final `Diagnostic.message`.
+    pub message: String,
+}
+
+/// Severity level for a [`FrontmatterDiagnostic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontmatterSeverity {
+    /// The frontmatter could not be parsed at all (or a mandatory shape
+    /// failed); the returned `FunctionProperties` is the default.
+    Error,
+    /// A specific key or entry was malformed/unknown; the rest of the
+    /// frontmatter parsed normally.
+    Warning,
 }
 
 /// Column-level data provenance information attached to a [`LogicalNode`].
@@ -267,92 +319,283 @@ pub enum LogicalNode {
 /// The root of a logical plan tree. A thin alias over `Arc<LogicalNode>`.
 pub type Plan = Arc<LogicalNode>;
 
-/// Parse `deterministic`, `idempotent`, `append_only`, and `provenance` keys
-/// out of a frontmatter YAML block.
+/// Known top-level frontmatter keys honoured by the parser. Any other key
+/// produces a [`FrontmatterSeverity::Warning`] diagnostic. Keys consumed by
+/// other passes (e.g. `backends:`) live alongside the function-properties
+/// keys and are not currently surfaced as warnings here — see
+/// [`is_known_top_level_key`].
+const KNOWN_KEYS: &[&str] = &[
+    "deterministic",
+    "idempotent",
+    "append_only",
+    "needs_cast",
+    "provenance",
+    "joins",
+    // Other frontmatter keys consumed elsewhere (backends-narrowing check,
+    // future planner extensions). Listed here so we do not warn about them.
+    "backends",
+    "incremental",
+    "materialization",
+    "tags",
+];
+
+fn is_known_top_level_key(key: &str) -> bool {
+    KNOWN_KEYS.contains(&key)
+}
+
+/// Raw deserialisation target for a single `joins:` entry. Each field is
+/// optional so a partially-shaped entry can be reported as a warning rather
+/// than a hard error.
+#[derive(Debug, Default, Deserialize)]
+struct RawJoinSpec {
+    #[serde(default)]
+    table: Option<String>,
+    #[serde(default)]
+    on: Option<String>,
+    #[serde(default)]
+    cardinality: Option<serde_yaml::Value>,
+}
+
+/// Parse the frontmatter YAML block into [`FunctionProperties`] plus a list
+/// of [`FrontmatterDiagnostic`]s describing parse failures and unknown keys.
 ///
-/// This is a pure, minimal parser — we avoid pulling in a full YAML library.
-/// Unknown keys are silently ignored.
+/// Accepted shapes (any indentation style serde_yaml accepts):
+///   * `deterministic: true | false` (also `idempotent`, `append_only`,
+///     `needs_cast`)
+///   * `provenance: { col: [src.a, src.b] }` (inline map)
+///   * Multi-line `provenance:` with nested mappings of sequence values
+///   * `joins:` as a sequence of `{ table, on, cardinality }` entries
 ///
-/// Accepted shapes:
-///   `deterministic: true`                              → `true`
-///   `deterministic: false`                             → `false`
-///   absent                                             → `false`
-///   `provenance: { col: [src.a, src.b] }`             → `Declared([("col", ["src.a", "src.b"])])`
-///   `provenance:` absent                               → `Provenance::Unknown`
+/// On a top-level YAML parse failure the returned `FunctionProperties` is the
+/// default and a single [`FrontmatterSeverity::Error`] diagnostic carries the
+/// underlying serde_yaml error message. Unknown keys become individual
+/// [`FrontmatterSeverity::Warning`] diagnostics; the rest of the YAML still
+/// parses.
 ///
 /// Note: `provenance:` is an **unstable** key. The Salsa layer in `smelt-db`
 /// is responsible for enforcing the `unstable_schema: true` workspace flag and
 /// resetting the provenance to `Unknown` when the flag is absent.
-pub fn parse_function_properties(yaml_text: &str) -> FunctionProperties {
+pub fn parse_function_properties(
+    yaml_text: &str,
+) -> (FunctionProperties, Vec<FrontmatterDiagnostic>) {
+    let mut diags: Vec<FrontmatterDiagnostic> = Vec::new();
     let mut props = FunctionProperties::default();
-    for line in yaml_text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("deterministic:") {
-            props.deterministic = parse_bool_value(rest.trim());
-        } else if let Some(rest) = trimmed.strip_prefix("idempotent:") {
-            props.idempotent = parse_bool_value(rest.trim());
-        } else if let Some(rest) = trimmed.strip_prefix("append_only:") {
-            props.append_only = parse_bool_value(rest.trim());
-        } else if let Some(rest) = trimmed.strip_prefix("needs_cast:") {
-            props.needs_cast = parse_bool_value(rest.trim());
-        } else if let Some(rest) = trimmed.strip_prefix("provenance:") {
-            if let Some(prov) = parse_provenance_value(rest.trim()) {
-                props.provenance = prov;
+
+    let trimmed = yaml_text.trim();
+    if trimmed.is_empty() {
+        return (props, diags);
+    }
+
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml_text) {
+        Ok(v) => v,
+        Err(err) => {
+            diags.push(FrontmatterDiagnostic {
+                severity: FrontmatterSeverity::Error,
+                message: format!("frontmatter: failed to parse YAML: {err}"),
+            });
+            return (props, diags);
+        }
+    };
+
+    let mapping = match value {
+        serde_yaml::Value::Mapping(m) => m,
+        // Empty document (`null`) is fine — same as empty input.
+        serde_yaml::Value::Null => return (props, diags),
+        other => {
+            diags.push(FrontmatterDiagnostic {
+                severity: FrontmatterSeverity::Error,
+                message: format!(
+                    "frontmatter: expected a top-level mapping, found {}",
+                    yaml_value_kind(&other)
+                ),
+            });
+            return (props, diags);
+        }
+    };
+
+    for (k, v) in mapping {
+        let key = match k.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                diags.push(FrontmatterDiagnostic {
+                    severity: FrontmatterSeverity::Warning,
+                    message: format!("frontmatter: ignoring non-string key {k:?}"),
+                });
+                continue;
+            }
+        };
+        match key.as_str() {
+            "deterministic" => {
+                if let Some(b) = parse_bool_value(&v) {
+                    props.deterministic = b;
+                } else {
+                    diags.push(FrontmatterDiagnostic {
+                        severity: FrontmatterSeverity::Warning,
+                        message: format!(
+                            "frontmatter: ignoring `deterministic`: expected a boolean, got {}",
+                            yaml_value_kind(&v)
+                        ),
+                    });
+                }
+            }
+            "idempotent" => {
+                if let Some(b) = parse_bool_value(&v) {
+                    props.idempotent = b;
+                } else {
+                    diags.push(FrontmatterDiagnostic {
+                        severity: FrontmatterSeverity::Warning,
+                        message: format!(
+                            "frontmatter: ignoring `idempotent`: expected a boolean, got {}",
+                            yaml_value_kind(&v)
+                        ),
+                    });
+                }
+            }
+            "append_only" => {
+                if let Some(b) = parse_bool_value(&v) {
+                    props.append_only = b;
+                } else {
+                    diags.push(FrontmatterDiagnostic {
+                        severity: FrontmatterSeverity::Warning,
+                        message: format!(
+                            "frontmatter: ignoring `append_only`: expected a boolean, got {}",
+                            yaml_value_kind(&v)
+                        ),
+                    });
+                }
+            }
+            "needs_cast" => {
+                if let Some(b) = parse_bool_value(&v) {
+                    props.needs_cast = b;
+                } else {
+                    diags.push(FrontmatterDiagnostic {
+                        severity: FrontmatterSeverity::Warning,
+                        message: format!(
+                            "frontmatter: ignoring `needs_cast`: expected a boolean, got {}",
+                            yaml_value_kind(&v)
+                        ),
+                    });
+                }
+            }
+            "provenance" => {
+                if let Some(prov) = parse_provenance_value(&v, &mut diags) {
+                    props.provenance = prov;
+                }
+            }
+            "joins" => {
+                props.joins = parse_joins_value(&v, &mut diags);
+            }
+            other => {
+                if !is_known_top_level_key(other) {
+                    diags.push(FrontmatterDiagnostic {
+                        severity: FrontmatterSeverity::Warning,
+                        message: format!("frontmatter: ignoring unknown key `{other}`"),
+                    });
+                }
+                // Known-but-not-here keys (e.g. `backends`) are silently
+                // skipped — they belong to other passes.
             }
         }
     }
-    props
+
+    (props, diags)
 }
 
-/// Parse a `provenance:` value from a single-line inline YAML map.
-///
-/// Accepts the shape `{ col1: [src.a, src.b], col2: [src.c] }`.
-/// Returns `None` if the input cannot be parsed as a valid provenance map.
-///
-/// This is intentionally minimal: it handles the specific subset of YAML
-/// produced by smelt frontmatter authors (single-line inline maps). Full YAML
-/// parsing would pull in an external dependency we don't need.
-pub fn parse_provenance_value(s: &str) -> Option<Provenance> {
-    // Must start with `{` and end with `}`
-    let inner = s.strip_prefix('{')?.strip_suffix('}')?;
-    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+/// Decode a YAML value as a boolean, accepting both native booleans and the
+/// string forms `"true"`, `"false"`, `"yes"`, `"no"`, `"1"`, `"0"` for
+/// backward compatibility with the previous line-walker behaviour.
+fn parse_bool_value(v: &serde_yaml::Value) -> Option<bool> {
+    match v {
+        serde_yaml::Value::Bool(b) => Some(*b),
+        serde_yaml::Value::String(s) => match s.as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        },
+        serde_yaml::Value::Number(n) => n.as_i64().and_then(|i| match i {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
 
-    // Split on `,` that are not inside `[…]`
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let chars: Vec<char> = inner.chars().collect();
-    let mut segments: Vec<String> = Vec::new();
-
-    for (i, &ch) in chars.iter().enumerate() {
-        match ch {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                segments.push(inner[start..i].trim().to_string());
-                start = i + 1;
-            }
-            _ => {}
+/// Parse the `provenance:` value into [`Provenance::Declared`]. Returns
+/// `None` if the value does not parse as a non-empty mapping. Malformed
+/// individual entries become warnings and are skipped.
+fn parse_provenance_value(
+    v: &serde_yaml::Value,
+    diags: &mut Vec<FrontmatterDiagnostic>,
+) -> Option<Provenance> {
+    let map = match v {
+        serde_yaml::Value::Mapping(m) => m,
+        serde_yaml::Value::Null => return None,
+        other => {
+            diags.push(FrontmatterDiagnostic {
+                severity: FrontmatterSeverity::Warning,
+                message: format!(
+                    "frontmatter: ignoring `provenance`: expected a mapping, got {}",
+                    yaml_value_kind(other)
+                ),
+            });
+            return None;
         }
-    }
-    // Final segment
-    let tail = inner[start..].trim();
-    if !tail.is_empty() {
-        segments.push(tail.to_string());
-    }
+    };
 
-    for seg in segments {
-        // Each segment is `col: [src.a, src.b]`
-        let colon_pos = seg.find(':')?;
-        let col = seg[..colon_pos].trim().to_string();
-        let list_str = seg[colon_pos + 1..].trim();
-        // Must be `[…]`
-        let list_inner = list_str.strip_prefix('[')?.strip_suffix(']')?;
-        let sources: Vec<String> = list_inner
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        entries.push((col, sources));
+    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+    for (k, v) in map {
+        let col = match k.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                diags.push(FrontmatterDiagnostic {
+                    severity: FrontmatterSeverity::Warning,
+                    message: format!(
+                        "frontmatter: ignoring provenance entry with non-string key {k:?}"
+                    ),
+                });
+                continue;
+            }
+        };
+        let sources = match v {
+            serde_yaml::Value::Sequence(seq) => {
+                let mut out = Vec::with_capacity(seq.len());
+                let mut entry_ok = true;
+                for item in seq {
+                    match item.as_str() {
+                        Some(s) => out.push(s.to_string()),
+                        None => {
+                            diags.push(FrontmatterDiagnostic {
+                                severity: FrontmatterSeverity::Warning,
+                                message: format!(
+                                    "frontmatter: ignoring provenance entry `{col}`: source list contains non-string {item:?}"
+                                ),
+                            });
+                            entry_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if entry_ok {
+                    Some(out)
+                } else {
+                    None
+                }
+            }
+            other => {
+                diags.push(FrontmatterDiagnostic {
+                    severity: FrontmatterSeverity::Warning,
+                    message: format!(
+                        "frontmatter: ignoring provenance entry `{col}`: expected a sequence, got {}",
+                        yaml_value_kind(other)
+                    ),
+                });
+                None
+            }
+        };
+        if let Some(sources) = sources {
+            entries.push((col, sources));
+        }
     }
 
     if entries.is_empty() {
@@ -362,49 +605,131 @@ pub fn parse_provenance_value(s: &str) -> Option<Provenance> {
     }
 }
 
-fn parse_bool_value(s: &str) -> bool {
-    matches!(s, "true" | "yes" | "1")
+/// Parse the `joins:` value into a vector of [`JoinSpec`]s. Each entry must
+/// be a mapping with `table`, `on`, and `cardinality` string keys; malformed
+/// entries become warnings and are skipped.
+fn parse_joins_value(
+    v: &serde_yaml::Value,
+    diags: &mut Vec<FrontmatterDiagnostic>,
+) -> Vec<JoinSpec> {
+    let seq = match v {
+        serde_yaml::Value::Sequence(s) => s,
+        serde_yaml::Value::Null => return Vec::new(),
+        other => {
+            diags.push(FrontmatterDiagnostic {
+                severity: FrontmatterSeverity::Warning,
+                message: format!(
+                    "frontmatter: ignoring `joins`: expected a sequence, got {}",
+                    yaml_value_kind(other)
+                ),
+            });
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::with_capacity(seq.len());
+    for (idx, item) in seq.iter().enumerate() {
+        let raw: RawJoinSpec = match serde_yaml::from_value(item.clone()) {
+            Ok(r) => r,
+            Err(err) => {
+                diags.push(FrontmatterDiagnostic {
+                    severity: FrontmatterSeverity::Warning,
+                    message: format!(
+                        "frontmatter: ignoring `joins[{idx}]`: failed to parse entry: {err}"
+                    ),
+                });
+                continue;
+            }
+        };
+        let Some(table) = raw.table else {
+            diags.push(FrontmatterDiagnostic {
+                severity: FrontmatterSeverity::Warning,
+                message: format!("frontmatter: ignoring `joins[{idx}]`: missing `table`"),
+            });
+            continue;
+        };
+        let Some(on) = raw.on else {
+            diags.push(FrontmatterDiagnostic {
+                severity: FrontmatterSeverity::Warning,
+                message: format!("frontmatter: ignoring `joins[{idx}]`: missing `on`"),
+            });
+            continue;
+        };
+        let cardinality = match raw.cardinality {
+            Some(serde_yaml::Value::String(s)) => s,
+            Some(serde_yaml::Value::Number(n)) => n.to_string(),
+            Some(other) => {
+                diags.push(FrontmatterDiagnostic {
+                    severity: FrontmatterSeverity::Warning,
+                    message: format!(
+                        "frontmatter: ignoring `joins[{idx}]`: cardinality must be a string, got {}",
+                        yaml_value_kind(&other)
+                    ),
+                });
+                continue;
+            }
+            None => {
+                diags.push(FrontmatterDiagnostic {
+                    severity: FrontmatterSeverity::Warning,
+                    message: format!("frontmatter: ignoring `joins[{idx}]`: missing `cardinality`"),
+                });
+                continue;
+            }
+        };
+        out.push(JoinSpec {
+            table,
+            on,
+            cardinality,
+        });
+    }
+    out
+}
+
+fn yaml_value_kind(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "boolean",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged value",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Phase 43 test 1 — boolean keys parse via the serde_yaml-backed path,
+    /// including the new `needs_cast` key. Subsumes the historical
+    /// `parse_properties_defaults_to_false`, `parse_properties_deterministic_true`,
+    /// and `parse_properties_all_keys` tests.
     #[test]
-    fn parse_properties_defaults_to_false() {
-        let props = parse_function_properties("");
+    fn parses_simple_boolean_properties() {
+        // Empty input: defaults, no diagnostics.
+        let (props, diags) = parse_function_properties("");
         assert_eq!(props, FunctionProperties::default());
-    }
+        assert!(diags.is_empty());
 
-    #[test]
-    fn parse_properties_deterministic_true() {
-        let props = parse_function_properties("deterministic: true\n");
-        assert!(props.deterministic);
-        assert!(!props.idempotent);
-        assert!(!props.append_only);
-        assert_eq!(props.provenance, Provenance::Unknown);
-    }
-
-    #[test]
-    fn parse_properties_all_keys() {
-        let yaml = "deterministic: true\nidempotent: true\nappend_only: true\n";
-        let props = parse_function_properties(yaml);
+        // All four bools: true.
+        let yaml = "deterministic: true\nidempotent: true\nappend_only: true\nneeds_cast: true\n";
+        let (props, diags) = parse_function_properties(yaml);
         assert!(props.deterministic);
         assert!(props.idempotent);
         assert!(props.append_only);
+        assert!(props.needs_cast);
+        assert_eq!(props.provenance, Provenance::Unknown);
+        assert!(props.joins.is_empty());
+        assert!(diags.is_empty());
     }
 
+    /// Phase 43 test 2 — single-line inline-map provenance still parses.
+    /// Direct port of the legacy `parse_provenance_single_output_column` test.
     #[test]
-    fn parse_properties_ignores_unknown_keys() {
-        let yaml = "backends: [duckdb]\ndeterministic: false\n";
-        let props = parse_function_properties(yaml);
-        assert!(!props.deterministic);
-    }
-
-    #[test]
-    fn parse_provenance_single_output_column() {
+    fn parses_inline_provenance_map() {
         let yaml = "provenance: { margin: [source.revenue, source.cost] }\n";
-        let props = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml);
         assert_eq!(
             props.provenance,
             Provenance::Declared(vec![(
@@ -412,12 +737,121 @@ mod tests {
                 vec!["source.revenue".to_string(), "source.cost".to_string()],
             )])
         );
+        assert!(diags.is_empty());
     }
 
+    /// Phase 43 test 3 — multi-line block-style provenance, which the old
+    /// line-walker could not handle.
     #[test]
-    fn parse_provenance_multiple_output_columns() {
+    fn parses_multi_line_provenance_map() {
+        let yaml = r#"provenance:
+  margin:
+    - source.revenue
+    - source.cost
+  ratio:
+    - source.numerator
+    - source.denominator
+"#;
+        let (props, diags) = parse_function_properties(yaml);
+        let Provenance::Declared(entries) = props.provenance else {
+            panic!("expected Declared, got {:?}", props.provenance);
+        };
+        // serde_yaml's Mapping preserves insertion order, so we expect both
+        // entries in declaration order.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "margin");
+        assert_eq!(
+            entries[0].1,
+            vec!["source.revenue".to_string(), "source.cost".to_string()]
+        );
+        assert_eq!(entries[1].0, "ratio");
+        assert_eq!(
+            entries[1].1,
+            vec![
+                "source.numerator".to_string(),
+                "source.denominator".to_string()
+            ]
+        );
+        assert!(diags.is_empty());
+    }
+
+    /// Phase 43 test 4 — `joins:` block parses into [`JoinSpec`]s with the
+    /// raw cardinality string preserved.
+    #[test]
+    fn parses_joins_block_with_nested_map() {
+        let yaml = r#"joins:
+  - table: dim_customer
+    on: orders.customer_id = dim_customer.customer_id
+    cardinality: "1:1"
+"#;
+        let (props, diags) = parse_function_properties(yaml);
+        assert_eq!(
+            props.joins,
+            vec![JoinSpec {
+                table: "dim_customer".to_string(),
+                on: "orders.customer_id = dim_customer.customer_id".to_string(),
+                cardinality: "1:1".to_string(),
+            }]
+        );
+        assert!(diags.is_empty());
+    }
+
+    /// Phase 43 test 5 — malformed YAML must yield a default
+    /// `FunctionProperties` plus a single Error diagnostic, never panic.
+    #[test]
+    fn malformed_yaml_emits_diagnostic_not_panic() {
+        let yaml = "provenance: {unterminated\n";
+        let (props, diags) = parse_function_properties(yaml);
+        assert_eq!(props, FunctionProperties::default());
+        assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+        assert_eq!(diags[0].severity, FrontmatterSeverity::Error);
+        assert!(
+            diags[0].message.contains("frontmatter"),
+            "diagnostic message should mention 'frontmatter': {}",
+            diags[0].message
+        );
+    }
+
+    /// Phase 43 test 6 — unknown top-level keys produce a Warning, but the
+    /// rest of the frontmatter still parses cleanly. Subsumes the historical
+    /// `parse_properties_ignores_unknown_keys` test's "deterministic still
+    /// parses" assertion.
+    #[test]
+    fn unknown_keys_warned_not_errored() {
+        let yaml = "deterministic: true\nunknown_property: foo\n";
+        let (props, diags) = parse_function_properties(yaml);
+        assert!(props.deterministic);
+        let warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == FrontmatterSeverity::Warning)
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one warning, got {diags:?}"
+        );
+        assert!(
+            warnings[0].message.contains("unknown_property"),
+            "warning should name the unknown key: {}",
+            warnings[0].message
+        );
+    }
+
+    /// Phase 43 test 7 — `joins:` absent yields an empty vec (regression
+    /// guard for the new field's default).
+    #[test]
+    fn joins_absent_yields_empty_vec() {
+        let (props, diags) = parse_function_properties("");
+        assert!(props.joins.is_empty());
+        assert!(diags.is_empty());
+    }
+
+    /// Phase 43 test 8 — multiple-output-columns inline provenance. Direct
+    /// port of the legacy `parse_provenance_multiple_output_columns` test.
+    #[test]
+    fn parses_provenance_multiple_output_columns_inline() {
         let yaml = "provenance: { a: [x.col1], b: [x.col2, x.col3] }\n";
-        let props = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml);
         assert_eq!(
             props.provenance,
             Provenance::Declared(vec![
@@ -428,24 +862,17 @@ mod tests {
                 ),
             ])
         );
+        assert!(diags.is_empty());
     }
 
+    /// Phase 43 test 9 — provenance absent stays Unknown. Direct port of
+    /// the legacy `parse_provenance_absent_is_unknown` test.
     #[test]
-    fn parse_provenance_absent_is_unknown() {
+    fn parses_provenance_absent_is_unknown() {
         let yaml = "deterministic: true\n";
-        let props = parse_function_properties(yaml);
+        let (props, diags) = parse_function_properties(yaml);
         assert_eq!(props.provenance, Provenance::Unknown);
-    }
-
-    #[test]
-    fn parse_provenance_value_roundtrip() {
-        let result = parse_provenance_value("{ margin: [source.revenue, source.cost] }");
-        assert_eq!(
-            result,
-            Some(Provenance::Declared(vec![(
-                "margin".to_string(),
-                vec!["source.revenue".to_string(), "source.cost".to_string()],
-            )]))
-        );
+        assert!(props.deterministic);
+        assert!(diags.is_empty());
     }
 }

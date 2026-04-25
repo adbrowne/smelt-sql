@@ -280,6 +280,23 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::FunctionCallCycle,
         message_substring: "cycle_b",
     },
+    // Phase 43 — frontmatter YAML that fails to parse. Body is valid; the
+    // only diagnostic is FrontmatterParseError (severity Error) anchored at
+    // the declaration's name range.
+    Case {
+        fixture: "fn_frontmatter_malformed.sql",
+        companion: None,
+        code: DiagnosticCode::FrontmatterParseError,
+        message_substring: "frontmatter",
+    },
+    // Phase 43 — frontmatter contains an unknown top-level key. Severity is
+    // Warning, not Error; the rest of the frontmatter still parses.
+    Case {
+        fixture: "fn_frontmatter_unknown_key.sql",
+        companion: None,
+        code: DiagnosticCode::FrontmatterParseError,
+        message_substring: "unknown_property",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {
