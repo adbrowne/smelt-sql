@@ -1856,7 +1856,7 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 44b | Fragment-forward parser + type-system support; ship `monitored_session_rollup` (closes finding #8) | pending | | |
 | 45 | JOIN aliases visible in `TableExpr`-returning function bodies | done | 8e5fe6a | 2026-04-26 |
 | 46 | `TableExpr` argument shapes: CTEs, derived tables, subqueries | done | 1c39757 | 2026-04-26 |
-| 47 | Cross-function CTE schema inference: drop opaque-CTE suppression (Step 10 complete) | done | | 2026-04-26 |
+| 47 | Cross-function CTE schema inference: drop opaque-CTE suppression (Step 10 complete) | done | c89d2b7 | 2026-04-26 |
 | 48 | LSP hover wiring + PASSING completion + multi-level frame trace (Step 11 complete) | pending | | |
 | 49 | `WindowInScalarContext` deep-walk into scalar subqueries (Step 12 opens) | pending | | |
 | 50 | Built-in registry expansion: operators + missing aggregates + window funcs (Step 12 complete) | pending | | |
