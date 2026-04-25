@@ -762,6 +762,12 @@ pub fn check_smelt_fn_call(
     // refs that match a TableExpr param name are not passed in (they
     // are already seeded as `add_tableexpr_param`).
     table_ref_schema_lookup: &dyn Fn(&TableRef) -> Option<Vec<(String, TypedColumn)>>,
+    // Phase 47: resolve a `smelt.fn.<name>(<args>)` call appearing as
+    // the source of a wildcard CTE body (`WITH x AS (SELECT * FROM
+    // smelt.fn.foo(...))`) to the callee's inferred return schema. In
+    // production this wraps `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`;
+    // returns `None` to fall back to the opaque-CTE marker.
+    smelt_fn_schema_lookup: &dyn Fn(&SmeltFnCall) -> Option<Vec<(String, TypedColumn)>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -1280,6 +1286,7 @@ pub fn check_smelt_fn_call(
             tableexpr_schema_lookup,
             default_type_lookup,
             table_ref_schema_lookup,
+            smelt_fn_schema_lookup,
         )
     };
 
@@ -1315,8 +1322,12 @@ pub fn check_smelt_fn_call(
             // Phase 45: JOIN-aliased schemas were already seeded above
             // (before the shadow-warning check) so they're visible to
             // both `compute_shadow_warnings` and the body re-walk.
-            let (body_ctx_with_ctes, _cycle_diags) =
-                extract_function_body_cte_schemas(select_stmt, &body_ctx, &body_text);
+            let (body_ctx_with_ctes, _cycle_diags) = extract_function_body_cte_schemas(
+                select_stmt,
+                &body_ctx,
+                &body_text,
+                smelt_fn_schema_lookup,
+            );
             let body_ctx = body_ctx_with_ctes;
 
             // Phase 15: a SELECT-shaped body (e.g. `add_margin`'s
@@ -2036,10 +2047,21 @@ fn find_cte_table_deps(cte: &Cte, all_names: &std::collections::HashSet<String>)
 ///
 /// When no WITH clause is present the seed context is returned unchanged.
 /// Pure — does not touch Salsa.
+///
+/// Phase 47: when a CTE body has the shape
+/// `SELECT * FROM smelt.fn.<name>(<args>)`, the CTE's column schema is
+/// resolved by the caller-supplied `smelt_fn_schema_lookup` closure
+/// (which in production wraps `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`).
+/// If the closure returns `None` (e.g. function not yet defined,
+/// recursion cycle, or the callee's body lacks a TableExpr return),
+/// the CTE is marked opaque (the Phase 22 fallback) so that outer
+/// column references don't emit false `UnknownIdentifier` cascades.
+#[allow(clippy::type_complexity)]
 pub fn extract_function_body_cte_schemas(
     select: &SelectStmt,
     seed_ctx: &TypeContext,
     text: &str,
+    smelt_fn_schema_lookup: &dyn Fn(&SmeltFnCall) -> Option<Vec<(String, TypedColumn)>>,
 ) -> (TypeContext, Vec<Diagnostic>) {
     let Some(with_clause) = select.with_clause() else {
         return (seed_ctx.clone(), vec![]);
@@ -2079,35 +2101,46 @@ pub fn extract_function_body_cte_schemas(
         }
         ctx.add_alias(cte_name, cte_name);
 
-        // Phase 22: if this CTE SELECTs from a `smelt.fn.*` source with a
-        // wildcard projection, its output schema cannot be determined at
-        // pure-function-check time (wildcard expansion from a
-        // user-defined-function source requires the function's body AST,
-        // which is not available here). Mark it as opaque so that column
-        // references from this CTE in the outer SELECT don't emit
-        // `UnknownIdentifier` false positives.
+        // Phase 47: when this CTE has the shape
+        // `SELECT * FROM smelt.fn.<name>(<args>)`, try to resolve the
+        // callee's return schema via the caller-supplied lookup
+        // closure. If resolution succeeds, register each column on
+        // the CTE so outer references are real-typed (and typos
+        // surface as `UnknownIdentifier`). If resolution fails (e.g.
+        // function not yet defined, recursion cycle, or the callee
+        // body lacks a TableExpr return), fall back to the Phase 22
+        // `mark_cte_opaque` shortcut to keep outer references quiet.
         {
-            let is_wildcard_from_smelt_fn = dfs
+            let inner_smelt_fn = dfs
                 .ctes
                 .get(cte_name)
                 .and_then(|c| c.query())
                 .and_then(|q| q.select_stmt())
-                .map(|s| {
-                    // Has a FROM clause with a smelt.fn.* source
-                    let has_smelt_fn_from = s
-                        .from_clause()
-                        .map(|fc| fc.table_refs().any(|tr| tr.smelt_fn_call().is_some()))
-                        .unwrap_or(false);
-                    // AND the SELECT list contains a wildcard
+                .and_then(|s| {
+                    // SELECT list must contain a wildcard
                     let has_wildcard = s
                         .select_list()
                         .map(|sl| sl.items().any(|item| item.is_wildcard()))
                         .unwrap_or(false);
-                    has_smelt_fn_from && has_wildcard
-                })
-                .unwrap_or(false);
-            if is_wildcard_from_smelt_fn {
-                ctx.mark_cte_opaque(cte_name);
+                    if !has_wildcard {
+                        return None;
+                    }
+                    // FROM clause must have a smelt.fn.* source — return it.
+                    s.from_clause()
+                        .and_then(|fc| fc.table_refs().find_map(|tr| tr.smelt_fn_call()))
+                });
+
+            if let Some(call) = inner_smelt_fn {
+                match smelt_fn_schema_lookup(&call) {
+                    Some(cols) => {
+                        for (col_name, typed_col) in &cols {
+                            ctx.add_cte_column(cte_name, col_name, typed_col.clone());
+                        }
+                    }
+                    None => {
+                        ctx.mark_cte_opaque(cte_name);
+                    }
+                }
             }
         }
     }

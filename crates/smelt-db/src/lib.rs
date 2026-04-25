@@ -1084,6 +1084,13 @@ pub fn function_body_diagnostics_for_file(
             None
         };
 
+    let smelt_fn_schema_lookup =
+        |_call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> {
+            // Tier 2 body checks don't expand wildcard CTE bodies, so
+            // cross-function CTE schema inference is unused here.
+            None
+        };
+
     let default_type_lookup = |sig: &FunctionSig, param_name: &str| -> Option<DataType> {
         let decl_path = decl_lookup(sig)?;
         let f = files.iter().find(|f| f.path(db) == &decl_path)?;
@@ -1125,6 +1132,7 @@ pub fn function_body_diagnostics_for_file(
             &tableexpr_schema_lookup,
             &default_type_lookup,
             &table_ref_schema_lookup,
+            &smelt_fn_schema_lookup,
         )
     };
 
@@ -1941,6 +1949,16 @@ pub fn smelt_fn_call_diagnostics_for_file(
             None
         };
 
+    // Phase 47: resolve a `smelt.fn.<name>(<args>)` call appearing as
+    // the source of a wildcard CTE body to the callee's inferred
+    // return schema (closes review finding #22). Wraps
+    // `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`.
+    let smelt_fn_schema_lookup =
+        |call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> {
+            let provider = SalsaRefSchemaProvider::new(db, workspace);
+            provider.resolve_smelt_fn_call_schema(call)
+        };
+
     // Phase 17: resolve a parameter's default-value expression by
     // re-parsing the declaring file and walking to the matching
     // PARAM node. Returns the inferred `DataType` of the default
@@ -1985,6 +2003,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &tableexpr_schema_lookup,
             &default_type_lookup,
             &table_ref_schema_lookup,
+            &smelt_fn_schema_lookup,
         ));
     }
     out
@@ -2207,10 +2226,15 @@ pub fn cte_cycle_diagnostics_for_file(
             continue;
         };
         let empty_ctx = type_inference::TypeContext::new();
+        // Cycle detection is purely structural — pass a no-op
+        // smelt_fn_schema_lookup; per-CTE schema content isn't needed.
+        let no_smelt_fn =
+            |_call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> { None };
         let (_ctx, cycle_diags) = function_body_check::extract_function_body_cte_schemas(
             &select,
             &empty_ctx,
             &clean_text,
+            &no_smelt_fn,
         );
         out.extend(cycle_diags);
     }
@@ -3195,8 +3219,32 @@ impl SalsaRefSchemaProvider<'_> {
         // in `session_rollup` whose body SELECTs from a `sessionized` CTE).
         // Cycle diagnostics are discarded — they're surfaced separately by
         // `cte_cycle_diagnostics_for_file`.
+        //
+        // Phase 47: when a CTE body has `SELECT * FROM smelt.fn.<name>(...)`,
+        // resolve the callee's return schema by recursing through this
+        // method. The workspace-level `function_call_cycle_fn_ids` set is
+        // consulted to short-circuit cycle members, preventing infinite
+        // recursion through chained or cyclic call graphs.
+        let cycle_set = function_call_cycle_fn_ids(self.db, self.workspace);
+        let smelt_fn_schema_lookup =
+            |inner_call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> {
+                let segs = inner_call
+                    .call_path()
+                    .map(|p| p.segments())
+                    .unwrap_or_default();
+                let inner_name = segs.last()?;
+                if cycle_set.contains(inner_name) {
+                    return None;
+                }
+                self.resolve_smelt_fn_call_schema(inner_call)
+            };
         let (body_ctx_with_ctes, _cycle_diags) =
-            function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
+            function_body_check::extract_function_body_cte_schemas(
+                &body_select,
+                &body_ctx,
+                "",
+                &smelt_fn_schema_lookup,
+            );
         let mut body_ctx = body_ctx_with_ctes;
 
         // Phase 45: seed JOIN-aliased schemas so that
