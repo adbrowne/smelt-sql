@@ -21,6 +21,27 @@ use smelt_types::DataType;
 /// Fully-qualified function identifier, e.g. `"some_fn"` or `"core.math.safe_divide"`.
 pub type FnId = String;
 
+/// Provenance tag attached to nodes produced by transparent function expansion.
+///
+/// Phase 41 adds these tags so consumers (debug printers, diagnostic
+/// renderers, planner-rule audits) can tell, for any node in the spliced
+/// subtree, whether it came from the caller's argument expressions or from
+/// the callee's body. The model follows §16 #12 of
+/// `docs/research/20260413-smelt-functions.md` (the third "Synthesized"
+/// variant from that document is left to a later phase — defaults / row-
+/// erasure don't have call sites in v1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvenanceTag {
+    /// The node originated in the caller (an argument expression or the
+    /// surrounding call site).  Phase 41 doesn't yet have argument
+    /// substitution, so this variant is reserved for future use; tests
+    /// pattern-match on it.
+    Caller,
+    /// The node originated in the callee's body (or a nested callee's body).
+    /// The `FnId` identifies the callee at the splice frame.
+    Callee(FnId),
+}
+
 /// Per-function properties extracted from the declaration's frontmatter.
 ///
 /// All fields default to `false` / `Unknown` when the corresponding frontmatter
@@ -118,6 +139,14 @@ pub enum LogicalNode {
         /// rule (Phase 33).  `None` means no filter has been pushed yet.
         /// Once set, the rule will not push again (idempotent).
         pushed_filter: Option<Plan>,
+        /// Phase 41: the callee's parsed body subtree, populated by the
+        /// `smelt-db::logical_plan` Salsa query for transparent calls whose
+        /// declaring file is reachable and whose call graph contains no
+        /// cycles. `None` for opaque (`smelt.extern`) calls, for unresolved
+        /// references, and for calls suppressed by cycle detection. When
+        /// `None`, [`crate::logical_plan_rules::ExpandTransparentFunctionCalls`]
+        /// falls back to the marker-only behaviour shipped in Phase 32.
+        body: Option<Plan>,
     },
     /// A reference to a named table or model output.
     TableRef {
@@ -155,6 +184,45 @@ pub enum LogicalNode {
         /// of pushdown visible in the final plan; `None` when no filter was
         /// pushed.
         pushed_filter: Option<Plan>,
+        /// Phase 41: the spliced callee body subtree, recursively expanded
+        /// (so a transparent call inside the body is itself an `ExpandedCall`
+        /// with its own `body`). Every cloned node is wrapped in
+        /// [`LogicalNode::Tagged`] with `ProvenanceTag::Callee(fn_id)`.
+        /// `None` when the originating `FunctionCall.body` was `None` —
+        /// either the callee was opaque, the declaration could not be
+        /// resolved, or the call participated in a cycle that the
+        /// `smelt-db::logical_plan` cycle pre-pass aborted.
+        body: Option<Plan>,
+    },
+    /// Phase 41 — provenance wrapper around a node produced during transparent
+    /// expansion. Carrying provenance via a wrapper node keeps the addition
+    /// localised: every existing `LogicalNode` field stays untouched, and
+    /// rules that don't care about provenance can recurse through `Tagged`
+    /// nodes transparently.
+    Tagged {
+        /// Where the wrapped subtree came from (caller vs callee body).
+        tag: ProvenanceTag,
+        /// The wrapped subtree.
+        inner: Plan,
+    },
+    /// Phase 41 — list-valued fragment-sort splice point.  A `SpliceList`
+    /// stands in for a `SelectItems<…>` (or comparable) parameter when the
+    /// expander materialises a callee body whose projection list contains
+    /// such a parameter.  `[]` represents the `()` (empty) case from
+    /// research §20: the surrounding adjacent commas should be elided at
+    /// lowering by [`crate::logical_plan_rules::ElideEmptySelectItemsSplices`].
+    /// Non-empty splices simply inline their children.
+    SpliceList(Vec<Plan>),
+    /// Phase 41 — opaque-text placeholder for a body subtree that has not
+    /// yet been lowered into structured `LogicalNode` shapes. Used as the
+    /// minimum-viable representation for transparent function bodies whose
+    /// SQL grammar (`SELECT ... FROM ...`) is richer than the Phase 30
+    /// node set. Subsequent phases replace `Raw` occurrences with their
+    /// structured equivalents (`Select`, `Cast`, `LeftJoin`, …) as the
+    /// body lowering matures.
+    Raw {
+        /// The raw SQL text (or fragment text) of the body subtree.
+        sql_text: String,
     },
     /// Wraps an inner node with an explicit SQL CAST to `target_type`.
     ///

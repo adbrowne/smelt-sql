@@ -46,12 +46,13 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
             provenance,
             properties,
             pushed_filter,
+            body,
         } => {
             writeln!(
                 out,
                 "{pad}FunctionCall fn_id={fn_id:?} transparent={transparent} \
                  deterministic={det} idempotent={idem} append_only={ao} \
-                 needs_cast={cast} provenance={prov} pushed_filter={pf} args={argc}",
+                 needs_cast={cast} provenance={prov} pushed_filter={pf} args={argc} body={body_present}",
                 det = properties.deterministic,
                 idem = properties.idempotent,
                 ao = properties.append_only,
@@ -63,6 +64,7 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
                     "None"
                 },
                 argc = args.len(),
+                body_present = if body.is_some() { "Some(_)" } else { "None" },
             )
             .unwrap();
             for arg in args {
@@ -74,6 +76,7 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
             provenance,
             properties,
             pushed_filter,
+            body,
         } => {
             writeln!(
                 out,
@@ -92,6 +95,23 @@ fn render(node: &Plan, indent: usize, out: &mut String) {
                 },
             )
             .unwrap();
+            if let Some(b) = body {
+                writeln!(out, "{pad}  body:").unwrap();
+                render(b, indent + 2, out);
+            }
+        }
+        LogicalNode::Tagged { tag, inner } => {
+            writeln!(out, "{pad}Tagged tag={tag:?}").unwrap();
+            render(inner, indent + 1, out);
+        }
+        LogicalNode::SpliceList(items) => {
+            writeln!(out, "{pad}SpliceList len={}", items.len()).unwrap();
+            for it in items {
+                render(it, indent + 1, out);
+            }
+        }
+        LogicalNode::Raw { sql_text } => {
+            writeln!(out, "{pad}Raw sql_text={sql_text:?}").unwrap();
         }
         LogicalNode::TableRef { name } => {
             writeln!(out, "{pad}TableRef name={name:?}").unwrap();

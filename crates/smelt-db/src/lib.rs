@@ -391,6 +391,14 @@ pub enum DiagnosticCode {
     /// support struct literal syntax. Anchored at the `smelt.as_struct` call
     /// span. Introduced in Phase 38 of smelt-functions.
     AsStructUnsupportedBackend,
+    /// Emitted when the transparent-function call graph contains a cycle —
+    /// directly (`A` calls `A`) or transitively (`A` → `B` → `A`).  Anchored
+    /// at the offending function declaration's name span.  The
+    /// `smelt-db::logical_plan` cycle pre-pass aborts splicing for every
+    /// `fn_id` participating in the cycle so the planner does not attempt to
+    /// inline a non-terminating expansion.  Introduced in Phase 41 of
+    /// smelt-functions.
+    FunctionCallCycle,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -981,8 +989,16 @@ pub fn function_body_diagnostics_for_file(
         type_inference::promote_types(&lhs, &rhs).data_type
     };
 
+    // Phase 41: short-circuit body cascade for cycle members so the
+    // existing nested-call body re-walk does not infinite-recurse on a
+    // function-call cycle.
+    let cycle_set = function_call_cycle_fn_ids(db, workspace);
+
     let body_lookup = |sig: &FunctionSig| -> Option<(String, function_body_check::BodyShape)> {
         if sig.origin == smelt_types::SigOrigin::Extern {
+            return None;
+        }
+        if cycle_set.contains(&sig.name) {
             return None;
         }
         for f in &files {
@@ -1087,6 +1103,15 @@ pub fn function_body_diagnostics_for_file(
             continue;
         };
         if has_deferred_phase13_param(sig) {
+            continue;
+        }
+        // Phase 41: skip body checks for cycle members. The cycle pre-pass
+        // emits `FunctionCallCycle` for every participant; running the body
+        // checker would risk re-entering the same cycle through nested
+        // expansions even with `body_lookup`'s guard, and we already know
+        // the diagnostic is wrong-shaped (the body itself is fine, the call
+        // graph is not).
+        if cycle_set.contains(&name) {
             continue;
         }
         let Some(body_expr) = define.body().and_then(|b| b.expression()) else {
@@ -1497,9 +1522,19 @@ pub fn smelt_fn_call_diagnostics_for_file(
         type_inference::promote_types(&lhs, &rhs).data_type
     };
 
+    // Phase 41: capture the cycle set so the body cascade short-circuits
+    // for cycle-participant functions. Without this guard, calling
+    // `body_lookup(cycle_a)` triggers a re-walk of cycle_a's body which
+    // calls cycle_b, which calls back into cycle_a — overflowing the stack.
+    // The cycle pre-pass surfaces a `FunctionCallCycle` diagnostic instead.
+    let cycle_set = function_call_cycle_fn_ids(db, workspace);
+
     let body_lookup = |sig: &FunctionSig| -> Option<(String, function_body_check::BodyShape)> {
         // Externs have no body — skip. Defines alone carry a re-walkable body.
         if sig.origin == smelt_types::SigOrigin::Extern {
+            return None;
+        }
+        if cycle_set.contains(&sig.name) {
             return None;
         }
         // Find the file declaring this function.
@@ -2077,6 +2112,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 
     // Phase 38 — smelt.as_struct() backend-capability gate.
     for diag in as_struct_backend_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 41 — transparent-function call-graph cycle pre-pass.
+    for diag in function_call_cycle_diagnostics_for_file(db, workspace, file) {
         DiagnosticAcc(diag).accumulate(db);
     }
 
@@ -3729,6 +3769,12 @@ struct FnCallInput {
     /// Resolved provenance: either the declared provenance (when the workspace
     /// opted in to `unstable_schema`) or `Unknown`.
     provenance: smelt_planner::logical::Provenance,
+    /// Phase 41: the callee's body text, captured eagerly by the Salsa query.
+    /// `None` for opaque calls, unresolved references, and calls suppressed by
+    /// the cycle pre-pass.  When `Some`, the body is attached to the
+    /// `FunctionCall` plan node as a `LogicalNode::Raw { sql_text }` subtree;
+    /// the Phase 41 expansion rule clones it into the resulting `ExpandedCall`.
+    body_text: Option<String>,
 }
 
 /// Build a [`smelt_planner::logical::Plan`] from a single source file.
@@ -3757,6 +3803,14 @@ pub fn logical_plan(
     let unstable_schema = find_project(db, workspace, &project_root)
         .map(|p| project_unstable_schema(db, p))
         .unwrap_or(false);
+
+    // Phase 41: workspace-wide body capture + cycle pre-pass.  The body map
+    // lets the call-site loop attach `LogicalNode::Raw` subtrees without
+    // re-walking the workspace per call; the cycle set tells us which
+    // transparent calls must skip body attachment so the planner does not
+    // attempt to inline a non-terminating expansion.
+    let bodies = workspace_function_bodies(db, workspace);
+    let cycle_set = function_call_cycle_fn_ids(db, workspace);
 
     // Walk the CST to collect all smelt.fn.* call sites, resolving each
     // function's signature and properties via Salsa before we leave the
@@ -3828,11 +3882,22 @@ pub fn logical_plan(
                     std::mem::replace(&mut properties.provenance, Provenance::Unknown)
                 };
 
+            // Phase 41: attach body text for transparent calls whose declaring
+            // function is not in a cycle.  Opaque (`smelt.extern`) calls and
+            // cycle participants leave `body_text: None` so the expansion
+            // rule falls back to the marker-only behaviour from Phase 32.
+            let body_text = if transparent && !cycle_set.contains(&fn_id) {
+                bodies.get(&fn_id).cloned()
+            } else {
+                None
+            };
+
             FnCallInput {
                 fn_id,
                 transparent,
                 properties,
                 provenance: resolved_provenance,
+                body_text,
             }
         })
         .collect();
@@ -3851,6 +3916,9 @@ fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logi
     let fn_call_nodes: Vec<Arc<LogicalNode>> = call_inputs
         .into_iter()
         .map(|input| {
+            let body = input
+                .body_text
+                .map(|t| Arc::new(LogicalNode::Raw { sql_text: t }));
             Arc::new(LogicalNode::FunctionCall {
                 fn_id: input.fn_id,
                 args: Vec::new(), // Phase 30 stub — arg sub-plans deferred to Phase 32+
@@ -3858,6 +3926,7 @@ fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logi
                 provenance: input.provenance,
                 properties: input.properties,
                 pushed_filter: None,
+                body,
             })
         })
         .collect();
@@ -3876,6 +3945,215 @@ fn build_logical_plan_pure(call_inputs: Vec<FnCallInput>) -> smelt_planner::logi
             filter: None,
         })
     }
+}
+
+/// Phase 41: workspace-wide map from `fn_id` → body text for every
+/// `smelt.define`. Opaque externs are not included (they have no body).
+///
+/// Salsa-tracked so the cycle pre-pass and body-attachment paths share one
+/// cache entry per workspace.  The return is wrapped in `Arc` to satisfy
+/// Salsa's interning / equality requirements (the same shape used by
+/// `all_models`).
+#[salsa::tracked]
+fn workspace_function_bodies(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+) -> Arc<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for f in workspace.files(db).iter().copied() {
+        let parse = parse_file(db, f);
+        let syntax = parse.syntax();
+        let Some(ast) = AstFile::cast(syntax) else {
+            continue;
+        };
+        for define in ast.defines() {
+            let Some(name) = define.name() else { continue };
+            let Some(body) = define.body() else { continue };
+            let body_text = body.syntax().text().to_string();
+            // First wins on duplicates — duplicate-define diagnostics catch
+            // the second occurrence elsewhere.
+            out.entry(name).or_insert(body_text);
+        }
+    }
+    Arc::new(out)
+}
+
+/// Phase 41 — workspace-wide call graph for `smelt.define` declarations.
+///
+/// Returns a map from caller `fn_id` → callees (set of `fn_id`s reached from
+/// the body's `smelt.fn.*` call sites). Externs and unresolved references
+/// are dropped — they are sinks in the graph.  Salsa-tracked so each
+/// workspace pays the walk once per parse-graph epoch.
+#[salsa::tracked]
+fn workspace_function_call_graph(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+) -> Arc<std::collections::HashMap<String, Vec<String>>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for f in workspace.files(db).iter().copied() {
+        let parse = parse_file(db, f);
+        let syntax = parse.syntax();
+        let Some(ast) = AstFile::cast(syntax) else {
+            continue;
+        };
+        for define in ast.defines() {
+            let Some(caller) = define.name() else {
+                continue;
+            };
+            let Some(body) = define.body() else { continue };
+            let mut callees: Vec<String> = body
+                .syntax()
+                .descendants()
+                .filter_map(smelt_parser::ast::SmeltFnCall::cast)
+                .map(|c| {
+                    c.call_path()
+                        .map(|p| p.segments().join("."))
+                        .unwrap_or_default()
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            callees.sort();
+            callees.dedup();
+            out.entry(caller).or_insert(callees);
+        }
+    }
+    Arc::new(out)
+}
+
+/// Phase 41 — pure DFS cycle detector over the workspace call graph.
+/// Returns the set of `fn_id`s that participate in any cycle.
+pub fn find_function_call_cycles(
+    graph: &std::collections::HashMap<String, Vec<String>>,
+) -> std::collections::HashSet<String> {
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Color {
+        White,
+        Grey,
+        Black,
+    }
+    let mut color: HashMap<&str, Color> = HashMap::new();
+    let mut in_cycle: HashSet<String> = HashSet::new();
+
+    for node in graph.keys() {
+        color.insert(node.as_str(), Color::White);
+    }
+
+    fn dfs<'a>(
+        node: &'a str,
+        graph: &'a std::collections::HashMap<String, Vec<String>>,
+        color: &mut HashMap<&'a str, Color>,
+        stack: &mut Vec<&'a str>,
+        in_cycle: &mut HashSet<String>,
+    ) {
+        color.insert(node, Color::Grey);
+        stack.push(node);
+        if let Some(callees) = graph.get(node) {
+            for callee in callees {
+                let key = callee.as_str();
+                match color.get(key).copied().unwrap_or(Color::White) {
+                    Color::White => {
+                        if graph.contains_key(callee) {
+                            dfs(key, graph, color, stack, in_cycle);
+                        } else {
+                            // sink: not in graph
+                            color.insert(key, Color::Black);
+                        }
+                    }
+                    Color::Grey => {
+                        // Found a back-edge — every Grey node from `key` to
+                        // the top of `stack` is on the cycle.
+                        let mut on_cycle = false;
+                        for &s in stack.iter() {
+                            if s == key {
+                                on_cycle = true;
+                            }
+                            if on_cycle {
+                                in_cycle.insert(s.to_string());
+                            }
+                        }
+                    }
+                    Color::Black => {}
+                }
+            }
+        }
+        stack.pop();
+        color.insert(node, Color::Black);
+    }
+
+    let nodes: Vec<&str> = graph.keys().map(|s| s.as_str()).collect();
+    for node in nodes {
+        if matches!(
+            color.get(node).copied().unwrap_or(Color::White),
+            Color::White
+        ) {
+            let mut stack: Vec<&str> = Vec::new();
+            dfs(node, graph, &mut color, &mut stack, &mut in_cycle);
+        }
+    }
+
+    in_cycle
+}
+
+/// Cached union of cycle-participant `fn_id`s for the current workspace.
+#[salsa::tracked]
+fn function_call_cycle_fn_ids(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+) -> Arc<std::collections::HashSet<String>> {
+    let graph = workspace_function_call_graph(db, workspace);
+    Arc::new(find_function_call_cycles(graph.as_ref()))
+}
+
+/// Phase 41 — emit [`DiagnosticCode::FunctionCallCycle`] for every
+/// `smelt.define` in `file` whose `fn_id` is reachable inside a cycle in the
+/// workspace call graph. Anchored at the declaration's name range.
+pub fn function_call_cycle_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    let cycle_set = function_call_cycle_fn_ids(db, workspace);
+    if cycle_set.is_empty() {
+        return Vec::new();
+    }
+
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+
+    let sigs = file_signature_inputs(db, file);
+
+    let mut out = Vec::new();
+    for define in ast.defines() {
+        let Some(name) = define.name() else { continue };
+        if !cycle_set.contains(&name) {
+            continue;
+        }
+        let range = sigs
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.name_range)
+            .unwrap_or(Range {
+                start: Position { line: 0, column: 0 },
+                end: Position { line: 0, column: 0 },
+            });
+        out.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "function `{name}` participates in a cyclic call graph; \
+                 transparent expansion is suppressed for this function and \
+                 every other function on the cycle"
+            ),
+            range,
+            code: Some(DiagnosticCode::FunctionCallCycle),
+            data: None,
+        });
+    }
+    out
 }
 
 // ============================================================================

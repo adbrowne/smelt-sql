@@ -986,6 +986,7 @@ impl Backend {
                 DbCode::UnknownPassingParameter => "unknown-passing-parameter",
                 DbCode::UnstableSchemaRequired => "unstable-schema-required",
                 DbCode::AsStructUnsupportedBackend => "as-struct-unsupported-backend",
+                DbCode::FunctionCallCycle => "function-call-cycle",
             };
             NumberOrString::String(code_str.to_string())
         });

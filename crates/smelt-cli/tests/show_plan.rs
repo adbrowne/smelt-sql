@@ -86,6 +86,7 @@ fn cli_show_plan_runs_pushdown_when_eligible() {
             ..FunctionProperties::default()
         },
         pushed_filter: None,
+        body: None,
     });
     let pred = Arc::new(LogicalNode::Literal(smelt_types::DataType::Boolean));
     let plan = Arc::new(LogicalNode::Select {

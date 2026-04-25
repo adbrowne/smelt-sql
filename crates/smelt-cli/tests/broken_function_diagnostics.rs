@@ -265,6 +265,21 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::AsStructUnsupportedBackend,
         message_substring: "no_struct_db",
     },
+    // Phase 41: transparent-function call-graph cycle.  `cycle_a` calls
+    // `cycle_b`, which calls back into `cycle_a` — both functions are on
+    // the cycle and the diagnostic anchors at each declaration's name.
+    Case {
+        fixture: "fn_call_cycle_a.sql",
+        companion: Some("fn_call_cycle_b.sql"),
+        code: DiagnosticCode::FunctionCallCycle,
+        message_substring: "cycle_a",
+    },
+    Case {
+        fixture: "fn_call_cycle_b.sql",
+        companion: Some("fn_call_cycle_a.sql"),
+        code: DiagnosticCode::FunctionCallCycle,
+        message_substring: "cycle_b",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {

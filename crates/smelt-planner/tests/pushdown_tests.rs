@@ -35,6 +35,7 @@ fn make_transparent_call_deterministic(fn_id: &str, provenance: Provenance) -> A
             ..FunctionProperties::default()
         },
         pushed_filter: None,
+        body: None,
     })
 }
 
@@ -49,6 +50,7 @@ fn make_opaque_call_deterministic(fn_id: &str, provenance: Provenance) -> Arc<Lo
             ..FunctionProperties::default()
         },
         pushed_filter: None,
+        body: None,
     })
 }
 
@@ -226,10 +228,13 @@ fn contains_transparent_function_call(node: &Arc<LogicalNode>) -> bool {
                     .as_ref()
                     .is_some_and(contains_transparent_function_call)
         }
-        LogicalNode::ExpandedCall { .. }
-        | LogicalNode::TableRef { .. }
-        | LogicalNode::Literal(_) => false,
+        LogicalNode::ExpandedCall { body, .. } => body
+            .as_ref()
+            .is_some_and(contains_transparent_function_call),
+        LogicalNode::TableRef { .. } | LogicalNode::Literal(_) | LogicalNode::Raw { .. } => false,
         LogicalNode::Cast { inner, .. } => contains_transparent_function_call(inner),
+        LogicalNode::Tagged { inner, .. } => contains_transparent_function_call(inner),
+        LogicalNode::SpliceList(items) => items.iter().any(contains_transparent_function_call),
         LogicalNode::LeftJoin { lhs, rhs, .. } => {
             contains_transparent_function_call(lhs) || contains_transparent_function_call(rhs)
         }
@@ -255,6 +260,7 @@ fn pushdown_blocked_by_non_deterministic_function() {
             ..FunctionProperties::default()
         },
         pushed_filter: None,
+        body: None,
     });
     let pred = boolean_literal();
     let plan = make_select_with_filter(call, pred);
@@ -291,6 +297,7 @@ fn no_re_push_when_already_pushed() {
             ..FunctionProperties::default()
         },
         pushed_filter: Some(pred),
+        body: None,
     });
     let plan = Arc::new(LogicalNode::Select {
         projections: vec!["*".to_string()],

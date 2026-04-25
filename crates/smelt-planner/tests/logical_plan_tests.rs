@@ -95,6 +95,9 @@ fn first_function_call(node: &Arc<LogicalNode>) -> Option<FunctionCallFields> {
             properties: properties.clone(),
             args: args.clone(),
         }),
+        LogicalNode::Tagged { inner, .. } => first_function_call(inner),
+        LogicalNode::SpliceList(items) => items.iter().find_map(first_function_call),
+        LogicalNode::Raw { .. } => None,
         LogicalNode::Select { from, filter, .. } => from
             .as_ref()
             .and_then(first_function_call)

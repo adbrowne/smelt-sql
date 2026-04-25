@@ -25,6 +25,7 @@ fn make_transparent_call(fn_id: &str) -> Arc<LogicalNode> {
         provenance: Provenance::Unknown,
         properties: FunctionProperties::default(),
         pushed_filter: None,
+        body: None,
     })
 }
 
@@ -36,6 +37,7 @@ fn make_opaque_call(fn_id: &str) -> Arc<LogicalNode> {
         provenance: Provenance::Unknown,
         properties: FunctionProperties::default(),
         pushed_filter: None,
+        body: None,
     })
 }
 
@@ -47,6 +49,7 @@ fn make_transparent_call_with_provenance(fn_id: &str, provenance: Provenance) ->
         provenance,
         properties: FunctionProperties::default(),
         pushed_filter: None,
+        body: None,
     })
 }
 
@@ -61,6 +64,7 @@ fn make_needs_cast_call(fn_id: &str) -> Arc<LogicalNode> {
             ..FunctionProperties::default()
         },
         pushed_filter: None,
+        body: None,
     })
 }
 
@@ -73,13 +77,17 @@ fn has_transparent_call(node: &Arc<LogicalNode>) -> bool {
         LogicalNode::FunctionCall {
             transparent: false, ..
         } => false,
-        LogicalNode::ExpandedCall { .. } => false,
-        LogicalNode::TableRef { .. } | LogicalNode::Literal(_) => false,
+        LogicalNode::ExpandedCall { body, .. } => {
+            body.as_ref().map(has_transparent_call).unwrap_or(false)
+        }
+        LogicalNode::TableRef { .. } | LogicalNode::Literal(_) | LogicalNode::Raw { .. } => false,
         LogicalNode::Select { from, filter, .. } => {
             from.as_ref().map(has_transparent_call).unwrap_or(false)
                 || filter.as_ref().map(has_transparent_call).unwrap_or(false)
         }
         LogicalNode::Cast { inner, .. } => has_transparent_call(inner),
+        LogicalNode::Tagged { inner, .. } => has_transparent_call(inner),
+        LogicalNode::SpliceList(items) => items.iter().any(has_transparent_call),
         LogicalNode::LeftJoin { lhs, rhs, .. } => {
             has_transparent_call(lhs) || has_transparent_call(rhs)
         }

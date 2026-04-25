@@ -16,12 +16,15 @@
 //! Future phases will add filter lists (which rules to skip), backend hints,
 //! etc.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use smelt_types::signatures::BuiltinRegistry;
 use smelt_types::DataType;
 
-use crate::logical::{Cardinality, FnId, FunctionProperties, LogicalNode, Plan, Provenance};
+use crate::logical::{
+    Cardinality, FnId, FunctionProperties, LogicalNode, Plan, Provenance, ProvenanceTag,
+};
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -129,6 +132,7 @@ pub fn show_plan_rules() -> Vec<Box<dyn PlannerRule>> {
     vec![
         Box::new(PushFilterIntoTransparentFunction),
         Box::new(ExpandTransparentFunctionCalls),
+        Box::new(ElideEmptySelectItemsSplices),
         Box::new(EliminateUnusedLeftJoin),
     ]
 }
@@ -189,7 +193,8 @@ pub struct ExpandTransparentFunctionCalls;
 
 impl PlannerRule for ExpandTransparentFunctionCalls {
     fn apply(&self, plan: Plan, ctx: &RuleContext) -> RuleResult {
-        expand_recursive(plan, ctx)
+        let mut visited: HashSet<FnId> = HashSet::new();
+        expand_recursive(plan, ctx, &mut visited)
     }
 }
 
@@ -197,7 +202,7 @@ impl PlannerRule for ExpandTransparentFunctionCalls {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn expand_recursive(node: Plan, ctx: &RuleContext) -> RuleResult {
+fn expand_recursive(node: Plan, ctx: &RuleContext, visited: &mut HashSet<FnId>) -> RuleResult {
     match node.as_ref() {
         // --- transparent call: expand it ---
         LogicalNode::FunctionCall {
@@ -206,9 +211,27 @@ fn expand_recursive(node: Plan, ctx: &RuleContext) -> RuleResult {
             provenance,
             properties,
             pushed_filter,
+            body,
             ..
         } => {
-            let expanded = build_expanded_call(fn_id, provenance, properties, pushed_filter, ctx);
+            // Per-pass visited-set keyed on FnId guarantees termination even
+            // for synthesised plans that escape the smelt-db cycle pre-pass.
+            // When `fn_id` is already on the active expansion stack, treat
+            // the body as suppressed (Phase 32 marker fall-back).
+            let body_for_splice: Option<Plan> = if visited.contains(fn_id) {
+                None
+            } else {
+                body.clone()
+            };
+            let expanded = build_expanded_call(
+                fn_id,
+                provenance,
+                properties,
+                pushed_filter,
+                &body_for_splice,
+                ctx,
+                visited,
+            );
             RuleResult::Changed(expanded)
         }
 
@@ -218,22 +241,56 @@ fn expand_recursive(node: Plan, ctx: &RuleContext) -> RuleResult {
         }
         | LogicalNode::ExpandedCall { .. }
         | LogicalNode::TableRef { .. }
-        | LogicalNode::Literal(_) => RuleResult::Unchanged,
+        | LogicalNode::Literal(_)
+        | LogicalNode::Raw { .. } => RuleResult::Unchanged,
 
         // --- structural nodes: recurse into children ---
         LogicalNode::Select {
             projections,
             from,
             filter,
-        } => expand_select(projections, from, filter, ctx),
+        } => expand_select(projections, from, filter, ctx, visited),
 
-        LogicalNode::Cast { inner, target_type } => match expand_recursive(inner.clone(), ctx) {
-            RuleResult::Changed(new_inner) => RuleResult::Changed(Arc::new(LogicalNode::Cast {
+        LogicalNode::Cast { inner, target_type } => {
+            match expand_recursive(inner.clone(), ctx, visited) {
+                RuleResult::Changed(new_inner) => {
+                    RuleResult::Changed(Arc::new(LogicalNode::Cast {
+                        inner: new_inner,
+                        target_type: target_type.clone(),
+                    }))
+                }
+                RuleResult::Unchanged => RuleResult::Unchanged,
+            }
+        }
+
+        // Tagged: recurse into inner, preserving the wrapper.
+        LogicalNode::Tagged { tag, inner } => match expand_recursive(inner.clone(), ctx, visited) {
+            RuleResult::Changed(new_inner) => RuleResult::Changed(Arc::new(LogicalNode::Tagged {
+                tag: tag.clone(),
                 inner: new_inner,
-                target_type: target_type.clone(),
             })),
             RuleResult::Unchanged => RuleResult::Unchanged,
         },
+
+        // SpliceList: recurse into each child; rebuild on any change.
+        LogicalNode::SpliceList(items) => {
+            let mut new_items: Vec<Plan> = Vec::with_capacity(items.len());
+            let mut changed = false;
+            for item in items {
+                match expand_recursive(item.clone(), ctx, visited) {
+                    RuleResult::Changed(p) => {
+                        new_items.push(p);
+                        changed = true;
+                    }
+                    RuleResult::Unchanged => new_items.push(item.clone()),
+                }
+            }
+            if changed {
+                RuleResult::Changed(Arc::new(LogicalNode::SpliceList(new_items)))
+            } else {
+                RuleResult::Unchanged
+            }
+        }
 
         // LeftJoin: recurse into both children.
         LogicalNode::LeftJoin {
@@ -243,8 +300,8 @@ fn expand_recursive(node: Plan, ctx: &RuleContext) -> RuleResult {
             cardinality,
             output_columns,
         } => {
-            let lhs_result = expand_recursive(lhs.clone(), ctx);
-            let rhs_result = expand_recursive(rhs.clone(), ctx);
+            let lhs_result = expand_recursive(lhs.clone(), ctx, visited);
+            let rhs_result = expand_recursive(rhs.clone(), ctx, visited);
             let lhs_changed = matches!(lhs_result, RuleResult::Changed(_));
             let rhs_changed = matches!(rhs_result, RuleResult::Changed(_));
             if lhs_changed || rhs_changed {
@@ -276,18 +333,47 @@ fn expand_recursive(node: Plan, ctx: &RuleContext) -> RuleResult {
 /// from `ctx.registry.canonical_return(fn_id)`. If the registry has no entry
 /// (or no canonical return declared), the cast is omitted entirely — emitting
 /// a Cast with no known target would be incorrect.
+///
+/// When `body` is `Some(b)` the callee body is spliced into the resulting
+/// `ExpandedCall.body` (every cloned node tagged via [`splice_body`]). Phase 41
+/// also recurses into the body itself, so a transparent call inside the body
+/// is itself expanded — covering the nested-call cycle test fixture pair.
+/// When `body` is `None` the rule falls back to the marker-only behaviour
+/// shipped in Phase 32 (used for opaque calls and for calls suppressed by
+/// the cycle pre-pass in `smelt-db::logical_plan`).
 fn build_expanded_call(
     fn_id: &FnId,
     provenance: &Provenance,
     properties: &FunctionProperties,
     pushed_filter: &Option<Plan>,
+    body: &Option<Plan>,
     ctx: &RuleContext,
+    visited: &mut HashSet<FnId>,
 ) -> Plan {
+    let spliced_body: Option<Plan> = body.as_ref().map(|b| {
+        let tagged = splice_body(b.clone(), &ProvenanceTag::Callee(fn_id.clone()));
+        // Recurse so nested transparent calls inside the spliced body are
+        // themselves expanded by the same fixed-point pass.  Push `fn_id`
+        // onto the visited set for the duration so a self-referential body
+        // (test fixtures, future direct callers, anything that escapes the
+        // smelt-db cycle pre-pass) cannot trigger unbounded recursion.
+        let inserted = visited.insert(fn_id.clone());
+        let expanded = match expand_recursive(tagged.clone(), ctx, visited) {
+            RuleResult::Changed(p) => p,
+            RuleResult::Unchanged => tagged,
+        };
+        if inserted {
+            visited.remove(fn_id);
+        }
+        expanded
+    });
+
     let expanded: Plan = Arc::new(LogicalNode::ExpandedCall {
         fn_id: fn_id.clone(),
         provenance: provenance.clone(),
         properties: properties.clone(),
         pushed_filter: pushed_filter.clone(),
+        body: spliced_body,
     });
 
     if !properties.needs_cast {
@@ -301,6 +387,125 @@ fn build_expanded_call(
         }),
         None => expanded,
     }
+}
+
+/// Clone `callee_body` and wrap every node with a [`LogicalNode::Tagged`]
+/// carrying `tag`.  Phase 41 keeps the helper deliberately minimal:
+///
+/// * Argument substitution is deferred — when callees take parameters, this
+///   helper currently splices the body verbatim, leaving any caller-side
+///   parameter binding to a follow-up phase.
+/// * Tagging is structural: every node we traverse is wrapped, so a consumer
+///   can trace any subtree's origin to either the caller or a specific callee.
+///
+/// The function is pure and depends only on the `LogicalNode` enum; tests
+/// can drive it directly without constructing a `RuleContext`.
+pub fn splice_body(callee_body: Plan, tag: &ProvenanceTag) -> Plan {
+    let inner = clone_with_tag(callee_body, tag);
+    Arc::new(LogicalNode::Tagged {
+        tag: tag.clone(),
+        inner,
+    })
+}
+
+fn clone_with_tag(node: Plan, tag: &ProvenanceTag) -> Plan {
+    let rebuilt: LogicalNode = match node.as_ref() {
+        LogicalNode::FunctionCall {
+            fn_id,
+            args,
+            transparent,
+            provenance,
+            properties,
+            pushed_filter,
+            body,
+        } => LogicalNode::FunctionCall {
+            fn_id: fn_id.clone(),
+            args: args
+                .iter()
+                .map(|a| wrap_with_tag(clone_with_tag(a.clone(), tag), tag))
+                .collect(),
+            transparent: *transparent,
+            provenance: provenance.clone(),
+            properties: properties.clone(),
+            pushed_filter: pushed_filter
+                .as_ref()
+                .map(|f| wrap_with_tag(clone_with_tag(f.clone(), tag), tag)),
+            body: body.clone(),
+        },
+        LogicalNode::ExpandedCall {
+            fn_id,
+            provenance,
+            properties,
+            pushed_filter,
+            body,
+        } => LogicalNode::ExpandedCall {
+            fn_id: fn_id.clone(),
+            provenance: provenance.clone(),
+            properties: properties.clone(),
+            pushed_filter: pushed_filter
+                .as_ref()
+                .map(|f| wrap_with_tag(clone_with_tag(f.clone(), tag), tag)),
+            body: body
+                .as_ref()
+                .map(|b| wrap_with_tag(clone_with_tag(b.clone(), tag), tag)),
+        },
+        LogicalNode::Select {
+            projections,
+            from,
+            filter,
+        } => LogicalNode::Select {
+            projections: projections.clone(),
+            from: from
+                .as_ref()
+                .map(|p| wrap_with_tag(clone_with_tag(p.clone(), tag), tag)),
+            filter: filter
+                .as_ref()
+                .map(|p| wrap_with_tag(clone_with_tag(p.clone(), tag), tag)),
+        },
+        LogicalNode::Cast { inner, target_type } => LogicalNode::Cast {
+            inner: wrap_with_tag(clone_with_tag(inner.clone(), tag), tag),
+            target_type: target_type.clone(),
+        },
+        LogicalNode::LeftJoin {
+            lhs,
+            rhs,
+            join_columns,
+            cardinality,
+            output_columns,
+        } => LogicalNode::LeftJoin {
+            lhs: wrap_with_tag(clone_with_tag(lhs.clone(), tag), tag),
+            rhs: wrap_with_tag(clone_with_tag(rhs.clone(), tag), tag),
+            join_columns: join_columns.clone(),
+            cardinality: cardinality.clone(),
+            output_columns: output_columns.clone(),
+        },
+        LogicalNode::Tagged {
+            tag: existing,
+            inner,
+        } => LogicalNode::Tagged {
+            tag: existing.clone(),
+            inner: clone_with_tag(inner.clone(), tag),
+        },
+        LogicalNode::SpliceList(items) => LogicalNode::SpliceList(
+            items
+                .iter()
+                .map(|p| wrap_with_tag(clone_with_tag(p.clone(), tag), tag))
+                .collect(),
+        ),
+        LogicalNode::TableRef { name } => LogicalNode::TableRef { name: name.clone() },
+        LogicalNode::Literal(dt) => LogicalNode::Literal(dt.clone()),
+        LogicalNode::Raw { sql_text } => LogicalNode::Raw {
+            sql_text: sql_text.clone(),
+        },
+    };
+    Arc::new(rebuilt)
+}
+
+fn wrap_with_tag(node: Plan, tag: &ProvenanceTag) -> Plan {
+    Arc::new(LogicalNode::Tagged {
+        tag: tag.clone(),
+        inner: node,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +552,7 @@ impl PlannerRule for PushFilterIntoTransparentFunction {
             ref provenance,
             ref properties,
             ref pushed_filter,
+            ref body,
         } = *from_node.as_ref()
         else {
             return RuleResult::Unchanged;
@@ -380,6 +586,7 @@ impl PlannerRule for PushFilterIntoTransparentFunction {
             provenance: provenance.clone(),
             properties: properties.clone(),
             pushed_filter: Some(pred.clone()),
+            body: body.clone(),
         });
 
         // Build the new Select with the filter cleared.
@@ -461,15 +668,197 @@ impl PlannerRule for EliminateUnusedLeftJoin {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rule: ElideEmptySelectItemsSplices
+// ---------------------------------------------------------------------------
+
+/// Phase 41 — remove every empty [`LogicalNode::SpliceList`] node from the
+/// plan, and inline non-empty ones into their enclosing list contexts.
+///
+/// The rule is the planner-level realisation of research §16 #20's
+/// "list-splice comma elision". An empty `SelectItems<…>` parameter (a
+/// fragment-sort default written `= ()` or an explicit empty argument) lowers
+/// to `LogicalNode::SpliceList(vec![])`; this rule deletes those splice
+/// points so the surrounding list (a `Select.projections`-shaped vector or a
+/// nested `SpliceList`) reads as if the splice never existed.  Non-empty
+/// splices are flattened so each item appears at the same depth as its
+/// neighbours.
+///
+/// Idempotent: running the rule twice yields the same plan as running it
+/// once, because every fired rewrite removes a `SpliceList` node, leaving
+/// nothing left to elide on the second pass.
+pub struct ElideEmptySelectItemsSplices;
+
+impl PlannerRule for ElideEmptySelectItemsSplices {
+    fn apply(&self, plan: Plan, _ctx: &RuleContext) -> RuleResult {
+        elide_recursive(plan)
+    }
+}
+
+fn elide_recursive(node: Plan) -> RuleResult {
+    match node.as_ref() {
+        LogicalNode::SpliceList(items) => {
+            // Recursively elide inside children so any nested SpliceList is
+            // collapsed before we decide what to do with this one.
+            let mut flattened: Vec<Plan> = Vec::with_capacity(items.len());
+            let mut any_inner_changed = false;
+            // Flattening kicks in whenever any direct child IS a SpliceList:
+            // its items become siblings in the parent context, replacing the
+            // child node itself.  An empty SpliceList contributes zero items
+            // (the comma-elision case from research §16 #20); a non-empty
+            // SpliceList contributes its items inlined.
+            let any_child_is_splice = items
+                .iter()
+                .any(|i| matches!(i.as_ref(), LogicalNode::SpliceList(_)));
+            for item in items {
+                match elide_recursive(item.clone()) {
+                    RuleResult::Changed(p) => {
+                        any_inner_changed = true;
+                        flatten_into(&p, &mut flattened);
+                    }
+                    RuleResult::Unchanged => flatten_into(item, &mut flattened),
+                }
+            }
+            if any_inner_changed || any_child_is_splice {
+                RuleResult::Changed(Arc::new(LogicalNode::SpliceList(flattened)))
+            } else {
+                RuleResult::Unchanged
+            }
+        }
+
+        LogicalNode::Select {
+            projections,
+            from,
+            filter,
+        } => {
+            // Phase 41 keeps `Select.projections` as a Vec<String> placeholder
+            // (no LogicalNode children for the projection list yet); recurse
+            // into structural children only.
+            let from_result = from.as_ref().map(|p| elide_recursive(p.clone()));
+            let filter_result = filter.as_ref().map(|p| elide_recursive(p.clone()));
+            let from_changed = matches!(from_result, Some(RuleResult::Changed(_)));
+            let filter_changed = matches!(filter_result, Some(RuleResult::Changed(_)));
+            if !from_changed && !filter_changed {
+                return RuleResult::Unchanged;
+            }
+            let new_from = match from_result {
+                Some(RuleResult::Changed(p)) => Some(p),
+                _ => from.clone(),
+            };
+            let new_filter = match filter_result {
+                Some(RuleResult::Changed(p)) => Some(p),
+                _ => filter.clone(),
+            };
+            RuleResult::Changed(Arc::new(LogicalNode::Select {
+                projections: projections.clone(),
+                from: new_from,
+                filter: new_filter,
+            }))
+        }
+
+        LogicalNode::Cast { inner, target_type } => match elide_recursive(inner.clone()) {
+            RuleResult::Changed(p) => RuleResult::Changed(Arc::new(LogicalNode::Cast {
+                inner: p,
+                target_type: target_type.clone(),
+            })),
+            RuleResult::Unchanged => RuleResult::Unchanged,
+        },
+
+        LogicalNode::Tagged { tag, inner } => match elide_recursive(inner.clone()) {
+            RuleResult::Changed(p) => RuleResult::Changed(Arc::new(LogicalNode::Tagged {
+                tag: tag.clone(),
+                inner: p,
+            })),
+            RuleResult::Unchanged => RuleResult::Unchanged,
+        },
+
+        LogicalNode::ExpandedCall {
+            fn_id,
+            provenance,
+            properties,
+            pushed_filter,
+            body,
+        } => {
+            let body_result = body.as_ref().map(|b| elide_recursive(b.clone()));
+            if let Some(RuleResult::Changed(p)) = body_result {
+                RuleResult::Changed(Arc::new(LogicalNode::ExpandedCall {
+                    fn_id: fn_id.clone(),
+                    provenance: provenance.clone(),
+                    properties: properties.clone(),
+                    pushed_filter: pushed_filter.clone(),
+                    body: Some(p),
+                }))
+            } else {
+                RuleResult::Unchanged
+            }
+        }
+
+        LogicalNode::LeftJoin {
+            lhs,
+            rhs,
+            join_columns,
+            cardinality,
+            output_columns,
+        } => {
+            let lhs_result = elide_recursive(lhs.clone());
+            let rhs_result = elide_recursive(rhs.clone());
+            let lhs_changed = matches!(lhs_result, RuleResult::Changed(_));
+            let rhs_changed = matches!(rhs_result, RuleResult::Changed(_));
+            if !lhs_changed && !rhs_changed {
+                return RuleResult::Unchanged;
+            }
+            let new_lhs = match lhs_result {
+                RuleResult::Changed(p) => p,
+                _ => lhs.clone(),
+            };
+            let new_rhs = match rhs_result {
+                RuleResult::Changed(p) => p,
+                _ => rhs.clone(),
+            };
+            RuleResult::Changed(Arc::new(LogicalNode::LeftJoin {
+                lhs: new_lhs,
+                rhs: new_rhs,
+                join_columns: join_columns.clone(),
+                cardinality: cardinality.clone(),
+                output_columns: output_columns.clone(),
+            }))
+        }
+
+        LogicalNode::FunctionCall { .. }
+        | LogicalNode::TableRef { .. }
+        | LogicalNode::Literal(_)
+        | LogicalNode::Raw { .. } => RuleResult::Unchanged,
+    }
+}
+
+/// Flatten a SpliceList by inlining its children into `out`. Non-SpliceList
+/// nodes are pushed verbatim. Empty SpliceList children evaporate (the comma-
+/// elision step from research §16 #20).
+fn flatten_into(node: &Plan, out: &mut Vec<Plan>) {
+    match node.as_ref() {
+        LogicalNode::SpliceList(items) => {
+            for item in items {
+                flatten_into(item, out);
+            }
+        }
+        _ => out.push(node.clone()),
+    }
+}
+
 /// Recurse into a `Select` node's `from` and `filter` children.
 fn expand_select(
     projections: &[String],
     from: &Option<Plan>,
     filter: &Option<Plan>,
     ctx: &RuleContext,
+    visited: &mut HashSet<FnId>,
 ) -> RuleResult {
-    let from_result = from.as_ref().map(|f| expand_recursive(f.clone(), ctx));
-    let filter_result = filter.as_ref().map(|f| expand_recursive(f.clone(), ctx));
+    let from_result = from
+        .as_ref()
+        .map(|f| expand_recursive(f.clone(), ctx, visited));
+    let filter_result = filter
+        .as_ref()
+        .map(|f| expand_recursive(f.clone(), ctx, visited));
 
     let from_changed = from_result
         .as_ref()
