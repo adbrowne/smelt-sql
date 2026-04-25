@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod graph;
 pub mod logical;
 pub mod logical_plan_rules;
+pub mod lowering;
 pub mod plan_printer;
 #[cfg(feature = "python")]
 pub mod python_bridge;

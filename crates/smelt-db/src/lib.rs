@@ -580,6 +580,26 @@ pub fn project_unstable_schema(db: &dyn salsa::Database, project: ProjectInput) 
     smelt_core::parse_unstable_schema_flag(project.smelt_yml_text(db))
 }
 
+/// Return the set of *active* backend names for `project` — i.e. the
+/// distinct `target_type` values in `smelt.yml`'s `targets:` map.
+///
+/// Phase 42: this is the set the
+/// [`as_struct_backend_diagnostics_for_file`] gate intersects against
+/// when a function declares `BackendSet::All` (no explicit
+/// `backends:` frontmatter). Returning `None` means we could not parse
+/// the workspace config — callers should treat that as "no constraint
+/// on active backends" and fall back to the Phase 38 behaviour
+/// (only check explicitly-declared `BackendSet::Only`).
+///
+/// Reads from `ProjectInput::smelt_yml_text`, which is tracked by Salsa.
+#[salsa::tracked]
+pub fn project_active_backends(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Option<Vec<String>> {
+    smelt_core::parse_active_backends(project.smelt_yml_text(db))
+}
+
 /// Discover seed CSV files for a project root and infer their column types.
 ///
 /// Reads from disk (not a tracked Salsa input) — seeds that change on disk
@@ -1268,20 +1288,28 @@ pub fn backends_widening_diagnostics_for_file(
     out
 }
 
-/// Per-file diagnostics for the Phase 38 `smelt.as_struct()` backend-
-/// capability gate.
+/// Per-file diagnostics for the Phase 38 / Phase 42 `smelt.as_struct()`
+/// backend-capability gate.
 ///
-/// For each `smelt.define` in `file` whose frontmatter declares an explicit
-/// `backends:` set, walks the body for `smelt.as_struct()` calls. If any
-/// declared backend does not support struct literal syntax, emits
-/// [`DiagnosticCode::AsStructUnsupportedBackend`] anchored at the call span.
+/// For each `smelt.define` in `file`, walks the body for `smelt.as_struct()`
+/// calls. The set of backends to check against is determined by the function's
+/// `declared_backends`:
 ///
-/// Functions with `BackendSet::All` (no explicit `backends:` declaration) are
-/// skipped — the check only fires when an author has explicitly restricted the
-/// function to a named set that includes a non-struct-literal backend.
+/// - `Some(BackendSet::Only(names))` (Phase 38): the explicit declared set.
+/// - `None` or `Some(BackendSet::All)` (Phase 42): the workspace's *active*
+///   backend set — the distinct `target_type` values in `smelt.yml`'s
+///   `targets:` map. Pass `active_backends = None` to fall back to the
+///   Phase 38 behaviour (skip functions without an explicit `backends:`
+///   declaration), e.g. when no `smelt.yml` is present in a synthetic test
+///   workspace.
+///
+/// If any backend in the resolved set does not support struct literal
+/// syntax, emits [`DiagnosticCode::AsStructUnsupportedBackend`] anchored at
+/// the call span.
 pub fn as_struct_backend_diagnostics_for_file(
     db: &dyn salsa::Database,
     file: SourceFile,
+    active_backends: Option<&[String]>,
 ) -> Vec<Diagnostic> {
     use smelt_parser::ast::SmeltAsStructCall;
     use smelt_types::signatures::BackendSet;
@@ -1297,10 +1325,19 @@ pub fn as_struct_backend_diagnostics_for_file(
 
     let mut out = Vec::new();
     for sig in sigs.iter() {
-        // Only check functions with an explicit (non-All) backend set.
-        let declared = match &sig.declared_backends {
+        // Resolve which backends to check against. Functions with an explicit
+        // `Only(names)` keep the Phase 38 behaviour; functions with `All`
+        // (no `backends:` declaration) fall back to the workspace's active
+        // backends — the diagnostic now fires for the implicit-default case
+        // too. When `active_backends` is `None` and the function declares no
+        // explicit set, we cannot compute a meaningful intersection and skip
+        // the check (Phase 38 behaviour).
+        let backends_to_check: Vec<String> = match &sig.declared_backends {
             Some(BackendSet::Only(names)) => names.clone(),
-            _ => continue,
+            Some(BackendSet::All) | None => match active_backends {
+                Some(active) => active.to_vec(),
+                None => continue,
+            },
         };
         // Walk the define's body looking for SMELT_AS_STRUCT_CALL nodes.
         let define = ast
@@ -1312,8 +1349,8 @@ pub fn as_struct_backend_diagnostics_for_file(
         let body_syntax = define.syntax().descendants();
         for node in body_syntax {
             if let Some(call) = SmeltAsStructCall::cast(node) {
-                // Check each declared backend.
-                for backend in &declared {
+                // Check each backend in the resolved set.
+                for backend in &backends_to_check {
                     if !function_body_check::backend_supports_struct_literal(backend) {
                         let range =
                             smelt_parser::ast::text_range_to_range(&text, call.text_range());
@@ -2110,8 +2147,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         DiagnosticAcc(diag).accumulate(db);
     }
 
-    // Phase 38 — smelt.as_struct() backend-capability gate.
-    for diag in as_struct_backend_diagnostics_for_file(db, file) {
+    // Phase 38 / Phase 42 — smelt.as_struct() backend-capability gate.
+    // Functions with explicit `backends:` are checked against that set;
+    // functions without (default `BackendSet::All`) are checked against
+    // the workspace's active backends from `smelt.yml`.
+    let active_backends = project.and_then(|p| project_active_backends(db, p));
+    for diag in as_struct_backend_diagnostics_for_file(db, file, active_backends.as_deref()) {
         DiagnosticAcc(diag).accumulate(db);
     }
 

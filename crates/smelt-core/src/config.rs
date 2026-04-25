@@ -361,6 +361,26 @@ pub fn parse_unstable_schema_flag(text: &str) -> bool {
     false
 }
 
+/// Parse the distinct `target_type` values from the `targets:` block of a
+/// `smelt.yml` file. Pure function — takes the text rather than a path.
+///
+/// Returns the de-duplicated, lower-cased target types in sorted order, or
+/// `None` if the YAML cannot be parsed.
+pub fn parse_active_backends(text: &str) -> Option<Vec<String>> {
+    if text.is_empty() {
+        return None;
+    }
+    let config = serde_yaml::from_str::<Config>(text).ok()?;
+    let mut backends: Vec<String> = config
+        .targets
+        .values()
+        .map(|t| t.target_type.to_ascii_lowercase())
+        .collect();
+    backends.sort();
+    backends.dedup();
+    Some(backends)
+}
+
 impl Config {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let config_path = project_dir.join("smelt.yml");

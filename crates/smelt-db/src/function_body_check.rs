@@ -2484,64 +2484,14 @@ pub fn declared_return_hover_text(sig: &FunctionSig) -> Option<String> {
     sig.return_type_text.as_deref().map(|t| format!("-> {t}"))
 }
 
-// ─── Phase 38: smelt.as_struct() backend printer ──────────────────────────────
-
-/// Returns `true` for backends that support struct literal syntax.
-///
-/// Supported: `duckdb`, `spark`, `databricks`, `postgres`.
-/// Any other backend name returns `false`.
-pub fn backend_supports_struct_literal(backend: &str) -> bool {
-    matches!(
-        backend.to_ascii_lowercase().as_str(),
-        "duckdb" | "spark" | "databricks" | "postgres"
-    )
-}
-
-/// Emit SQL for a `smelt.as_struct(alias [EXCEPT cols])` call against a
-/// target backend.
-///
-/// Returns `Ok(sql)` for backends that support struct literals:
-///   - DuckDB:    `{'col': alias.col, ...}`
-///   - Spark / Databricks: `struct(alias.col AS col, ...)`
-///   - Postgres:  `ROW(alias.col, ...)` (composite type; field names inferred)
-///
-/// Returns `Err(backend_name)` for backends without struct-literal support.
-///
-/// Pure — no Salsa dependency.
-pub fn as_struct_to_sql(
-    alias: &str,
-    fields: &[(String, DataType)],
-    backend: &str,
-) -> Result<String, String> {
-    if !backend_supports_struct_literal(backend) {
-        return Err(backend.to_string());
-    }
-    let sql = match backend.to_ascii_lowercase().as_str() {
-        "duckdb" => {
-            let items: Vec<String> = fields
-                .iter()
-                .map(|(name, _)| format!("'{name}': {alias}.{name}"))
-                .collect();
-            format!("{{{}}}", items.join(", "))
-        }
-        "spark" | "databricks" => {
-            let items: Vec<String> = fields
-                .iter()
-                .map(|(name, _)| format!("{alias}.{name} AS {name}"))
-                .collect();
-            format!("struct({})", items.join(", "))
-        }
-        "postgres" => {
-            let items: Vec<String> = fields
-                .iter()
-                .map(|(name, _)| format!("{alias}.{name}"))
-                .collect();
-            format!("ROW({})", items.join(", "))
-        }
-        _ => unreachable!("backend_supports_struct_literal should have returned false"),
-    };
-    Ok(sql)
-}
+// ─── Phase 42: smelt.as_struct() backend printer ──────────────────────────────
+//
+// The lowering helpers moved to `smelt-planner::lowering::as_struct` in
+// Phase 42 — SQL emission is a planner concern. Re-exported here so the
+// existing `smelt-db::function_body_check::{as_struct_to_sql,
+// backend_supports_struct_literal}` call sites (and the published unit
+// tests in `crates/smelt-db/tests/as_struct_tests.rs`) keep working.
+pub use smelt_planner::lowering::{as_struct_to_sql, backend_supports_struct_literal};
 
 #[cfg(test)]
 mod tests {
