@@ -1810,7 +1810,7 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 39 | Wire logical-plan rules into `smelt compile`; add `--show-plan` (Step 9 opens) | done | 029d7fa | 2026-04-25 |
 | 40 | CAST emission resolves target type from `Signature::canonical_return` | done | 1b1d613 | 2026-04-25 |
 | 41 | `ExpandedCall` body splice + list-splice comma elision | done | 7dc0ea9 | 2026-04-25 |
-| 42 | `smelt.as_struct` lowering wired in + capability gate broadened | done |  | 2026-04-25 |
+| 42 | `smelt.as_struct` lowering wired in + capability gate broadened | done | 3bac61d | 2026-04-25 |
 | 43 | Frontmatter YAML parser via `serde_yaml` (Step 9 complete) | pending | | |
 | 44 | Canonical fixture restoration: `monitored_session_rollup` + `safe_divide` tighten (Step 10 opens) | pending | | |
 | 45 | JOIN aliases visible in `TableExpr`-returning function bodies | pending | | |
