@@ -1077,6 +1077,13 @@ pub fn function_body_diagnostics_for_file(
         None
     };
 
+    let table_ref_schema_lookup =
+        |_table_ref: &smelt_parser::ast::TableRef| -> Option<Vec<(String, TypedColumn)>> {
+            // Tier 2 body checks don't expand TableExpr-param bodies, so the
+            // join-alias visitor never runs on this path.
+            None
+        };
+
     let default_type_lookup = |sig: &FunctionSig, param_name: &str| -> Option<DataType> {
         let decl_path = decl_lookup(sig)?;
         let f = files.iter().find(|f| f.path(db) == &decl_path)?;
@@ -1117,6 +1124,7 @@ pub fn function_body_diagnostics_for_file(
             &decl_lookup,
             &tableexpr_schema_lookup,
             &default_type_lookup,
+            &table_ref_schema_lookup,
         )
     };
 
@@ -1817,6 +1825,85 @@ pub fn smelt_fn_call_diagnostics_for_file(
         None
     };
 
+    // Phase 45: resolve a `TableRef` inside a function body's FROM /
+    // JOIN clauses to the joined schema, so the body's bare-column
+    // resolver can see e.g. `dim_customer.col` from
+    // `JOIN smelt.ref('dim_customer') AS dim_customer`.
+    //
+    // Supported shapes:
+    //   - `smelt.ref('model')` — same path as `tableexpr_schema_lookup`.
+    //   - `smelt.source('src.tbl')` — same path as `tableexpr_schema_lookup`.
+    //   - `smelt.fn.<name>(...)` returning TableExpr — uses
+    //     `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`.
+    // Unsupported shapes (subqueries, CTE refs, derived tables) return
+    // `None`. Phase 46 widens to those.
+    let table_ref_schema_lookup =
+        |table_ref: &smelt_parser::ast::TableRef| -> Option<Vec<(String, TypedColumn)>> {
+            use smelt_parser::ast::{RefCall, SourceCall};
+
+            // smelt.fn.<name>(...) in FROM/JOIN position — resolve through
+            // the workspace function signature index + Phase 17 return-
+            // schema inference.
+            if let Some(fn_call) = table_ref.smelt_fn_call() {
+                let provider = SalsaRefSchemaProvider::new(db, workspace);
+                return provider.resolve_smelt_fn_call_schema(&fn_call);
+            }
+
+            // Otherwise the table-ref is either a bare identifier (caller
+            // already handled), a subquery (deferred), or a function-call
+            // wrapping `smelt.ref` / `smelt.source`. Walk the function-
+            // call subtree to detect the latter.
+            let func = table_ref.function_call()?;
+            if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
+                if let Some(model_name) = ref_call.model_name() {
+                    let provider = SalsaRefSchemaProvider::new(db, workspace);
+                    return provider
+                        .resolved_columns(&model_name)
+                        .or_else(|| provider.seed_columns(&model_name));
+                }
+            }
+            if let Some(src_call) = SourceCall::from_function_call(func) {
+                if let (Some(source_name), Some(table_name)) =
+                    (src_call.source_name(), src_call.table_name())
+                {
+                    let sources = sources_config(
+                        db,
+                        *workspace
+                            .projects(db)
+                            .first()
+                            .expect("at least one project"),
+                    );
+                    for s in &sources.sources {
+                        if s.name != source_name {
+                            continue;
+                        }
+                        for t in &s.tables {
+                            if t.name == table_name {
+                                let cols: Vec<(String, TypedColumn)> = t
+                                    .columns
+                                    .iter()
+                                    .map(|c| {
+                                        (
+                                            c.name.clone(),
+                                            TypedColumn {
+                                                data_type: c
+                                                    .data_type
+                                                    .clone()
+                                                    .unwrap_or(DataType::Unknown),
+                                                nullable: true,
+                                            },
+                                        )
+                                    })
+                                    .collect();
+                                return Some(cols);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+
     // Phase 17: resolve a parameter's default-value expression by
     // re-parsing the declaring file and walking to the matching
     // PARAM node. Returns the inferred `DataType` of the default
@@ -1860,6 +1947,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &decl_lookup,
             &tableexpr_schema_lookup,
             &default_type_lookup,
+            &table_ref_schema_lookup,
         ));
     }
     out
@@ -2813,6 +2901,66 @@ impl<'a> SalsaRefSchemaProvider<'a> {
 }
 
 impl SalsaRefSchemaProvider<'_> {
+    /// Phase 45: resolve a `TableRef` (FROM/JOIN entry) to the columns it
+    /// contributes. Used by [`function_body_check::register_join_alias_schemas`]
+    /// from the `infer_tableexpr_return_schema` path so that `<alias>.*`
+    /// projections from joined tables expand correctly.
+    pub fn resolve_table_ref_schema(
+        &self,
+        table_ref: &smelt_parser::ast::TableRef,
+    ) -> Option<Vec<(String, TypedColumn)>> {
+        use smelt_parser::ast::{RefCall, SourceCall};
+
+        // smelt.fn.<name>(...) in FROM/JOIN position.
+        if let Some(fn_call) = table_ref.smelt_fn_call() {
+            return self.resolve_smelt_fn_call_schema(&fn_call);
+        }
+
+        let func = table_ref.function_call()?;
+        if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
+            if let Some(model_name) = ref_call.model_name() {
+                return self
+                    .resolved_columns(&model_name)
+                    .or_else(|| self.seed_columns(&model_name));
+            }
+        }
+        if let Some(src_call) = SourceCall::from_function_call(func) {
+            if let (Some(source_name), Some(table_name)) =
+                (src_call.source_name(), src_call.table_name())
+            {
+                let project = self.workspace.projects(self.db).first().copied()?;
+                let sources = sources_config(self.db, project);
+                for s in &sources.sources {
+                    if s.name != source_name {
+                        continue;
+                    }
+                    for t in &s.tables {
+                        if t.name == table_name {
+                            let cols: Vec<(String, TypedColumn)> = t
+                                .columns
+                                .iter()
+                                .map(|c| {
+                                    (
+                                        c.name.clone(),
+                                        TypedColumn {
+                                            data_type: c
+                                                .data_type
+                                                .clone()
+                                                .unwrap_or(DataType::Unknown),
+                                            nullable: true,
+                                        },
+                                    )
+                                })
+                                .collect();
+                            return Some(cols);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve a `smelt.fn.<name>(...)` call in FROM position to its
     /// inferred output schema (Phase 17).
     ///
@@ -3012,7 +3160,22 @@ impl SalsaRefSchemaProvider<'_> {
         // `cte_cycle_diagnostics_for_file`.
         let (body_ctx_with_ctes, _cycle_diags) =
             function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
-        let body_ctx = body_ctx_with_ctes;
+        let mut body_ctx = body_ctx_with_ctes;
+
+        // Phase 45: seed JOIN-aliased schemas so that
+        // `infer_tableexpr_return_schema` can expand `<alias>.*`
+        // projections from joined tables (e.g. `dim_customer.*` in
+        // `JOIN smelt.ref('dim_customer') AS dim_customer`).
+        let join_lookup =
+            |table_ref: &smelt_parser::ast::TableRef| -> Option<Vec<(String, TypedColumn)>> {
+                self.resolve_table_ref_schema(table_ref)
+            };
+        function_body_check::register_join_alias_schemas(
+            &mut body_ctx,
+            &body_select,
+            sig,
+            &join_lookup,
+        );
 
         let schema = infer_tableexpr_return_schema(&body_select, &body_ctx)?;
         // Project to (name, TypedColumn) pairs.

@@ -15,7 +15,7 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall};
+use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall, TableRef};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
@@ -719,6 +719,16 @@ pub fn check_smelt_fn_call(
     // Returns the inferred type of the default expression, or `None`
     // if the default cannot be located / inferred.
     default_type_lookup: &dyn Fn(&FunctionSig, &str) -> Option<DataType>,
+    // Phase 45: resolve a `TableRef` inside a function body's FROM /
+    // JOIN clauses to its column schema. Called once per JOIN clause
+    // (and once per non-param FROM-clause table-ref) when the body is
+    // a SELECT shape, so that `JOIN smelt.ref('Y') AS y` registers
+    // `y`'s columns into the body's bare-column resolver. Returns
+    // `None` for unsupported shapes (subqueries, derived tables,
+    // CTEs) — those are deferred to Phase 46. Bare-identifier table
+    // refs that match a TableExpr param name are not passed in (they
+    // are already seeded as `add_tableexpr_param`).
+    table_ref_schema_lookup: &dyn Fn(&TableRef) -> Option<Vec<(String, TypedColumn)>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -1114,6 +1124,21 @@ pub fn check_smelt_fn_call(
         }
     }
 
+    // Phase 45: pre-resolve the body so JOIN-aliased schemas are
+    // visible to the shadow-warning check below — a parameter
+    // colliding with a column on a JOIN-aliased schema must still
+    // shadow-warn. This re-uses the body shape we'd resolve later for
+    // the body re-walk; we just lift the lookup and seeding earlier.
+    // Tier 2 expressions and bodies without a SELECT shape skip this
+    // (no JOIN clauses to inspect).
+    let preview_body_for_joins = body_lookup(&sig);
+    if let Some((preview_text, BodyShape::Select(preview_select))) = &preview_body_for_joins {
+        // CTE seeding doesn't affect TableExpr-param column membership,
+        // so we can skip it here and only seed the JOIN aliases.
+        let _ = preview_text; // text only needed for diagnostics, none here
+        register_join_alias_schemas(&mut body_ctx, preview_select, &sig, table_ref_schema_lookup);
+    }
+
     // Phase 15 shadow warnings: flag every `Expr<T>`-kinded parameter whose
     // name collides with a column in any `TableExpr`-kinded parameter's
     // caller-supplied schema (§16 #1). The warning anchors at the
@@ -1193,6 +1218,7 @@ pub fn check_smelt_fn_call(
             decl_lookup,
             tableexpr_schema_lookup,
             default_type_lookup,
+            table_ref_schema_lookup,
         )
     };
 
@@ -1224,6 +1250,10 @@ pub fn check_smelt_fn_call(
             // `cte_columns`. CTE cycle diagnostics from this extraction
             // are discarded here — `cte_cycle_diagnostics_for_file`
             // handles them at definition time.
+            //
+            // Phase 45: JOIN-aliased schemas were already seeded above
+            // (before the shadow-warning check) so they're visible to
+            // both `compute_shadow_warnings` and the body re-walk.
             let (body_ctx_with_ctes, _cycle_diags) =
                 extract_function_body_cte_schemas(select_stmt, &body_ctx, &body_text);
             let body_ctx = body_ctx_with_ctes;
@@ -1415,6 +1445,96 @@ pub fn infer_tableexpr_return_schema(body: &SelectStmt, ctx: &TypeContext) -> Op
         row_extensions: Vec::new(),
         input_constraints: Vec::new(),
     })
+}
+
+/// Phase 45: walk a SELECT-shaped function body's FROM clause and
+/// JOIN clauses, and register every aliased table-ref's column schema
+/// into `body_ctx` so the body's bare-column resolver can see joined
+/// schemas (review findings #10 and #21).
+///
+/// Specifically:
+///   - For each `TableRef` in the FROM clause's comma-separated list:
+///     if the ref is a bare identifier matching a TableExpr parameter
+///     name *and* has an alias, register the alias as a synonym for
+///     the parameter via `body_ctx.add_alias`. (Other cases — refs
+///     resolved by `table_ref_schema_lookup` — are seeded as
+///     full alias schemas via `add_tableexpr_param`.)
+///   - For each `JoinClause`: get its `TableRef`, look up its schema
+///     via `table_ref_schema_lookup`, and seed it as a TableExpr-param-
+///     style alias.
+///
+/// Subqueries / CTE references / derived tables in JOIN/FROM
+/// position are deferred (`table_ref_schema_lookup` returns `None`
+/// for them). Phase 46 widens to those.
+///
+/// Note: we deliberately use [`TypeContext::add_tableexpr_param`] for
+/// the joined alias because:
+///   1. it registers both bare-column lookups and qualified
+///      `alias.col` lookups, which the body checker needs;
+///   2. it adds the alias to `tableexpr_param_schemas` so
+///      Phase 17's [`infer_tableexpr_return_schema`] can expand
+///      `alias.*` projections from the joined schema; and
+///   3. it makes the joined columns visible to Phase 15's shadow
+///      check (a parameter colliding with a joined column should
+///      shadow-warn, just like a TableExpr-param column).
+#[allow(clippy::type_complexity)]
+pub fn register_join_alias_schemas(
+    body_ctx: &mut TypeContext,
+    select_stmt: &SelectStmt,
+    sig: &FunctionSig,
+    table_ref_schema_lookup: &dyn Fn(&TableRef) -> Option<Vec<(String, TypedColumn)>>,
+) {
+    let Some(from) = select_stmt.from_clause() else {
+        return;
+    };
+
+    // Helper: is `ident` a TableExpr parameter on this signature?
+    let is_tableexpr_param_name = |ident: &str| -> bool {
+        sig.params
+            .iter()
+            .any(|p| p.name == ident && is_tableexpr_param(p))
+    };
+
+    let mut process_table_ref = |table_ref: &TableRef| {
+        let alias = match table_ref.alias() {
+            Some(a) => a,
+            None => return,
+        };
+
+        // Bare identifier that matches a TableExpr parameter name —
+        // register the alias as a synonym.
+        if let Some(ident) = table_ref.identifier() {
+            if is_tableexpr_param_name(&ident) {
+                // Also seed the alias's column schema so qualified
+                // refs `alias.col` resolve via the param's schema.
+                let cols = body_ctx.tableexpr_param_columns(&ident).map(|s| s.to_vec());
+                if let Some(cols) = cols {
+                    body_ctx.add_tableexpr_param(&alias, &cols);
+                } else {
+                    body_ctx.add_alias(&alias, &ident);
+                }
+                return;
+            }
+        }
+
+        // Otherwise, ask the closure to resolve a schema. Supported
+        // shapes today: `smelt.ref('X')`, `smelt.source('a.b')`, and
+        // `smelt.fn.<name>(...)` returning TableExpr. Unsupported
+        // shapes (subqueries, CTE refs, derived tables) return None
+        // and are deferred to Phase 46.
+        if let Some(cols) = table_ref_schema_lookup(table_ref) {
+            body_ctx.add_tableexpr_param(&alias, &cols);
+        }
+    };
+
+    for table_ref in from.table_refs() {
+        process_table_ref(&table_ref);
+    }
+    for join in from.joins() {
+        if let Some(tr) = join.table_ref() {
+            process_table_ref(&tr);
+        }
+    }
 }
 
 /// Walk a SELECT-shaped function body (Phase 15) against a pre-seeded

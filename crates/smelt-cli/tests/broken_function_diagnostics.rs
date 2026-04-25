@@ -297,6 +297,25 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::FrontmatterParseError,
         message_substring: "unknown_property",
     },
+    // Phase 45 — body references a column on a JOIN-aliased schema
+    // (`y.does_not_exist`) that the joined model does not provide.
+    // The body checker now sees the joined alias and surfaces the
+    // unknown column as `UnknownIdentifier`.
+    Case {
+        fixture: "fn_join_alias_missing_col.sql",
+        companion: Some("fn_join_alias_missing_col_other.sql"),
+        code: DiagnosticCode::UnknownIdentifier,
+        message_substring: "does_not_exist",
+    },
+    // Phase 45 — `Expr<Text>` parameter named `name` collides with a
+    // column of the same name on a joined alias's schema. The shadow-
+    // warning check now consults JOIN-aliased schemas.
+    Case {
+        fixture: "fn_join_alias_shadow.sql",
+        companion: Some("fn_join_alias_shadow_other.sql"),
+        code: DiagnosticCode::ParameterShadowsColumn,
+        message_substring: "name",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {
