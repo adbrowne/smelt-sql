@@ -491,6 +491,14 @@ impl TypeContext {
             if let Some(col) = self.function_params.get(name) {
                 return Some(col);
             }
+            // Phase 37: a bare identifier that resolves as a table alias (e.g. `e`
+            // in `smelt.fn.with_hour(e)`) is a valid reference even though it is
+            // not itself a column.  Treat it as Unknown-typed to suppress false-
+            // positive `UndeclaredColumn` diagnostics for table aliases used as
+            // struct arguments.
+            if self.aliases.contains_key(name) {
+                return Some(Self::opaque_column());
+            }
         }
         self.lookup_column(qualifier, name)
     }
@@ -1083,12 +1091,125 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
         Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
         // `SelectItems<Kind>` (Phase 21) is not a scalar type.
         Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
-        // `Struct<{…}>` (Phase 35) params — runtime type unknown until Phase 36.
-        Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown,
+        // Phase 37: `Struct<{declared_fields, ..r}>` return type — resolve
+        // the row variable `r` by examining the call-site argument that
+        // corresponds to the first struct parameter.  When the extras can
+        // be determined we build a concrete `DataType::Struct` from the
+        // declared fields plus the extras; otherwise fall back to Unknown.
+        Some(Ok(SmeltType::Struct { fields: ret_fields, tail })) => {
+            resolve_struct_return_type(call, ctx, sig, ret_fields, tail)
+        }
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };
     Some(TypedColumn::nullable(dt))
+}
+
+/// Resolve a `Struct<{declared_fields, ..r}>` return type to a concrete
+/// `DataType::Struct` by consulting the call-site argument schema (Phase 37).
+///
+/// Algorithm:
+/// 1. Find the first struct parameter (one whose type is `SmeltType::Struct`).
+/// 2. Get the corresponding call-site argument expression.
+/// 3. Resolve the argument to a column set via `ctx.columns_for_qualifier`.
+/// 4. Run `check_struct_row_var_binding` to compute the extras for the row var.
+/// 5. Return `DataType::Struct(ret_fields + extras)`.
+///
+/// Falls back to `DataType::Unknown` whenever any step cannot be completed.
+fn resolve_struct_return_type(
+    call: &SmeltFnCall,
+    ctx: &TypeContext,
+    sig: &smelt_types::signatures::FunctionSig,
+    ret_fields: &[(String, DataType)],
+    tail: &smelt_types::signatures::StructRowTail,
+) -> DataType {
+    use crate::function_body_check::{check_struct_row_var_binding, struct_param_fields};
+    use smelt_types::signatures::StructRowTail;
+
+    // If no named row var, just return the declared fields as a concrete struct.
+    let var_name = match tail {
+        StructRowTail::Named(n) => n.as_str(),
+        StructRowTail::Anon | StructRowTail::None => {
+            // No row variable — build concrete struct from declared fields only.
+            let concrete: Vec<(String, DataType)> = ret_fields.to_vec();
+            return DataType::Struct(concrete);
+        }
+    };
+
+    // Find the struct parameter index.
+    let struct_param_idx = sig
+        .params
+        .iter()
+        .position(|p| matches!(&p.type_ref, Some(Ok(SmeltType::Struct { .. }))));
+    let Some(idx) = struct_param_idx else {
+        return DataType::Unknown;
+    };
+
+    // Get the corresponding argument expression.
+    let arg_list = call.arg_list();
+    let positional: Vec<_> = arg_list
+        .as_ref()
+        .map(|al| al.positional_args())
+        .unwrap_or_default();
+    let arg_expr = positional.get(idx).cloned().or_else(|| {
+        // Named argument lookup.
+        let param_name = &sig.params[idx].name;
+        let named: Vec<_> = arg_list
+            .as_ref()
+            .map(|al| al.named_params().collect())
+            .unwrap_or_default();
+        named.into_iter().find_map(|np| {
+            if np.name().as_deref() == Some(param_name.as_str()) {
+                np.value_expr()
+            } else {
+                None
+            }
+        })
+    });
+    let Some(arg) = arg_expr else {
+        return DataType::Unknown;
+    };
+
+    // Resolve the argument to a column set.
+    let qualifier = arg.text().trim().to_string();
+    if qualifier.is_empty() {
+        return DataType::Unknown;
+    }
+    let cols: Vec<(String, DataType)> = ctx
+        .columns_for_qualifier(&qualifier)
+        .into_iter()
+        .map(|(col_name, tc)| (col_name.to_string(), tc.data_type.clone()))
+        .collect();
+    if cols.is_empty() {
+        return DataType::Unknown;
+    }
+
+    // Extract declared fields from the struct parameter to compute extras.
+    let param = &sig.params[idx];
+    let Some((declared_fields, param_tail)) = struct_param_fields(param) else {
+        return DataType::Unknown;
+    };
+
+    // Run struct row-var unification to get extras.
+    let extras = match check_struct_row_var_binding(declared_fields, &cols, param_tail) {
+        Ok(Some(extras)) => extras,
+        Ok(None) => vec![],
+        Err(_) => return DataType::Unknown,
+    };
+
+    // Check that the row var name matches between param and return type.
+    let param_var_matches = match param_tail {
+        StructRowTail::Named(param_var) => param_var.as_str() == var_name,
+        _ => false,
+    };
+    if !param_var_matches {
+        return DataType::Unknown;
+    }
+
+    // Build the concrete return type: declared return fields + extras.
+    let mut concrete: Vec<(String, DataType)> = ret_fields.to_vec();
+    concrete.extend(extras);
+    DataType::Struct(concrete)
 }
 
 /// LUB adapter: the canonical numeric-promotion routine lives in

@@ -39,8 +39,8 @@ pub mod yaml_edits;
 
 pub use function_body_check::{
     check_fragment_context_bindings, check_struct_row_var_binding, check_tier3_return_type,
-    declared_return_hover_text, extract_function_body_cte_schemas, infer_splice_contexts,
-    infer_tableexpr_return_schema, is_tier2_function,
+    declared_return_hover_text, expand_brace_struct_body, extract_function_body_cte_schemas,
+    infer_splice_contexts, infer_tableexpr_return_schema, is_tier2_function,
 };
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,

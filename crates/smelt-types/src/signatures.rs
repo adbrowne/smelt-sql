@@ -1225,6 +1225,8 @@ pub fn extract_signature_with_raw(
     if let Some(tr) = &return_type_node {
         if let Some(structured) = tableexpr_type_from_cst(tr) {
             return_type = Some(Ok(structured));
+        } else if let Some(structured) = struct_expr_type_from_cst(tr) {
+            return_type = Some(Ok(structured));
         }
     }
     let return_type_range = return_type_node
@@ -1303,6 +1305,8 @@ pub fn extract_extern_signature_with_raw(
         return_type_text.as_deref().map(parse_smelt_type);
     if let Some(tr) = &return_type_node {
         if let Some(structured) = tableexpr_type_from_cst(tr) {
+            return_type = Some(Ok(structured));
+        } else if let Some(structured) = struct_expr_type_from_cst(tr) {
             return_type = Some(Ok(structured));
         }
     }

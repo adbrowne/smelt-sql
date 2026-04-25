@@ -2414,6 +2414,55 @@ pub fn check_tier3_return_type(sig: &FunctionSig, body: &Expr, text: &str) -> Ve
     }]
 }
 
+/// Expand `..spread_name` placeholders inside a brace-struct literal body
+/// to explicit `spread_name.field AS field` references (Phase 37).
+///
+/// Given a body string like `{EXTRACT(HOUR FROM event.ts) AS hour, ..event}`
+/// and extras `[(user_id, Integer)]`, produces:
+/// `{EXTRACT(HOUR FROM event.ts) AS hour, event.user_id AS user_id}`.
+///
+/// - `body_text`: the raw body string (the entire brace-struct expression,
+///   including the outer `{…}` braces).
+/// - `spread_name`: the parameter name whose spread (`..spread_name`) to
+///   replace (e.g. `"event"`).
+/// - `extras`: the `(field_name, DataType)` list bound to the row variable;
+///   each entry becomes `spread_name.field_name AS field_name`.
+///
+/// If `..spread_name` does not appear in `body_text`, returns `body_text`
+/// unchanged.
+///
+/// Pure — no Salsa dependency.
+pub fn expand_brace_struct_body(
+    body_text: &str,
+    spread_name: &str,
+    extras: &[(String, DataType)],
+) -> String {
+    let spread_placeholder = format!("..{}", spread_name);
+
+    if !body_text.contains(&spread_placeholder) {
+        return body_text.to_string();
+    }
+
+    let expanded_fields: String = extras
+        .iter()
+        .map(|(field_name, _)| format!("{}.{} AS {}", spread_name, field_name, field_name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Replace `..spread_name` with the explicit field list.
+    // Handle two cases: `..spread_name` preceded by `, ` or just `,`
+    // (with or without a space), and standalone (no preceding comma, e.g.
+    // when it's the first and only item — edge case but handle gracefully).
+    let mut result = body_text.replace(&spread_placeholder, &expanded_fields);
+    // Clean up `,,` or `, ,` that could arise if extras is empty.
+    result = result.replace(", ,", ",").replace(",,", ",");
+    // Clean up `,  ` before `}` if extras is empty.
+    if extras.is_empty() {
+        result = result.replace(", }", "}").replace(",}", "}");
+    }
+    result
+}
+
 /// For a Tier 3 function, return the declared return type as a hover-ready
 /// string (e.g. `"-> Expr<Double>"`). Returns `None` for Tier 1/2 or when
 /// the return annotation is unparseable or absent.
