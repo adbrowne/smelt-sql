@@ -1239,3 +1239,569 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 - **Phase 22 — opaque-CTE suppression for `smelt.fn.*` wildcard bodies** (2026-04-24). When a CTE body is `SELECT * FROM smelt.fn.<path>(...)`, the CTE schema cannot be inferred without resolving the callee's return schema (a future mechanism). `TypeContext` gains `mark_cte_opaque()` so the type-checker returns `Unknown` for any column access against such a CTE, suppressing false-positive `UnknownIdentifier` errors. The full smelt-fn-return-schema inference in CTE bodies is deferred to a later phase as it requires cross-function schema propagation.
 - **Phase 22 — `empty_default_metrics_splice_comma_elision` scoped to type-checker level** (2026-04-24). The plan test name implies SQL comma-elision; §16 #20 explicitly places that rule at Level 2 materialisation (Phase 32+). The test validates that the type-checker handles `SelectItems<Agg, ctx> = ()` without errors and that calling without `metrics` doesn't surface a diagnostic. SQL generation deferred to Phase 32.
 - **Phase 8 broken fixtures → Phase 10** (2026-04-23, resolved). `examples/broken/models/fn_coalesce_text_int.sql` and `fn_greatest_no_args.sql` were originally slated for Phase 9. During Phase 9 implementation, reading `function_body_check::check_smelt_fn_call` (the only path that emits `ArgTypeMismatch` / `MissingArgument` for a `smelt.fn.*` call today) confirmed it only resolves user-declared functions via `ctx.lookup_function_signature`. Phase 9's `try_registry_inference` hook is a pure inference path and doesn't emit diagnostics — the rewire preserves `Unknown`-returning behaviour for coverage gaps, it doesn't spawn new error codes. The fix landed in Phase 10 via Option B: a new `builtin_lookup` closure on `check_smelt_fn_call` that dispatches built-ins through `unify_call` when the user-declared signature index misses, translating `UnificationError::{ConstraintViolation, MissingArgs, InconsistentBinding, EmptyVariadicTypeVar}` into `ArgTypeMismatch` / `MissingArgument` diagnostics. Both fixtures and their `broken_function_diagnostics.rs` CASES rows now live under Phase 10's coverage — `smelt.fn.COALESCE('x', 1)` surfaces `ArgTypeMismatch` (via `InconsistentBinding`) and `smelt.fn.GREATEST()` surfaces `MissingArgument` (via `EmptyVariadicTypeVar`, mapped to "variadic requires at least one argument").
+
+---
+
+## Review: implementation vs. research / plan (2026-04-25)
+
+This review compares the shipped Phase 1–38 implementation against the research doc (`docs/research/20260413-smelt-functions.md`) and the plan above. All 38 phases are marked `done`. The review focuses on what is actually wired end-to-end, what is plumbed but inert, and what the research promised that never materialised. Findings are bucketed by severity, then by area.
+
+### Headline assessment
+
+The type-system half of the design landed cleanly: fragment sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `TableExpr<{…}>`, `SelectItems<K, ctx>`, `Struct<{…, ..r}>`), three-tier checking, frame-stack diagnostics, generics, variadics, bidirectional inference with expected-return, row variables (struct + table), context bindings, PASSING binding, and the canonical signature registry skeleton are all real and tested. The pure-function rule held — `type_inference.rs` has no Salsa imports, and the new `function_body_check.rs`, `signatures.rs`, and `smelt-planner` crates obey the same discipline.
+
+The planner half is the weak link. Phases 30–34 produced a logical-plan data model, three rules, and Salsa wiring (`logical_plan(workspace, file)` at `crates/smelt-db/src/lib.rs:3742`), but **none of the rules are reachable from any user-facing CLI surface or codegen path**. Several Phase 32–38 deliverables are present as code but inert: CAST emission uses a placeholder type, `smelt.as_struct` has a backend printer that nothing calls, list-splice comma elision is not implemented anywhere, and the `--show-plan` smoke test referenced in this plan's Verification section does not exist as a CLI flag. The "Steps 1–5 are real, Steps 7–8 are scaffolding" framing is accurate; the plan's `done` markers somewhat overstate Step 7–8 completeness.
+
+### Severity 1 — shipped-but-inert (planner side)
+
+These items are marked `done` in the progress table but the production code path doesn't exercise them. They will silently regress without anyone noticing, because the only thing exercising them is unit tests inside `smelt-planner`.
+
+1. **CAST emission target type is hardcoded `BigInt`** (Phase 32). `crates/smelt-planner/src/logical_plan_rules.rs:191` wraps an `ExpandedCall` with `LogicalNode::Cast { target_type: DataType::BigInt }` whenever `properties.needs_cast` is true, with the comment "Phase 32: use BigInt as a placeholder target type. Phase 33+ will resolve the actual return type from the function registry." Phase 33 added pushdown and never came back to this; Phase 34–38 also did not. The `Signature` struct already carries `canonical_return: DataType` plus `engine_native: HashMap<BackendId, DataType>` (`crates/smelt-types/src/signatures.rs` ~line 1518), so the data is there — the rule just needs to read it.
+
+2. **The new logical-plan rule pipeline is not wired into compile**. `apply_rules_to_fixed_point` (`crates/smelt-planner/src/logical_plan_rules.rs:62`) and the `logical_plan` Salsa query exist, but `crates/smelt-cli/src/commands/` has no `--show-plan` flag and no call site grepping for `apply_rules_to_fixed_point` outside tests. The legacy `Planner` struct in `crates/smelt-planner/src/rules/mod.rs` (with `cube_split` / `incremental` / `python` rules over a `ModelGraph`) is the one the CLI runs. The new pipeline runs only inside `crates/smelt-planner/tests/*.rs`. The Phase 34 verification step "`smelt compile models/order_totals.sql --show-plan`" is therefore not executable as written.
+
+3. **`ExpandedCall` is a marker, not an expansion**. `LogicalNode::ExpandedCall { fn_id, provenance, properties }` records that expansion *should* happen, but the rule does not splice in the callee's body subtree. The "Phase 32 ships expansion of function calls into their body subtree, with provenance preserved" goal is partially met — provenance is preserved, but the body subtree is not. Codegen emission of expanded SQL (Phase 32 review checklist line: "Rule API is ergonomically close to `docs/planner_rule_api_design.md`") cannot run because there is no body subtree to print.
+
+4. **`smelt.as_struct` backend printer is unreachable** (Phase 38). `as_struct_to_sql` lives at `crates/smelt-db/src/function_body_check.rs:2511` as a pure utility, and `as_struct_backend_diagnostics_for_file` (`crates/smelt-db/src/lib.rs:1257`) does the capability check. But no caller invokes `as_struct_to_sql` during physical-plan emission — the function is dead code outside its own unit tests. `docs/TODO.md` already records this as "Planner-time as_struct expansion".
+
+5. **`smelt.as_struct` capability gate misses functions with default backends**. `as_struct_backend_diagnostics_for_file` (`crates/smelt-db/src/lib.rs:1280`) only walks function bodies whose `BackendSet` is `Only(names)`. Functions with no `backends:` frontmatter resolve to `BackendSet::All` (`crates/smelt-db/src/backends.rs:39, :95, :142, :144`) and are skipped, so a function using `smelt.as_struct` without an explicit backends declaration silently passes regardless of the deployment target's struct-literal capability. Phase 38 TDD test `backend_without_struct_literal_errors` is therefore tighter than the runtime check.
+
+6. **List-splice comma elision is unimplemented anywhere**. Decision 20 places this rule at Level 2 materialisation (Phase 32+); the Phase 22 deferral note ("`empty_default_metrics_splice_comma_elision` scoped to type-checker level") promised SQL emission would land in Phase 32. It did not. Grep for `comma_elide`, `comma_elision`, `splice` in `smelt-planner` shows no matches. `metrics = ()` callers compile only because `ExpandedCall` is a marker and never lowers to SQL through this path.
+
+7. **Per-function structured frontmatter (`provenance`, `joins`) parser is line-based, not YAML**. `parse_function_properties` (`crates/smelt-planner/src/logical.rs:212`) walks lines using `strip_prefix("provenance:")` etc. — fine for `deterministic: true`, fragile for the structured `provenance: { margin: [source.revenue, source.cost] }` and the multi-line `joins:` block in `enriched_order.sql`. Multi-line YAML maps and any indentation other than the one on the test fixtures will silently miss. This is the most likely cross-phase regression vector if anyone touches the example fixtures.
+
+### Severity 2 — research surface that never materialised
+
+Things the research called out as canonical end-to-end demonstrations and the plan did not redirect, but are missing from `examples/functions_demo/`.
+
+8. **`monitored_session_rollup` (research §10) was never created**. This is the only example in the research that exercises *block-syntax composition* — a function declared with fragment-sort parameters (`metrics: SelectItems<Agg>`, `alerts: SelectItems<Agg, base>`) that internally calls another function and forwards a PASSING fragment (`PASSING metrics AS (metrics)`). Without it, "Blocks compose" is asserted but not exercised end-to-end. Phase 29's `rollup_with_passing.sql` covers a single PASSING use, not the compositional case. Recommend: add `examples/functions_demo/functions/monitored_session_rollup.sql` as a regression fixture for Step 6 closure.
+
+9. **`safe_divide` example fixture diverges from research §3**. `examples/functions_demo/functions/safe_divide.sql` is the canonical Step 1 deliverable; the body in the fixture is `CASE WHEN denominator = 0 THEN NULL ELSE CAST(numerator AS DOUBLE) / denominator END`. The research-spec body is `CASE WHEN denominator = 0 OR denominator IS NULL THEN NULL ELSE CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE) END`. Two divergences: (a) missing `OR denominator IS NULL` guard (a real correctness gap on inputs where DuckDB returns NULL), (b) only one CAST instead of two (an integer-division precision footgun on engines that don't auto-widen). The fixture is the headline example readers will copy; recommend tightening it back to the spec.
+
+10. **`enriched_order` (Phase 34) is a stub for join elimination**. `examples/functions_demo/functions/enriched_order.sql` declares `provenance: { customer_name: [dim_customer.customer_name], customer_tier: [dim_customer.customer_tier] }` and a `joins:` block, but the body emits `CAST(NULL AS VARCHAR) AS customer_name, CAST(NULL AS VARCHAR) AS customer_tier` because (per the inline comment) "JOIN aliases are not yet tracked in the function body check scope". The function declares it consumes from `dim_customer` but its body cannot reference the join. This is a soundness hole if a planner rule ever trusts the declared provenance — the rule would push filters that mention columns the body never reads. The Phase 34 join-elimination unit tests work because they synthesise `LeftJoin` plan nodes directly, bypassing the smelt-define body. The end-to-end `examples/functions_demo/models/order_totals.sql` model that Phase 34's verification calls out cannot demonstrate join elimination on this fixture; it can only assert that the rule fires on a hand-built plan.
+
+11. **`smelt.extern` with fragment-sort parameters is not exercised**. Decision 18 explicitly defers PASSING-after-extern but the broader question — can an extern declare a `SelectItems` parameter at all? — has no fixture either way. `examples/functions_demo/functions/externs.sql` only declares `Expr<T>`/`TableExpr` externs. If the answer is "v1 externs are scalar-only" that should be encoded as a parser-level reject with a `broken/models/fn_extern_fragment_param.sql` fixture; today it is silently accepted at parse time and behaviour at the call site is untested.
+
+12. **Parameterized models (research §4 "Parameterized Models") are entirely deferred**. The research positions `smelt.ref('orders', default => smelt.source('us_orders'))` as one of the unified-model payoffs. There is no fixture, no parser path for the `default =>` named-arg on `smelt.ref`, and no plan phase for it. This is fine — §18 lists it under "Open Questions / Unified Model" — but the plan's Scope section does not name it as deferred, so it is invisible to a reader who only reads the plan.
+
+13. **`smelt.metric()` was correctly held out of scope** (decision 6) and is not addressed; this is consistent with the research and plan, just noting for completeness that no regression has crept in here.
+
+### Severity 3 — LSP completion / hover deferrals
+
+Already documented under "Deferred during implementation" but worth surfacing because they affect the human review experience of every prior phase.
+
+14. **Phase 24 LSP hover wiring deferred**. Pure helper `declared_return_hover_text(sig)` is implemented and unit-tested; the LSP `hover()` handler does not call it on `smelt.fn.*` call sites. Net effect: Tier 3 functions advertise return types that hover never displays.
+
+15. **Phase 29 PASSING-body completion deferred**. Same shape: type-checking inside PASSING bodies is correct (tests 1–4 pass), but cursor-in-PASSING-body column completion (test 5) is not wired. The research §10 user value proposition ("LSP completion inside the block body lists the columns of the clause's inferred context") is therefore untested in the LSP e2e harness.
+
+16. **Phase 12 multi-level renderer is single-level in disguise**. `render_expansion_frames` (`crates/smelt-lsp/src/lib.rs:819`) walks the full frame vector and emits `relatedInformation`, but the diagnostic *message* itself is the innermost frame — the outer frames live in `relatedInformation` only. Editors that don't surface `relatedInformation` (some terminals, simple LSP clients) see a single-level trace. This is an editor-coverage regression, not a code regression — the data is there. Worth flagging because §16 #16 Step 2 promised "every frame contributes a 'in expansion of `fn`, parameter `p` was bound to ...' line, call-site first" in the rendered error, not in side-channel data.
+
+### Severity 3 — registry / type-system thinness
+
+17. **Built-in registry seeds ~30 entries; production SQL needs many more**. `crates/smelt-types/src/signatures.rs:2102` populates aggregates (SUM, AVG, MIN, MAX, COUNT), windows (ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD), null/coalesce (COALESCE, GREATEST, LEAST, NULLIF, IFNULL), arithmetic (ABS, POWER, SQRT, LOG, LN, ROUND, CEIL, FLOOR), text (LOWER, UPPER, LENGTH, SUBSTRING, TRIM, CONCAT), and date/time (DATE_TRUNC, EXTRACT, DATE, NOW, CURRENT_DATE, CURRENT_TIMESTAMP). Notably absent: `LIKE`, `ILIKE`, `IS NULL`, `BETWEEN`, `IN`, `EXISTS` (operators — handled by parser primitives, but still need typed signatures), `STRING_AGG`/`LISTAGG`, `ARRAY_AGG`, `MEDIAN`, `STDDEV`, `VARIANCE`, `DATE_ADD`/`DATE_SUB`, `JSON_*` family, `NTILE`, `FIRST_VALUE`, `LAST_VALUE`, `CAST` (operator). The legacy `crates/smelt-types/src/functions.rs` (773 lines, ~150 functions across categories) was left in place rather than migrated — the registry is the *new* canonical surface. Plan note: Phase 9 was supposed to "Replace the hand-written match at `type_inference.rs:541` with a registry lookup" while preserving behaviour; the actual implementation kept the legacy match as a fallback, so a built-in absent from the registry still types via the legacy path. This is fine for correctness but means the registry isn't actually canonical — Phase 9's headline goal is partially achieved.
+
+18. **`Decimal` precision/scale tracking is deferred (decision 9) but the divergence with DuckDB is now observable**. `docs/TODO.md` line "ABS(Decimal) returns Double — pre-existing divergence; add to `divergences.rs` registry or fix type inference" — this is the first user-visible consequence of the v1 deferral. Either fix or document in `docs/research/20260413-smelt-functions.md` §16 #9 deferred items.
+
+19. **No `Predicate` sort and no `WindowInScalarContext` analogue for `WHERE EXISTS (... ORDER BY rownum())`**. `WindowInScalarContext` (Phase 14) catches `WHERE ROW_NUMBER() OVER (...) > 1` directly. It does not catch a window function buried inside a scalar subquery in WHERE. This is a real SQL footgun; the research lists it as a top-3 SQL error class. Worth a follow-up phase if the kind discipline is meant to live up to the research.
+
+### Severity 3 — context / scoping edge cases
+
+20. **TableExpr argument resolution covers only `smelt.ref()` / `smelt.source()`**. `crates/smelt-db/src/function_body_check.rs` resolves a TableExpr argument's schema by pattern-matching `smelt.ref('X')` / `smelt.source('a.b')`. Other shapes — inline subqueries, CTEs, derived tables — leave the FROM scope empty and produce false-positive `UnknownIdentifier` at body bare-column references. This is recorded under "Phase 15 — `tableexpr_schema_lookup` closure" but is the most common cause a function caller will hit when a composition gets non-trivial. The end-to-end `add_margin → sessionize` pipeline in `models/margin_by_session.sql` works because each link uses `smelt.ref()`; any synthesised intermediate table will fail.
+
+21. **Bare-column resolution from JOIN aliases inside a function body is unsupported**. The `enriched_order.sql` workaround (CAST(NULL ...) for join-supplied columns) is the visible symptom. The TableExpr body checker only knows the top-level FROM target's schema; aliased JOIN sources are not threaded into the body's lookup. Plan does not flag this and no broken fixture exists for it. Recommend a follow-up phase or at minimum a TODO entry.
+
+22. **Cross-function CTE schema inference deferred**. Phase 22's "opaque-CTE suppression for `smelt.fn.*` wildcard bodies" silently weakens checking inside any function body that wraps a `smelt.fn.*` call in a CTE — which is exactly the `session_rollup` body shape. The function ships green, but a typo in a column reference inside the WHERE/GROUP BY of the outer SELECT is not caught. The deferral is documented; users will hit it the moment they write a CTE-heavy function.
+
+### Severity 3 — soundness / consistency holes
+
+23. **Provenance / joins frontmatter is unverified against the body** (research §20E "Property correctness is unverified"). `add_margin_with_provenance.sql` declares `provenance: { margin: [source.revenue, source.cost] }`; `enriched_order.sql` declares both `provenance` and `joins`. Nothing checks the declaration against the body's projection list or join graph. The unstable-schema flag is the only safety mechanism. This matches §20E's expectation but the plan does not flag it as a known soundness hole; future planner rules using these properties will inherit the trust.
+
+24. **`provenance: Unknown` propagation — no diagnostic when a transparent function lacks provenance and is downstream of a pushdown candidate**. `PushFilterIntoTransparentFunction` correctly refuses to push when provenance is `Unknown`, but the user gets no signal that they've left optimization on the table. A `lint`-level diagnostic ("function `X` is transparent but has no declared provenance — filter pushdown will be skipped") would help adopters reason about why optimizer behaviour changes when annotations move.
+
+25. **`smelt.extern` collisions are checked against built-ins; cross-file extern collisions are checked; built-in shadowing the same name in another file isn't tested**. The decision-21 deferred item "Cross-file name collision rules for externs declared in multiple files with the same name" is noted as resolved by Phase 10, but the symmetric case ("two files each declare `smelt.extern foo` — both at the same level") needs a fixture. Phase 10 has `fn_extern_duplicate.sql` plus `_other.sql` — good. There's no negative fixture for "two files each declare a different `smelt.extern foo` aimed at different backends" — the canonical multi-backend extern split.
+
+### Severity 3 — plan-document drift
+
+26. **Verification section references CLI flags that don't exist**. `--show-plan` (Phase 34, Phase 38), and the Phase 38 manual smoke "`smelt compile models/order_totals.sql --show-plan` should demonstrate join elimination" — the flag is unimplemented. Either (a) implement the flag as a closing task, or (b) delete the smoke step and replace with a unit-test reference inside `crates/smelt-planner/tests/join_elimination_tests.rs`.
+
+27. **Progress table has two rows with empty commit SHA** despite status `done`: Phase 13 (2026-04-23) and Phase 34 / Phase 37 (2026-04-25). The plan's own execution prompt mandates filling in the SHA at phase commit; the gap suggests these commits were squashed or that the plan-record commit dropped before the implementation commit. Recommend filling these in for traceability — `git log --oneline | grep -i "Phase 13\|Phase 34\|Phase 37"` should pin them.
+
+28. **Plan's "Cross-phase risks" section flagged risks that materialised silently**. "Planner-rule fixed point on transparent functions (Step 7). Phase 33's first rewrite pushes filters across `LogicalNode::FunctionCall { transparent: true, .. }`. If the rule doesn't terminate ... Termination is guaranteed by an "already-pushed" marker in `Context`, tested explicitly." The implementation uses `pushed_filter.is_some()` on the node itself (`logical_plan_rules.rs:268`) — equivalent in effect, but the `RuleContext` type is a unit struct with no fields (not the "Context" the plan promised). Termination is correct; the design comment is stale.
+
+### Recommendations (priority order)
+
+If this review prompts a follow-up phase, the most-leverage items are:
+
+R1. **Wire the new logical-plan rule pipeline into `smelt compile`** with `--show-plan` (Severity 1 #2). Without this, every Phase 30–34 deliverable is exercised only by tests in one crate. The most mechanical single change with the largest visibility win — and it unblocks the Phase 34 / 38 verification smoke that the plan promised but cannot run today.
+
+R2. **Resolve the CAST emission target type from `Signature::canonical_return`** (Severity 1 #1). One file, one rule; the data is already on the registry entry.
+
+R3. **Add `monitored_session_rollup.sql` and tighten `safe_divide.sql`** (Severity 2 #8, #9). Cheap, restores fidelity to the research's headline examples, and catches regressions in PASSING composition that nothing else exercises.
+
+R4. **Either implement `smelt.as_struct` lowering or downgrade Phase 38 to "type-checked, lowering deferred"** (Severity 1 #4, #5). The current state — parsed, type-checked, capability-gated for one slice of cases, never emitted — is the worst-of-three-worlds. `docs/TODO.md` already records the follow-up; consider promoting it from TODO to a Phase 38 review-fix commit.
+
+R5. **Add a `lint`-level diagnostic when a transparent function lacks declared provenance and a pushdown candidate sits above it** (Severity 3 #24). Closes the discoverability gap on the §20E soundness story.
+
+R6. **Replace the line-based YAML walker in `parse_function_properties` with the existing serde_yaml stack** (Severity 1 #7). The `provenance:` and `joins:` blocks in fixtures are already structured YAML; one mis-indentation away from a silent miss.
+
+R7. **Track the deferred LSP hover (#14) and PASSING completion (#15) under a single follow-up phase** rather than as scattered "Deferred during implementation" bullets. Both share the same cursor-in-CST infrastructure; landing them together is cheaper than landing them separately.
+
+R8. **Resolve the empty-SHA progress rows** (Severity 3 #27) so the plan can be replayed against `git log` for audit.
+
+### What this review does NOT change
+
+- The §16 24 decisions are not re-opened. Every decision is honoured by the implementation as far as the code shows.
+- The pure-function rule held across all 38 phases. `type_inference.rs`, `function_body_check.rs`, `signatures.rs`, and `smelt-planner/logical*.rs` are Salsa-free; Salsa queries wrap them as designed.
+- The fragment-sort thesis (research §2) is validated by the type-checker test surface — `WindowInScalarContext`, `ParameterShadowsColumn`, kind-ceiling checks, row-variable unification all fire as the research predicted.
+- The three-tier gradual typing model works end-to-end — Tier 2 isolation, Tier 3 hover (pure form), Tier 2→Tier 1 inline expansion — modulo the LSP hover wiring deferral noted above.
+
+The headline finding is narrow: **Steps 1–6 are real, Step 7 ships a rule API but no compile integration, and Step 8 ships parser+typer for `as_struct` but no SQL emission**. Closing R1, R2, R4 brings the planner half up to the type-system half.
+
+---
+
+## Steps 9–13 — Review remediation (Phases 39–53)
+
+These phases close every Severity 1, 2, and 3 finding from the review section above. They are organised so each Step delivers one cohesive class of fix and ships green: each phase ends with `cargo fmt --all -- --check`, `cargo clippy --all-targets` (zero warnings), `cargo test`, and `cargo test -p smelt-cli --test example_diagnostics` clean.
+
+The execution prompt at the top of this file applies unchanged: each phase is dispatched to a fresh implementer subagent with a self-contained brief built from that phase's section, then to a fresh reviewer subagent with the diff and the phase's review checklist. Iterate until clean, then record + commit + push to the tracking branch.
+
+### Cross-Step design choices
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| New rule API integration | The new `apply_rules_to_fixed_point` (`crates/smelt-planner/src/logical_plan_rules.rs`) is the canonical compile-time rule pipeline. The legacy `Planner` struct (`crates/smelt-planner/src/rules/mod.rs`) stays as the runtime DAG orchestrator. Phase 39 introduces a new compile-side entry point rather than merging the two. | Merging would re-open every Phase 30–34 design choice; legacy rules operate on `ModelGraph`, new rules operate on `Plan`. Two pipelines, one shared crate. |
+| Frontmatter YAML parser | Replace `parse_function_properties` line-walker with `serde_yaml`. The crate is already a dependency in `smelt-cli` (used for `smelt.yml`); add it to `smelt-planner`. | Structured properties (`provenance:`, `joins:`) are real YAML maps; line-walker silently misses any deviation from the test-fixture indentation. |
+| JOIN-alias scoping in TableExpr bodies | Extend the body-checker's FROM-scope layer to record per-alias schemas, not just the top-level TableExpr's schema. Aliases come from `JOIN smelt.ref('X') AS y` and `JOIN source AS s` patterns. | The `enriched_order` workaround (`CAST(NULL AS VARCHAR)`) is the visible symptom; properly threading aliases removes the workaround and unblocks Phase 34's example. |
+| TableExpr argument-shape resolution | Phase 46 widens the call-site closure to inline-subqueries and CTE references; full Tier 2 schema-propagation is still deferred. | Covers ~95% of real call sites; Tier 2 propagation is its own phase elsewhere. |
+| Built-in registry expansion strategy | Phase 50 ships the operators (`LIKE`, `IN`, `BETWEEN`, `IS NULL`), the missing aggregates (`STRING_AGG`, `ARRAY_AGG`, `MEDIAN`, `STDDEV`/`VARIANCE`), and the missing window functions (`NTILE`, `FIRST_VALUE`, `LAST_VALUE`). JSON family is its own follow-up because of the `Json` type-tracking question. | Mirrors `docs/TODO.md`'s coverage map; matches what real production SQL needs first. |
+| Multi-level frame rendering | Phase 49 prepends every frame's "in expansion of …" trailer into the diagnostic *message* (outer-most first). Existing `relatedInformation` payload remains a parallel surface for editors that consume it. | §16 #16 Step 2 promised in-message rendering; today it's only in side-channel data. |
+
+### Cross-Step risks
+
+- **Phase 39 wiring fan-out.** Hooking `apply_rules_to_fixed_point` into the compile path will surface every dormant correctness issue in Phases 30–34's data model. Expect at least one round of reviewer findings that pull in a Phase 30–34 callee fix; treat those as Phase 39 review-fixes, not new phases.
+- **Phase 41 body-splice termination.** When `ExpandedCall` learns to splice the callee body, recursive expansion of nested transparent calls must stop at the cycle-detection boundary (§3 no-recursion guarantee, but Salsa cycles in the planner are a separate risk). Use a per-pass visited-set keyed on `FnId`.
+- **Phase 50 registry coverage breaks property tests.** Adding signatures will route more SQL through the registry path (Phase 9's hybrid). Run `PROPTEST_CASES=1000` after this phase before declaring it done.
+- **Phase 47 dropping opaque-CTE suppression.** When cross-function CTE inference lands, the existing `mark_cte_opaque` shortcut becomes dead code — but every existing test that depends on the silent `Unknown` for `SELECT * FROM smelt.fn.*` CTE bodies will start emitting diagnostics. Audit `session_rollup` and its callers explicitly.
+
+---
+
+## Step 9 — Planner integration & frontmatter hardening (Phases 39 to 43)
+
+Closes Severity 1 findings #1–#7 from the review. By the end of Step 9, `smelt compile --show-plan` runs the new logical-plan rule pipeline end-to-end, CAST emission resolves to canonical-return types, transparent calls expand into body subtrees, list-splice comma elision works at lowering, `smelt.as_struct` emits backend SQL with a complete capability gate, and structured frontmatter (`provenance`, `joins`) parses through `serde_yaml`.
+
+### Phase 39 — Wire logical-plan rules into `smelt compile`; add `--show-plan`
+
+**Goal.** Add a `--show-plan` flag to `smelt compile` (or equivalent build/run command). When set, run `apply_rules_to_fixed_point` over the new logical plan from `smelt-db::logical_plan(workspace, file)` and print the result. Default behaviour without the flag is unchanged. Closes review findings #2 and #26.
+
+**Pre-conditions.** Phase 30 (logical plan), Phase 32 (rule API).
+
+**TDD tests.**
+1. `cli_show_plan_prints_logical_plan` — run `smelt compile examples/functions_demo/models/uses_safe_divide.sql --show-plan` and assert the printed output contains a `FunctionCall` node for `safe_divide`.
+2. `cli_show_plan_runs_expand_rule` — same, but assert the output contains an `ExpandedCall` node, demonstrating Phase 32's expansion fired.
+3. `cli_show_plan_runs_pushdown_when_eligible` — model with `WHERE` over a transparent + deterministic call shows `pushed_filter: Some(_)` on the call node.
+4. `cli_show_plan_eliminates_unused_join` — `models/order_totals.sql` shows the `LeftJoin` elided (Phase 34's E2E claim).
+5. `default_compile_unchanged` — without `--show-plan`, generated SQL byte-for-byte equal to pre-Phase-39 output.
+
+**Implementation.**
+- New flag in `crates/smelt-cli/src/commands/build.rs` (or wherever `compile` lives) wired to a function in `crates/smelt-cli/src/lib.rs`.
+- Build the rule list: `vec![Box::new(ExpandTransparentFunctionCalls), Box::new(PushFilterIntoTransparentFunction), Box::new(EliminateUnusedLeftJoin)]`. Run `apply_rules_to_fixed_point`, format the result with a debug printer (new `pub fn format_plan(&Plan) -> String` in `smelt-planner`).
+- Emit the printed plan to stdout when `--show-plan` is set; gate by a new `--show-plan` clap field on the relevant subcommand.
+
+**Example fixtures.** Reuses existing `models/uses_safe_divide.sql`, `models/order_totals.sql`. No new fixtures.
+
+**Review checklist.** Default build path unchanged. Plan printer is deterministic across runs. The flag only affects compile/build subcommand, not run/test. The legacy `Planner` (model-graph-based) is not touched. `format_plan` lives in `smelt-planner`, not `smelt-cli` (keeps printer pure and reusable).
+
+**Commit.** `cli+planner: wire logical-plan rules into compile with --show-plan (Phase 39, Step 9 opens)`
+
+### Phase 40 — CAST emission resolves target type from `Signature::canonical_return`
+
+**Goal.** Replace the hardcoded `target_type: DataType::BigInt` placeholder in `ExpandTransparentFunctionCalls::build_expanded_call` (`crates/smelt-planner/src/logical_plan_rules.rs:191`) with a lookup of the callee's `Signature::canonical_return`. Closes review finding #1.
+
+**Pre-conditions.** Phase 39.
+
+**TDD tests.**
+1. `sum_integer_cast_target_is_bigint` — `SUM(Integer)` on DuckDB emits `Cast { target_type: BigInt }`.
+2. `sum_decimal_cast_target_is_decimal` — registry's canonical for SUM(Decimal) (resolve per §16 #9 deferred — for v1, accept `Decimal { precision: 38, scale: 0 }`).
+3. `non_cast_function_emits_no_cast_node` — `LOWER(Text)` has `needs_cast: false` and emits no `Cast` wrapper.
+4. `unknown_signature_falls_back_to_no_cast` — extern with no `canonical_return` → no Cast node, no panic.
+
+**Implementation.**
+- Thread `&BuiltinRegistry` (or `Workspace + Salsa`) into the rule's `RuleContext`. Currently `RuleContext` is a unit struct (`logical_plan_rules.rs`); add a `registry: Arc<BuiltinRegistry>` field.
+- `build_expanded_call` reads `registry.resolve(fn_id).and_then(|sig| sig.canonical_return.clone())`. If `Some(dt)`, wrap in `Cast { target_type: dt }`. If `None`, no Cast.
+- Update the stale comment "Phase 32: use BigInt as a placeholder target type. Phase 33+ will resolve …" — mark resolved.
+
+**Example fixtures.** No new fixtures; existing planner unit tests assert the new behaviour.
+
+**Review checklist.** `RuleContext` change is backward-compatible at the trait level (downstream rules ignore the new field). `needs_cast: false` path unchanged. Stale design comment in `logical_plan_rules.rs:191` removed. Cross-phase risk in this plan's risks section ("CAST emission ... Phase 33+") marked resolved.
+
+**Commit.** `planner: resolve CAST emission target type from canonical_return (Phase 40)`
+
+### Phase 41 — `ExpandedCall` body splice + list-splice comma elision
+
+**Goal.** `ExpandTransparentFunctionCalls` no longer produces a marker; it splices the callee's body subtree (cloned with provenance tags per §16 #12) into the call site. List-valued fragment-sort splices (`metrics: SelectItems<…> = ()` or omitted) elide adjacent commas at lowering (§16 #20). Closes review findings #3 and #6.
+
+**Pre-conditions.** Phase 40.
+
+**TDD tests.**
+1. `expanded_call_contains_body_subtree` — assert the `ExpandedCall` node's child is the callee's parsed body, not just an `fn_id` marker.
+2. `nested_transparent_calls_expand_recursively` — A calls B calls C; final plan has C's body inlined under A.
+3. `cycle_detection_terminates_expansion` — synthesised cycle (call graph has a back-edge) produces a `FunctionCallCycle` diagnostic and stops expanding.
+4. `empty_selectitems_default_elides_comma` — `metrics = ()` in `session_rollup` body's `SELECT user_col, ..., metrics FROM sessionized` lowers to `SELECT user_col, ... FROM sessionized` (comma after the last non-empty item is removed).
+5. `non_empty_selectitems_keeps_commas` — `metrics = (COUNT(*) AS n)` lowers with the trailing column included.
+6. `provenance_preserved_through_splice` — every spliced node carries a `Caller` / `Callee(fn_id, ...)` tag (decision 12 model).
+
+**Implementation.**
+- Extend `LogicalNode::ExpandedCall` to optionally carry a `body: Plan` field, or replace `ExpandedCall` with a richer spliced subtree. Decision: add `body: Plan` to keep diff small.
+- Implement `splice_body(callee_body: Plan, args: &Args, provenance_tag: ProvenanceTag) -> Plan`. Substitute parameter placeholders with argument subtrees. Tag every cloned node.
+- Comma elision: a new rule `ElideEmptySelectItemsSplices` runs after `ExpandTransparentFunctionCalls`. Walks `Select::projections` and removes `SelectItems` placeholder positions whose splice resolved to `()`.
+- Cycle detection: pre-pass over the call graph in `smelt-db::logical_plan` (Salsa-cached). Cycle → `DiagnosticCode::FunctionCallCycle` + abort splice for that fn_id.
+
+**Example fixtures.** No new SQL fixtures; existing `session_rollup` workflow exercises both empty-default and non-empty `metrics`. New broken fixture `examples/broken/models/fn_call_cycle_a.sql` + `_b.sql` for the cycle test.
+
+**Review checklist.** Splice termination guaranteed by the cycle pre-pass. Provenance tags survive multi-level splicing. Comma elision rule is idempotent (running twice = running once).
+
+**Commit.** `planner: expand transparent function bodies with splice + comma elision (Phase 41)`
+
+### Phase 42 — `smelt.as_struct` lowering wired in + capability gate broadened
+
+**Goal.** `as_struct_to_sql` (`crates/smelt-db/src/function_body_check.rs:2511`) is invoked during physical-plan emission for every `SMELT_AS_STRUCT_CALL` node. The backend-capability gate (`as_struct_backend_diagnostics_for_file`) fires for functions with `BackendSet::All` against the workspace's *active* backends (not just `BackendSet::Only(names)`). Closes review findings #4 and #5; closes the two `docs/TODO.md` items under "smelt.as_struct follow-ups (Phase 38 deferred)".
+
+**Pre-conditions.** Phase 41.
+
+**TDD tests.**
+1. `as_struct_lowering_emits_duckdb_struct_literal` — compile a model that calls a function using `smelt.as_struct(o EXCEPT customer_id)`; resulting SQL contains `{'order_id': o.order_id, 'total': o.total}` (DuckDB form).
+2. `as_struct_lowering_emits_spark_struct_constructor` — same call, Spark backend, contains `struct(o.order_id AS order_id, o.total AS total)`.
+3. `as_struct_unsupported_backend_errors` — backend without struct-literal capability + `smelt.as_struct` → `BackendCapabilityViolation` diagnostic.
+4. `as_struct_default_backends_capability_check_fires` — function declared with no `backends:` frontmatter (`BackendSet::All`) using `smelt.as_struct` against a workspace whose active-backend set lacks struct-literal capability → diagnostic emitted at the function declaration.
+5. `as_struct_with_explicit_backends_only_unchanged` — Phase 38's existing behaviour unchanged.
+
+**Implementation.**
+- Move `as_struct_to_sql` from `crates/smelt-db/src/function_body_check.rs` to `crates/smelt-planner/src/lowering/as_struct.rs`. Pure helper; takes a `SmeltAsStructCall` AST + concrete schema + backend.
+- Wire into the physical-plan printer (the same Step 7 emission path that handles `LogicalNode::ExpandedCall`).
+- Extend `as_struct_backend_diagnostics_for_file` to consult the workspace's active-backend set when the function's `BackendSet == All`. The active-backend set lives in `smelt.yml`; thread via Salsa.
+
+**Example fixtures.** Existing `examples/functions_demo/functions/enrich_order_with_as_struct.sql` becomes a real lowering test (not just type-check). New `examples/broken/models/fn_as_struct_default_backends.sql` for the capability-check test.
+
+**Review checklist.** `as_struct_to_sql` no longer lives under `function_body_check.rs` (it's a lowering concern, not a body-check concern). The capability check honours `smelt.yml`'s active backends. Existing Phase 38 tests still pass unchanged.
+
+**Commit.** `planner+db: lower smelt.as_struct and broaden capability gate (Phase 42)`
+
+### Phase 43 — Frontmatter YAML parser via `serde_yaml`
+
+**Goal.** Replace `parse_function_properties` in `crates/smelt-planner/src/logical.rs:212` with a `serde_yaml`-backed parser. Structured `provenance:` and `joins:` properties parse correctly across indentation styles and multi-line maps. Closes review finding #7.
+
+**Pre-conditions.** Phase 42.
+
+**TDD tests.**
+1. `parses_simple_boolean_properties` — `deterministic: true`, `idempotent: true`, etc. unchanged.
+2. `parses_inline_provenance_map` — `provenance: { margin: [source.revenue, source.cost] }` parses to a structured map.
+3. `parses_multi_line_provenance_map` — same content on multiple lines, varying indentation.
+4. `parses_joins_block_with_nested_map` — the `enriched_order.sql` `joins:` shape (a list of `{ table, on, cardinality }` maps).
+5. `malformed_yaml_emits_diagnostic_not_panic` — bad YAML inside frontmatter → `DiagnosticCode::FrontmatterParseError` at the frontmatter span.
+6. `unknown_keys_warned_not_errored` — forward-compatible: `unknown_property: foo` produces a `Severity::Warning` not a hard error.
+
+**Implementation.**
+- Add `serde_yaml` to `smelt-planner/Cargo.toml`.
+- Define a `#[derive(Deserialize)]` `RawFunctionProperties` struct mirroring the documented frontmatter schema. Convert to `FunctionProperties` after parsing.
+- New `DiagnosticCode::FrontmatterParseError` (severity Error) and an `unknown_key` warning (Severity::Warning).
+- Delete the line-walker. Existing call sites switch to the new parser transparently.
+
+**Example fixtures.** Tighten `examples/functions_demo/functions/add_margin_with_provenance.sql` and `enriched_order.sql` — the existing fixtures already use structured YAML and become regression tests automatically. Broken: `examples/broken/models/fn_frontmatter_malformed.sql`, `fn_frontmatter_unknown_key.sql`.
+
+**Review checklist.** No silent parse failures. Existing Phase 11 fixtures (`safe_divide.sql`, `multi_decl.sql`) still parse cleanly. Indentation tolerance verified.
+
+**Commit.** `planner: parse function frontmatter via serde_yaml (Phase 43, Step 9 complete)`
+
+---
+
+## Step 10 — Canonical fixture fidelity & body-scope (Phases 44 to 47)
+
+Closes review findings #8–#10 (research-fidelity examples) and #20–#22 (TableExpr body-scope edges + cross-function CTE inference). By the end of Step 10, every research-doc example up through §11 ships green in `examples/functions_demo/`, JOIN aliases are visible inside `TableExpr`-returning function bodies, and CTE bodies that wrap `smelt.fn.*` calls have inferred return schemas.
+
+### Phase 44 — Canonical fixture restoration: `monitored_session_rollup` + `safe_divide` tighten
+
+**Goal.** Add the missing research §10 example `monitored_session_rollup` (the only fixture exercising block-syntax composition — a function declared with fragment-sort parameters that internally calls another function and forwards a `PASSING` fragment). Tighten `safe_divide.sql` to match research §3 exactly (re-introduce `OR denominator IS NULL` guard and the second `CAST(denominator AS DOUBLE)`). Closes review findings #8 and #9.
+
+**Pre-conditions.** Phase 29 (PASSING binding).
+
+**TDD tests.**
+1. `monitored_session_rollup_typechecks_clean` — workspace fixture types clean under `cargo test -p smelt-cli --test example_diagnostics`.
+2. `monitored_session_rollup_passing_forward_typechecks` — a model that calls `monitored_session_rollup` with `PASSING metrics AS (…)` correctly forwards through to the inner `session_rollup` PASSING binding.
+3. `safe_divide_handles_null_denominator` — call `safe_divide(x, NULL)` in a model; expansion produces the `OR denominator IS NULL` guard (verified in `--show-plan` output).
+4. `safe_divide_double_cast_preserved` — generated SQL contains both `CAST(numerator AS DOUBLE)` and `CAST(denominator AS DOUBLE)`.
+
+**Implementation.**
+- New `examples/functions_demo/functions/monitored_session_rollup.sql` containing the verbatim research §10 example.
+- New `examples/functions_demo/models/monitored_dashboard.sql` exercising the function with a `PASSING metrics AS (…)` clause that forwards.
+- Edit `examples/functions_demo/functions/safe_divide.sql` to restore the dropped `OR denominator IS NULL` guard and the second CAST.
+
+**Review checklist.** No type-system change required — these are fixture-only edits. Phase 29's PASSING-forward path is exercised end-to-end for the first time. `safe_divide` matches research §3 verbatim.
+
+**Commit.** `examples: restore canonical safe_divide and monitored_session_rollup fixtures (Phase 44, Step 10 opens)`
+
+### Phase 45 — JOIN aliases visible in `TableExpr`-returning function bodies
+
+**Goal.** A function body that joins a `TableExpr` parameter to an external table (`JOIN smelt.ref('Y') AS y`) sees `y`'s columns through the body's bare-column resolver. Closes review findings #10 and #21.
+
+**Pre-conditions.** Phase 15 (TableExpr row polymorphism), Phase 17 (return-schema inference).
+
+**TDD tests.**
+1. `joined_alias_columns_visible_in_body` — `enriched_order` body uses `dim_customer.customer_name` directly; resolves correctly.
+2. `joined_alias_shadow_warning` — alias name collides with a parameter → Phase 15's shadow warning fires consistently.
+3. `joined_alias_missing_column_errors` — `JOIN smelt.ref('Y') AS y` referencing `y.does_not_exist` → `UnknownIdentifier` rooted at the body span.
+4. `joined_alias_in_select_star_expansion` — `SELECT y.*` inside the body expands the alias's schema into the function's return schema.
+5. `enriched_order_no_longer_uses_cast_null_workaround` — fixture body actually reads `dim_customer.customer_name` (delete the `CAST(NULL AS VARCHAR)` workaround).
+
+**Implementation.**
+- Extend `function_body_check.rs::tableexpr_schema_lookup` (currently scoped to `smelt.ref()` / `smelt.source()` args) with a JOIN-alias visitor. Walk the body's `FROM` and `JOIN` clauses; for each `JOIN <smelt.ref|source|sub-call> AS alias`, register the alias→schema in the body's FROM scope.
+- Aliased TableExpr parameters (`FROM source AS s`) work the same way — `s` becomes a synonym.
+- Extend Phase 17's return-schema inference so `SELECT y.*` from a joined alias contributes to the inferred return schema.
+
+**Example fixtures.** Edit `examples/functions_demo/functions/enriched_order.sql` to drop the `CAST(NULL AS VARCHAR)` workaround and read real `dim_customer.*` columns. New broken fixtures `examples/broken/models/fn_join_alias_missing_col.sql` and `fn_join_alias_shadow.sql`.
+
+**Review checklist.** `enriched_order.sql` no longer has the workaround comment. Phase 34's join-elimination demo (`models/order_totals.sql`) actually elides a real join now. Existing Phase 15–17 tests still pass.
+
+**Commit.** `db: JOIN aliases in TableExpr body scope (Phase 45)`
+
+### Phase 46 — `TableExpr` argument shapes: CTEs, derived tables, subqueries
+
+**Goal.** Calls of a `TableExpr`-parameterised function whose argument is a CTE reference, a derived table (`FROM (SELECT …) AS x`), or an inline subquery resolve the schema correctly. Closes review finding #20.
+
+**Pre-conditions.** Phase 45.
+
+**TDD tests.**
+1. `tableexpr_arg_from_cte` — `WITH x AS (SELECT …) SELECT * FROM smelt.fn.add_margin(x)` resolves `x`'s columns inside the body.
+2. `tableexpr_arg_from_derived_table` — `FROM smelt.fn.add_margin((SELECT … FROM y) AS d)` — derived-table arg resolves.
+3. `tableexpr_arg_inline_subquery` — `smelt.fn.add_margin((SELECT * FROM y))` resolves.
+4. `tableexpr_arg_unrecognised_shape_errors_clearly` — argument is a literal or a non-table expression → diagnostic at the arg span (not buried inside the body).
+
+**Implementation.**
+- Extend the `tableexpr_schema_lookup` closure to recognise CTE references (look up via `TypeContext::cte_columns`), derived tables (recurse into the inner SELECT for schema inference), and parenthesised subqueries (same as derived).
+- Drop the "Phase 15 — `tableexpr_schema_lookup` closure resolves only `smelt.ref('X')` / `smelt.source('a.b')` arguments" deferral entry in this plan's "Deferred during implementation" section once the test passes.
+
+**Example fixtures.** Add `examples/functions_demo/models/margin_via_cte.sql`. No broken fixtures (the current behaviour was a false-positive; this phase removes them).
+
+**Review checklist.** Phase 22's `mark_cte_opaque` shortcut is no longer the dominant path — note the relationship with Phase 47.
+
+**Commit.** `db: resolve TableExpr arguments from CTEs, derived tables, and subqueries (Phase 46)`
+
+### Phase 47 — Cross-function CTE schema inference: drop opaque-CTE suppression
+
+**Goal.** A CTE body of the shape `WITH x AS (SELECT * FROM smelt.fn.<…>(…)) …` infers `x`'s schema by resolving the callee's return schema. Drops the Phase 22 `mark_cte_opaque` workaround. Closes review finding #22.
+
+**Pre-conditions.** Phase 46, Phase 17.
+
+**TDD tests.**
+1. `cte_schema_inferred_from_smelt_fn_call` — `WITH x AS (SELECT * FROM smelt.fn.sessionize(…)) SELECT user_col, session_id FROM x` types clean (today, the `SELECT user_col, …` line surfaces false-positive `UnknownIdentifier`).
+2. `cte_schema_typo_inside_caller_caught` — same shape, but the outer SELECT references a column that does NOT exist in the inferred schema → `UnknownIdentifier` at the typo (today, suppressed by `mark_cte_opaque`).
+3. `session_rollup_existing_tests_still_pass` — Phase 22's workflow regressions explicitly checked.
+4. `cte_schema_inference_handles_chained_smelt_fn_calls` — `WITH x AS (SELECT * FROM smelt.fn.add_margin(smelt.fn.sessionize(…)))` resolves.
+
+**Implementation.**
+- Replace `mark_cte_opaque` shortcut in `function_body_check.rs` with a real return-schema lookup. Use Phase 17's `infer_tableexpr_return_schema(callee_sig, callee_body, call-site arg types)` machinery.
+- The inferred CTE schema flows into `TypeContext::cte_columns` for downstream resolution.
+- Salsa caching: schema inference is per-(callee fn_id, arg types) — reuses Phase 26's `DataTypeHash`.
+
+**Example fixtures.** No new fixtures; tighten `models/rollup_dashboard.sql` to actually project columns from the `sessionized` CTE (today it's `SELECT *` to dodge the suppression). Add a broken fixture for the typo case.
+
+**Review checklist.** Phase 22's "opaque-CTE suppression for `smelt.fn.*` wildcard bodies" deferral entry in this plan is marked resolved. No regression in existing Phase 20–22 tests. The `mark_cte_opaque` API is deleted (or marked `#[deprecated]` if downstream code outside the function-checker uses it).
+
+**Commit.** `db: cross-function CTE schema inference, drop opaque-CTE suppression (Phase 47, Step 10 complete)`
+
+---
+
+## Step 11 — LSP polish (Phase 48)
+
+Closes review findings #14, #15, #16. Single phase, three deliverables that share the same cursor-in-CST + signature-resolution infrastructure.
+
+### Phase 48 — LSP hover wiring + PASSING completion + multi-level frame trace in message
+
+**Goal.** Three deferred LSP polish items from Phase 24, Phase 29, and Phase 12, landed together because they share the same cursor traversal and signature lookup machinery.
+
+**Pre-conditions.** Phase 24 (pure hover helper), Phase 29 (PASSING type-check), Phase 12 (frame data structure).
+
+**TDD tests.**
+1. `lsp_hover_on_smelt_fn_call_shows_declared_return` — hover on a `smelt.fn.*` call site whose callee has a Tier 3 declared return type → tooltip contains `format_smelt_type_hover` output.
+2. `lsp_hover_on_passing_clause_param_shows_param_signature` — hover on `PASSING metrics AS (…)` highlights the `metrics` parameter declaration (clause name → param signature).
+3. `lsp_completion_in_passing_body_lists_context_columns` — cursor inside `PASSING metrics AS (|)` for a `metrics: SelectItems<Agg, sessionized>` parameter returns `sessionized`'s columns as completions.
+4. `lsp_completion_in_passing_body_filters_by_kind` — completion only suggests aggregate-kind expressions when the parameter's kind is `Agg`.
+5. `multi_level_frame_trace_in_message_body` — diagnostic message text contains "in expansion of `outer`", "in expansion of `middle`", and "in expansion of `inner`" lines (outer-most first), not just in `relatedInformation`.
+
+**Implementation.**
+- New helper `find_smelt_fn_call_at_cursor(syntax, position) -> Option<SmeltFnCall>`. Used by both hover and completion.
+- Hover handler: when the cursor is on a `smelt.fn.*` call name segment, resolve the signature via Salsa and format with `declared_return_hover_text(sig)`.
+- Completion handler: when the cursor is inside a `PASSING_BODY` node, walk up to `SMELT_FN_CALL` + `PASSING_NAME`, resolve the parameter's context, and return the context's columns (filtered by parameter kind).
+- Multi-level frame rendering: extend `render_expansion_frames` (`crates/smelt-lsp/src/lib.rs:819`) to prepend every frame's "in expansion of …" line into the message body, outer-most first. `relatedInformation` is unchanged (parallel surface).
+
+**Example fixtures.** Manual smoke per the plan's existing Phase 18/22/27 patterns. New LSP e2e tests in the existing harness.
+
+**Review checklist.** Phases 24/29 deferral notes in "Deferred during implementation" are marked resolved. Multi-level rendering shows in editors that don't surface `relatedInformation`. No regression in single-level rendering tests.
+
+**Commit.** `lsp: hover, PASSING completion, and multi-level frame rendering (Phase 48, Step 11 complete)`
+
+---
+
+## Step 12 — Type-system depth (Phases 49 to 50)
+
+Closes review findings #17 (registry coverage), #19 (kind discipline depth). Finding #18 (Decimal divergence) is a one-liner addressed inside Phase 50's tests.
+
+### Phase 49 — `WindowInScalarContext` deep-walk: catch window functions buried in scalar subqueries
+
+**Goal.** The Phase 14 `WindowInScalarContext` check fires not only at top-level expression positions but also when a window function appears inside a scalar subquery in `WHERE`, `GROUP BY`, or `HAVING`. Closes review finding #19.
+
+**Pre-conditions.** Phase 14.
+
+**TDD tests.**
+1. `where_subquery_with_window_func_errors` — `WHERE col > (SELECT MAX(ROW_NUMBER() OVER (…)) FROM t)` → `WindowInScalarContext` diagnostic at the inner `ROW_NUMBER()`.
+2. `having_subquery_with_window_func_errors` — same with HAVING.
+3. `select_list_subquery_with_window_func_allowed` — top-level SELECT accepts window kind, so the check does not fire here (regression guard).
+4. `from_clause_subquery_with_window_func_allowed` — derived tables don't trigger the scalar-context check.
+
+**Implementation.**
+- The current `infer_expression_kind` walker stops at sub-expression boundaries that aren't themselves `Expr`-kinded. Extend it to recurse into nested SELECT/subquery expressions, propagating the surrounding kind expectation.
+- `Phase 14 — infer_expression_kind parallel-walker gap` deferral note becomes "partially resolved" (this phase does scalar subqueries; array literals / struct literals / `IN` / `EXISTS` remain — flag the residual).
+
+**Example fixtures.** Add `examples/broken/models/fn_window_in_subquery_where.sql`, `fn_window_in_subquery_having.sql`. Append rows to `broken_function_diagnostics.rs`.
+
+**Review checklist.** No false positives in `examples/timeseries/` and `examples/retail_analytics/`. Single-level Phase 14 tests still green.
+
+**Commit.** `db: WindowInScalarContext deep-walk into scalar subqueries (Phase 49, Step 12 opens)`
+
+### Phase 50 — Built-in registry expansion: operators + missing aggregates + missing window funcs
+
+**Goal.** Seed the canonical registry with the operators and built-ins needed for production SQL coverage. Closes review findings #17 and #18.
+
+**Pre-conditions.** Phase 9 (registry rewire).
+
+**TDD tests** (new `crates/smelt-types/tests/registry_coverage.rs`):
+1. **Operators** — `LIKE`, `ILIKE`, `IS NULL`, `IS NOT NULL`, `BETWEEN`, `IN`, `EXISTS`, `CAST` each have a registry entry. (`CAST` is special-cased in the parser but still gets a typed signature for hover / completion.)
+2. **Aggregates** — `STRING_AGG`, `LISTAGG`, `ARRAY_AGG`, `MEDIAN`, `STDDEV`, `STDDEV_POP`, `STDDEV_SAMP`, `VARIANCE`, `VAR_POP`, `VAR_SAMP`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR`, `BIT_XOR`, `ANY_VALUE`, `APPROX_COUNT_DISTINCT`.
+3. **Window functions** — `NTILE`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `CUME_DIST`, `PERCENT_RANK`.
+4. **String** — `LTRIM`, `RTRIM`, `CHAR_LENGTH`, `CHARACTER_LENGTH`, `REPLACE`, `LPAD`, `RPAD`, `REPEAT`, `SUBSTR`, `SPLIT_PART`, `STRPOS`, `LEFT`, `RIGHT`.
+5. **Math** — `EXP`, `LOG10`, `LOG2`, `MOD`, `SIGN`, `SIN`, `COS`, `TAN`, `ATAN`, `ATAN2`, `SINH`, `COSH`, `TANH`, `PI`.
+6. **Temporal** — `DATE_PART`, `DATE_ADD`, `DATE_SUB`, `MAKE_DATE`, `MAKE_TIMESTAMP`, `AGE`.
+7. **Decimal divergence registered** — `ABS<T: Numeric>(T) -> T` produces a `Decimal{p,s}` result for `ABS(Decimal{p,s})` (matching DuckDB), or the divergence is added to `divergences.rs` with explicit comment. Closes review finding #18.
+8. **Property test** — `prop_registry_signatures_consistent_with_duckdb` runs every new signature through the DuckDB oracle.
+
+**Implementation.**
+- Append to the `REGISTRY` LazyLock initialiser in `crates/smelt-types/src/signatures.rs`. Group by family with section comments matching the existing layout.
+- Operators (`LIKE`, `IN`, `BETWEEN`) get signatures even though parser handles them as primitive grammar — used for hover/completion only.
+- `CAST` signature is `CAST<T>(Any, Type) -> Expr<T>` — `Type` is a placeholder enum tag (a future signature-language extension per §13 Category 3); for v1, accept it as `Any` to avoid blocking.
+- Decimal: either thread Decimal precision through `ABS` (return `T` with the same precision) or document the divergence in `crates/smelt-db/tests/prop_helpers/divergences.rs`. Decision: divergence registry — full Decimal-precision arithmetic is out of scope for v1 per §16 #9.
+
+**Example fixtures.** Extend `examples/functions_demo/models/uses_generics.sql` with calls to a sampling of new signatures. No broken fixtures unless the property tests surface unexpected behaviour.
+
+**Review checklist.** `PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference` still green. No regressions in `examples/timeseries/` or `examples/retail_analytics/`. Plan note about "Phase 9 hand-written match fallback" is removed — the registry is now genuinely canonical.
+
+**Commit.** `types: expand canonical registry with operators, aggregates, and window funcs (Phase 50, Step 12 complete)`
+
+---
+
+## Step 13 — Soundness, lint, and cleanup (Phases 51 to 53)
+
+Closes review findings #11, #23–#25, #27, #28. Three short phases.
+
+### Phase 51 — `provenance` / `joins` validator
+
+**Goal.** When a function declares `provenance:` or `joins:` in frontmatter, the compiler verifies the declaration against the body. Mismatches emit diagnostics. Closes review finding #23.
+
+**Pre-conditions.** Phase 31, Phase 43, Phase 45.
+
+**TDD tests.**
+1. `provenance_matches_body_projection` — declared `provenance: { margin: [source.revenue, source.cost] }` and body `SELECT revenue - cost AS margin FROM source` types clean.
+2. `provenance_extra_column_errors` — declared `provenance: { margin: [source.revenue, source.cost, dim.x] }` but body never reads `dim.x` → `ProvenanceMismatch` diagnostic.
+3. `provenance_missing_column_errors` — body reads `source.revenue` for an output column but provenance omits it → diagnostic.
+4. `joins_declared_but_body_has_different_join_set` — `joins: [{ table: dim_a, … }]` but body joins `dim_b` → diagnostic.
+5. `joins_cardinality_unverifiable_warning` — declared cardinality (`1:1`, `1:N`) cannot be verified statically; explicit `Severity::Warning` documenting the §20E soundness caveat.
+
+**Implementation.**
+- Pure validator: takes the parsed body's projection list / join graph + the declared provenance/joins YAML map, returns a `Vec<Diagnostic>`.
+- New `DiagnosticCode::ProvenanceMismatch`, `DiagnosticCode::JoinsMismatch`, `DiagnosticCode::DeclaredCardinalityUnverifiable` (warning).
+- The validator runs only when the workspace has the `unstable_schema` flag set — same gate as Phase 31's provenance parsing.
+
+**Example fixtures.** Tighten `examples/functions_demo/functions/enriched_order.sql` so its declared `provenance` and `joins` actually match the body (now possible after Phase 45). Broken: `examples/broken/models/fn_provenance_extra_col.sql`, `fn_joins_mismatch.sql`.
+
+**Review checklist.** Validator is pure, runs in `smelt-db`. The §20E soundness caveat is now actively flagged at compile time (warning, not error, per §20E "the rule does not verify cardinality against data").
+
+**Commit.** `db: provenance and joins frontmatter validator (Phase 51, Step 13 opens)`
+
+### Phase 52 — Discoverability lint: missing-provenance pushdown advisory + extern fragment-param reject
+
+**Goal.** Two unrelated small lints shipped together: (a) when a transparent function lacks declared provenance and a pushdown candidate sits above it, emit an info-level diagnostic explaining the lost optimisation; (b) reject `smelt.extern` declarations that use fragment-sort parameters (`SelectItems`, `OrderSpec`) at parse time per §16 #18 deferral. Closes review findings #11 and #24.
+
+**Pre-conditions.** Phase 51, Phase 33 (pushdown).
+
+**TDD tests.**
+1. `missing_provenance_pushdown_advisory` — model with `WHERE` over a transparent call whose function lacks `provenance:` → `Severity::Hint` diagnostic at the model's WHERE clause referencing the function declaration.
+2. `provenance_present_no_advisory` — same model but the function has `provenance: …` → no diagnostic.
+3. `extern_with_selectitems_param_rejected` — `smelt.extern foo(items: SelectItems<Agg>) -> TableExpr` → parse-time `DiagnosticCode::ExternFragmentParamUnsupported`.
+4. `extern_with_orderspec_param_rejected` — same for `OrderSpec`.
+5. `extern_with_expr_or_tableexpr_param_unchanged` — Phase 10's existing externs still parse clean.
+
+**Implementation.**
+- For (a): a planner-side or LSP-side post-pass that walks the logical plan looking for `Select { filter: Some, from: FunctionCall { transparent: true, provenance: Unknown, … } }` and emits a `Hint`-severity diagnostic.
+- For (b): `parse_smelt_extern` validates that no parameter type is a fragment sort. New `DiagnosticCode::ExternFragmentParamUnsupported`.
+
+**Example fixtures.** Extend `examples/functions_demo/models/uses_safe_divide.sql` with a `WHERE` clause exercising the advisory (or document why it doesn't fire). Broken: `examples/broken/models/fn_extern_with_selectitems.sql`.
+
+**Review checklist.** `Hint` severity surfaces in LSP as a code-action opportunity, not a hard error. Phase 10's existing externs don't regress.
+
+**Commit.** `db+parser: missing-provenance lint and extern fragment-param reject (Phase 52)`
+
+### Phase 53 — Plan audit: empty SHAs, stale comments, cross-file extern collision fixture
+
+**Goal.** Final cleanup pass. Fill the empty commit-SHA cells in the progress table (review #27). Fix the stale "`Context`" type comment in cross-phase risks (review #28). Add the missing cross-file extern same-name multi-backend negative fixture (review #25). Closes the remaining minor findings.
+
+**Pre-conditions.** None (cleanup-only, but should run after all other Phase 39–52 work to catch any new gaps).
+
+**TDD tests.**
+1. `cross_file_extern_same_name_different_backends_rejected` — two files each declaring `smelt.extern foo` with different `backends:` sets → `DiagnosticCode::ExternDuplicateDeclaration` at the second declaration.
+
+**Implementation.**
+- Audit: `git log --oneline --grep="Phase 13"`, `--grep="Phase 34"`, `--grep="Phase 37"`, fill the empty cells in the progress-tracking table.
+- Edit cross-phase-risks paragraph for Phase 33 to remove the stale "marker in `Context`" reference (the actual implementation uses `pushed_filter.is_some()` on the node).
+- Confirm Phase 38 ("Step 8 closure") notes `--show-plan` smoke step now executable post-Phase 39.
+- Add `examples/broken/models/fn_extern_collide_cross_file_a.sql` + `_b.sql` for the cross-file collision test.
+
+**Example fixtures.** As above.
+
+**Review checklist.** No code drift between this phase and Phases 39–52. Progress table is fully audited. `docs/ROADMAP.md` updated to mark "Smelt Functions — Steps 9–13" complete with date.
+
+**Commit.** `plan+examples: progress-table audit and cross-file extern collision fixture (Phase 53, Step 13 complete)`
+
+---
+
+## Verification — Steps 9–13 closure
+
+After Phase 53:
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets` — zero warnings
+- `cargo test` — all green
+- `cargo test -p smelt-cli --test example_diagnostics` — zero diagnostics
+- `PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference` — final oracle check
+- `smelt compile examples/functions_demo/models/order_totals.sql --show-plan` — manual smoke; verify printed plan shows `LeftJoin` elided per Phase 34's claim, and that CAST emission uses canonical-return types from Phase 40.
+- `smelt compile examples/functions_demo/models/monitored_dashboard.sql --show-plan` — Phase 44's new fixture; verify nested PASSING composition expands cleanly through two levels.
+- Update `docs/ROADMAP.md` marking "Smelt Functions — Review remediation (Steps 9–13)" complete with the closure date and a link back to this plan's Review section.
+- Update the research doc (`docs/research/20260413-smelt-functions.md`) §16 Decision 19 — `smelt.as_struct` is now fully shipped, not just typed; remove the "Step 8 revisit" framing.
+
+## Progress tracking — Phases 39 to 53
+
+Updated as phases complete. Same format as the earlier progress-tracking table.
+
+| Phase | Title | Status | Commit | Date |
+|---|---|---|---|---|
+| 39 | Wire logical-plan rules into `smelt compile`; add `--show-plan` (Step 9 opens) | pending | | |
+| 40 | CAST emission resolves target type from `Signature::canonical_return` | pending | | |
+| 41 | `ExpandedCall` body splice + list-splice comma elision | pending | | |
+| 42 | `smelt.as_struct` lowering wired in + capability gate broadened | pending | | |
+| 43 | Frontmatter YAML parser via `serde_yaml` (Step 9 complete) | pending | | |
+| 44 | Canonical fixture restoration: `monitored_session_rollup` + `safe_divide` tighten (Step 10 opens) | pending | | |
+| 45 | JOIN aliases visible in `TableExpr`-returning function bodies | pending | | |
+| 46 | `TableExpr` argument shapes: CTEs, derived tables, subqueries | pending | | |
+| 47 | Cross-function CTE schema inference: drop opaque-CTE suppression (Step 10 complete) | pending | | |
+| 48 | LSP hover wiring + PASSING completion + multi-level frame trace (Step 11 complete) | pending | | |
+| 49 | `WindowInScalarContext` deep-walk into scalar subqueries (Step 12 opens) | pending | | |
+| 50 | Built-in registry expansion: operators + missing aggregates + window funcs (Step 12 complete) | pending | | |
+| 51 | `provenance` / `joins` validator (Step 13 opens) | pending | | |
+| 52 | Missing-provenance pushdown advisory + extern fragment-param reject | pending | | |
+| 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | pending | | |
