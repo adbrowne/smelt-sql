@@ -1962,5 +1962,5 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 54 | End-user documentation: functions guide + language-ref + ROADMAP cleanup | done | ae8e58f | 2026-04-27 |
 | 55 | `smelt.as_struct()` + `smelt.fn.*` SQL emission wired into `smelt build` | done | 6d6e5b1 | 2026-04-27 |
 | 56 | Wire `set_function_bodies()` through `CompilerRegistry` in production paths | done | 75b8cea | 2026-04-27 |
-| 57 | End-to-end execution test: `smelt build` runs a project using `smelt.fn.*` + `smelt.as_struct` | done | — | 2026-04-27 |
+| 57 | End-to-end execution test: `smelt build` runs a project using `smelt.fn.*` + `smelt.as_struct` | done | 61aff5e | 2026-04-27 |
 | 58 | `EXTRACT(part FROM expr)` parser robustness so generators can include it | planned | — | — |
