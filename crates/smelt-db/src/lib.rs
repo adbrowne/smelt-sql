@@ -420,6 +420,15 @@ pub enum DiagnosticCode {
     /// (§20E soundness caveat). Anchored at the declaration's name range.
     /// Introduced in Phase 51.
     DeclaredCardinalityUnverifiable,
+    /// Emitted (Severity::Hint) when a transparent function is called from
+    /// a SELECT that has a WHERE clause but the function lacks declared
+    /// provenance, which would allow filter pushdown. Introduced in Phase 52.
+    MissingProvenancePushdownAdvisory,
+    /// Emitted when a `smelt.extern` declaration has a parameter whose type
+    /// is a fragment sort (`SelectItems`, `OrderSpec`). Fragment-sort params
+    /// are only meaningful with PASSING clauses, which `smelt.extern` does
+    /// not support (§16 #18). Introduced in Phase 52.
+    ExternFragmentParamUnsupported,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -473,6 +482,7 @@ pub enum DiagnosticSeverity {
     Error,
     Warning,
     Info,
+    Hint,
 }
 
 /// YAML parse error with location information
@@ -1609,6 +1619,171 @@ fn frontmatter_diag_to_diagnostic(
     }
 }
 
+/// Phase 52 — per-file check: reject `smelt.extern` declarations with
+/// fragment-sort parameters (`SelectItems`, `OrderSpec`).
+///
+/// Fragment sorts require PASSING clauses, which `smelt.extern` does not
+/// support (§16 #18 deferral). This catches `SelectItems<…>` (a valid
+/// `SmeltType` that passes type-ref parse) and `OrderSpec` (which is an
+/// `UnsupportedSort` parse error, but with a specific sort name).
+pub fn extern_fragment_param_diagnostics_for_file(
+    db: &dyn salsa::Database,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_types::signatures::SmeltType;
+    use smelt_types::signatures::SmeltTypeParseError;
+
+    let sigs = file_signature_inputs(db, file);
+    let mut out = Vec::new();
+
+    for sig in sigs.iter() {
+        if sig.origin != smelt_types::SigOrigin::Extern {
+            continue;
+        }
+        for param in &sig.params {
+            let is_fragment = match &param.type_ref {
+                // `SelectItems<…>` parses as Ok(SmeltType::SelectItems)
+                Some(Ok(SmeltType::SelectItems { .. })) => true,
+                // `OrderSpec<…>` (with angle brackets) parses as UnsupportedSort;
+                // check the sort name to distinguish fragment sorts from
+                // genuinely unknown types (which emit InvalidFunctionTypeRef).
+                Some(Err(SmeltTypeParseError::UnsupportedSort { sort, .. })) => {
+                    sort.as_str() == "OrderSpec"
+                }
+                // Bare `OrderSpec` (no angle brackets) parses as Malformed because
+                // `parse_smelt_type` requires `<…>` for non-TableExpr sorts. Detect
+                // it by inspecting the span_text's leading identifier.
+                Some(Err(SmeltTypeParseError::Malformed { span_text })) => {
+                    let head = span_text
+                        .trim()
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or("");
+                    head == "OrderSpec"
+                }
+                _ => false,
+            };
+            if is_fragment {
+                if let Some(range) = param.type_ref_range {
+                    out.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "parameter `{}` of `smelt.extern {}` uses a fragment-sort type; \
+                             fragment sorts (`SelectItems`, `OrderSpec`) require PASSING clauses \
+                             which `smelt.extern` does not support (§16 #18)",
+                            param.name, sig.name
+                        ),
+                        range,
+                        code: Some(DiagnosticCode::ExternFragmentParamUnsupported),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Phase 52 — per-file advisory: when a transparent function lacks declared
+/// provenance and a WHERE clause sits above its call site, emit a Hint.
+///
+/// Runs on all files (model and function). Anchors the Hint at the WHERE
+/// clause's text range. Only fires when `unstable_schema: true` (so the
+/// provenance system is active).
+pub fn missing_provenance_advisory_for_file(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<Diagnostic> {
+    use smelt_planner::logical::Provenance;
+
+    let raw_text = file.text(db);
+    let parse = parse_file(db, file);
+    let syntax = parse.syntax();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+
+    // Walk all SELECT statements in the file.
+    for node in ast.syntax().descendants() {
+        let Some(select) = smelt_parser::ast::SelectStmt::cast(node) else {
+            continue;
+        };
+        // Only interested in SELECTs with a WHERE clause.
+        let Some(where_clause) = select.where_clause() else {
+            continue;
+        };
+        let where_range =
+            smelt_parser::ast::text_range_to_range(raw_text, where_clause.text_range());
+
+        // Find smelt.fn.* calls in the FROM clause.
+        let Some(from_clause) = select.from_clause() else {
+            continue;
+        };
+        for table_ref in from_clause.table_refs() {
+            let Some(call) = table_ref.smelt_fn_call() else {
+                continue;
+            };
+            // Derive the function name from the call path segments (last segment = name).
+            let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+            let Some(fn_name) = segments.last().cloned() else {
+                continue;
+            };
+
+            let Some(sig) = resolve_function(db, workspace, fn_name.clone()) else {
+                continue;
+            };
+            // Only transparent (smelt.define) functions.
+            if sig.origin != smelt_types::SigOrigin::Define {
+                continue;
+            }
+
+            // Check if the function has declared provenance.
+            // Sort by path to match resolve_function's deterministic "first wins" order.
+            let mut sorted_files: Vec<SourceFile> = workspace.files(db).iter().copied().collect();
+            sorted_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
+            let has_provenance = sorted_files
+                .iter()
+                .copied()
+                .find(|f| {
+                    file_signature_inputs(db, *f)
+                        .iter()
+                        .any(|s| s.name == fn_name)
+                })
+                .and_then(|decl_file| {
+                    let decl_raw = decl_file.text(db).clone();
+                    let decl_parse = parse_file(db, decl_file);
+                    let decl_syntax = decl_parse.syntax();
+                    let decl_ast = AstFile::cast(decl_syntax)?;
+                    let fm = decl_ast
+                        .defines()
+                        .find(|d| d.name().as_deref() == Some(fn_name.as_str()))
+                        .and_then(|d| d.frontmatter(&decl_raw))?;
+                    let (props, _) = smelt_planner::logical::parse_function_properties(&fm);
+                    Some(matches!(props.provenance, Provenance::Declared(_)))
+                })
+                .unwrap_or(false);
+
+            if !has_provenance {
+                out.push(Diagnostic {
+                    severity: DiagnosticSeverity::Hint,
+                    message: format!(
+                        "function `{fn_name}` is transparent but has no declared `provenance:` \
+                         — filter pushdown into the function body will be skipped; \
+                         add `provenance:` frontmatter to enable this optimisation"
+                    ),
+                    range: where_range,
+                    code: Some(DiagnosticCode::MissingProvenancePushdownAdvisory),
+                    data: None,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Per-file diagnostics for `smelt.fn.<name>(...)` call sites (Phase 6).
 ///
 /// For every `SMELT_FN_CALL` AST node in `file`, runs the pure
@@ -2432,6 +2607,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Phase 51 — provenance/joins validator (only when unstable_schema: true).
     if unstable_schema {
         for diag in provenance_validator::provenance_validator_diagnostics_for_file(db, file) {
+            DiagnosticAcc(diag).accumulate(db);
+        }
+    }
+
+    // Phase 52 — extern fragment-param rejection (fires unconditionally).
+    for diag in extern_fragment_param_diagnostics_for_file(db, file) {
+        DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 52 — missing-provenance pushdown advisory (Hint severity,
+    // only when unstable_schema: true).
+    if unstable_schema {
+        for diag in missing_provenance_advisory_for_file(db, workspace, file) {
             DiagnosticAcc(diag).accumulate(db);
         }
     }

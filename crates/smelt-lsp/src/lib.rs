@@ -1076,6 +1076,8 @@ impl Backend {
                 DbCode::ProvenanceMismatch => "provenance-mismatch",
                 DbCode::JoinsMismatch => "joins-mismatch",
                 DbCode::DeclaredCardinalityUnverifiable => "declared-cardinality-unverifiable",
+                DbCode::MissingProvenancePushdownAdvisory => "missing-provenance-pushdown-advisory",
+                DbCode::ExternFragmentParamUnsupported => "extern-fragment-param-unsupported",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -1152,6 +1154,7 @@ impl Backend {
                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
                 DbSeverity::Info => DiagnosticSeverity::INFORMATION,
+                DbSeverity::Hint => DiagnosticSeverity::HINT,
             }),
             message,
             source: Some("smelt".to_string()),
@@ -1553,6 +1556,7 @@ impl Backend {
                                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
                                 DbSeverity::Info => DiagnosticSeverity::INFORMATION,
+                                DbSeverity::Hint => DiagnosticSeverity::HINT,
                             }),
                             message: d.message.clone(),
                             source: Some("smelt".to_string()),

@@ -1,4 +1,7 @@
 -- Phase 6 fixture: exercise the `smelt.fn.*` call surface end-to-end.
+-- Phase 52 note: the MissingProvenancePushdownAdvisory does not fire here
+-- because safe_divide is called as a column expression (not in FROM position).
+-- The advisory only triggers when a smelt.fn.* call appears in a FROM clause.
 -- Both `user_id` and `event_id` are INTEGER columns from `source.events`
 -- (see ../sources.yml), which widen into `Expr<Numeric>` — the declared
 -- parameter constraint on `safe_divide`. No diagnostic should fire.

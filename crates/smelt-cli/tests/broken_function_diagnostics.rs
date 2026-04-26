@@ -334,6 +334,18 @@ const CASES: &[Case] = &[
     },
 ];
 
+/// Phase 52 broken fixtures — tested without unstable_schema (extern check is
+/// unconditional).
+const PHASE52_CASES: &[Case] = &[
+    // Phase 52 — extern with a SelectItems parameter is rejected.
+    Case {
+        fixture: "fn_extern_with_selectitems.sql",
+        companion: None,
+        code: DiagnosticCode::ExternFragmentParamUnsupported,
+        message_substring: "fragment-sort",
+    },
+];
+
 /// Phase 51 broken fixtures — tested with `unstable_schema: true`.
 const PHASE51_CASES: &[Case] = &[
     // Phase 51 — provenance declares a source column (dim.extra) that the body
@@ -423,6 +435,7 @@ fn no_orphan_fn_fixtures() {
     let mut covered: Vec<String> = CASES
         .iter()
         .chain(PHASE51_CASES.iter())
+        .chain(PHASE52_CASES.iter())
         .flat_map(|c| std::iter::once(c.fixture).chain(c.companion))
         .map(|s| s.to_string())
         .collect();
@@ -612,6 +625,44 @@ fn phase51_provenance_broken_cases() {
         let files = vec![(fixture_path.clone(), fixture_content)];
         let (db, ws, handles) =
             build_db_with_yml(project_root.clone(), &files, "unstable_schema: true\n");
+        let fixture_handle = handles[0];
+        let file_diags = file_diagnostics(&db, ws, fixture_handle);
+        let type_diags: Vec<_> =
+            check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, fixture_handle)
+                .into_iter()
+                .map(|d| d.0.clone())
+                .collect();
+        let diags: Vec<_> = file_diags.into_iter().chain(type_diags).collect();
+        let matching: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(case.code) && d.message.contains(case.message_substring))
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "fixture {fix} expected a {code:?} diagnostic containing {msg:?}, got {diags:#?}",
+            fix = case.fixture,
+            code = case.code,
+            msg = case.message_substring,
+        );
+    }
+}
+
+#[test]
+fn phase52_extern_fragment_param_cases() {
+    let models_dir = broken_models_dir();
+    let project_root = models_dir.parent().unwrap().to_path_buf();
+    for case in PHASE52_CASES {
+        let fixture_path = models_dir.join(case.fixture);
+        let fixture_content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("fixture {} must exist: {e}", case.fixture));
+        let mut files = vec![(fixture_path.clone(), fixture_content)];
+        if let Some(companion) = case.companion {
+            let companion_path = models_dir.join(companion);
+            let companion_content = std::fs::read_to_string(&companion_path)
+                .unwrap_or_else(|e| panic!("companion {companion} must exist: {e}"));
+            files.push((companion_path, companion_content));
+        }
+        let (db, ws, handles) = build_db(project_root.clone(), &files);
         let fixture_handle = handles[0];
         let file_diags = file_diagnostics(&db, ws, fixture_handle);
         let type_diags: Vec<_> =
