@@ -2403,6 +2403,523 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         })),
     ));
 
+    // ─── Phase 50: Extended aggregates ──────────────────────────────────────
+
+    insert(
+        Signature::new(
+            "STRING_AGG",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "LISTAGG",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T"), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "ARRAY_AGG",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            // Array<T> cannot be expressed as a TypeExpr::Var directly; use Unknown for v1.
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "MEDIAN",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "STDDEV",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "STDDEV_POP",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "STDDEV_SAMP",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "VARIANCE",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "VAR_POP",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "VAR_SAMP",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "BOOL_AND",
+            vec![],
+            vec![concrete(DataType::Boolean)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "BOOL_OR",
+            vec![],
+            vec![concrete(DataType::Boolean)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "BIT_AND",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "BIT_OR",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "BIT_XOR",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "ANY_VALUE",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    insert(
+        Signature::new(
+            "APPROX_COUNT_DISTINCT",
+            vec![],
+            vec![SigParam::Concrete(TypeConstraint::Any)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+
+    // ─── Phase 50: Extended window functions ─────────────────────────────────
+
+    insert(
+        Signature::new(
+            "NTILE",
+            vec![],
+            vec![concrete(DataType::BigInt)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "FIRST_VALUE",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "LAST_VALUE",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "NTH_VALUE",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T"), concrete(DataType::BigInt)],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "CUME_DIST",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Window),
+    );
+    insert(
+        Signature::new(
+            "PERCENT_RANK",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        .with_kind(ExprKind::Window),
+    );
+
+    // ─── Phase 50: Extended string scalars ───────────────────────────────────
+
+    insert(Signature::new(
+        "LTRIM",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "RTRIM",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "CHAR_LENGTH",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+    ));
+    insert(Signature::new(
+        "CHARACTER_LENGTH",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+    ));
+    insert(Signature::new(
+        "REPLACE",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::Text),
+            concrete(DataType::Text),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "LPAD",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::BigInt),
+            concrete(DataType::Text),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "RPAD",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::BigInt),
+            concrete(DataType::Text),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "REPEAT",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::BigInt)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "SUBSTR",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::BigInt)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "SPLIT_PART",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::Text),
+            concrete(DataType::BigInt),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "STRPOS",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+    ));
+    insert(Signature::new(
+        "LEFT",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::BigInt)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
+        "RIGHT",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::BigInt)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+
+    // ─── Phase 50: Extended math scalars ─────────────────────────────────────
+
+    insert(Signature::new(
+        "EXP",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "LOG10",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "LOG2",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "MOD",
+        vec![tp("T", TypeConstraint::Numeric)],
+        vec![var("T"), var("T")],
+        TypeExpr::Var("T".into()),
+    ));
+    insert(Signature::new(
+        "SIGN",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "SIN",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "COS",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "TAN",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "ATAN",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "ATAN2",
+        vec![],
+        vec![concrete(DataType::Double), concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "SINH",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "COSH",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "TANH",
+        vec![],
+        vec![concrete(DataType::Double)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "PI",
+        vec![],
+        vec![],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+
+    // ─── Phase 50: Extended temporal scalars ──────────────────────────────────
+
+    insert(Signature::new(
+        "DATE_PART",
+        vec![],
+        vec![
+            concrete(DataType::Text),
+            concrete(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+    ));
+    insert(Signature::new(
+        "DATE_ADD",
+        vec![],
+        vec![concrete(DataType::Date), concrete(DataType::Interval)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+    ));
+    insert(Signature::new(
+        "DATE_SUB",
+        vec![],
+        vec![concrete(DataType::Date), concrete(DataType::Interval)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+    ));
+    insert(Signature::new(
+        "MAKE_DATE",
+        vec![],
+        vec![
+            concrete(DataType::BigInt),
+            concrete(DataType::BigInt),
+            concrete(DataType::BigInt),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+    ));
+    insert(Signature::new(
+        "MAKE_TIMESTAMP",
+        vec![],
+        vec![
+            concrete(DataType::BigInt),
+            concrete(DataType::BigInt),
+            concrete(DataType::BigInt),
+            concrete(DataType::BigInt),
+            concrete(DataType::BigInt),
+            concrete(DataType::Double),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+            with_timezone: false,
+        })),
+    ));
+    insert(Signature::new(
+        "AGE",
+        vec![],
+        vec![
+            concrete(DataType::Timestamp {
+                with_timezone: false,
+            }),
+            concrete(DataType::Timestamp {
+                with_timezone: false,
+            }),
+        ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
+    ));
+
+    // ─── Phase 50: Operator stubs ────────────────────────────────────────────
+    //
+    // These are not dispatched through `infer_function_type`'s normal path
+    // (they use dedicated SQL syntax), but having registry entries enables
+    // hover, completion, and future lint rules.
+
+    insert(Signature::new(
+        "LIKE",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "ILIKE",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "IS_NULL",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "IS_NOT_NULL",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "BETWEEN",
+        vec![tp("T", TypeConstraint::Ordered)],
+        vec![var("T"), var("T"), var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "IN",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T"), var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "EXISTS",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
+        "CAST",
+        vec![tp("T", TypeConstraint::Any)],
+        vec![var("T")],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown)),
+    ));
+
     m
 });
 

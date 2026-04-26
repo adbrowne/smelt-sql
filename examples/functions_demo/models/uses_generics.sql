@@ -1,6 +1,7 @@
 -- Phase 8 fixture: exercise the generic/variadic shapes seeded in the
 -- canonical registry. `sources.yml` declares `source.events` with
--- `event_id INTEGER`, `user_id INTEGER`, `event_type VARCHAR`.
+-- `event_id INTEGER`, `user_id INTEGER`, `event_type VARCHAR`,
+-- `ts TIMESTAMP`.
 --
 -- Each call below covers a different registry form:
 --   * MIN(event_id)                          — `MIN<T: Ordered>(T) → T`
@@ -18,10 +19,20 @@
 -- that declares `-> Expr<Double>` over an `Expr<Integer>` body using ABS.
 --   * smelt.fn.widen_to_double(event_id)     — Integer arg widened to Double
 --                                               by expected_return propagation
+--
+-- Phase 50 fixture: newly-seeded registry built-ins.
+--   * STDDEV(event_id)                       — aggregate: Numeric → Double
+--   * NTILE(4) OVER (ORDER BY event_id)      — window: BigInt → BigInt
+--   * LEFT(event_type, 3)                    — string scalar: Text → Text
+--   * DATE_PART('year', ts)                  — temporal scalar: Text, Timestamp → Double
 SELECT
     MIN(event_id) AS min_event_id,
     COALESCE(user_id, 0) AS user_id_or_zero,
     GREATEST(event_id, user_id, 0) AS max_numeric,
     CONCAT(event_type, '-', event_type) AS doubled_event_type,
-    smelt.fn.widen_to_double(event_id) AS event_id_as_double
+    smelt.fn.widen_to_double(event_id) AS event_id_as_double,
+    STDDEV(event_id) AS stddev_event_id,
+    NTILE(4) OVER (ORDER BY event_id) AS event_quartile,
+    LEFT(event_type, 3) AS event_type_prefix,
+    DATE_PART('year', ts) AS event_year
 FROM smelt.source('source.events')

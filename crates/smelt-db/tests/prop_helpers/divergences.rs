@@ -181,6 +181,21 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::ByDesign,
         },
+        TypeDivergence {
+            id: "abs_decimal",
+            description: "ABS(Decimal) — DuckDB returns the same Decimal type, but smelt's \
+                Numeric-generic signature returns Unknown for Decimal inputs because smelt v1 \
+                does not thread precision/scale through type variable unification \
+                (Decimal satisfies Numeric but the generic T remains unresolved).",
+            smelt_type: DataType::Unknown,
+            duckdb_type: Some(DataType::Decimal {
+                // Wildcard: Decimal(0,0) matches any Decimal precision/scale
+                precision: 0,
+                scale: 0,
+            }),
+            spark_type: None,
+            status: DivergenceStatus::KnownBug,
+        },
     ]
 }
 
