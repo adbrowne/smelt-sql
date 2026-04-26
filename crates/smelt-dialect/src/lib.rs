@@ -8,5 +8,5 @@ mod printer;
 mod type_conformance;
 
 pub use dialect::{BackendCapabilities, SqlDialect};
-pub use printer::{print, PrintContext};
+pub use printer::{print, AsStructEmitter, PrintContext, SmeltFnExpander};
 pub use type_conformance::wrap_with_type_casts;

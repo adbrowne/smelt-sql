@@ -12,12 +12,22 @@
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
+use smelt_parser::ast::{SmeltAsStructCall, SmeltFnCall};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall, RefCall, SourceCall};
 
 use std::collections::{HashMap, HashSet};
 
 use crate::{BackendCapabilities, SqlDialect};
+
+/// Emitter closure type for `smelt.as_struct(alias [EXCEPT cols])`.
+/// Called with `(alias, except_columns)` → emitted SQL, or `None` to pass through.
+pub type AsStructEmitter<'a> = Box<dyn Fn(&str, &[String]) -> Option<String> + 'a>;
+
+/// Expander closure type for `smelt.fn.*` calls.
+/// Called with `(fn_name, positional_arg_sqls, named_args)` → expanded SQL, or `None`.
+pub type SmeltFnExpander<'a> =
+    Box<dyn Fn(&str, Vec<String>, Vec<(String, String)>) -> Option<String> + 'a>;
 
 /// Context for dialect-aware printing.
 pub struct PrintContext<'a> {
@@ -29,6 +39,16 @@ pub struct PrintContext<'a> {
     /// Cross-engine refs: model_name -> `read_parquet('{path}/**/*.parquet', hive_partitioning=true)`.
     /// When a ref is in this map, the parquet expression is emitted instead of `schema.model`.
     pub cross_engine_refs: HashMap<String, String>,
+    /// Emitter for `smelt.as_struct(alias [EXCEPT cols])`.
+    ///
+    /// Called with `(alias, except_columns)` and returns the backend-specific SQL string.
+    /// `None` = pass through verbatim (backward compat for tests / contexts without schema info).
+    pub smelt_as_struct: Option<AsStructEmitter<'a>>,
+    /// Expander for `smelt.fn.*` calls.
+    ///
+    /// Called with `(fn_name, positional_arg_sqls, named_args)` and returns the expanded SQL.
+    /// `None` = pass through verbatim (backward compat for tests / contexts without function info).
+    pub smelt_fn: Option<SmeltFnExpander<'a>>,
 }
 
 /// Print a CST node as dialect-specific SQL.
@@ -40,6 +60,66 @@ pub fn print(node: &SyntaxNode, ctx: &PrintContext) -> String {
 
 fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
     match node.kind() {
+        SyntaxKind::SMELT_AS_STRUCT_CALL => {
+            if let Some(ref emitter) = ctx.smelt_as_struct {
+                if let Some(call) = SmeltAsStructCall::cast(node.clone()) {
+                    if let Some(alias) = call.alias() {
+                        let except = call.except_columns();
+                        if let Some(sql) = emitter(&alias, &except) {
+                            out.push_str(&sql);
+                            return;
+                        }
+                    }
+                }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::SMELT_FN_CALL => {
+            if let Some(ref expander) = ctx.smelt_fn {
+                if let Some(call) = SmeltFnCall::cast(node.clone()) {
+                    // Extract the leaf function name (last segment after smelt.fn.)
+                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+                    if let Some(fn_name) = segments.last().cloned() {
+                        // Extract positional arg SQL strings by printing each arg through ctx
+                        let positional_sqls: Vec<String> = call
+                            .arg_list()
+                            .map(|al| {
+                                al.positional_args()
+                                    .into_iter()
+                                    .map(|arg| {
+                                        let mut s = String::new();
+                                        print_node(arg.syntax(), ctx, &mut s);
+                                        s
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Extract named args as (name, sql) pairs
+                        let named_sqls: Vec<(String, String)> = call
+                            .arg_list()
+                            .map(|al| {
+                                al.named_params()
+                                    .filter_map(|np| {
+                                        let name = np.name()?;
+                                        let expr = np.value_expr()?;
+                                        let mut s = String::new();
+                                        print_node(expr.syntax(), ctx, &mut s);
+                                        Some((name, s))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Some(expanded) = expander(&fn_name, positional_sqls, named_sqls) {
+                            // Re-parse the expanded SQL so smelt.ref() etc. in the body get rewritten.
+                            let reparsed = smelt_parser::parse(&expanded);
+                            print_node(&reparsed.syntax(), ctx, out);
+                            return;
+                        }
+                    }
+                }
+            }
+            print_children(node, ctx, out);
+        }
         SyntaxKind::FUNCTION_CALL => {
             if let Some(fc) = FunctionCall::cast(node.clone()) {
                 if let Some(ref_call) = RefCall::from_function_call(fc.clone()) {
@@ -432,6 +512,8 @@ mod tests {
             schema,
             ephemeral_models: HashSet::new(),
             cross_engine_refs: HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         print(&parsed.syntax(), &ctx)
     }
@@ -529,6 +611,8 @@ mod tests {
             schema: "main",
             ephemeral_models: HashSet::new(),
             cross_engine_refs: cross_refs,
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
@@ -564,6 +648,8 @@ mod tests {
             schema: "main",
             ephemeral_models: HashSet::new(),
             cross_engine_refs: cross_refs,
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(

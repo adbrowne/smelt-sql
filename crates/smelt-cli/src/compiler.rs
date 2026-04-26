@@ -5,11 +5,91 @@ use anyhow::Result;
 use smelt_core::SourcesConfig;
 use smelt_db::type_inference::infer_select_column_types;
 use smelt_db::{build_type_context, StaticRefSchemaProvider};
-use smelt_dialect::{wrap_with_type_casts, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_dialect::{
+    wrap_with_type_casts, AsStructEmitter, BackendCapabilities, PrintContext, SmeltFnExpander,
+    SqlDialect,
+};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Type for the pre-resolved function-body map: fn_name → (param_names, body_sql).
+type FnBodyMap = HashMap<String, (Vec<String>, String)>;
+
+/// Substitute `param_names` with `arg_sqls` in a function body SQL string.
+///
+/// Replaces whole-word occurrences of each parameter name with the
+/// corresponding argument SQL, skipping inside single-quoted strings.
+/// Named args (`key => value`) are not yet supported here; only positional.
+fn substitute_params(body: &str, param_names: &[String], arg_sqls: &[String]) -> String {
+    let mut result = body.to_string();
+    for (param, arg) in param_names.iter().zip(arg_sqls.iter()) {
+        result = replace_identifier(&result, param, arg);
+    }
+    result
+}
+
+/// Replace whole-word occurrences of `ident` with `replacement` in `text`,
+/// skipping content inside single-quoted strings (SQL string literals).
+fn replace_identifier(text: &str, ident: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len() + replacement.len());
+    let chars: Vec<char> = text.chars().collect();
+    let ident_chars: Vec<char> = ident.chars().collect();
+    let n = chars.len();
+    let m = ident_chars.len();
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < n {
+        // Track single-quoted string literals.
+        if chars[i] == '\'' {
+            if in_string {
+                // Check for '' escape (doubled quote within string)
+                if i + 1 < n && chars[i + 1] == '\'' {
+                    out.push('\'');
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            } else {
+                in_string = true;
+            }
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // Check for a whole-word match of `ident` at position i.
+        let before_ok = i == 0 || !is_ident_char(chars[i - 1]);
+        let slice_matches = i + m <= n
+            && chars[i..i + m]
+                .iter()
+                .zip(ident_chars.iter())
+                .all(|(a, b)| a == b);
+        let after_ok = i + m >= n || !is_ident_char(chars[i + m]);
+
+        if before_ok && slice_matches && after_ok {
+            out.push_str(replacement);
+            i += m;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
 
 #[derive(Debug, Clone)]
 pub struct CompiledModel {
@@ -35,6 +115,8 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
         schema,
         ephemeral_models: std::collections::HashSet::new(),
         cross_engine_refs: std::collections::HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -55,6 +137,13 @@ pub struct SqlCompiler {
     /// SUM/COUNT/etc. to silently narrow to BIGINT. See bug #3 in
     /// `docs/research/20260417-0.3-regression-triage.md`.
     upstream_schemas: Arc<UpstreamSchemas>,
+    /// Pre-resolved `smelt.fn.*` function bodies for SQL emission.
+    ///
+    /// Maps the leaf function name (e.g. `"safe_div"`) to
+    /// `(param_names, body_sql)`. Populated by callers that have access to
+    /// the Salsa database. When `None` (the default), `smelt.fn.*` calls
+    /// pass through the printer verbatim.
+    fn_bodies: Option<Arc<FnBodyMap>>,
 }
 
 /// Pre-computed upstream model and seed column schemas, plus the project's
@@ -145,6 +234,7 @@ impl SqlCompiler {
             capabilities,
             cross_engine_refs: HashMap::new(),
             upstream_schemas: Arc::new(UpstreamSchemas::default()),
+            fn_bodies: None,
         }
     }
 
@@ -157,6 +247,15 @@ impl SqlCompiler {
     /// resolve `smelt.ref()` and `smelt.source()` column types correctly.
     pub fn set_upstream_schemas(&mut self, schemas: Arc<UpstreamSchemas>) {
         self.upstream_schemas = schemas;
+    }
+
+    /// Provide pre-resolved `smelt.fn.*` function bodies for SQL emission.
+    ///
+    /// Maps leaf function name → (param_names, body_sql). When set, `smelt.fn.*`
+    /// calls in compiled models are expanded inline. When not set (the default),
+    /// they pass through verbatim.
+    pub fn set_function_bodies(&mut self, bodies: FnBodyMap) {
+        self.fn_bodies = Some(Arc::new(bodies));
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -181,12 +280,69 @@ impl SqlCompiler {
         // Strip frontmatter to avoid parse errors from YAML metadata
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let parse = smelt_parser::parse(&clean_content);
+
+        // Build a TypeContext from the original SQL so smelt.as_struct() can
+        // look up column types for each qualifier/alias in scope.
+        let type_ctx = if let Some(file) = File::cast(parse.syntax()) {
+            let provider = StaticRefSchemaProvider {
+                models: &self.upstream_schemas.models,
+                seeds: &self.upstream_schemas.seeds,
+            };
+            Some(build_type_context(
+                &file,
+                &self.upstream_schemas.sources,
+                &provider,
+            ))
+        } else {
+            None
+        };
+
+        // Build the smelt.as_struct emitter from the TypeContext + dialect.
+        let dialect_name = match self.dialect {
+            SqlDialect::DuckDB => "duckdb",
+            SqlDialect::SparkSQL => "spark",
+            SqlDialect::PostgreSQL => "postgres",
+        };
+        let as_struct_emitter: Option<AsStructEmitter<'_>> = type_ctx.map(|tc| {
+            let backend = dialect_name.to_string();
+            let emitter: AsStructEmitter<'_> = Box::new(move |alias: &str, except: &[String]| {
+                let cols = tc.columns_for_qualifier(alias);
+                if cols.is_empty() {
+                    return None;
+                }
+                let fields: Vec<(String, DataType)> = cols
+                    .into_iter()
+                    .filter(|(name, _)| !except.contains(&name.to_string()))
+                    .map(|(name, tc_col)| (name.to_string(), tc_col.data_type.clone()))
+                    .collect();
+                if fields.is_empty() {
+                    return None;
+                }
+                smelt_planner::lowering::as_struct_to_sql(alias, &fields, &backend).ok()
+            });
+            emitter
+        });
+
+        // Build the smelt.fn.* expander from the pre-resolved function bodies.
+        let fn_expander: Option<SmeltFnExpander<'_>> = self.fn_bodies.as_ref().map(|bodies| {
+            let bodies = Arc::clone(bodies);
+            let expander: SmeltFnExpander<'_> = Box::new(
+                move |fn_name: &str, positional: Vec<String>, _named: Vec<(String, String)>| {
+                    let (param_names, body_sql) = bodies.get(fn_name)?;
+                    Some(substitute_params(body_sql, param_names, &positional))
+                },
+            );
+            expander
+        });
+
         let ctx = PrintContext {
             dialect: &self.dialect,
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: std::collections::HashSet::new(),
             cross_engine_refs: self.cross_engine_refs.clone(),
+            smelt_as_struct: as_struct_emitter,
+            smelt_fn: fn_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -284,6 +440,8 @@ impl SqlCompiler {
             schema,
             ephemeral_models: std::collections::HashSet::new(),
             cross_engine_refs: self.cross_engine_refs.clone(),
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -330,6 +488,8 @@ impl SqlCompiler {
             schema,
             ephemeral_models: ephemeral_refs,
             cross_engine_refs: self.cross_engine_refs.clone(),
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
@@ -449,6 +609,8 @@ impl EphemeralResolver {
             schema,
             ephemeral_models: ephemeral_refs,
             cross_engine_refs: std::collections::HashMap::new(),
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         let compiled = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -801,6 +963,8 @@ impl SqlCompiler {
             schema,
             ephemeral_models: ephemeral_refs,
             cross_engine_refs: self.cross_engine_refs.clone(),
+            smelt_as_struct: None,
+            smelt_fn: None,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);

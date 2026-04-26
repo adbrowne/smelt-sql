@@ -616,6 +616,8 @@ fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) ->
         schema,
         ephemeral_models: std::collections::HashSet::new(),
         cross_engine_refs: std::collections::HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
