@@ -1860,6 +1860,6 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 48 | LSP hover wiring + PASSING completion + multi-level frame trace (Step 11 complete) | done | 221d7d8 | 2026-04-26 |
 | 49 | `WindowInScalarContext` deep-walk into scalar subqueries (Step 12 opens) | done | 179de87 | 2026-04-26 |
 | 50 | Built-in registry expansion: operators + missing aggregates + window funcs (Step 12 complete) | done | 20c5eb0 | 2026-04-26 |
-| 51 | `provenance` / `joins` validator (Step 13 opens) | done | | 2026-04-26 |
+| 51 | `provenance` / `joins` validator (Step 13 opens) | done | 75dd429 | 2026-04-26 |
 | 52 | Missing-provenance pushdown advisory + extern fragment-param reject | pending | | |
 | 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | pending | | |
