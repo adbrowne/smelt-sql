@@ -1862,4 +1862,4 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 50 | Built-in registry expansion: operators + missing aggregates + window funcs (Step 12 complete) | done | 20c5eb0 | 2026-04-26 |
 | 51 | `provenance` / `joins` validator (Step 13 opens) | done | 75dd429 | 2026-04-26 |
 | 52 | Missing-provenance pushdown advisory + extern fragment-param reject | done | 15e4ada | 2026-04-26 |
-| 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | | 2026-04-26 |
+| 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | 3a800d5 | 2026-04-26 |
