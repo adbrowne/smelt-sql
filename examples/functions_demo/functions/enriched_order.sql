@@ -4,7 +4,6 @@ provenance: { order_id: [orders.order_id], total: [orders.total], customer_id: [
 joins:
   - table: dim_customer
     on: orders.customer_id = dim_customer.customer_id
-    cardinality: "1:1"
 ---
 smelt.define enriched_order(orders: TableExpr<{order_id: BigInt, customer_id: Text, total: Numeric}>) -> TableExpr AS (
   SELECT

@@ -668,13 +668,10 @@ fn parse_joins_value(
                 });
                 continue;
             }
-            None => {
-                diags.push(FrontmatterDiagnostic {
-                    severity: FrontmatterSeverity::Warning,
-                    message: format!("frontmatter: ignoring `joins[{idx}]`: missing `cardinality`"),
-                });
-                continue;
-            }
+            // `cardinality` is optional — an absent entry means the join's
+            // cardinality is unknown. Phase 51's DeclaredCardinalityUnverifiable
+            // warning fires only when a non-empty string is present.
+            None => String::new(),
         };
         out.push(JoinSpec {
             table,

@@ -32,6 +32,7 @@ use smelt_types::{parse_type, DataType};
 pub mod backends;
 pub mod code_actions;
 pub mod function_body_check;
+pub mod provenance_validator;
 pub mod references;
 pub mod schema;
 pub mod type_inference;
@@ -405,6 +406,20 @@ pub enum DiagnosticCode {
     /// inline a non-terminating expansion.  Introduced in Phase 41 of
     /// smelt-functions.
     FunctionCallCycle,
+    /// Emitted when a function's declared `provenance:` entry lists a source
+    /// column not read by the body expression, or the body reads a column not
+    /// listed in the declared provenance. Anchored at the declaration's name
+    /// range. Introduced in Phase 51.
+    ProvenanceMismatch,
+    /// Emitted when a function's declared `joins:` entry names a table that
+    /// does not appear as a join alias in the body's outermost FROM clause.
+    /// Anchored at the declaration's name range. Introduced in Phase 51.
+    JoinsMismatch,
+    /// Emitted (Severity::Warning) for every declared join whose `cardinality`
+    /// field is non-empty. Cardinality is trusted, not verified against data
+    /// (§20E soundness caveat). Anchored at the declaration's name range.
+    /// Introduced in Phase 51.
+    DeclaredCardinalityUnverifiable,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -2412,6 +2427,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         .unwrap_or(false);
     for diag in provenance_unstable_diagnostics_for_file(db, file, unstable_schema) {
         DiagnosticAcc(diag).accumulate(db);
+    }
+
+    // Phase 51 — provenance/joins validator (only when unstable_schema: true).
+    if unstable_schema {
+        for diag in provenance_validator::provenance_validator_diagnostics_for_file(db, file) {
+            DiagnosticAcc(diag).accumulate(db);
+        }
     }
 
     // Phase 38 / Phase 42 — smelt.as_struct() backend-capability gate.

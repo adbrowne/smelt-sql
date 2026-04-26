@@ -334,6 +334,26 @@ const CASES: &[Case] = &[
     },
 ];
 
+/// Phase 51 broken fixtures — tested with `unstable_schema: true`.
+const PHASE51_CASES: &[Case] = &[
+    // Phase 51 — provenance declares a source column (dim.extra) that the body
+    // does not read. Must emit ProvenanceMismatch.
+    Case {
+        fixture: "fn_provenance_extra_col.sql",
+        companion: None,
+        code: DiagnosticCode::ProvenanceMismatch,
+        message_substring: "extra",
+    },
+    // Phase 51 — joins: declares dim_a but body only joins dim_b. Must emit
+    // JoinsMismatch for the undeclared join.
+    Case {
+        fixture: "fn_joins_mismatch.sql",
+        companion: None,
+        code: DiagnosticCode::JoinsMismatch,
+        message_substring: "dim_a",
+    },
+];
+
 fn broken_models_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
@@ -352,6 +372,24 @@ fn build_db(
 ) -> (Database, Workspace, Vec<SourceFile>) {
     let mut db = Database::default();
     let project = db.set_project_input(project_root.clone(), String::new());
+    let mut handles = Vec::with_capacity(files.len());
+    for (path, content) in files {
+        let sf = db.set_source_file(path.clone(), content.clone(), project_root.clone());
+        handles.push(sf);
+    }
+    db.set_workspace(handles.clone(), vec![project]);
+    let ws = db.workspace();
+    (db, ws, handles)
+}
+
+fn build_db_with_yml(
+    project_root: PathBuf,
+    files: &[(PathBuf, String)],
+    smelt_yml_text: &str,
+) -> (Database, Workspace, Vec<SourceFile>) {
+    let mut db = Database::default();
+    let project = db.set_project_input(project_root.clone(), String::new());
+    db.set_project_smelt_yml(&project_root, smelt_yml_text.to_string());
     let mut handles = Vec::with_capacity(files.len());
     for (path, content) in files {
         let sf = db.set_source_file(path.clone(), content.clone(), project_root.clone());
@@ -384,6 +422,7 @@ fn no_orphan_fn_fixtures() {
     // All fixtures CASES covers — primary + companion entries.
     let mut covered: Vec<String> = CASES
         .iter()
+        .chain(PHASE51_CASES.iter())
         .flat_map(|c| std::iter::once(c.fixture).chain(c.companion))
         .map(|s| s.to_string())
         .collect();
@@ -555,6 +594,39 @@ fn every_broken_fn_fixture_emits_expected_diagnostic() {
             !matching.is_empty(),
             "fixture {fix} expected a {code:?} diagnostic containing {msg:?}, \
              got {diags:#?}",
+            fix = case.fixture,
+            code = case.code,
+            msg = case.message_substring,
+        );
+    }
+}
+
+#[test]
+fn phase51_provenance_broken_cases() {
+    let models_dir = broken_models_dir();
+    let project_root = models_dir.parent().unwrap().to_path_buf();
+    for case in PHASE51_CASES {
+        let fixture_path = models_dir.join(case.fixture);
+        let fixture_content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("fixture {} must exist: {e}", case.fixture));
+        let files = vec![(fixture_path.clone(), fixture_content)];
+        let (db, ws, handles) =
+            build_db_with_yml(project_root.clone(), &files, "unstable_schema: true\n");
+        let fixture_handle = handles[0];
+        let file_diags = file_diagnostics(&db, ws, fixture_handle);
+        let type_diags: Vec<_> =
+            check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, fixture_handle)
+                .into_iter()
+                .map(|d| d.0.clone())
+                .collect();
+        let diags: Vec<_> = file_diags.into_iter().chain(type_diags).collect();
+        let matching: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(case.code) && d.message.contains(case.message_substring))
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "fixture {fix} expected a {code:?} diagnostic containing {msg:?}, got {diags:#?}",
             fix = case.fixture,
             code = case.code,
             msg = case.message_substring,
