@@ -1853,6 +1853,80 @@ After Phase 53:
 
 **Commit.** `docs: functions guide, language-ref extensions, ROADMAP cleanup (Phase 54)`
 
+## Phase 56 — Wire `set_function_bodies()` through `CompilerRegistry` in production build/run paths
+
+**Goal.** Phase 55 added the `smelt_fn` / `smelt_as_struct` closure plumbing on `PrintContext` and the `set_function_bodies()` setter on `SqlCompiler`, but no production code path calls `set_function_bodies()` — only the new `as_struct_emission_tests.rs` does. As a result, when the user runs `smelt build` against a project that contains `smelt.define` files, every `smelt.fn.*` call is emitted verbatim to the backend and fails at execution. This phase loads function bodies from the discovered `functions/` files and threads them through `CompilerRegistry` so production runs actually expand function calls.
+
+**Pre-conditions.** Phase 55.
+
+**TDD tests.**
+1. `smelt_fn_call_expanded_in_smelt_build` (new integration test under `crates/smelt-cli/tests/`) — workspace with a `functions/safe_divide.sql` and a model that calls `smelt.fn.safe_divide(revenue, cost)`; running the build path's compile step (not just `SqlCompiler::new()` in isolation) emits the expanded `CASE WHEN ... END` body, not the literal `smelt.fn.safe_divide(...)` text.
+2. `smelt_as_struct_expanded_in_smelt_build` — same harness, function body uses `smelt.as_struct(o EXCEPT customer_id)`; emitted SQL contains the DuckDB struct literal form, capability gate honoured.
+3. `compiler_registry_set_function_bodies_propagates_to_all_targets` — `CompilerRegistry::set_function_bodies(bodies)` propagates the map to every contained `SqlCompiler` (mirrors `set_upstream_schemas_all`'s shape so cross-engine projects work).
+4. `function_body_with_unbalanced_braces_emits_diagnostic_not_panic` — bad function body (already caught by existing diagnostics) does not panic the body-loader; missing-body case (e.g. function file failed to parse) yields a sensible compile-time error rather than emitting `smelt.fn.*` to the backend.
+5. `regression_legacy_project_without_functions_unchanged` — projects with no `functions/` directory continue to compile identically to today (no extra Salsa work, no behaviour change).
+
+**Implementation.**
+- Add `pub fn set_function_bodies_all(&mut self, bodies: FnBodyMap)` on `CompilerRegistry` (parallels `set_upstream_schemas_all`); each contained `SqlCompiler` gets the same `Arc<FnBodyMap>` clone.
+- New helper in `crates/smelt-cli/src/compiler.rs` (or a small module under `commands/`): `pub fn build_fn_body_map(db: &Database, ws: Workspace) -> FnBodyMap`. For each function file in the workspace, walk the parsed CST, locate each `smelt.define` node, and extract `(fn_name, params: Vec<String>, body_text: String)`. Use the existing `function_body()` query (`crates/smelt-db/src/lib.rs:839`) for the byte range, then slice `file_text` to obtain the body source. Param names come from `define.params()`.
+- In `crates/smelt-cli/src/commands/run.rs` (the actual execution entry point that `build.rs` chains into via `super::run::run`), after `let mut compilers = CompilerRegistry::new(...)` (line 282) and after `set_upstream_schemas_all`: build the body map and call `compilers.set_function_bodies_all(...)`. Function discovery is already done — `function_files` are part of `models` since the user discovers them in `build.rs`.
+- Same wiring in `crates/smelt-cli/src/commands/backbuild.rs` (also uses `CompilerRegistry::new`), and in `crates/smelt-ui/src/run_manager.rs` if it constructs compilers directly (Phase 55 already touched the `PrintContext` site there).
+
+**Example fixtures.** Reuse `examples/functions_demo/`. Add (or promote) a model under `examples/functions_demo/models/` that calls `smelt.fn.safe_divide` and assert via the new integration test that `smelt build --target duckdb` produces an executable SQL string. The DuckDB run is optional for CI speed — the SQL-shape assertion is the load-bearing check.
+
+**Review checklist.** Production `smelt build` no longer emits `smelt.fn.*` verbatim. `smelt.as_struct` capability errors fire at compile time (already wired in Phase 42), not at backend-execution time. No regression on projects without functions. Body extraction is pure (no Salsa import inside the helper — the Salsa call is in the orchestration layer per the pure-function rule in `CLAUDE.md`).
+
+**Commit.** `cli: load function bodies into CompilerRegistry during smelt build/run (Phase 56)`
+
+### Phase 57 — End-to-end execution test: `smelt build` runs a project using `smelt.fn.*` + `smelt.as_struct`
+
+**Goal.** Phase 56 makes the SQL emission path expand function bodies, but until we actually run the resulting SQL against DuckDB we can't claim the feature works end-to-end. This phase adds an executing integration test (gated behind the existing DuckDB test infrastructure used elsewhere in `smelt-cli`) that builds a representative `examples/functions_demo`-style project and verifies the materialised tables match expected rows.
+
+**Pre-conditions.** Phase 56.
+
+**TDD tests.**
+1. `e2e_safe_divide_executes_against_duckdb` — workspace with a `safe_divide` function + a model that calls it on a seed table; `smelt build --target duckdb` runs to completion; the resulting table contains the expected divided values (and `NULL` for divide-by-zero rows).
+2. `e2e_as_struct_emits_executable_struct_literal` — workspace with a function that returns `smelt.as_struct(...)`; built model materialises a table with a `STRUCT` column whose fields match the source columns minus the `EXCEPT` list.
+3. `e2e_passing_clause_substitution_executes` — workspace using a `TableExpr`-shaped function with a PASSING clause for `metrics`; built SQL runs and aggregates correctly.
+4. `e2e_cross_target_function_call` — same function definition compiled for both DuckDB and (a second active backend if available in CI; otherwise just snapshot the Spark SQL for review). Catches divergence between dialect-specific struct literal forms.
+
+**Implementation.**
+- Promote or write `examples/functions_demo/models/order_totals_using_safe_divide.sql`, `models/orders_packed.sql` (uses `as_struct`), `models/session_rollup_passing.sql` (uses PASSING). Seeds for each.
+- Test harness goes in `crates/smelt-cli/tests/functions_e2e.rs`. Use the existing DuckDB-fixture helpers (search for the pattern used by `crates/smelt-cli/tests/example_diagnostics.rs` or similar). Run `BuildArgs` end-to-end through `commands::build::build()` — not just the compile step — so seeds, run, and result-fetching all execute.
+- Acceptance: `cargo test -p smelt-cli --test functions_e2e` passes. CI guard skips when `DUCKDB_LIB_DIR` is unset (same pattern other e2e tests use).
+- Update `examples/functions_demo/README.md` (if present) or add a one-liner note that the project doubles as the smelt-functions e2e target.
+
+**Example fixtures.** As above — `examples/functions_demo/` becomes the canonical end-to-end functions demo and CI regression target.
+
+**Review checklist.** Tests run actual SQL through DuckDB, not just snapshot string matches. `smelt.as_struct` produces a real STRUCT column readable from DuckDB. Failures point clearly at "emission" vs "type-check" via separate test names. The `examples/functions_demo` project is now both a documentation example and a regression suite.
+
+**Commit.** `cli+examples: end-to-end execution tests for smelt.fn.* and smelt.as_struct (Phase 57)`
+
+### Phase 58 — `EXTRACT(part FROM expr)` parser robustness so generators can include it
+
+**Goal.** Today `crates/smelt-parser/src/parser.rs:3172` already has `parse_extract_expr` and basic unit tests pass for `SELECT EXTRACT(EPOCH FROM ts) FROM events`. But `docs/TODO.md` records that `ExprKind::Extract` (and `ExprKind::MakeTemporal`) are explicitly excluded from `expr_kind_strategy()` in `crates/smelt-db/tests/prop_helpers/generators.rs:855` because the proptest harness's alias-extraction / SELECT-item-parsing path mis-handles `FROM` inside the function args in some cases. This phase reproduces the failure with a minimal proptest seed, fixes the underlying bug, and re-enables the generator entries.
+
+**Pre-conditions.** None (independent of the function-body wiring phases).
+
+**TDD tests.**
+1. `extract_inside_select_item_with_alias` (parser unit test) — `SELECT EXTRACT(YEAR FROM dt) AS y FROM t` parses with `dt` correctly inside the EXTRACT expression and `y` as the alias of the outer SELECT item; the outer FROM clause still resolves to `t`. Currently passes per existing test at `parser.rs:6347`; included as a regression baseline.
+2. `extract_chained_with_arithmetic` — `SELECT EXTRACT(EPOCH FROM ts1) - EXTRACT(EPOCH FROM ts2) AS diff FROM t` (matches the existing `parser.rs:6376` test); regression baseline.
+3. `extract_in_smelt_db_typed_expression` (new in `smelt-db/tests/`) — feed the same SQL through the `smelt-db` semantic-analysis pipeline (the layer the proptest harness exercises); verify alias extraction recovers `expr_0` correctly. **This is the failing test that justifies the phase** — capture whatever the proptest seed reproduces.
+4. `proptest_extract_no_longer_excluded` — re-enable `ExprKind::Extract` in `expr_kind_strategy()` and run the full prop suite locally with `PROPTEST_CASES=200`; record any new divergences in `divergences.rs` or fix.
+5. `proptest_make_temporal_no_longer_excluded` — same for `ExprKind::MakeTemporal` (DATE/TIMESTAMP construction).
+
+**Implementation.**
+- Reproduce: write the failing test from #3 first. Likely candidates for the bug are (a) the alias-extraction code in `smelt-db` walking past the inner `FROM` token (it should skip CSTs of kind `EXTRACT_EXPR` since the parser already structurally encloses them), or (b) the SELECT-item splitter in the conformance-test wrapper at `crates/smelt-db/tests/prop_helpers/` that uses textual `FROM` matching. Likely fix: switch to CST-based traversal that respects `EXTRACT_EXPR` boundaries, instead of textual scanning.
+- Once green, remove the `ExprKind::Extract` / `ExprKind::MakeTemporal` exclusion comment from `generators.rs:855`-`873` (current strategy) and add both to `prop_oneof!`.
+- Verify against DuckDB: EXTRACT(part FROM ts) should return `BIGINT` for most parts, `DOUBLE` for EPOCH (already documented in `docs-site/docs/reference/language.md:213-225`).
+- Update `docs/TODO.md`: check off the EXTRACT parser-support item (line 62) and the related entry in the "Known DuckDB Incompatibilities" section.
+
+**Example fixtures.** No new model fixtures needed; the proptest oracle is the regression suite.
+
+**Review checklist.** `parser.rs` EXTRACT tests still pass; the `smelt-db` semantic layer no longer mishandles EXTRACT; both `ExprKind::Extract` and `ExprKind::MakeTemporal` appear in `expr_kind_strategy()`; `cargo test -p smelt-db --test type_property_tests` runs at least 200 cases without uncategorised divergences. `docs/TODO.md` cleared of the EXTRACT entries.
+
+**Commit.** `parser+db: structural EXTRACT handling lets proptests re-enable Extract/MakeTemporal (Phase 58)`
+
 ## Progress tracking — Phases 39 to 53
 
 Updated as phases complete. Same format as the earlier progress-tracking table.
@@ -1877,3 +1951,6 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | 3a800d5 | 2026-04-26 |
 | 54 | End-user documentation: functions guide + language-ref + ROADMAP cleanup | done | ae8e58f | 2026-04-27 |
 | 55 | `smelt.as_struct()` + `smelt.fn.*` SQL emission wired into `smelt build` | done | 6d6e5b1 | 2026-04-27 |
+| 56 | Wire `set_function_bodies()` through `CompilerRegistry` in production paths | planned | — | — |
+| 57 | End-to-end execution test: `smelt build` runs a project using `smelt.fn.*` + `smelt.as_struct` | planned | — | — |
+| 58 | `EXTRACT(part FROM expr)` parser robustness so generators can include it | planned | — | — |
