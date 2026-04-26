@@ -1876,3 +1876,4 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 52 | Missing-provenance pushdown advisory + extern fragment-param reject | done | 15e4ada | 2026-04-26 |
 | 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | 3a800d5 | 2026-04-26 |
 | 54 | End-user documentation: functions guide + language-ref + ROADMAP cleanup | done | ae8e58f | 2026-04-27 |
+| 55 | `smelt.as_struct()` + `smelt.fn.*` SQL emission wired into `smelt build` | done | 6d6e5b1 | 2026-04-27 |
