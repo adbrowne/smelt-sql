@@ -853,6 +853,10 @@ pub fn column_pool_strategy() -> impl Strategy<Value = Vec<TypedSource>> {
 
 /// Strategy that picks an expression kind.
 pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
+    // `Extract` and `MakeTemporal` were previously excluded due to a documented
+    // (but stale) parser/harness issue around the `FROM` keyword inside
+    // `EXTRACT(part FROM expr)`. Phase 58 (April 2026) verified the bug had
+    // already been fixed end-to-end and re-enabled both entries here.
     prop_oneof![
         2 => Just(ExprKind::ColumnRef),
         3 => Just(ExprKind::Function),
@@ -871,6 +875,8 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::ScalarSubquery),
         1 => Just(ExprKind::Like),
         1 => Just(ExprKind::Regex),
+        1 => Just(ExprKind::Extract),
+        1 => Just(ExprKind::MakeTemporal),
     ]
 }
 
