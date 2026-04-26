@@ -1956,6 +1956,6 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | 3a800d5 | 2026-04-26 |
 | 54 | End-user documentation: functions guide + language-ref + ROADMAP cleanup | done | ae8e58f | 2026-04-27 |
 | 55 | `smelt.as_struct()` + `smelt.fn.*` SQL emission wired into `smelt build` | done | 6d6e5b1 | 2026-04-27 |
-| 56 | Wire `set_function_bodies()` through `CompilerRegistry` in production paths | done | TBD | 2026-04-27 |
+| 56 | Wire `set_function_bodies()` through `CompilerRegistry` in production paths | done | 75b8cea | 2026-04-27 |
 | 57 | End-to-end execution test: `smelt build` runs a project using `smelt.fn.*` + `smelt.as_struct` | planned | — | — |
 | 58 | `EXTRACT(part FROM expr)` parser robustness so generators can include it | planned | — | — |
