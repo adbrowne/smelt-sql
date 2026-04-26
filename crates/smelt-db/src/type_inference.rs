@@ -888,13 +888,15 @@ pub struct WindowInScalarContextInfo {
     pub expression_text: String,
 }
 
-/// Pure check: collect every expression in WHERE / GROUP BY whose synthesised
-/// kind is [`ExprKind::Window`] (Phase 14, §16 #24).
+/// Pure check: collect every expression in WHERE / GROUP BY / HAVING whose
+/// synthesised kind is [`ExprKind::Window`] (Phase 14, §16 #24).
 ///
-/// Returns one entry per offending expression. HAVING / ORDER BY / ON
-/// clauses are deliberately not checked here — Phase 14's scope is
-/// `WHERE` and `GROUP BY` only (the two TDD tests). Future phases may
-/// extend the helper.
+/// Also recurses into scalar subqueries nested inside those clauses so that
+/// `WHERE col > (SELECT ROW_NUMBER() OVER (...) FROM t)` is flagged as a
+/// `"WHERE"` violation (Phase 49).
+///
+/// FROM-clause subqueries are intentionally excluded: they are not scalar
+/// contexts, and window functions are valid inside derived-table SELECT lists.
 pub fn check_window_in_scalar_contexts(
     select_stmt: &SelectStmt,
     ctx: &TypeContext,
@@ -903,29 +905,133 @@ pub fn check_window_in_scalar_contexts(
 
     if let Some(where_clause) = select_stmt.where_clause() {
         if let Some(expr) = where_clause.expression() {
-            if infer_expression_kind(&expr, ctx) == ExprKind::Window {
-                out.push(WindowInScalarContextInfo {
-                    clause: "WHERE",
-                    range: expr.text_range(),
-                    expression_text: expr.text().trim().to_string(),
-                });
-            }
+            check_expr_and_scalar_subqueries(&expr, "WHERE", ctx, &mut out);
         }
     }
 
     if let Some(group_by) = select_stmt.group_by_clause() {
         for expr in group_by.expressions() {
-            if infer_expression_kind(&expr, ctx) == ExprKind::Window {
-                out.push(WindowInScalarContextInfo {
-                    clause: "GROUP BY",
-                    range: expr.text_range(),
-                    expression_text: expr.text().trim().to_string(),
-                });
-            }
+            check_expr_and_scalar_subqueries(&expr, "GROUP BY", ctx, &mut out);
+        }
+    }
+
+    if let Some(having_clause) = select_stmt.having_clause() {
+        if let Some(expr) = having_clause.expression() {
+            check_expr_and_scalar_subqueries(&expr, "HAVING", ctx, &mut out);
         }
     }
 
     out
+}
+
+/// Check a single expression in a scalar clause (WHERE / GROUP BY / HAVING):
+///
+/// 1. If the expression itself is `Window`-kinded, emit an error.
+/// 2. Recursively descend into any scalar subqueries found within the
+///    expression tree. For each scalar subquery found:
+///    - Check its SELECT list for Window-kinded expressions (a window function
+///      inside a scalar-subquery SELECT list is invalid because the subquery
+///      must return a scalar value).
+///    - Call [`check_window_in_scalar_contexts`] on it to catch violations in
+///      its nested WHERE / GROUP BY / HAVING clauses.
+///
+/// FROM-clause subqueries are **not** visited here — they live under
+/// `TABLE_REF` nodes, which are children of `FROM_CLAUSE`, which is a child
+/// of `SELECT_STMT`, not of an expression node.  Since we only enter this
+/// function from expression positions (WHERE / GROUP BY / HAVING), every
+/// `SUBQUERY` descendant of `expr` is guaranteed to be a scalar subquery.
+fn check_expr_and_scalar_subqueries(
+    expr: &Expr,
+    clause: &'static str,
+    ctx: &TypeContext,
+    out: &mut Vec<WindowInScalarContextInfo>,
+) {
+    use smelt_parser::SyntaxKind;
+
+    // Top-level: if this expression is Window-kinded, report it directly.
+    if infer_expression_kind(expr, ctx) == ExprKind::Window {
+        out.push(WindowInScalarContextInfo {
+            clause,
+            range: expr.text_range(),
+            expression_text: expr.text().trim().to_string(),
+        });
+    }
+
+    // Recurse into scalar subqueries nested inside this expression.
+    // All SUBQUERY nodes in an expression tree are scalar contexts (they are
+    // not FROM-clause derived tables), so we check their inner SELECT
+    // statements with the same outer clause name.
+    for node in expr.syntax().descendants() {
+        if node.kind() == SyntaxKind::SUBQUERY {
+            if let Some(subquery) = Subquery::cast(node) {
+                if let Some(inner_select) = subquery.select_stmt() {
+                    // (a) Check the inner SELECT's own SELECT list: a window
+                    // function in the select list of a scalar subquery is
+                    // invalid because the subquery must produce a scalar value.
+                    check_scalar_subquery_select_list(&inner_select, clause, out);
+
+                    // (b) Recurse into the inner SELECT's WHERE/GROUP BY/HAVING
+                    // clauses (and any further nested scalar subqueries there).
+                    out.extend(check_window_in_scalar_contexts(&inner_select, ctx));
+                }
+            }
+        }
+    }
+}
+
+/// For a [`SelectStmt`] that appears as a scalar subquery, check each item in
+/// its SELECT list. If any item contains a Window-kinded expression (directly
+/// or buried inside an aggregate wrapping a window call), emit an entry with
+/// `clause` preserved from the outer scalar context.
+///
+/// This is needed because `infer_expression_kind` treats outer function calls
+/// by their registry kind (e.g. `MAX(ROW_NUMBER() OVER (...))` → `Agg`), so a
+/// raw top-level kind check would miss the nested window expression. Here we
+/// walk the expression's descendants looking for any node with an OVER clause.
+fn check_scalar_subquery_select_list(
+    inner_select: &SelectStmt,
+    clause: &'static str,
+    out: &mut Vec<WindowInScalarContextInfo>,
+) {
+    use smelt_parser::SyntaxKind;
+
+    let Some(select_list) = inner_select.select_list() else {
+        return;
+    };
+    for item in select_list.items() {
+        let Some(item_expr) = item.expression() else {
+            continue;
+        };
+        // Walk every descendant of this select-item expression looking for
+        // any EXPRESSION node that carries an OVER clause (i.e. a window
+        // function call).
+        //
+        // We look for EXPRESSION nodes (not FUNCTION_CALL) because the parser
+        // puts the WINDOW_SPEC as a sibling of the FUNCTION_CALL inside a
+        // parent EXPRESSION: `EXPRESSION { FUNCTION_CALL { ARG_LIST } WINDOW_SPEC }`.
+        // An `Expr` wrapping that EXPRESSION node will find the WINDOW_SPEC via
+        // `window_spec()`, while an `Expr` wrapping the inner FUNCTION_CALL won't.
+        //
+        // We do NOT use `infer_expression_kind` on the top-level item because an
+        // aggregate wrapping a window call (e.g. `MAX(ROW_NUMBER() OVER (...))`)
+        // would be classified as `Agg` by the registry lookup, hiding the inner
+        // window function.
+        for desc_node in item_expr.syntax().descendants() {
+            if desc_node.kind() == SyntaxKind::EXPRESSION {
+                if let Some(desc_expr) = Expr::cast(desc_node) {
+                    if desc_expr.window_spec().is_some() {
+                        out.push(WindowInScalarContextInfo {
+                            clause,
+                            range: desc_expr.text_range(),
+                            expression_text: desc_expr.text().trim().to_string(),
+                        });
+                        // One hit per select item is sufficient.
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Infer the type of a CAST expression.
@@ -4047,6 +4153,86 @@ mod tests {
             via_qualified.map(|c| c.data_type.clone()),
             Some(DataType::Integer),
             "qualified lookup must ignore function params"
+        );
+    }
+
+    // ── Phase 49: check_window_in_scalar_contexts recurses into subqueries ──
+
+    fn parse_select(sql: &str) -> smelt_parser::ast::SelectStmt {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        file.select_stmt().expect("no SelectStmt in parsed SQL")
+    }
+
+    /// WHERE contains a scalar subquery whose body includes a window function.
+    /// Expected: at least one WindowInScalarContextInfo with clause "WHERE".
+    #[test]
+    fn where_subquery_with_window_func_errors() {
+        let sql = "SELECT col FROM t WHERE col > \
+                   (SELECT MAX(ROW_NUMBER() OVER (PARTITION BY col ORDER BY col)) FROM t)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.iter().any(|i| i.clause == "WHERE"),
+            "expected a WindowInScalarContext error in WHERE for a subquery containing \
+             a window function, got: {infos:?}"
+        );
+    }
+
+    /// HAVING contains a scalar subquery whose body includes a window function.
+    /// Expected: at least one WindowInScalarContextInfo with clause "HAVING".
+    #[test]
+    fn having_subquery_with_window_func_errors() {
+        let sql = "SELECT col, COUNT(*) FROM t GROUP BY col \
+                   HAVING COUNT(*) > (SELECT AVG(RANK() OVER (ORDER BY col)) FROM t)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.iter().any(|i| i.clause == "HAVING"),
+            "expected a WindowInScalarContext error in HAVING for a subquery containing \
+             a window function, got: {infos:?}"
+        );
+    }
+
+    /// Window function in SELECT-list subquery — must NOT produce any error
+    /// (regression guard: only WHERE / GROUP BY / HAVING are restricted).
+    ///
+    /// The outer query intentionally includes a WHERE clause so that the
+    /// checker has a non-trivial scalar context to walk.  A buggy
+    /// implementation that descended into SELECT-list subqueries and
+    /// misattributed the inner window function to the outer WHERE would
+    /// emit a spurious error here — this test catches that regression.
+    #[test]
+    fn select_list_subquery_with_window_func_allowed() {
+        let sql = "SELECT (SELECT ROW_NUMBER() OVER (ORDER BY col) FROM inner_t) AS rn, col \
+             FROM outer_t \
+             WHERE col > 0";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.is_empty(),
+            "window function inside a SELECT-list subquery must not be flagged \
+             even when the outer query has a WHERE clause, got: {infos:?}"
+        );
+    }
+
+    /// Window function in FROM-clause derived-table — must NOT produce any error
+    /// (regression guard: FROM subqueries are not scalar contexts).
+    #[test]
+    fn from_clause_subquery_with_window_func_allowed() {
+        let sql = "SELECT * FROM (SELECT ROW_NUMBER() OVER (ORDER BY col) AS rn FROM t) sub";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.is_empty(),
+            "window function inside a FROM-clause subquery must not be flagged, \
+             got: {infos:?}"
         );
     }
 }

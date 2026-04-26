@@ -316,6 +316,22 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::ParameterShadowsColumn,
         message_substring: "name",
     },
+    // Phase 49 — scalar subquery in WHERE contains a window function.
+    // The recursive scalar-subquery check must surface `WindowInScalarContext`.
+    Case {
+        fixture: "fn_window_in_subquery_where.sql",
+        companion: None,
+        code: DiagnosticCode::WindowInScalarContext,
+        message_substring: "WHERE",
+    },
+    // Phase 49 — scalar subquery in HAVING contains a window function.
+    // The HAVING check (new in Phase 49) must surface `WindowInScalarContext`.
+    Case {
+        fixture: "fn_window_in_subquery_having.sql",
+        companion: None,
+        code: DiagnosticCode::WindowInScalarContext,
+        message_substring: "HAVING",
+    },
 ];
 
 fn broken_models_dir() -> PathBuf {
