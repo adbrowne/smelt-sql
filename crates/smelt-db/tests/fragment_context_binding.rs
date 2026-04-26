@@ -89,7 +89,8 @@ fn fragment_argument_column_valid_in_context() {
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("filters".to_string(), (arg_expr, arg_range))]);
 
-    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+    let diags =
+        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
     let missing: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))
@@ -131,7 +132,8 @@ fn fragment_argument_column_missing_from_context_errors() {
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("filters".to_string(), (arg_expr, arg_range))]);
 
-    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+    let diags =
+        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
     let missing: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))
@@ -181,7 +183,8 @@ fn explicit_annotation_wider_than_inference_errors() {
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("pred".to_string(), (arg_expr, arg_range))]);
 
-    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+    let diags =
+        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
     let too_wide: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::AnnotationTooWide))
@@ -237,7 +240,8 @@ fn explicit_annotation_narrower_than_inference_allowed() {
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("pred".to_string(), (arg_expr, arg_range))]);
 
-    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+    let diags =
+        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
     let too_wide: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::AnnotationTooWide))
@@ -279,7 +283,9 @@ fn agg_kind_context_binding_checks() {
         let (arg_expr, arg_range, arg_text) = parse_arg_expr("revenue + 1");
         let bindings: HashMap<String, (Expr, TextRange)> =
             HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
-        let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+        let diags = check_fragment_context_bindings(
+            &sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text,
+        );
         let kind_diags: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
@@ -295,7 +301,9 @@ fn agg_kind_context_binding_checks() {
         let (arg_expr, arg_range, arg_text) = parse_arg_expr("SUM(revenue)");
         let bindings: HashMap<String, (Expr, TextRange)> =
             HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
-        let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+        let diags = check_fragment_context_bindings(
+            &sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text,
+        );
         let kind_diags: Vec<_> = diags
             .iter()
             .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))

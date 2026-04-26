@@ -184,7 +184,8 @@ smelt.define session_rollup(
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
 
-    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+    let diags =
+        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
     let missing: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))
@@ -247,7 +248,8 @@ smelt.define session_rollup(
     let bindings: HashMap<String, (Expr, TextRange)> =
         HashMap::from([("metrics".to_string(), (arg_expr, arg_range))]);
 
-    let diags = check_fragment_context_bindings(&sig, &select, &body_ctx, &bindings, &arg_text);
+    let diags =
+        check_fragment_context_bindings(&sig, &select, &body_ctx, &body_ctx, &bindings, &arg_text);
     let missing: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))

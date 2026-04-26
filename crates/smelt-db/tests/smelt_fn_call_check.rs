@@ -719,3 +719,199 @@ fn default_fills_omitted_passing() {
         "omitted PASSING for defaulted parameter should produce no diagnostics, got {bad_diags:?}"
     );
 }
+
+// ─── Phase 44b — Fragment param reference in PASSING body ────────────────────
+
+/// Inner function: `inner_agg(source: TableExpr, metrics: SelectItems<Agg>) -> TableExpr`.
+/// Splices `metrics` into a SELECT list.
+const INNER_AGG_FN_SRC: &str = "\
+smelt.define inner_agg(\
+    source: TableExpr, \
+    metrics: SelectItems<Agg> = ()\
+) -> TableExpr AS (\
+    SELECT metrics FROM source GROUP BY 1\
+)\n";
+
+/// Outer function: wraps `inner_agg`, forwarding its own `metrics: SelectItems<Agg>`
+/// through to the inner call via `PASSING metrics AS (metrics)`.
+const OUTER_WRAPPER_FN_SRC: &str = "\
+smelt.define outer_wrapper(\
+    source: TableExpr, \
+    metrics: SelectItems<Agg> = ()\
+) -> TableExpr AS (\
+    WITH base AS (\
+        smelt.fn.inner_agg(source)\
+        PASSING metrics AS (metrics)\
+    )\
+    SELECT * FROM base\
+)\n";
+
+#[test]
+fn fragment_param_reference_in_passing_body_inherits_kind() {
+    // Phase 44b TDD test 2: when the outer function `outer_wrapper` has a
+    // `metrics: SelectItems<Agg>` parameter and its body passes that param
+    // to an inner call's `metrics: SelectItems<Agg>` parameter via
+    // `PASSING metrics AS (metrics)`, the bare `metrics` reference inside
+    // the PASSING body must NOT emit `FragmentKindMismatch`.
+    //
+    // Without the fix, `infer_expression_kind` returns `Scalar` for the
+    // bare identifier `metrics`, causing a kind mismatch against `<Agg>`.
+    let root = PathBuf::from("/fake/project");
+    let inner_path = root.join("functions").join("inner_agg.sql");
+    let outer_path = root.join("functions").join("outer_wrapper.sql");
+    // Check the outer function definition for errors.
+    let (db, ws, files) = build_db(
+        root,
+        &[
+            (inner_path, INNER_AGG_FN_SRC),
+            (outer_path.clone(), OUTER_WRAPPER_FN_SRC),
+        ],
+    );
+    let outer_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, outer_file);
+    let kind_mismatch_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+        .collect();
+    assert!(
+        kind_mismatch_diags.is_empty(),
+        "Phase 44b: bare fragment-param reference in PASSING body should not emit \
+         FragmentKindMismatch, got: {kind_mismatch_diags:?}"
+    );
+}
+
+#[test]
+fn fragment_param_reference_exempt_from_splice_column_validation() {
+    // Phase 44b TDD test 3: the same PASSING body `(metrics)` should NOT emit
+    // `FragmentColumnMissing` for the parameter name. The parameter is a
+    // `SelectItems<Agg>` fragment — it forwards an opaque list, so there are
+    // no concrete column references to validate against the splice context.
+    let root = PathBuf::from("/fake/project2");
+    let inner_path = root.join("functions").join("inner_agg.sql");
+    let outer_path = root.join("functions").join("outer_wrapper.sql");
+    let (db, ws, files) = build_db(
+        root,
+        &[
+            (inner_path, INNER_AGG_FN_SRC),
+            (outer_path.clone(), OUTER_WRAPPER_FN_SRC),
+        ],
+    );
+    let outer_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, outer_file);
+    let col_missing_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))
+        .collect();
+    assert!(
+        col_missing_diags.is_empty(),
+        "Phase 44b: bare fragment-param reference in PASSING body should not emit \
+         FragmentColumnMissing, got: {col_missing_diags:?}"
+    );
+}
+
+#[test]
+fn non_fragment_param_reference_still_kind_checked() {
+    // Phase 44b TDD test 6 (negative regression guard): a literal integer `42`
+    // in a PASSING body for `SelectItems<Agg>` must still emit
+    // `FragmentKindMismatch` — the fix must not suppress all kind checks.
+    let root = PathBuf::from("/fake/project3");
+    let inner_path = root.join("functions").join("inner_agg.sql");
+    let outer_path = root.join("functions").join("bad_outer.sql");
+    let bad_outer_src = "\
+smelt.define bad_outer(\
+    source: TableExpr\
+) -> TableExpr AS (\
+    WITH base AS (\
+        smelt.fn.inner_agg(source)\
+        PASSING metrics AS (42)\
+    )\
+    SELECT * FROM base\
+)\n";
+    let (db, ws, files) = build_db(
+        root,
+        &[
+            (inner_path, INNER_AGG_FN_SRC),
+            (outer_path.clone(), bad_outer_src),
+        ],
+    );
+    let outer_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, outer_file);
+    let kind_mismatch_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::FragmentKindMismatch))
+        .collect();
+    assert!(
+        !kind_mismatch_diags.is_empty(),
+        "Phase 44b: integer literal 42 in PASSING body for SelectItems<Agg> must still emit \
+         FragmentKindMismatch (regression guard), got no such diagnostic; all diags: {diags:?}"
+    );
+}
+
+#[test]
+fn non_param_column_in_fragment_body_still_validated() {
+    // Phase 44b TDD test 7 (negative regression guard): when the PASSING body
+    // contains a non-fragment-param bare column inside an aggregate call, the
+    // column-walk gate must NOT suppress validation.
+    //
+    // Scenario:
+    //   - `col_agg_fn` has `src: TableExpr` and `metrics: SelectItems<Agg, src>`.
+    //   - A model calls `col_agg_fn(smelt.ref('orders'))` with
+    //     `PASSING metrics AS (COUNT(nonexistent_col))`.
+    //   - `nonexistent_col` is NOT a fragment param in `body_ctx`, so
+    //     `is_bare_fragment_param_ref` returns false.
+    //   - `COUNT(...)` is Agg-kind — the kind check passes.
+    //   - `smelt.ref('orders')` has no defined schema in this test, so the
+    //     inferred splice context for `src` is empty.
+    //   - `nonexistent_col` is not in the empty inferred set →
+    //     `FragmentColumnMissing` must fire.
+    //
+    // This proves the exemption is narrow: only bare fragment-param refs
+    // (e.g. `PASSING metrics AS (metrics)`) bypass column validation — all
+    // other column references are still checked. The test WILL fail if
+    // `is_bare_fragment_param_ref` is accidentally broadened to suppress
+    // validation for non-fragment-param columns.
+    let root = PathBuf::from("/fake/project4");
+    let fn_path = root.join("functions").join("col_agg_fn.sql");
+    let model_path = root.join("models").join("uses_col_agg_fn.sql");
+
+    // `col_agg_fn` uses `SelectItems<Agg, src>` so the splice context
+    // is the schema of `src`. At call time `src` has no known columns
+    // (smelt.ref('orders') is not defined in this test workspace) →
+    // inferred_set is empty → any column ref in the PASSING body that is
+    // not a fragment param will emit FragmentColumnMissing.
+    let fn_src = "\
+smelt.define col_agg_fn(\
+    src: TableExpr, \
+    metrics: SelectItems<Agg, src> = ()\
+) -> TableExpr AS (\
+    SELECT metrics FROM src GROUP BY 1\
+)\n";
+    // COUNT is Agg-kind so the kind check passes. `nonexistent_col` is not
+    // a fragment param → column walk runs → FragmentColumnMissing fires.
+    let model_src = "SELECT * FROM smelt.fn.col_agg_fn(smelt.ref('orders')) \
+         PASSING metrics AS (COUNT(nonexistent_col))\n";
+
+    let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
+    let model_file = files[1];
+
+    let diags = file_diagnostics(&db, ws, model_file);
+    let col_missing: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::FragmentColumnMissing))
+        .collect();
+    assert!(
+        !col_missing.is_empty(),
+        "Phase 44b regression guard: non-fragment-param column `nonexistent_col` in PASSING \
+         body must emit FragmentColumnMissing (column-walk must not be suppressed for \
+         non-fragment-param references); got no such diagnostic. All diags: {diags:?}"
+    );
+    assert!(
+        col_missing
+            .iter()
+            .any(|d| d.message.contains("nonexistent_col")),
+        "FragmentColumnMissing message should name `nonexistent_col`, got: {col_missing:?}"
+    );
+}

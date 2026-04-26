@@ -208,6 +208,13 @@ fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
         }
         let bound_type = param_binding_type(p);
         ctx.add_function_param(&p.name, TypedColumn::nullable(bound_type));
+        // Phase 44b: record SelectItems<Kind> parameters so that bare
+        // references to these params inside PASSING bodies inherit the
+        // declared kind (see `infer_expression_kind`'s fragment_param_kinds
+        // lookup).
+        if let Some(Ok(SmeltType::SelectItems { kind, .. })) = &p.type_ref {
+            ctx.add_fragment_param_kind(&p.name, *kind);
+        }
     }
     ctx
 }
@@ -1191,6 +1198,20 @@ pub fn check_smelt_fn_call(
         }
     }
 
+    // Phase 44b: after all parameters are bound, register
+    // `SelectItems<Kind>` parameters as fragment-param kinds in `body_ctx`.
+    // This allows bare references to these params inside nested PASSING
+    // bodies (which see `body_ctx` as their "caller_ctx") to inherit the
+    // correct kind via `infer_expression_kind`.
+    for p in &sig.params {
+        if p.name.is_empty() {
+            continue;
+        }
+        if let Some(Ok(SmeltType::SelectItems { kind, .. })) = &p.type_ref {
+            body_ctx.add_fragment_param_kind(&p.name, *kind);
+        }
+    }
+
     // Phase 45: pre-resolve the body so JOIN-aliased schemas are
     // visible to the shadow-warning check below — a parameter
     // colliding with a column on a JOIN-aliased schema must still
@@ -1350,10 +1371,13 @@ pub fn check_smelt_fn_call(
             // Phase 22: `body_ctx` now includes CTE schemas so that
             // `SelectItems<Kind, cte_name>` parameters can validate
             // caller fragments against the CTE's column set.
+            // Phase 44b: pass `ctx` (caller's context) so that kind inference
+            // for argument expressions is performed in the caller's scope.
             body_diags.extend(check_fragment_context_bindings(
                 &sig,
                 select_stmt,
                 &body_ctx,
+                ctx,
                 &bindings,
                 text,
             ));
@@ -2130,7 +2154,17 @@ pub fn extract_function_body_cte_schemas(
                         .and_then(|fc| fc.table_refs().find_map(|tr| tr.smelt_fn_call()))
                 });
 
-            if let Some(call) = inner_smelt_fn {
+            // Phase 44b: bare `smelt.fn.*` CTE body (produced when the
+            // CTE body is a `smelt.fn.foo(...) PASSING ...` call rather
+            // than a SELECT * FROM smelt.fn.foo(...) query).
+            let inner_smelt_fn_direct = if inner_smelt_fn.is_none() {
+                dfs.ctes.get(cte_name).and_then(|c| c.smelt_fn_call_body())
+            } else {
+                None
+            };
+
+            let fn_call_to_resolve = inner_smelt_fn.or(inner_smelt_fn_direct);
+            if let Some(call) = fn_call_to_resolve {
                 match smelt_fn_schema_lookup(&call) {
                     Some(cols) => {
                         for (col_name, typed_col) in &cols {
@@ -2411,8 +2445,27 @@ pub fn context_mismatch_diagnostics_for_fn(
 ///    expression must resolve against the inferred splice context columns.
 ///    Unknown column references emit [`DiagnosticCode::FragmentColumnMissing`].
 ///
+/// Return `true` when `expr` is a bare unqualified identifier that names a
+/// fragment-typed (`SelectItems<Kind>`) parameter registered in `ctx` (Phase 44b).
+///
+/// Used by [`check_fragment_context_bindings`] to skip column validation for
+/// PASSING bodies that simply forward an outer function's fragment parameter
+/// as-is (e.g. `PASSING metrics AS (metrics)`). There are no concrete column
+/// references in such an expression — it's an opaque splice that inherits its
+/// kind from the outer parameter declaration.
+fn is_bare_fragment_param_ref(expr: &Expr, ctx: &TypeContext) -> bool {
+    if let Some(col_ref) = expr.as_column_ref() {
+        if col_ref.qualifier().is_none() {
+            return ctx.is_fragment_param(col_ref.name());
+        }
+    }
+    false
+}
+
 /// `body_ctx` must already be seeded with the call-site [`TableExpr`] schemas
 /// (as `check_smelt_fn_call` does before calling this function).
+/// `caller_ctx` is the context at the call site — used for kind inference of
+/// argument expressions, which live in the caller's scope (Phase 44b).
 /// `text` is the call-site source text used to convert [`TextRange`]s to
 /// [`Range`]s.
 ///
@@ -2421,6 +2474,7 @@ pub fn check_fragment_context_bindings(
     sig: &FunctionSig,
     select: &SelectStmt,
     body_ctx: &TypeContext,
+    caller_ctx: &TypeContext,
     bindings: &std::collections::HashMap<String, (Expr, TextRange)>,
     text: &str,
 ) -> Vec<Diagnostic> {
@@ -2433,36 +2487,50 @@ pub fn check_fragment_context_bindings(
         }
 
         // 1. Kind check for SelectItems<Kind> parameters.
+        // Phase 44b: argument expressions live in the caller's scope, so kind
+        // inference uses `caller_ctx` (not the callee's `body_ctx`). This
+        // allows a bare reference to a fragment-typed parameter of the enclosing
+        // function to inherit that parameter's declared kind rather than
+        // defaulting to `Scalar`.
+        //
+        // If the arg is a bare reference to a fragment-typed parameter visible
+        // in `body_ctx` (i.e. it forwards the callee's own fragment param as-is,
+        // as in `PASSING metrics AS (metrics)`), skip the kind check entirely —
+        // the forwarding is always valid by construction.
         if let Some(Ok(SmeltType::SelectItems { kind: req_kind, .. })) = &param.type_ref {
             if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
-                let found_kind = infer_expression_kind(arg_expr, body_ctx);
-                let kind_ok = match req_kind {
-                    ExprKind::Scalar => true,
-                    ExprKind::Agg => matches!(found_kind, ExprKind::Agg | ExprKind::Window),
-                    ExprKind::Window => matches!(found_kind, ExprKind::Window),
-                };
-                if !kind_ok {
-                    let req_str = match req_kind {
-                        ExprKind::Scalar => "Scalar",
-                        ExprKind::Agg => "Agg",
-                        ExprKind::Window => "Window",
+                // Phase 44b: skip kind check for bare fragment-param references
+                // (these forward an opaque SelectItems value as-is).
+                if !is_bare_fragment_param_ref(arg_expr, body_ctx) {
+                    let found_kind = infer_expression_kind(arg_expr, caller_ctx);
+                    let kind_ok = match req_kind {
+                        ExprKind::Scalar => true,
+                        ExprKind::Agg => matches!(found_kind, ExprKind::Agg | ExprKind::Window),
+                        ExprKind::Window => matches!(found_kind, ExprKind::Window),
                     };
-                    let found_str = match found_kind {
-                        ExprKind::Scalar => "Scalar",
-                        ExprKind::Agg => "Agg",
-                        ExprKind::Window => "Window",
-                    };
-                    out.push(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format!(
-                            "Argument for `{}` in `{}` must be {}-kind or higher, \
-                             but found {}-kind expression",
-                            param.name, sig.name, req_str, found_str
-                        ),
-                        range: to_range(*arg_range, text),
-                        code: Some(DiagnosticCode::FragmentKindMismatch),
-                        data: None,
-                    });
+                    if !kind_ok {
+                        let req_str = match req_kind {
+                            ExprKind::Scalar => "Scalar",
+                            ExprKind::Agg => "Agg",
+                            ExprKind::Window => "Window",
+                        };
+                        let found_str = match found_kind {
+                            ExprKind::Scalar => "Scalar",
+                            ExprKind::Agg => "Agg",
+                            ExprKind::Window => "Window",
+                        };
+                        out.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "Argument for `{}` in `{}` must be {}-kind or higher, \
+                                 but found {}-kind expression",
+                                param.name, sig.name, req_str, found_str
+                            ),
+                            range: to_range(*arg_range, text),
+                            code: Some(DiagnosticCode::FragmentKindMismatch),
+                            data: None,
+                        });
+                    }
                 }
             }
         }
@@ -2537,6 +2605,14 @@ pub fn check_fragment_context_bindings(
 
         // 3. Fragment column validation.
         if let Some((arg_expr, _)) = bindings.get(&param.name) {
+            // Phase 44b: if the entire argument expression is a bare reference
+            // to a fragment-typed parameter of the enclosing function, skip
+            // column validation. The parameter forwards an opaque SelectItems
+            // value as-is — there are no concrete column references to validate
+            // against the splice context.
+            if is_bare_fragment_param_ref(arg_expr, body_ctx) {
+                continue;
+            }
             walk_expression_columns_with_visitor(
                 arg_expr,
                 body_ctx,

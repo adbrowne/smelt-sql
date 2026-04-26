@@ -3892,6 +3892,12 @@ impl<'a> Parser<'a> {
             self.finish_node();
         } else if self.at(VALUES_KW) {
             self.parse_values_clause();
+        } else if self.at_smelt_fn_trigger() {
+            // Phase 44b: CTE body is a bare `smelt.fn.*` call with optional
+            // PASSING clauses. Wrap in SUBQUERY so `Cte::query()` returns Some.
+            self.start_node(SUBQUERY);
+            self.parse_smelt_fn_call();
+            self.finish_node();
         } else {
             self.error("Expected SELECT, WITH, or VALUES in CTE".to_string());
         }
@@ -7543,6 +7549,31 @@ LIMIT 100
             parse.errors.is_empty(),
             "anonymous tail with no spread in body must not produce errors, got: {:?}",
             parse.errors
+        );
+    }
+
+    // ---- Phase 44b: CTE body as bare smelt.fn.* call ----
+
+    #[test]
+    fn cte_body_accepts_bare_smelt_fn_call() {
+        // Phase 44b TDD test: a CTE body that is a bare `smelt.fn.*` call with
+        // PASSING clauses must parse without any "Expected SELECT, WITH, or
+        // VALUES in CTE" error.
+        let sql = "WITH base AS (\n    smelt.fn.session_rollup(source, u, ts)\n    PASSING metrics AS (COUNT(*))\n)\nSELECT * FROM base";
+        let result = parse(sql);
+        // Must not contain "Expected SELECT, WITH, or VALUES in CTE"
+        for err in &result.errors {
+            assert!(
+                !err.message
+                    .contains("Expected SELECT, WITH, or VALUES in CTE"),
+                "Parser should accept smelt.fn call as CTE body, got error: {}",
+                err.message
+            );
+        }
+        assert!(
+            result.errors.is_empty(),
+            "Expected no parse errors, got: {:?}",
+            result.errors
         );
     }
 }

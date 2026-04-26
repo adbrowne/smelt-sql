@@ -2675,6 +2675,13 @@ impl Subquery {
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
     }
+
+    /// Phase 44b: if the subquery's body is a bare `smelt.fn.*` call
+    /// (produced when a CTE body is `smelt.fn.foo(...) PASSING ...`),
+    /// return that call. Returns `None` for SELECT-shaped subqueries.
+    pub fn smelt_fn_call_body(&self) -> Option<SmeltFnCall> {
+        self.0.children().find_map(SmeltFnCall::cast)
+    }
 }
 
 /// BETWEEN expression (expr BETWEEN low AND high)
@@ -3140,6 +3147,13 @@ impl Cte {
     /// Get the query (SELECT statement)
     pub fn query(&self) -> Option<Subquery> {
         self.0.children().find_map(Subquery::cast)
+    }
+
+    /// Phase 44b: if this CTE's body is a bare `smelt.fn.*` call
+    /// (produced when a CTE body is `smelt.fn.foo(...) PASSING ...`),
+    /// return that call directly. Returns `None` for SELECT-shaped CTEs.
+    pub fn smelt_fn_call_body(&self) -> Option<SmeltFnCall> {
+        self.query()?.smelt_fn_call_body()
     }
 
     /// Get the column names from the optional column list

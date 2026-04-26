@@ -1853,7 +1853,7 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 42 | `smelt.as_struct` lowering wired in + capability gate broadened | done | 3bac61d | 2026-04-25 |
 | 43 | Frontmatter YAML parser via `serde_yaml` (Step 9 complete) | done | 9594d15 | 2026-04-26 |
 | 44 | Canonical fixture restoration: `safe_divide` tighten (Step 10 opens) — partial close, #8 carved to 44b | done | 3856027 | 2026-04-26 |
-| 44b | Fragment-forward parser + type-system support; ship `monitored_session_rollup` (closes finding #8) | pending | | |
+| 44b | Fragment-forward parser + type-system support; ship `monitored_session_rollup` (closes finding #8) | done | | 2026-04-26 |
 | 45 | JOIN aliases visible in `TableExpr`-returning function bodies | done | 8e5fe6a | 2026-04-26 |
 | 46 | `TableExpr` argument shapes: CTEs, derived tables, subqueries | done | 1c39757 | 2026-04-26 |
 | 47 | Cross-function CTE schema inference: drop opaque-CTE suppression (Step 10 complete) | done | c89d2b7 | 2026-04-26 |

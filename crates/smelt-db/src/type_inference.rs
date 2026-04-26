@@ -65,6 +65,14 @@ pub struct TypeContext {
     /// `UnknownIdentifier` diagnostics for columns that come from opaque-schema
     /// CTEs. Introduced in Phase 22 of smelt-functions.
     opaque_ctes: std::collections::HashSet<String>,
+    /// Fragment-typed parameters (`SelectItems<Kind>`) seeded during function
+    /// body checks. Maps param name → declared [`ExprKind`] so that
+    /// [`infer_expression_kind`] can return the correct kind for bare
+    /// references to these params inside `PASSING` bodies (Phase 44b).
+    ///
+    /// A bare identifier that matches a key in this map inherits its declared
+    /// kind instead of falling through to the default `Scalar` return value.
+    fragment_param_kinds: HashMap<String, ExprKind>,
     /// Expected return type for the expression currently being inferred
     /// (bidirectional inference, Phase 27, §16 #14 Decision 14).
     ///
@@ -93,6 +101,7 @@ impl PartialEq for TypeContext {
             && self.tableexpr_param_schemas == other.tableexpr_param_schemas
             && self.row_var_env == other.row_var_env
             && self.opaque_ctes == other.opaque_ctes
+            && self.fragment_param_kinds == other.fragment_param_kinds
             && self.expected_return == other.expected_return
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
@@ -113,6 +122,7 @@ impl Clone for TypeContext {
             tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
             row_var_env: self.row_var_env.clone(),
             opaque_ctes: self.opaque_ctes.clone(),
+            fragment_param_kinds: self.fragment_param_kinds.clone(),
             expected_return: self.expected_return.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
@@ -358,6 +368,32 @@ impl TypeContext {
     /// Is `name` bound as a function parameter in this context?
     pub fn has_function_param(&self, name: &str) -> bool {
         self.function_params.contains_key(name)
+    }
+
+    /// Record that `name` is a `SelectItems<Kind>` fragment parameter with
+    /// the given declared [`ExprKind`] (Phase 44b).
+    ///
+    /// After this call, [`infer_expression_kind`] will return `kind` for a
+    /// bare unqualified identifier expression whose text matches `name`, so
+    /// that forwarding a fragment-typed parameter through to an inner call's
+    /// PASSING body doesn't produce spurious `FragmentKindMismatch` errors.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn add_fragment_param_kind(&mut self, name: &str, kind: ExprKind) {
+        self.fragment_param_kinds.insert(name.to_string(), kind);
+    }
+
+    /// Look up the declared [`ExprKind`] for a fragment-typed parameter by
+    /// name (Phase 44b). Returns `None` when `name` was not registered via
+    /// [`TypeContext::add_fragment_param_kind`].
+    pub fn lookup_fragment_param_kind(&self, name: &str) -> Option<ExprKind> {
+        self.fragment_param_kinds.get(name).copied()
+    }
+
+    /// Return `true` when `name` is a fragment-typed (SelectItems<Kind>)
+    /// parameter registered in this context (Phase 44b).
+    pub fn is_fragment_param(&self, name: &str) -> bool {
+        self.fragment_param_kinds.contains_key(name)
     }
 
     /// Seed a `TableExpr` parameter's caller-supplied schema as a
@@ -806,7 +842,17 @@ pub fn infer_expression_kind(expr: &Expr, ctx: &TypeContext) -> ExprKind {
     }
 
     // Column refs, literals, identifiers — Scalar.
-    let _ = ctx; // ctx held for symmetry with infer_expression_type signatures
+    // Phase 44b exception: a bare unqualified identifier that matches a
+    // registered fragment-typed parameter inherits that parameter's declared
+    // kind. This lets `PASSING metrics AS (metrics)` forward a
+    // `SelectItems<Agg>` parameter without producing a `FragmentKindMismatch`.
+    if let Some(col_ref) = expr.as_column_ref() {
+        if col_ref.qualifier().is_none() {
+            if let Some(kind) = ctx.lookup_fragment_param_kind(col_ref.name()) {
+                return kind;
+            }
+        }
+    }
     ExprKind::Scalar
 }
 
