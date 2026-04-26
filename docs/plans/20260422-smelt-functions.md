@@ -134,7 +134,7 @@ A phase's review must confirm both (a) `functions_demo` is still green and (b) e
 - **Registry coverage gap (Phase 9).** Rewiring `infer_function_type` through the registry must preserve current property-test behaviour. Spike first: confirm every `SqlFunction` variant removed from the legacy match has a registry entry.
 - **AggExpr collapse temptation (Step 3).** §18 flags "keep or collapse `AggExpr<T>`." **Keep** — the linear subtyping chain (§16 #8) gives it a clear role once `WindowExpr<T>` lands in Phase 14. Regressions would re-open the question.
 - **Row variable scope leaks (Step 8).** Phase 35's row-variable binding must be scoped to the signature; `..r` in one function's signature must not be visible in another's. Use per-function-declaration fresh var IDs.
-- **Planner-rule fixed point on transparent functions (Step 7).** Phase 33's first rewrite pushes filters across `LogicalNode::FunctionCall { transparent: true, .. }`. If the rule doesn't terminate (pushing the same filter repeatedly), the planner loop loops. Termination is guaranteed by an "already-pushed" marker in `Context`, tested explicitly.
+- **Planner-rule fixed point on transparent functions (Step 7).** Phase 33's first rewrite pushes filters across `LogicalNode::FunctionCall { transparent: true, .. }`. If the rule doesn't terminate (pushing the same filter repeatedly), the planner loop loops. Termination is guaranteed by the `pushed_filter.is_some()` field on the `ExpandedCall` node (not a separate `Context` field as originally planned), tested explicitly. _(Phase 53 audit: stale "marker in `Context`" reference corrected — the implementation uses `pushed_filter.is_some()` on the node itself, `RuleContext` is `#[derive(Default)]` with no fields.)_
 - **Tier 2 → Tier 1 expansion caching (Step 5).** Phase 26 may expand the same Tier 1 body many times under one Tier 2 body check. Salsa caches per `(callee_fn_id, arg_types)` — but `arg_types` is not hashable by default. Define a canonical `DataTypeHash` in Phase 26, not retrofitted.
 - **`PASSING` vs. future post-call syntax (Step 6).** Phase 28's lookahead after `)` is currently one token. If future syntax ever adds another post-call form (e.g. `.chain_method()`), the lookahead grows. Keep the check centralised so the growth is one edit.
 - **Struct literal backend divergence (Step 8).** Phase 36 emits struct literals on DuckDB (`{'f': v}`); Spark (`struct(v AS f)`) and Postgres (row constructor / composite type) differ. The backend printer (Phase 11's infrastructure) is the only place this should vary.
@@ -1166,7 +1166,7 @@ After Phase 34 (Step 7 complete):
 
 After Phase 38 (Step 8 complete):
 - Manual smoke: author `functions/session_rollup.sql` and call it with a `PASSING metrics AS (...)` clause from a model; verify LSP completion works inside the clause and diagnostics are frame-stack-aware.
-- `smelt compile models/order_totals.sql --show-plan` should demonstrate join elimination on the example from Phase 34.
+- `smelt compile models/order_totals.sql --show-plan` should demonstrate join elimination on the example from Phase 34. _(Phase 53 audit: this smoke step is now executable post-Phase 39, which wired the logical-plan rule pipeline into `smelt build --show-plan`; see Phase 39 note in cross-phase findings.)_
 - `PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference` — final oracle check.
 - Update `docs/ROADMAP.md` marking Steps 3–8 complete. Update the experimentation-roadmap section of the research doc to mark §19 Steps 3–8 complete with dates.
 
@@ -1188,7 +1188,7 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 10 | `smelt.extern` declarations | done | f8641ef | 2026-04-23 |
 | 11 | Per-declaration frontmatter + `backends:` + backend namespace | done | 3bedc86 | 2026-04-23 |
 | 12 | Multi-level frame rendering + CAST-enforcement flag (Step 2 complete) | done | 2d2a1a8 | 2026-04-23 |
-| 13 | Parser: TableExpr / WindowExpr / SelectItems<K, ctx> in type refs (Step 3 opens) | done | | 2026-04-23 |
+| 13 | Parser: TableExpr / WindowExpr / SelectItems<K, ctx> in type refs (Step 3 opens) | done | 3e69c98 | 2026-04-23 |
 | 14 | Types: WindowExpr sort and SelectItems<K> kind ceiling | done | 80553d1 | 2026-04-23 |
 | 15 | TableExpr parameters: bare-column row polymorphism + shadow warnings | done | 85a9441 | 2026-04-24 |
 | 16 | Row-requirement annotations: TableExpr<{…}> pre-expansion checking | done | 38609e5 | 2026-04-24 |
@@ -1209,10 +1209,10 @@ Updated as phases complete. Format: `Phase N — <title> — <status> (<commit s
 | 31 | Column provenance + declared-property propagation | done | 9cb6709 | 2026-04-25 |
 | 32 | Planner rule API + Level 2 expansion of function calls | done | 3715013 | 2026-04-25 |
 | 33 | Filter pushdown across transparent-function boundaries | done | 677f2e3 | 2026-04-25 |
-| 34 | Join elimination example (Step 7 complete) | done | | 2026-04-25 |
+| 34 | Join elimination example (Step 7 complete) | done | 35b125f | 2026-04-25 |
 | 35 | Parser + types: row variables on `Struct<…>` and value-level spread (Step 8 opens) | done | 17b6c8f | 2026-04-25 |
 | 36 | Row unification at call sites with value-level erasure | done | 836925e | 2026-04-25 |
-| 37 | Row variable in return position: pass-through fields | done | | 2026-04-25 |
+| 37 | Row variable in return position: pass-through fields | done | 4a5d97b | 2026-04-25 |
 | 38 | `smelt.as_struct()` revisit (Step 8 complete) | done | 143f3fe | 2026-04-25 |
 
 ### Deferred during implementation
@@ -1861,5 +1861,5 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 49 | `WindowInScalarContext` deep-walk into scalar subqueries (Step 12 opens) | done | 179de87 | 2026-04-26 |
 | 50 | Built-in registry expansion: operators + missing aggregates + window funcs (Step 12 complete) | done | 20c5eb0 | 2026-04-26 |
 | 51 | `provenance` / `joins` validator (Step 13 opens) | done | 75dd429 | 2026-04-26 |
-| 52 | Missing-provenance pushdown advisory + extern fragment-param reject | pending | | |
-| 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | pending | | |
+| 52 | Missing-provenance pushdown advisory + extern fragment-param reject | done | 15e4ada | 2026-04-26 |
+| 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | | 2026-04-26 |

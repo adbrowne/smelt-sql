@@ -121,6 +121,15 @@ const CASES: &[Case] = &[
         code: DiagnosticCode::DuplicateFunctionDefinition,
         message_substring: "extern_twice",
     },
+    // Phase 53 — cross-file extern collision with different `backends:` sets.
+    // Same detection path as Phase 10; companion A is alphabetically first
+    // (no error), B (alphabetically later) carries the duplicate error.
+    Case {
+        fixture: "fn_extern_collide_cross_file_b.sql",
+        companion: Some("fn_extern_collide_cross_file_a.sql"),
+        code: DiagnosticCode::DuplicateFunctionDefinition,
+        message_substring: "cross_file_extern",
+    },
     // Phase 11 — frontmatter declares `[duckdb, spark]` while the body
     // uses `duckdb.read_parquet` (inferred [duckdb]). The narrow-only
     // rule rejects the widening.
