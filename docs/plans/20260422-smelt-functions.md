@@ -1858,7 +1858,7 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 46 | `TableExpr` argument shapes: CTEs, derived tables, subqueries | done | 1c39757 | 2026-04-26 |
 | 47 | Cross-function CTE schema inference: drop opaque-CTE suppression (Step 10 complete) | done | c89d2b7 | 2026-04-26 |
 | 48 | LSP hover wiring + PASSING completion + multi-level frame trace (Step 11 complete) | done | 221d7d8 | 2026-04-26 |
-| 49 | `WindowInScalarContext` deep-walk into scalar subqueries (Step 12 opens) | pending | | |
+| 49 | `WindowInScalarContext` deep-walk into scalar subqueries (Step 12 opens) | done | 179de87 | 2026-04-26 |
 | 50 | Built-in registry expansion: operators + missing aggregates + window funcs (Step 12 complete) | pending | | |
 | 51 | `provenance` / `joins` validator (Step 13 opens) | pending | | |
 | 52 | Missing-provenance pushdown advisory + extern fragment-param reject | pending | | |
