@@ -265,6 +265,77 @@ impl SqlCompiler {
         self.fn_bodies = Some(bodies);
     }
 
+    /// Build the `smelt.as_struct` emitter and `smelt.fn.*` expander closures
+    /// for use in [`PrintContext`]. Pulled out of the per-`compile_*` methods
+    /// so every code path (including the production `compile_with_ephemerals`
+    /// path used by `commands/run.rs`) wires them identically.
+    ///
+    /// Returns `(None, None)` when there is no syntax to analyse or no
+    /// function bodies / upstream schemas have been configured — preserving
+    /// the previous behaviour for tests that don't set them.
+    fn build_emitters(
+        &self,
+        syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    ) -> (
+        Option<AsStructEmitter<'static>>,
+        Option<SmeltFnExpander<'static>>,
+    ) {
+        // Build a TypeContext from the parsed file so smelt.as_struct() can
+        // look up column types for each qualifier/alias in scope.
+        let type_ctx = if let Some(file) = File::cast(syntax.clone()) {
+            let provider = StaticRefSchemaProvider {
+                models: &self.upstream_schemas.models,
+                seeds: &self.upstream_schemas.seeds,
+            };
+            Some(build_type_context(
+                &file,
+                &self.upstream_schemas.sources,
+                &provider,
+            ))
+        } else {
+            None
+        };
+
+        let dialect_name = match self.dialect {
+            SqlDialect::DuckDB => "duckdb",
+            SqlDialect::SparkSQL => "spark",
+            SqlDialect::PostgreSQL => "postgres",
+        };
+        let as_struct_emitter: Option<AsStructEmitter<'static>> = type_ctx.map(|tc| {
+            let backend = dialect_name.to_string();
+            let emitter: AsStructEmitter<'static> =
+                Box::new(move |alias: &str, except: &[String]| {
+                    let cols = tc.columns_for_qualifier(alias);
+                    if cols.is_empty() {
+                        return None;
+                    }
+                    let fields: Vec<(String, DataType)> = cols
+                        .into_iter()
+                        .filter(|(name, _)| !except.contains(&name.to_string()))
+                        .map(|(name, tc_col)| (name.to_string(), tc_col.data_type.clone()))
+                        .collect();
+                    if fields.is_empty() {
+                        return None;
+                    }
+                    smelt_planner::lowering::as_struct_to_sql(alias, &fields, &backend).ok()
+                });
+            emitter
+        });
+
+        let fn_expander: Option<SmeltFnExpander<'static>> = self.fn_bodies.as_ref().map(|bodies| {
+            let bodies = Arc::clone(bodies);
+            let expander: SmeltFnExpander<'static> = Box::new(
+                move |fn_name: &str, positional: Vec<String>, _named: Vec<(String, String)>| {
+                    let (param_names, body_sql) = bodies.get(fn_name)?;
+                    Some(substitute_params(body_sql, param_names, &positional))
+                },
+            );
+            expander
+        });
+
+        (as_struct_emitter, fn_expander)
+    }
+
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
         // ERROR if any named parameters detected
@@ -288,59 +359,7 @@ impl SqlCompiler {
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let parse = smelt_parser::parse(&clean_content);
 
-        // Build a TypeContext from the original SQL so smelt.as_struct() can
-        // look up column types for each qualifier/alias in scope.
-        let type_ctx = if let Some(file) = File::cast(parse.syntax()) {
-            let provider = StaticRefSchemaProvider {
-                models: &self.upstream_schemas.models,
-                seeds: &self.upstream_schemas.seeds,
-            };
-            Some(build_type_context(
-                &file,
-                &self.upstream_schemas.sources,
-                &provider,
-            ))
-        } else {
-            None
-        };
-
-        // Build the smelt.as_struct emitter from the TypeContext + dialect.
-        let dialect_name = match self.dialect {
-            SqlDialect::DuckDB => "duckdb",
-            SqlDialect::SparkSQL => "spark",
-            SqlDialect::PostgreSQL => "postgres",
-        };
-        let as_struct_emitter: Option<AsStructEmitter<'_>> = type_ctx.map(|tc| {
-            let backend = dialect_name.to_string();
-            let emitter: AsStructEmitter<'_> = Box::new(move |alias: &str, except: &[String]| {
-                let cols = tc.columns_for_qualifier(alias);
-                if cols.is_empty() {
-                    return None;
-                }
-                let fields: Vec<(String, DataType)> = cols
-                    .into_iter()
-                    .filter(|(name, _)| !except.contains(&name.to_string()))
-                    .map(|(name, tc_col)| (name.to_string(), tc_col.data_type.clone()))
-                    .collect();
-                if fields.is_empty() {
-                    return None;
-                }
-                smelt_planner::lowering::as_struct_to_sql(alias, &fields, &backend).ok()
-            });
-            emitter
-        });
-
-        // Build the smelt.fn.* expander from the pre-resolved function bodies.
-        let fn_expander: Option<SmeltFnExpander<'_>> = self.fn_bodies.as_ref().map(|bodies| {
-            let bodies = Arc::clone(bodies);
-            let expander: SmeltFnExpander<'_> = Box::new(
-                move |fn_name: &str, positional: Vec<String>, _named: Vec<(String, String)>| {
-                    let (param_names, body_sql) = bodies.get(fn_name)?;
-                    Some(substitute_params(body_sql, param_names, &positional))
-                },
-            );
-            expander
-        });
+        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
 
         let ctx = PrintContext {
             dialect: &self.dialect,
@@ -441,14 +460,15 @@ impl SqlCompiler {
         sql: &str,
     ) -> Result<CompiledModel> {
         let parse = smelt_parser::parse(sql);
+        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
             dialect: &self.dialect,
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: std::collections::HashSet::new(),
             cross_engine_refs: self.cross_engine_refs.clone(),
-            smelt_as_struct: None,
-            smelt_fn: None,
+            smelt_as_struct: as_struct_emitter,
+            smelt_fn: fn_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -489,14 +509,15 @@ impl SqlCompiler {
             .collect();
 
         let parse = smelt_parser::parse(sql);
+        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
             dialect: &self.dialect,
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: ephemeral_refs,
             cross_engine_refs: self.cross_engine_refs.clone(),
-            smelt_as_struct: None,
-            smelt_fn: None,
+            smelt_as_struct: as_struct_emitter,
+            smelt_fn: fn_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
@@ -964,14 +985,16 @@ impl SqlCompiler {
             .map(|s| s.as_str())
             .collect();
 
+        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
+
         let ctx = PrintContext {
             dialect: &self.dialect,
             capabilities: &self.capabilities,
             schema,
             ephemeral_models: ephemeral_refs,
             cross_engine_refs: self.cross_engine_refs.clone(),
-            smelt_as_struct: None,
-            smelt_fn: None,
+            smelt_as_struct: as_struct_emitter,
+            smelt_fn: fn_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
