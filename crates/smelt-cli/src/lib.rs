@@ -27,8 +27,8 @@ pub use backfill::{
     format_plan_summary, BackfillBatch, BackfillOptions, ModelBackfillPlan,
 };
 pub use compiler::{
-    prepend_ephemeral_ctes, resolve_refs_in_sql, CompiledModel, CompilerRegistry,
-    EphemeralResolver, SqlCompiler,
+    build_fn_body_map, prepend_ephemeral_ctes, resolve_refs_in_sql, CompiledModel,
+    CompilerRegistry, EphemeralResolver, FnBodyMap, SqlCompiler,
 };
 pub use config::{
     find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,

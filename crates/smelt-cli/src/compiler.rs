@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Type for the pre-resolved function-body map: fn_name → (param_names, body_sql).
-type FnBodyMap = HashMap<String, (Vec<String>, String)>;
+pub type FnBodyMap = HashMap<String, (Vec<String>, String)>;
 
 /// Substitute `param_names` with `arg_sqls` in a function body SQL string.
 ///
@@ -256,6 +256,13 @@ impl SqlCompiler {
     /// they pass through verbatim.
     pub fn set_function_bodies(&mut self, bodies: FnBodyMap) {
         self.fn_bodies = Some(Arc::new(bodies));
+    }
+
+    /// Like [`SqlCompiler::set_function_bodies`] but takes an already-shared
+    /// `Arc<FnBodyMap>` so callers can register the same map on multiple
+    /// compilers without cloning the underlying allocation.
+    fn set_function_bodies_arc(&mut self, bodies: Arc<FnBodyMap>) {
+        self.fn_bodies = Some(bodies);
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -1038,6 +1045,71 @@ impl CompilerRegistry {
             compiler.set_upstream_schemas(schemas.clone());
         }
     }
+
+    /// Set pre-resolved `smelt.fn.*` function bodies on every compiler in the
+    /// registry. Bodies are computed once per project (via
+    /// [`build_fn_body_map`]) and shared across targets so that every backend
+    /// expands `smelt.fn.*` calls consistently. The single `Arc` is cloned
+    /// per compiler, avoiding a fresh allocation per target.
+    pub fn set_function_bodies_all(&mut self, bodies: FnBodyMap) {
+        let bodies = Arc::new(bodies);
+        for compiler in self.compilers.values_mut() {
+            compiler.set_function_bodies_arc(bodies.clone());
+        }
+    }
+}
+
+/// Walk every file in `workspace` and extract `smelt.define` bodies as a
+/// [`FnBodyMap`] keyed by leaf function name.
+///
+/// The `(param_names, body_sql)` payload is what `SqlCompiler`'s
+/// `smelt.fn.*` expander substitutes into call sites at print time. Body
+/// extraction uses the parser's `DEFINE_BODY` `text_range`, which spans the
+/// surrounding parens (e.g. `(CASE WHEN ... END)`); substituting a
+/// parenthesised expression at the call site preserves precedence.
+///
+/// Pure: takes an immutable `&Database` and returns plain data. The
+/// orchestration layer (`commands/run.rs`, `commands/backbuild.rs`) is the
+/// only place that calls into Salsa to build the inputs for this helper, per
+/// the pure-function rule in CLAUDE.md.
+///
+/// On a workspace-level duplicate function name (already a separate
+/// diagnostic via `workspace_function_diagnostics`), later entries silently
+/// overwrite earlier ones in iteration order. "First declaration wins" is a
+/// diagnostic concern, not a runtime one.
+///
+/// Models without `smelt.define` declarations contribute zero entries; an
+/// empty `functions/` directory yields an empty map.
+pub fn build_fn_body_map(db: &smelt_db::Database, workspace: smelt_db::Workspace) -> FnBodyMap {
+    let mut out: FnBodyMap = HashMap::new();
+    for file in workspace.files(db).iter().copied() {
+        let parse = smelt_db::parse_file(db, file);
+        let Some(ast) = File::cast(parse.syntax()) else {
+            continue;
+        };
+        // `parse_file` strips frontmatter while preserving byte offsets, so
+        // text-range offsets index into either the raw or stripped text
+        // identically. We use the raw `file.text(db)` here so the extracted
+        // body is what users see in their source files.
+        let text = file.text(db);
+        for define in ast.defines() {
+            let Some(name) = define.name() else { continue };
+            let Some(body) = define.body() else { continue };
+            let range = body.syntax().text_range();
+            let start = usize::from(range.start());
+            let end = usize::from(range.end());
+            if end > text.len() || start > end {
+                continue;
+            }
+            let body_sql = text[start..end].to_string();
+            let params: Vec<String> = define
+                .param_list()
+                .map(|pl| pl.params().filter_map(|p| p.name()).collect())
+                .unwrap_or_default();
+            out.insert(name, (params, body_sql));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

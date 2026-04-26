@@ -56,6 +56,14 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
     // Filter out test models — they shouldn't be materialized
     models.retain(|m| !m.is_test());
 
+    // Function files (smelt.define / smelt.extern) must be registered with
+    // the Salsa DB so `build_fn_body_map` can extract bodies for
+    // `smelt.fn.*` expansion. They are NOT materialisable models so they
+    // stay out of `models` and the LogicalGraph.
+    let function_files = discovery
+        .discover_function_files()
+        .with_context(|| "Failed to discover function files")?;
+
     let python_files = discovery
         .discover_python_files()
         .with_context(|| "Failed to scan for Python models")?;
@@ -267,13 +275,29 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             .iter_in_order()
             .map(|node| node.model_file.clone())
             .collect();
-        let type_db = init_db(&project_dir, &all_models);
+        // Register function files alongside models so `parse_file` can
+        // resolve `smelt.define` bodies for `build_fn_body_map`. They are
+        // intentionally excluded from `all_models` since they aren't
+        // materialisable models.
+        let mut db_files: Vec<_> = all_models.clone();
+        db_files.extend(function_files.iter().cloned());
+        let type_db = init_db(&project_dir, &db_files);
         let upstream_schemas = Arc::new(UpstreamSchemas::from_database(
             &type_db,
             &project_dir,
             &all_models,
         ));
         compilers.set_upstream_schemas_all(upstream_schemas);
+
+        // Wire `smelt.fn.*` function bodies through every compiler. Skipped
+        // when the project has no functions so legacy projects compile
+        // byte-for-byte identically to the pre-Phase-56 codepath.
+        let workspace =
+            smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
+        let fn_bodies = smelt_cli::build_fn_body_map(&type_db, workspace);
+        if !fn_bodies.is_empty() {
+            compilers.set_function_bodies_all(fn_bodies);
+        }
     }
 
     info!("{}", "=".repeat(60));
