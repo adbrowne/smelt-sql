@@ -58,23 +58,20 @@ Dagster/Airflow plugin API. `smelt explain --json` already provides the graph st
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
-### 4. `smelt check` — LLM-Optimised Diagnostic CLI
-
-Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
-
-See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
-
-### 5. Orchestrator Integration
-
-Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
-
-### 6. PostgreSQL Backend
-
-Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
-
 ---
 
 ## Recently Completed
+
+### ~~Smelt Functions — Steps 6–13 (PASSING, planner, struct row vars, review remediation)~~ ✅ (April 24–26, 2026)
+
+Completed the remaining eight steps of the smelt-functions experimentation roadmap (Phases 28–53 of [plan](plans/20260422-smelt-functions.md)):
+
+- **Step 6** (Phases 28–29, April 24): Context-sensitive `PASSING name AS (...)` parser (peek `PASSING` only after `smelt.fn.*` / user-defined call closings); binding PASSING fragments to `SelectItems` parameters with type-checking and kind-ceiling enforcement. `rollup_with_passing.sql` demo.
+- **Step 7** (Phases 30–34, April 25): Functions as first-class `LogicalNode::FunctionCall` nodes in the logical plan; column provenance + declared-property propagation (`provenance:`, `joins:`, `deterministic:` frontmatter); `PlannerRule` trait + `apply_rules_to_fixed_point`; `ExpandTransparentFunctionCalls`, `PushFilterIntoTransparentFunction`, and `EliminateUnusedLeftJoin` rules. `--show-plan` CLI flag wired in Phase 39.
+- **Step 8** (Phases 35–38, April 25): Struct row variables (`Struct<{..r}>`), value-level spread (`..event`), call-site row-var unification with erasure at expansion, `smelt.as_struct(<alias> EXCEPT ...)` with backend-specific struct-literal emission.
+- **Steps 9–13 — review remediation** (Phases 39–53, April 25–26): 15 phases closing all 28 findings from the post-Phase-38 plan review. Key deliverables: `--show-plan` CLI integration (Phase 39), CAST emission from canonical-return registry (Phase 40), transparent-call body splice into logical plan (Phase 41), list-splice comma elision (Phase 41), `smelt.as_struct` lowering to `smelt-planner` + broadened capability gate (Phase 42), serde_yaml frontmatter parser replacing line-walker (Phase 43), `safe_divide` / `monitored_session_rollup` canonical fixtures (Phases 44–44b), JOIN alias visibility in `TableExpr` bodies + `enriched_order` workaround removed (Phase 45), `TableExpr` argument shapes extended to CTEs / derived tables / subqueries (Phase 46), cross-function CTE schema inference + opaque-CTE suppression dropped (Phase 47), LSP hover + PASSING completion + multi-level frame trace in message (Phase 48), `WindowInScalarContext` deep-walk into scalar subqueries (Phase 49), built-in registry expansion (operators, aggregates, window functions — Phase 50), `provenance:` / `joins:` validator (Phase 51), missing-provenance pushdown advisory + extern fragment-param rejection (Phase 52), plan audit / SHA table + cross-file extern collision fixture (Phase 53).
+
+See [plan](plans/20260422-smelt-functions.md) for the full phase-by-phase record. User documentation: [Functions guide](../docs-site/docs/guide/functions.md).
 
 ### ~~Smelt Functions — Steps 1–5~~ ✅ (April 22–24, 2026)
 
@@ -460,5 +457,5 @@ Items here are interesting design problems without committed timelines.
 - **Virtual environments / plan-apply workflow**: Compare schemas across dev/prod without materializing; require approval before execution. Interesting state management problem — smelt's logical/physical graph split could enable lightweight virtual environments.
 - **OpenLineage / column-level lineage**: Export model and column-level lineage in OpenLineage format for catalog integration (DataHub, Amundsen, Atlan). Internal lineage tracking partially exists — interesting graph analysis problem.
 - **Substrait integration**: Portable plan representation, DataFusion interop
-- **Smelt Functions — Steps 6–8** (PASSING clauses, planner-rule API, struct row vars): Steps 1–5 are ✅ complete (April 2026). Tier 2/3 body checking, call-site bidirectional checking, Tier 2 → Tier 1 inline expansion, and bidirectional generics are all implemented. Upgrade story documented in [`docs/smelt-functions-upgrade-story.md`](smelt-functions-upgrade-story.md). Remaining steps continue the experimentation roadmap. See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
+- **Smelt Functions — next frontiers**: Steps 1–13 are ✅ complete (April 2026). Remaining open design problems: generics in `smelt.define` (user-polymorphic functions, §16 #14 deferred), variadics in `smelt.define` (§16 #15), parameterized models (`smelt.param()`), metrics DSL integration (`smelt.metric()`), and full function-body SQL lowering (replacing `LogicalNode::Raw` placeholders with structured plan nodes for end-to-end `smelt build` code generation from function bodies). See [plan](plans/20260422-smelt-functions.md) and [discussion paper](research/20260413-smelt-functions.md).
 - **Learning from history**: Use run statistics to suggest optimizations

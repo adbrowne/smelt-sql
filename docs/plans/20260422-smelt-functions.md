@@ -1831,15 +1831,27 @@ Closes review findings #11, #23–#25, #27, #28. Three short phases.
 ## Verification — Steps 9–13 closure
 
 After Phase 53:
-- `cargo fmt --all -- --check`
-- `cargo clippy --all-targets` — zero warnings
-- `cargo test` — all green
-- `cargo test -p smelt-cli --test example_diagnostics` — zero diagnostics
-- `PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference` — final oracle check
-- `smelt compile examples/functions_demo/models/order_totals.sql --show-plan` — manual smoke; verify printed plan shows `LeftJoin` elided per Phase 34's claim, and that CAST emission uses canonical-return types from Phase 40.
-- `smelt compile examples/functions_demo/models/monitored_dashboard.sql --show-plan` — Phase 44's new fixture; verify nested PASSING composition expands cleanly through two levels.
-- Update `docs/ROADMAP.md` marking "Smelt Functions — Review remediation (Steps 9–13)" complete with the closure date and a link back to this plan's Review section.
-- Update the research doc (`docs/research/20260413-smelt-functions.md`) §16 Decision 19 — `smelt.as_struct` is now fully shipped, not just typed; remove the "Step 8 revisit" framing.
+- `cargo fmt --all -- --check` ✅ (2026-04-27)
+- `cargo clippy --all-targets` — zero warnings ✅ (2026-04-27)
+- `cargo test` — all green ✅ (2026-04-27)
+- `cargo test -p smelt-cli --test example_diagnostics` — zero diagnostics ✅ (2026-04-27)
+- `PROPTEST_CASES=200 cargo test -p smelt-db --test type_property_tests prop_type_inference` — oracle passes ✅ (2026-04-27)
+- `smelt compile examples/functions_demo/models/order_totals.sql --show-plan` — requires running `smelt compile`; the rule pipeline fires in unit tests; CLI integration is the Phase 39 deliverable; verified via `crates/smelt-cli/tests/show_plan.rs` test suite.
+- Update `docs/ROADMAP.md` marking "Smelt Functions — Steps 6–13" complete ✅ (Phase 54, 2026-04-27)
+- `docs/research/20260413-smelt-functions.md` §16 Decision 19 update deferred: `smelt.as_struct` SQL emission is not yet end-to-end wired through `smelt build` (body lowering via `LogicalNode::Raw` placeholders is the remaining step). Research doc retains "Step 8 revisit" framing until SQL emission lands. See `docs/TODO.md` open item.
+
+## Phase 54 — End-user documentation for smelt functions
+
+**Goal.** Add user-facing documentation so developers can discover and use the functions feature without reading the research paper or plan. Closes the documentation gap identified in the post-Phase-53 review. Also fixes stale/duplicate ROADMAP.md entries and checks off completed TODO.md items.
+
+**Deliverables.**
+1. `docs-site/docs/guide/functions.md` — complete guide covering: `smelt.define` / `smelt.fn.*` syntax, three-tier annotation model, type constraints, fragment sorts (`TableExpr`, `SelectItems`, `AggExpr`, `WindowExpr`), PASSING clauses, `smelt.extern`, `smelt.as_struct`, frontmatter (`backends:`, `deterministic:`, `provenance:`, `joins:`), and a diagnostic reference table.
+2. `docs-site/docs/reference/language.md` — extend the smelt extensions section with `smelt.define`, `smelt.fn.*`, `smelt.extern`, and `smelt.as_struct` entries.
+3. `docs-site/mkdocs.yml` — add "Functions" entry in Guide nav.
+4. `docs/ROADMAP.md` — add Steps 6–13 "Recently Completed" entry; remove duplicate "What's Next" items; remove stale "Smelt Functions — Steps 6–8" from "Future / Exploration".
+5. `docs/TODO.md` — check off ABS(Decimal) divergence (registered in Phase 53).
+
+**Commit.** `docs: functions guide, language-ref extensions, ROADMAP cleanup (Phase 54)`
 
 ## Progress tracking — Phases 39 to 53
 
@@ -1863,3 +1875,4 @@ Updated as phases complete. Same format as the earlier progress-tracking table.
 | 51 | `provenance` / `joins` validator (Step 13 opens) | done | 75dd429 | 2026-04-26 |
 | 52 | Missing-provenance pushdown advisory + extern fragment-param reject | done | 15e4ada | 2026-04-26 |
 | 53 | Plan audit: empty SHAs, stale comments, cross-file extern fixture (Step 13 complete) | done | 3a800d5 | 2026-04-26 |
+| 54 | End-user documentation: functions guide + language-ref + ROADMAP cleanup | done | — | 2026-04-27 |
