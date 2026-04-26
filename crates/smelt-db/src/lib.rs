@@ -1742,7 +1742,7 @@ pub fn missing_provenance_advisory_for_file(
 
             // Check if the function has declared provenance.
             // Sort by path to match resolve_function's deterministic "first wins" order.
-            let mut sorted_files: Vec<SourceFile> = workspace.files(db).iter().copied().collect();
+            let mut sorted_files: Vec<SourceFile> = workspace.files(db).to_vec();
             sorted_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
             let has_provenance = sorted_files
                 .iter()
