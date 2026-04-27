@@ -13,7 +13,7 @@ This project uses a spec-driven workflow. The flow:
 3. `/smelt:implement <plan>` — per-phase implementer + reviewer subagents, red-green TDD on real fixtures, atomic commits
 4. `/smelt:validate <feature>` — drift report comparing spec, code, and user docs
 
-The mandatory plan structure (execution prompt, per-phase TDD tests, implementer/reviewer loop, code+docs phases by default) is encoded in `/smelt:plan`. See [`docs/ace-fca-guide.md`](ace-fca-guide.md) for the full tutorial.
+The mandatory plan structure (execution prompt, per-phase TDD tests, implementer/reviewer loop, code+docs phases by default) is encoded in `/smelt:plan`. See `CLAUDE.md` § Workflow & Slash Commands for the workflow overview.
 
 ## What's Next
 

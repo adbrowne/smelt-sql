@@ -338,7 +338,7 @@ Plans are committed to the repo under `docs/plans/` as markdown files.
 
 ## Workflow & Slash Commands
 
-This project uses the [ACE-FCA workflow](docs/ace-fca-guide.md) (Advanced Context Engineering with Frequent Intentional Compaction), specialized for spec-driven development.
+The workflow is spec-driven and uses Frequent Intentional Compaction. Adapted from [ACE-FCA](https://github.com/humanlayer/advanced-context-engineering-for-coding-agents) (Dex Horthy / HumanLayer) with attribution.
 
 **Spec-driven commands** (in `.claude/commands/smelt/`):
 - `/smelt:spec` — Draft or update a feature spec (outputs to `docs/specs/`)
@@ -348,14 +348,23 @@ This project uses the [ACE-FCA workflow](docs/ace-fca-guide.md) (Advanced Contex
 
 The standard flow: `/smelt:spec → /smelt:plan → /smelt:implement → /smelt:validate`. Each phase of `/smelt:implement` runs an implementer subagent (red-green TDD on the listed tests, real-fixture coverage in `examples/`) followed by a reviewer subagent that flags only material findings, then commits and pushes atomically.
 
-**Compaction guidance** — When compacting (manually or automatically), preserve:
+**Leverage hierarchy.** A bad line of a spec leads to thousands of bad lines of code; a bad line of a plan leads to hundreds. Spend review effort there, not on generated code:
+
+```
+spec → plan → code
+1000x   100x    1x   (relative leverage of human review)
+```
+
+**Be willing to throw away.** If a spec, research doc, or plan went in the wrong direction, discard it and re-steer with better framing. The cost of restarting a phase is low compared to building on a bad foundation.
+
+**Compaction guidance** — when compacting (manually or automatically), preserve:
 - The active plan path and which phases are `done`
 - The spec referenced by the plan
 - List of files modified in this session
 - Current build/test status
 - Decisions made and their rationale
 
-See `docs/ace-fca-guide.md` for the full tutorial.
+Full source documents (each artifact is committed): `docs/specs/` (specs), `docs/plans/` (plans, naming `YYYYMMDD-name.md`), `docs/research/` (`YYYY-MM-DD-topic.md`), `docs/handoffs/` (`YYYY-MM-DD-name.md`).
 
 ## License
 
