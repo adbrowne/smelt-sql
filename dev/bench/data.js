@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777283485105,
+  "lastUpdate": 1777283487390,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18422,6 +18422,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.16105700954532,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "143c8616a0c0daffd473f7b7dd063c100f031f53",
+          "message": "Merge pull request #108 from adbrowne/worktree-review\n\nAdd §16: struct parameters and row polymorphism",
+          "timestamp": "2026-04-27T19:49:33+10:00",
+          "tree_id": "0b87129203897a8c4b286f4890be4dfde8f4cde5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/143c8616a0c0daffd473f7b7dd063c100f031f53"
+        },
+        "date": 1777283486936,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.04551827771237,
             "unit": "MB/s"
           }
         ]
