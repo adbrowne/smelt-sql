@@ -16,13 +16,17 @@ A next-generation data pipeline tool designed to improve upon dbt by:
 
 ## Key Documentation
 
-- **README.md**: Full language specification and design decisions
-  - Two-layer DSL architecture (Metrics DSL + SQL models)
-  - Type system design
-  - Extension syntax (`smelt.ref()`, `smelt.metric()` with `=>` parameters)
-  - Computation requirements (stateless, windowed, sessionized, etc.)
-  - Backend capabilities and rewrite rules
-  - Incrementalization and optimization strategy
+- **docs/specs/**: Per-feature normative specs — the canonical answer to "how does this feature work?"
+  - Naming convention: `<feature>.md` (e.g., `incremental_models.md`, `architecture.md`)
+  - See `docs/specs/SPEC_TEMPLATE.md` for the file format
+  - Spec-first rule: edit the spec before writing the plan that changes the feature
+
+- **README.md**: Project overview, quick example, and current status snapshot
+  - For normative behavior, see `docs/specs/`
+
+- **docs/DESIGN.md**: Legacy design document — being incrementally extracted into `docs/specs/`
+  - Authoritative for areas not yet specified in `docs/specs/`
+  - As specs are extracted, this thins out
 
 - **docs/ROADMAP.md**: Implementation status and next steps
   - Track completed phases with completion dates
@@ -30,18 +34,19 @@ A next-generation data pipeline tool designed to improve upon dbt by:
   - Propose concrete next-step options
   - **Update after completing phases or making architectural decisions**
 
-- **docs/**: Architecture and design documentation
-  - `architecture_overview.md`: System design and component interactions
+- **docs/**: Additional design documentation
   - `lsp_architecture.md`: LSP implementation details
   - `lsp_quickstart.md`: Getting started with the LSP
   - `planner_rule_api_design.md`: Future planner API design
+  - `type_semantics.md`: Type inference rules
 
-- **docs/research/**: Research into an idea. Often the predecessor to a plan.
+- **docs/research/**: Research into an idea. Often the predecessor to a spec or plan.
   - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
 
 - **docs/plans/**: Implementation plans committed to the repo
   - Naming convention: `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
-  - Created before non-trivial implementation work
+  - Each plan cites the spec it implements and the spec diff
+  - Created before non-trivial implementation work, via `/smelt:plan`
 
 ## Commands
 
@@ -270,6 +275,8 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_
 
 - Always use red-green testing. Stop writing code when the test passes. Update the test or add a new one if you don't think the task is complete.
 - When you discover a property based test failure, add an explicit test to capture that failure before fixing the bug.
+- **Spec-first for feature behavior changes.** If you're changing the user-visible surface or semantics of a feature, edit `docs/specs/<feature>.md` first. Plans for that feature must cite the spec and ideally the spec diff. If no spec exists yet for the feature, create one as part of the work — extract from `DESIGN.md` and existing plans. See `docs/specs/SPEC_TEMPLATE.md`.
+- **Plans update code and user docs together.** Unless the plan header says `Docs: code-only`, every plan must include phases that update `docs/specs/<feature>.md` Surface section and the corresponding `docs-site/` pages alongside the implementation.
 
 ### For Parser/LSP Features
 
@@ -307,31 +314,43 @@ Before wrapping up, write any unfinished work and open decisions to `docs/TODO.m
 
 **Note:** Use dates instead of commit hashes to avoid requiring a follow-up commit just to document the hash.
 
+## Specs
+
+Per-feature specs live under `docs/specs/` as markdown files.
+
+**Naming convention:** `docs/specs/<feature>.md` (e.g., `incremental_models.md`, `architecture.md`).
+
+A spec is the **canonical answer** to "how does this feature work?". It is normative — the implementation and the user docs must match it. See `docs/specs/SPEC_TEMPLATE.md` for the file format.
+
+- Edit the spec **before** writing the plan that changes the feature.
+- The spec diff is the change description for `/smelt:plan`.
+- `/smelt:validate <feature>` produces a drift report against the spec.
+
 ## Plans
 
 Plans are committed to the repo under `docs/plans/` as markdown files.
 
 **Naming convention:** `YYYYMMDD-short-name.md` (e.g., `20260321-planner-api.md`)
 
-- Create a plan before starting non-trivial implementation work
-- Plans should be committed alongside or before the implementation they describe
-- Use markdown format
-- **Always commit the plan file to `docs/plans/`** as part of the implementation work — do not leave it only in `.claude/plans/`
+- Plans cite the spec they implement (`Spec:` and `Spec diff:` header fields). Plans do not restate the spec.
+- Plans include explicit `pending`/`done` Progress tracking, per-phase TDD tests, implementer + reviewer review checklists, and per-phase commit messages. The mandatory structure is encoded in `/smelt:plan`.
+- **Always commit the plan file to `docs/plans/`** as part of the implementation work — do not leave it only in `.claude/plans/`.
 
-## ACE-FCA Workflow
+## Workflow & Slash Commands
 
-This project uses the [ACE-FCA workflow](docs/ace-fca-guide.md) (Advanced Context Engineering with Frequent Intentional Compaction) for non-trivial development tasks.
+This project uses the [ACE-FCA workflow](docs/ace-fca-guide.md) (Advanced Context Engineering with Frequent Intentional Compaction), specialized for spec-driven development.
 
-**Slash commands** (in `.claude/commands/`):
-- `/research` — Explore codebase to understand a topic (outputs to `docs/research/`)
-- `/plan-rpi` — Create an implementation plan from research (outputs to `docs/plans/`)
-- `/iterate-plan` — Refine an existing plan based on feedback
-- `/implement` — Execute a plan phase by phase with verification gates
-- `/validate` — Verify implementation matches the plan specification
-- `/handoff` — Compact session context for continuity (outputs to `docs/handoffs/`)
+**Spec-driven commands** (in `.claude/commands/smelt/`):
+- `/smelt:spec` — Draft or update a feature spec (outputs to `docs/specs/`)
+- `/smelt:plan` — Generate a phased implementation plan from a spec diff (outputs to `docs/plans/`)
+- `/smelt:implement` — Execute a plan phase-by-phase using implementer + reviewer subagents, spec as oracle
+- `/smelt:validate` — Verify implementation and user docs match the spec; produce a drift report
+
+The standard flow: `/smelt:spec → /smelt:plan → /smelt:implement → /smelt:validate`. Each phase of `/smelt:implement` runs an implementer subagent (red-green TDD on the listed tests, real-fixture coverage in `examples/`) followed by a reviewer subagent that flags only material findings, then commits and pushes atomically.
 
 **Compaction guidance** — When compacting (manually or automatically), preserve:
-- The active plan path and which phases are complete
+- The active plan path and which phases are `done`
+- The spec referenced by the plan
 - List of files modified in this session
 - Current build/test status
 - Decisions made and their rationale

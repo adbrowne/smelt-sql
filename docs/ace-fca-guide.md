@@ -33,108 +33,103 @@ The full pipeline produces structured markdown artifacts at each stage. Each sta
 fresh (or compacted) context, consuming the artifact from the previous stage.
 
 ```
-/research  →  /plan  →  /implement  →  /validate  →  /handoff
-    ↑            ↑
-    |         /iterate-plan
-    |
-  (human review gate)
+/smelt:spec  →  /smelt:plan  →  /smelt:implement  →  /smelt:validate
+                                                              ↑
+                                                         (drift report
+                                                          → next /smelt:spec
+                                                            or /smelt:plan)
 ```
 
-### Stage 1: Research (`/research`)
+The four commands are spec-anchored: every plan cites a spec, every implementation is reviewed
+against the spec, and validation reports drift between code, spec, and user docs.
 
-**Purpose**: Understand the codebase as it exists today. No suggestions, no critiques — just
-document what's there.
+### Stage 1: Spec (`/smelt:spec`)
 
-```
-/research How does the parser handle error recovery in smelt-parser?
-```
-
-This spawns parallel subagents to explore the codebase and produces a structured document at
-`docs/research/YYYY-MM-DD-topic.md` containing:
-- Key files with line references
-- Architecture and data flow
-- Current behavior
-- Related patterns and test coverage
-- Open questions
-
-**Human review point**: Read the research output. Is it accurate? Does it cover the right
-scope? If it went in the wrong direction, throw it away and re-steer with better framing.
-This is far cheaper than building on bad research.
-
-### Stage 2: Plan (`/plan`)
-
-**Purpose**: Design an explicit, verifiable implementation plan.
+**Purpose**: Capture or update the canonical answer to "how does this feature work?". The spec
+is normative — implementation and user docs must match it.
 
 ```
-/plan docs/research/2026-03-31-error-recovery.md
+/smelt:spec incremental_models
 ```
 
-The agent reads your research, presents its understanding, and asks for confirmation before
-writing the plan. The output goes to `docs/plans/YYYYMMDD-description.md` and includes:
-- Overview and desired end state
-- Explicit scope boundaries ("What We're NOT Doing")
-- Phased implementation with file-level specifics
-- Verification steps for each phase (cargo fmt, clippy, test)
+Reads code, `DESIGN.md`, prior plans, and `docs-site/` to produce a spec at
+`docs/specs/<feature>.md` with sections:
+- Surface (user-visible API: syntax, YAML fields, CLI flags, error messages)
+- Semantics (formal rules, edge cases, failure modes)
+- Constraints & Invariants (what must always hold; what's explicitly not supported)
+- Known Divergences / Open Questions (where code differs from intent)
+- References (code paths, tests, user docs, plan history)
 
-**Human review point**: This is the highest-leverage review. Read ~200 lines of plan instead
-of reviewing thousands of lines of generated code. Check:
-- Does the approach make sense?
-- Are the scope boundaries right?
-- Are there risks the plan doesn't address?
+**Human review point**: The spec is the source of truth. A wrong spec produces wrong plans
+which produce wrong code. Read the Surface and Semantics sections carefully.
 
-### Stage 2b: Iterate (`/iterate-plan`)
+### Stage 2: Plan (`/smelt:plan`)
 
-**Purpose**: Refine a plan based on feedback without starting over.
+**Purpose**: Derive a phased implementation plan from a spec diff.
 
 ```
-/iterate-plan docs/plans/20260331-error-recovery.md - split Phase 2 into parser and AST phases
+/smelt:plan incremental_models
 ```
 
-Makes surgical edits to an existing plan. Only researches new code if the changes require it.
+The agent reads the spec as primary context, computes the diff from the last spec commit, and
+produces a plan at `docs/plans/YYYYMMDD-<slug>.md`. Plans cite the spec rather than restate
+it — they're typically much shorter than pre-spec plans of comparable scope.
 
-### Stage 3: Implement (`/implement`)
+Every plan includes:
+- An execution prompt for a fresh Claude session
+- Per-phase TDD tests listed verbatim (red before green)
+- Per-phase critical files (the implementer is allowed to touch nothing else)
+- Per-phase docs touched (default: spec Surface + corresponding `docs-site/` page)
+- A Progress tracking table
 
-**Purpose**: Execute the plan phase by phase with verification gates.
+**Human review point**: This is still the highest-leverage review. Check:
+- Does each phase match a spec section?
+- Are the listed TDD tests sufficient to prove the spec rule?
+- Is anything sneaking past the phase boundary?
 
-```
-/implement docs/plans/20260331-error-recovery.md
-```
+### Stage 3: Implement (`/smelt:implement`)
 
-The agent:
-1. Reads the plan and identifies the next incomplete phase
-2. Implements that phase
-3. Runs verification (`cargo fmt`, `cargo clippy`, `cargo test`)
-4. Updates checkboxes in the plan file
-5. **Stops and waits for your confirmation** before the next phase
-
-If reality diverges from the plan, the agent stops and presents the issue with options.
-
-### Stage 4: Validate (`/validate`)
-
-**Purpose**: Verify the implementation matches the plan's specification.
+**Purpose**: Execute the plan phase by phase with implementer + reviewer subagents.
 
 ```
-/validate docs/plans/20260331-error-recovery.md
+/smelt:implement docs/plans/20260427-incremental_models.md
 ```
 
-Produces a validation report comparing the plan's desired end state against the actual code.
-Runs all automated checks and lists any manual testing needed.
+For each phase the main session runs the loop:
+1. **Implementer subagent** — writes the listed TDD tests as failing tests, makes them pass,
+   leaves the tree green (`cargo fmt --check`, `cargo clippy` zero warnings, `cargo test`,
+   `cargo test -p smelt-cli --test example_diagnostics`).
+2. **Reviewer subagent** — gets the phase's review checklist plus the diff. Reports only
+   material findings (correctness vs. spec, invariant violations, missing test coverage,
+   scope creep). Style nits are out of scope.
+3. **Iterate** until the reviewer comes back clean.
+4. **Commit + push** atomically with the phase's commit message verbatim.
 
-### Stage 5: Handoff (`/handoff`)
+Pause conditions: same finding twice across implementer passes, TDD tests can't pass without
+violating a spec rule, or a pre-existing failure surfaces.
 
-**Purpose**: Compact your session context for continuity.
+### Stage 4: Validate (`/smelt:validate`)
+
+**Purpose**: Produce a drift report comparing spec, code, and user docs.
 
 ```
-/handoff
+/smelt:validate incremental_models
 ```
 
-Creates a structured handoff document at `docs/handoffs/YYYY-MM-DD-description.md` with:
-- Task status (completed, in progress, planned)
-- Recent changes with file:line references
-- Key learnings that aren't obvious from the code
-- Ordered next steps
+Checks:
+- Surface drift (does every YAML field / CLI flag / error in the spec exist in code and docs?)
+- Semantics drift (is every normative rule test-covered? does the code uphold it?)
+- Invariant drift (are spec invariants still satisfied?)
+- Freshness (`last_reviewed` vs. recent code changes)
 
-To resume in a new session, just read the handoff document.
+Recommends the next step: re-spec if the spec is stale, plan if code drifted, or a small
+docs-only fix if only `docs-site/` is out of sync.
+
+### Optional helpers
+
+- `/research` — pre-spec exploration when extracting a spec for an unspecified area
+- `/iterate-plan` — surgical edits to an existing plan
+- `/handoff` — session compaction artifact at `docs/handoffs/YYYY-MM-DD-description.md`
 
 ## Frequent Intentional Compaction
 
@@ -200,6 +195,7 @@ person who understands the codebase and domain to steer the research and review 
 
 | Artifact | Directory | Convention |
 |----------|-----------|------------|
+| Feature specs | `docs/specs/` | `<feature>.md` (normative; spec-first) |
 | Research docs | `docs/research/` | `YYYY-MM-DD-topic.md` |
 | Implementation plans | `docs/plans/` | `YYYYMMDD-description.md` |
 | Handoff docs | `docs/handoffs/` | `YYYY-MM-DD-description.md` |
@@ -211,20 +207,22 @@ All artifacts are committed to the repo, creating institutional memory.
 Here's how you'd use the full workflow:
 
 ```bash
-# 1. Research how functions are currently parsed and type-checked
-/research How are SQL functions parsed in smelt-parser and type-checked in smelt-db?
+# 1. Capture the spec (or update an existing one). For a brand-new feature
+#    you may want a /research pass first to find the relevant code.
+/smelt:spec window_functions
 
-# 2. Review the research doc, then plan the implementation
-/plan docs/research/2026-03-31-sql-functions.md
+# 2. Review the spec, edit the Surface and Semantics sections to capture intent,
+#    then derive a plan from the spec diff
+/smelt:plan window_functions
 
-# 3. Review the plan, iterate if needed
-/iterate-plan docs/plans/20260331-window-functions.md - add a phase for LSP completions
+# 3. Optionally iterate on the plan
+/iterate-plan docs/plans/20260331-window-functions.md - split Phase 2 into parser and AST phases
 
-# 4. Implement phase by phase
-/implement docs/plans/20260331-window-functions.md
+# 4. Implement phase by phase (implementer + reviewer subagents per phase)
+/smelt:implement docs/plans/20260331-window-functions.md
 
-# 5. Validate the full implementation
-/validate docs/plans/20260331-window-functions.md
+# 5. Validate the full implementation against the spec
+/smelt:validate window_functions
 
 # 6. If you need to pause, create a handoff
 /handoff window function implementation

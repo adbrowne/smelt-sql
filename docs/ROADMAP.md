@@ -1,8 +1,19 @@
 # smelt Development Roadmap
 
-This document summarizes where each area of smelt stands and what's next. For detailed implementation plans, see [`docs/plans/`](plans/).
+This document summarizes where each area of smelt stands and what's next. For detailed implementation plans, see [`docs/plans/`](plans/). For the canonical behavior of a feature, see [`docs/specs/`](specs/) — specs are the source of truth and plans cite them.
 
 The **What's Next** section below is the prioritized work queue. Component sections that follow provide context on current state and per-area backlog items.
+
+## Process
+
+This project uses a spec-driven workflow. The flow:
+
+1. `/smelt:spec <feature>` — capture or update `docs/specs/<feature>.md` (the canonical answer to "how does this feature work?")
+2. `/smelt:plan <feature>` — derive a phased plan from the spec diff; plan cites the spec rather than restating it
+3. `/smelt:implement <plan>` — per-phase implementer + reviewer subagents, red-green TDD on real fixtures, atomic commits
+4. `/smelt:validate <feature>` — drift report comparing spec, code, and user docs
+
+The mandatory plan structure (execution prompt, per-phase TDD tests, implementer/reviewer loop, code+docs phases by default) is encoded in `/smelt:plan`. See [`docs/ace-fca-guide.md`](ace-fca-guide.md) for the full tutorial.
 
 ## What's Next
 
