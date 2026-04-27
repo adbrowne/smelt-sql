@@ -95,6 +95,34 @@ impl ModelDiscovery {
         Ok(models)
     }
 
+    /// Discover `smelt.define` / `smelt.extern` files under the project-root
+    /// `functions/` directory.
+    ///
+    /// Function files are loaded into Salsa the same way as model files (each
+    /// becomes a [`ModelFile`]) so that `smelt-db`'s `functions_in_file` query
+    /// can index their signatures. Phase 3 uses a hardcoded `functions/`
+    /// directory; a configurable discovery policy is deferred to a later
+    /// phase per §21 of the smelt-functions research.
+    pub fn discover_function_files(&self) -> Result<Vec<ModelFile>> {
+        let search_path = self.project_root.join("functions");
+        if !search_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut files = Vec::new();
+        for entry in WalkDir::new(&search_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+                files.extend(self.parse_model_file(path)?);
+            }
+        }
+        Ok(files)
+    }
+
     /// Scan model paths for Python files containing `@model` decorators.
     /// Returns (file_path, decorator_line_numbers, file_content) tuples.
     pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<u32>, String)>> {

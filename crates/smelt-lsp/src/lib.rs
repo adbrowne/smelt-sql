@@ -13,7 +13,7 @@ use smelt_core::{
     metadata::{extract_file_metadata, FileMetadata},
 };
 use smelt_db::{
-    check_type_diagnostics, file_diagnostics,
+    check_type_diagnostics, file_diagnostics, functions_in_file,
     yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
     Database, Diagnostic as DbDiagnostic, DiagnosticAcc, DiagnosticCode as DbCode,
     DiagnosticData as DbData, DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile,
@@ -113,7 +113,7 @@ fn project_sources_yaml(db: &Database, root: &Path) -> String {
 use smelt_parser::ast::File as AstFile;
 use smelt_parser::is_valid_sql_identifier;
 use smelt_parser::symbol::{position_to_offset, symbol_at_cursor, SymbolAtCursor};
-use smelt_types::TypedColumn;
+use smelt_types::{format_smelt_type_hover, TypedColumn};
 
 /// Tracks errors that occurred during workspace initialization
 #[derive(Default)]
@@ -797,6 +797,155 @@ fn build_python_context(all_files: &[PathBuf], config: &smelt_core::Config) -> S
 /// (virtual_path, start_line_offset) for each section in a multi-model file.
 type MultiModelEntry = Vec<(PathBuf, u32)>;
 
+/// Render a database diagnostic into the LSP message body + per-frame
+/// `related_information` list.
+///
+/// Pulled out of [`Backend::to_lsp_diagnostic`] as a pure function so it
+/// can be unit-tested without needing to construct a live `Backend`/LSP
+/// `Client`. The returned tuple is `(message, related_information)`:
+///
+/// * `message` — the primary diagnostic text. If the diagnostic carries
+///   an `ExpansionFrames` payload, one trailer line per frame is appended
+///   in outer-to-inner order (Phase 12 §16 #16 Step 2 renderer).
+/// * `related_information` — `Some(..)` with one entry per frame that
+///   carries both `decl_path` and `decl_range`; `None` otherwise (no
+///   frames, or no frame had resolvable location metadata).
+///
+/// The underlying `FrameInfo` vector is stored innermost-first →
+/// outermost-last (the canonical merge order used by
+/// `smelt_db::check_smelt_fn_call`), so we iterate in reverse to render
+/// the outermost (user-visible) call first, then walk down to the
+/// innermost cause.
+pub fn render_expansion_frames(
+    diag: &DbDiagnostic,
+) -> (String, Option<Vec<DiagnosticRelatedInformation>>) {
+    let mut message = diag.message.clone();
+    let Some(DbData::ExpansionFrames(frames)) = diag.data.as_ref() else {
+        return (message, None);
+    };
+    let mut related: Vec<DiagnosticRelatedInformation> = Vec::new();
+    for frame in frames.iter().rev() {
+        message.push_str(&format!(
+            "\nin expansion of `{}`, `{}` was bound to {}",
+            frame.function, frame.param, frame.bound_type,
+        ));
+        if let (Some(path), Some(range)) = (&frame.decl_path, frame.decl_range.as_ref()) {
+            if let Ok(uri) = Url::from_file_path(path) {
+                related.push(DiagnosticRelatedInformation {
+                    location: Location {
+                        uri,
+                        range: Range {
+                            start: Position {
+                                line: range.start.line,
+                                character: range.start.column,
+                            },
+                            end: Position {
+                                line: range.end.line,
+                                character: range.end.column,
+                            },
+                        },
+                    },
+                    message: format!(
+                        "in expansion of `{}`, `{}` was bound to {}",
+                        frame.function, frame.param, frame.bound_type,
+                    ),
+                });
+            }
+        }
+    }
+    let related_information = if related.is_empty() {
+        None
+    } else {
+        Some(related)
+    };
+    (message, related_information)
+}
+
+/// Find the innermost `SMELT_FN_CALL` whose text range contains `offset`.
+///
+/// Used by hover and completion to dispatch on a `smelt.fn.<name>(...)`
+/// call site (Phase 48: hover wiring + PASSING-body completion).
+pub fn find_smelt_fn_call_at_cursor(
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    offset: usize,
+) -> Option<smelt_parser::ast::SmeltFnCall> {
+    let mut best: Option<smelt_parser::ast::SmeltFnCall> = None;
+    let mut best_size: usize = usize::MAX;
+    for node in syntax.descendants() {
+        if let Some(call) = smelt_parser::ast::SmeltFnCall::cast(node) {
+            let r = call.text_range();
+            let start: usize = r.start().into();
+            let end: usize = r.end().into();
+            if offset >= start && offset <= end {
+                let size = end.saturating_sub(start);
+                if size < best_size {
+                    best = Some(call);
+                    best_size = size;
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Phase 48 — completion helper: resolve the columns of a function-body
+/// CTE named `ctx_name` for use in PASSING-body completion. The function
+/// body lives in the workspace, so we walk all files to find the
+/// signature's declaration and look up the matching CTE in its body.
+///
+/// Returns an empty vector when the context can't be resolved (function
+/// not found, body shape unexpected, no matching CTE).
+pub fn passing_body_completion_columns(
+    db: &smelt_db::Database,
+    workspace: smelt_db::Workspace,
+    sig: &smelt_types::FunctionSig,
+    ctx_name: &str,
+) -> Vec<(String, smelt_types::TypedColumn)> {
+    let files: Vec<smelt_db::SourceFile> = workspace.files(db).to_vec();
+    for f in files {
+        let parse = smelt_db::parse_file(db, f);
+        let ast = match smelt_parser::ast::File::cast(parse.syntax()) {
+            Some(a) => a,
+            None => continue,
+        };
+        for define in ast.defines() {
+            if define.name().as_deref() != Some(sig.name.as_str()) {
+                continue;
+            }
+            let Some(body) = define.body() else { continue };
+            // Body may be a SELECT (TableExpr) or a wrapped expression. We
+            // only mine CTEs from the SELECT shape.
+            let Some(select) = body.select_stmt() else {
+                continue;
+            };
+            let Some(with_clause) = select.with_clause() else {
+                continue;
+            };
+            for cte in with_clause.ctes() {
+                if cte.name().as_deref() != Some(ctx_name) {
+                    continue;
+                }
+                // Use a minimal type context — the goal is just to
+                // surface column names; type info is best-effort.
+                let ctx = smelt_db::TypeContext::new();
+                return smelt_db::infer_cte_columns(&cte, &ctx)
+                    .into_iter()
+                    .filter(|(n, _)| n != "*")
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Phase 48 — completion helper: canonical aggregate function labels for
+/// PASSING-body completion when the parameter kind is `Agg` or higher.
+/// Scoped down per the plan to a small high-signal set (`COUNT`, `SUM`,
+/// `AVG`, `MIN`, `MAX`); the full kind-filtered set is future work.
+pub fn passing_body_aggregate_labels() -> Vec<&'static str> {
+    vec!["COUNT", "SUM", "AVG", "MIN", "MAX"]
+}
+
 pub struct Backend {
     client: Client,
     /// The salsa database. `Database: Clone` with internally-Arc'd storage, so
@@ -899,6 +1048,36 @@ impl Backend {
                 DbCode::AmbiguousColumn => "ambiguous-column",
                 DbCode::UnknownCastType => "unknown-cast-type",
                 DbCode::UnrecognizedFunction => "unrecognized-function",
+                DbCode::DuplicateFunctionDefinition => "duplicate-function-definition",
+                DbCode::InvalidFunctionTypeRef => "invalid-function-type-ref",
+                DbCode::FunctionBodyTypeMismatch => "function-body-type-mismatch",
+                DbCode::UnknownIdentifier => "unknown-identifier",
+                DbCode::DuplicateParameterName => "duplicate-parameter-name",
+                DbCode::UnknownSmeltFn => "unknown-smelt-fn",
+                DbCode::MissingArgument => "missing-argument",
+                DbCode::ArgTypeMismatch => "arg-type-mismatch",
+                DbCode::ExternCollidesWithBuiltin => "extern-collides-with-builtin",
+                DbCode::BackendsWideningNotAllowed => "backends-widening-not-allowed",
+                DbCode::WindowInScalarContext => "window-in-scalar-context",
+                DbCode::ParameterShadowsColumn => "parameter-shadows-column",
+                DbCode::RowRequirementUnsatisfied => "row-requirement-unsatisfied",
+                DbCode::UnknownContext => "unknown-context",
+                DbCode::CteCycle => "cte-cycle",
+                DbCode::ContextMismatch => "context-mismatch",
+                DbCode::FragmentColumnMissing => "fragment-column-missing",
+                DbCode::AnnotationTooWide => "annotation-too-wide",
+                DbCode::FragmentKindMismatch => "fragment-kind-mismatch",
+                DbCode::ReturnTypeMismatch => "return-type-mismatch",
+                DbCode::UnknownPassingParameter => "unknown-passing-parameter",
+                DbCode::UnstableSchemaRequired => "unstable-schema-required",
+                DbCode::AsStructUnsupportedBackend => "as-struct-unsupported-backend",
+                DbCode::FunctionCallCycle => "function-call-cycle",
+                DbCode::FrontmatterParseError => "frontmatter-parse-error",
+                DbCode::ProvenanceMismatch => "provenance-mismatch",
+                DbCode::JoinsMismatch => "joins-mismatch",
+                DbCode::DeclaredCardinalityUnverifiable => "declared-cardinality-unverifiable",
+                DbCode::MissingProvenancePushdownAdvisory => "missing-provenance-pushdown-advisory",
+                DbCode::ExternFragmentParamUnsupported => "extern-fragment-param-unsupported",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -936,7 +1115,29 @@ impl Backend {
                     "expectedType": expected_type
                 })
             }
+            DbData::ExpansionFrames(frames) => {
+                let frames_json: Vec<_> = frames
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "function": f.function,
+                            "param": f.param,
+                            "boundType": f.bound_type,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "kind": "expansion-frames",
+                    "frames": frames_json,
+                })
+            }
         });
+
+        // Phase 12 (smelt-functions Step 1): expand the message body and
+        // `DiagnosticRelatedInformation` list from the diagnostic's
+        // `ExpansionFrames` payload. The pure helper below is unit-testable
+        // directly (see `render_expansion_frames` tests).
+        let (message, related_information) = render_expansion_frames(diag);
 
         lsp_types::Diagnostic {
             range: Range {
@@ -953,11 +1154,13 @@ impl Backend {
                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
                 DbSeverity::Info => DiagnosticSeverity::INFORMATION,
+                DbSeverity::Hint => DiagnosticSeverity::HINT,
             }),
-            message: diag.message.clone(),
+            message,
             source: Some("smelt".to_string()),
             code,
             data,
+            related_information,
             ..Default::default()
         }
     }
@@ -1353,6 +1556,7 @@ impl Backend {
                                 DbSeverity::Error => DiagnosticSeverity::ERROR,
                                 DbSeverity::Warning => DiagnosticSeverity::WARNING,
                                 DbSeverity::Info => DiagnosticSeverity::INFORMATION,
+                                DbSeverity::Hint => DiagnosticSeverity::HINT,
                             }),
                             message: d.message.clone(),
                             source: Some("smelt".to_string()),
@@ -3669,6 +3873,109 @@ impl LanguageServer for Backend {
                         }
                     }
                 }
+
+                // Check smelt.define parameters — Phase 18 hover
+                if let Some(file_input) = lookup_file(&db, &effective_path) {
+                    let fn_sigs = functions_in_file(&db, file_input);
+                    for define in file.defines() {
+                        let fn_name = define.name().unwrap_or_default();
+                        if let Some(param_list) = define.param_list() {
+                            for param in param_list.params() {
+                                let param_range = param.syntax().text_range();
+                                let start: usize = param_range.start().into();
+                                let end: usize = param_range.end().into();
+                                if cursor_offset >= start && cursor_offset <= end {
+                                    let param_name = param.name().unwrap_or_default();
+                                    let type_display = fn_sigs
+                                        .iter()
+                                        .find(|s| s.name == fn_name)
+                                        .and_then(|s| {
+                                            s.params.iter().find(|p| p.name == param_name)
+                                        })
+                                        .and_then(|p| {
+                                            p.type_ref
+                                                .as_ref()?
+                                                .as_ref()
+                                                .ok()
+                                                .map(format_smelt_type_hover)
+                                        })
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let content = format!(
+                                        "**`{param_name}`** (parameter of `{fn_name}`)\n\n\
+                                         `{param_name}: {type_display}`"
+                                    );
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: content,
+                                        }),
+                                        range: None,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Phase 48: hover on a `smelt.fn.<name>(...)` call site —
+                // surface the declared return type or the parameter binding
+                // for a `PASSING <name> AS (...)` clause.
+                if let Some(call) = find_smelt_fn_call_at_cursor(file.syntax(), cursor_offset) {
+                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+                    let fn_name = segments.last().cloned().unwrap_or_default();
+                    let ws = Workspace::try_get(&db);
+                    let sig = ws.and_then(|w| smelt_db::resolve_function(&db, w, fn_name.clone()));
+
+                    if let Some(sig) = sig {
+                        // Phase 48 test 2: cursor on a PASSING clause name.
+                        for passing in call.passing_clauses() {
+                            if let Some(name_range) = passing.name_range() {
+                                let start: usize = name_range.start().into();
+                                let end: usize = name_range.end().into();
+                                if cursor_offset >= start && cursor_offset <= end {
+                                    if let Some(name) = passing.name() {
+                                        let type_text = sig
+                                            .params
+                                            .iter()
+                                            .find(|p| p.name == name)
+                                            .and_then(|p| p.type_ref_text.clone())
+                                            .unwrap_or_else(|| "unknown".to_string());
+                                        let content = format!(
+                                            "**`{name}`** (parameter of `{}`)\n\n`{name}: {type_text}`",
+                                            sig.name
+                                        );
+                                        return Ok(Some(Hover {
+                                            contents: HoverContents::Markup(MarkupContent {
+                                                kind: MarkupKind::Markdown,
+                                                value: content,
+                                            }),
+                                            range: None,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Phase 48 test 1: cursor on the call path —
+                        // surface the declared return type.
+                        if let Some(call_path_range) = call.call_path_range() {
+                            let start: usize = call_path_range.start().into();
+                            let end: usize = call_path_range.end().into();
+                            if cursor_offset >= start && cursor_offset <= end {
+                                if let Some(text) = smelt_db::declared_return_hover_text(&sig) {
+                                    let content = format!("`{}` `{text}`", sig.name);
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: content,
+                                        }),
+                                        range: None,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -4012,6 +4319,68 @@ impl LanguageServer for Backend {
 
                 items
             }
+            // Phase 48: PASSING-body completions — offer aggregate functions
+            // and any columns from the parameter's declared context schema.
+            CompletionContext::InPassingBody {
+                callee,
+                passing_name,
+            } => {
+                let ws = Workspace::try_get(&db);
+                let mut items: Vec<CompletionItem> = Vec::new();
+
+                // Resolve the callee's signature to find the parameter's
+                // declared context (e.g. `SelectItems<Agg, sessionized>`).
+                if let Some(w) = ws {
+                    if let Some(sig) =
+                        smelt_db::resolve_function(&db, w, callee.clone()).map(|arc| (*arc).clone())
+                    {
+                        // Look up the parameter by name.
+                        if let Some(param) = sig.params.iter().find(|p| p.name == passing_name) {
+                            use smelt_types::signatures::SmeltType;
+                            if let Some(Ok(SmeltType::SelectItems {
+                                context: Some(smelt_types::signatures::ContextRef(ctx_name)),
+                                ..
+                            })) = &param.type_ref
+                            {
+                                // Surface columns from the context schema (e.g. the
+                                // `sessionized` CTE) so the user can pick column refs.
+                                let cols = passing_body_completion_columns(&db, w, &sig, ctx_name);
+                                for (col_name, typed_col) in &cols {
+                                    items.push(CompletionItem {
+                                        label: col_name.clone(),
+                                        kind: Some(CompletionItemKind::FIELD),
+                                        detail: Some(format_type(typed_col)),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+
+                            // Always offer aggregate function keywords for
+                            // `SelectItems<Agg>`-kinded parameters.
+                            use smelt_types::signatures::ExprKind;
+                            let needs_agg = matches!(
+                                &param.type_ref,
+                                Some(Ok(SmeltType::SelectItems {
+                                    kind: ExprKind::Agg | ExprKind::Window,
+                                    ..
+                                }))
+                            );
+                            if needs_agg {
+                                for label in passing_body_aggregate_labels() {
+                                    items.push(CompletionItem {
+                                        label: label.to_string(),
+                                        kind: Some(CompletionItemKind::FUNCTION),
+                                        detail: Some("aggregate function".to_string()),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                items
+            }
             CompletionContext::None => Vec::new(),
         };
 
@@ -4031,6 +4400,14 @@ enum CompletionContext {
     ColumnName,              // Cursor in a position where column name is expected
     QualifiedColumn(String), // Cursor after alias. (e.g., "t." for table alias t)
     FromClause,              // Cursor in FROM/JOIN position (offer CTE names)
+    /// Phase 48: cursor inside the body of a `PASSING <name> AS (|)` clause
+    /// attached to a `smelt.fn.<callee>(...)` call. Carries the parameter
+    /// name and the trailing call-path segment so the completion list can
+    /// be filtered by the callee's signature.
+    InPassingBody {
+        callee: String,
+        passing_name: String,
+    },
     None,
 }
 
@@ -4038,6 +4415,15 @@ enum CompletionContext {
 fn determine_completion_context(text: &str, offset: usize) -> CompletionContext {
     // Look backward from cursor to determine context
     let before_cursor = &text[..offset.min(text.len())];
+
+    // Phase 48: detect cursor sitting inside the body of a
+    // `PASSING <name> AS (|)` clause. Heuristic: walk backwards from the
+    // cursor for an unmatched `(` whose preceding tokens form
+    // `PASSING <ident> AS`. The callee name is the last segment of the
+    // most recent `smelt.fn.<...>` call before the PASSING.
+    if let Some(ctx) = detect_passing_body(before_cursor) {
+        return ctx;
+    }
 
     // Check if we're inside source('')
     // Simple heuristic: look for source(' before cursor and no closing )
@@ -4147,6 +4533,101 @@ fn is_in_from_position(upper_text: &str) -> bool {
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
     // If 0 tokens (just spaces) or 1 partial token being typed - we're in FROM position
     tokens.len() <= 1
+}
+
+/// Phase 48: heuristically detect whether the cursor sits inside the body
+/// of a `PASSING <name> AS (|)` clause attached to a `smelt.fn.<callee>(...)`
+/// call.
+///
+/// The heuristic walks backwards from the cursor:
+/// 1. Find the nearest unmatched `(`. The cursor lies inside whatever
+///    parenthesised expression that opener belongs to.
+/// 2. Just before that `(` (allowing whitespace), look for the literal
+///    `AS`. Before that, an identifier (the parameter name). Before that,
+///    the keyword `PASSING`.
+/// 3. Before the `PASSING`, the most recent `smelt.fn.<...>(...)` call
+///    determines the callee name (last dot-segment of the call path).
+///
+/// Returns `None` for non-PASSING-body cursors so the rest of the
+/// dispatcher takes over.
+fn detect_passing_body(before_cursor: &str) -> Option<CompletionContext> {
+    // Step 1: find the nearest unmatched open-paren walking right-to-left.
+    let mut depth = 0i32;
+    let mut open_paren: Option<usize> = None;
+    for (i, ch) in before_cursor.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                if depth == 0 {
+                    open_paren = Some(i);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let open_paren = open_paren?;
+
+    // Step 2: directly before the `(` we should see `AS` (case-insensitive,
+    // possibly with surrounding whitespace).
+    let pre = before_cursor[..open_paren].trim_end();
+    let as_end = pre.len();
+    if !pre.to_ascii_uppercase().ends_with("AS") {
+        return None;
+    }
+    let after_as = &pre[..as_end - 2];
+    let after_as_trimmed = after_as.trim_end();
+
+    // Step 3: extract the identifier before AS — the PASSING name.
+    let mut name_end = after_as_trimmed.len();
+    let mut name_start = name_end;
+    for (i, ch) in after_as_trimmed.char_indices().rev() {
+        if ch.is_alphanumeric() || ch == '_' {
+            name_start = i;
+        } else {
+            name_end = name_start;
+            break;
+        }
+        // If we walk to the very start, name_end stays at full length.
+    }
+    if name_start == after_as_trimmed.len() {
+        return None;
+    }
+    let passing_name = &after_as_trimmed[name_start..name_end.max(name_start + 1)];
+    if passing_name.is_empty() {
+        return None;
+    }
+
+    // Step 4: before the parameter name, the keyword `PASSING`.
+    let pre_name = after_as_trimmed[..name_start].trim_end();
+    if !pre_name.to_ascii_uppercase().ends_with("PASSING") {
+        return None;
+    }
+
+    // Step 5: extract the callee name — last `smelt.fn.<...>` call before
+    // the `PASSING`. We look for the most recent `smelt.fn.` literal in
+    // `before_cursor` and take the dotted-identifier that follows.
+    let smelt_fn = before_cursor.rfind("smelt.fn.")?;
+    let after = &before_cursor[smelt_fn + "smelt.fn.".len()..];
+    let mut last_segment_end = 0usize;
+    for (i, ch) in after.char_indices() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '.' {
+            last_segment_end = i + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let dotted = &after[..last_segment_end];
+    let callee = dotted.split('.').next_back()?.to_string();
+    if callee.is_empty() {
+        return None;
+    }
+
+    Some(CompletionContext::InPassingBody {
+        callee,
+        passing_name: passing_name.to_string(),
+    })
 }
 
 /// Extract the alias/identifier before a dot at the end of the text
@@ -4362,5 +4843,172 @@ mod tests {
     fn test_not_from_position_complete_table_ref() {
         // After a complete table ref with alias, we're past the position
         assert!(!is_in_from_position("SELECT * FROM TABLE_A T"));
+    }
+
+    // =====================================================================
+    // Phase 12 — multi-level frame rendering (smelt-functions Step 2).
+    //
+    // These tests exercise `render_expansion_frames` directly because it
+    // is a pure function over a `DbDiagnostic` — we don't need a running
+    // `Backend` / tower-lsp `Client` to validate the renderer contract.
+    // =====================================================================
+
+    use smelt_db::{
+        Diagnostic as DbDiagnosticT, DiagnosticCode, DiagnosticData,
+        DiagnosticSeverity as DbSeverityT, Range as DbRange,
+    };
+    use smelt_parser::ast::Position as DbPosition;
+    use smelt_types::FrameInfo;
+
+    fn make_db_range(line: u32, col: u32) -> DbRange {
+        DbRange {
+            start: DbPosition { line, column: col },
+            end: DbPosition {
+                line,
+                column: col + 1,
+            },
+        }
+    }
+
+    fn make_frame(function: &str, param: &str, bound_type: &str, decl_line: u32) -> FrameInfo {
+        // Use a temp-dir file path so `Url::from_file_path` succeeds on
+        // Linux/macOS (the path must be absolute). We can't reach for a
+        // real tempfile in a unit test without pulling tempfile into
+        // dev-deps; using the conventional `/tmp/...` absolute path keeps
+        // the URL builder happy on the CI runner.
+        let path = PathBuf::from(format!("/tmp/smelt-lsp-test-{function}.sql"));
+        FrameInfo {
+            function: function.to_string(),
+            param: param.to_string(),
+            bound_type: bound_type.to_string(),
+            decl_path: Some(path),
+            decl_range: Some(make_db_range(decl_line, 0)),
+            call_site_range: Some(make_db_range(decl_line + 10, 0)),
+        }
+    }
+
+    fn make_db_diag(message: &str, frames: Vec<FrameInfo>) -> DbDiagnosticT {
+        DbDiagnosticT {
+            severity: DbSeverityT::Error,
+            message: message.to_string(),
+            range: make_db_range(0, 0),
+            code: Some(DiagnosticCode::UnknownIdentifier),
+            data: Some(DiagnosticData::ExpansionFrames(frames)),
+        }
+    }
+
+    /// Phase 12 TDD test #4 — LSP e2e: nested-call error includes
+    /// `relatedInformation` per frame. A three-level expansion chain
+    /// (`outer_call → middle → inner_unary`) must yield exactly three
+    /// related-info entries and a message with three trailer lines, all
+    /// in outer-to-inner order.
+    #[test]
+    fn lsp_diagnostic_formats_frames_as_related_information() {
+        // Innermost-first → outermost-last data layout, matching the
+        // `check_smelt_fn_call` merge contract.
+        let frames = vec![
+            make_frame("inner_unary", "x", "INTEGER", 1),
+            make_frame("middle", "z", "INTEGER", 2),
+            make_frame("outer_call", "y", "INTEGER", 3),
+        ];
+        let diag = make_db_diag("unknown identifier `undefined_var`", frames);
+
+        let (message, related) = render_expansion_frames(&diag);
+
+        // 1. The related-information list must have one entry per frame.
+        let related = related.expect("expected three-level chain to produce related_information");
+        assert_eq!(
+            related.len(),
+            3,
+            "expected one DiagnosticRelatedInformation per frame, got {related:#?}"
+        );
+
+        // 2. Frame order in related-information is outer-to-inner
+        //    (`frames.iter().rev()` in the renderer).
+        assert!(
+            related[0].message.contains("outer_call"),
+            "first related-info entry must be the outermost frame, got: {}",
+            related[0].message
+        );
+        assert!(
+            related[1].message.contains("middle"),
+            "second related-info entry must be the middle frame, got: {}",
+            related[1].message
+        );
+        assert!(
+            related[2].message.contains("inner_unary"),
+            "third related-info entry must be the innermost frame, got: {}",
+            related[2].message
+        );
+
+        // 3. URIs must resolve to a real file-scheme URL.
+        for info in &related {
+            assert_eq!(info.location.uri.scheme(), "file");
+            assert!(
+                info.location.uri.to_file_path().is_ok(),
+                "related-info URI must round-trip to a file path: {}",
+                info.location.uri
+            );
+        }
+
+        // 4. The message body is expanded with one trailer line per frame,
+        //    outer-to-inner.
+        let pos_outer = message
+            .find("outer_call")
+            .expect("rendered message must mention outer_call");
+        let pos_middle = message
+            .find("middle")
+            .expect("rendered message must mention middle");
+        let pos_inner = message
+            .find("inner_unary")
+            .expect("rendered message must mention inner_unary");
+        assert!(
+            pos_outer < pos_middle && pos_middle < pos_inner,
+            "message trailers must render outer-to-inner; got {pos_outer}/{pos_middle}/{pos_inner} — rendered:\n{message}"
+        );
+    }
+
+    /// Phase 12 — single-frame diagnostics still render one trailer line
+    /// and exactly one related-information entry (Phase 6 behaviour
+    /// preserved).
+    #[test]
+    fn lsp_single_level_frame_preserves_phase6_rendering() {
+        let frames = vec![make_frame("safe_divide", "numerator", "TEXT", 0)];
+        let diag = make_db_diag("type mismatch in body", frames);
+
+        let (message, related) = render_expansion_frames(&diag);
+
+        let related = related.expect("single frame must still produce related_information");
+        assert_eq!(
+            related.len(),
+            1,
+            "single-frame diagnostics must emit exactly one related-info entry"
+        );
+        assert!(related[0].message.contains("safe_divide"));
+
+        // Exactly one trailer line was appended.
+        let trailer_count = message.matches("\nin expansion of `").count();
+        assert_eq!(
+            trailer_count, 1,
+            "single-frame diagnostic must have exactly one trailer line, got: {message}"
+        );
+    }
+
+    /// Phase 12 — diagnostics without any `ExpansionFrames` payload must
+    /// pass through untouched. This is the common case for non-function
+    /// diagnostics (unknown model refs, type mismatches in model SQL,
+    /// etc.) and must stay zero-cost.
+    #[test]
+    fn lsp_non_frame_diagnostics_unaffected() {
+        let diag = DbDiagnosticT {
+            severity: DbSeverityT::Error,
+            message: "undefined model `foo`".to_string(),
+            range: make_db_range(0, 0),
+            code: Some(DiagnosticCode::UndefinedModelRef),
+            data: None,
+        };
+        let (message, related) = render_expansion_frames(&diag);
+        assert_eq!(message, "undefined model `foo`");
+        assert!(related.is_none());
     }
 }

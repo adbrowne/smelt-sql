@@ -5,7 +5,11 @@
 use rowan::TextRange;
 use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, StructLiteral, Subquery,
+    SelectStmt, SmeltAsStructCall, SmeltFnCall, StructLiteral, Subquery,
+};
+use smelt_types::signatures::{
+    kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, SmeltType,
+    TypeConstraint,
 };
 use smelt_types::{parse_type, DataType, SqlFunction, TypedColumn};
 use std::collections::HashMap;
@@ -25,6 +29,62 @@ pub struct TypeContext {
     cte_names: std::collections::HashSet<String>,
     /// Aliases in scope: alias -> qualified name
     aliases: HashMap<String, String>,
+    /// Bound function parameters (param name → type). Shadows all SQL scopes
+    /// per §16 #1 of `docs/research/20260413-smelt-functions.md`: params
+    /// resolve **before** any SQL scope. Seeded by the Phase 5
+    /// `check_function_body` pure function when checking a `smelt.define`
+    /// body. Unqualified lookups via [`TypeContext::lookup_identifier`]
+    /// check this map first.
+    function_params: HashMap<String, TypedColumn>,
+    /// Workspace function-signature index (name → signature), populated by
+    /// Phase 6 callers so `infer_expression_type` can resolve the return
+    /// type of a `smelt.fn.<name>(...)` call site. Empty for non-call
+    /// contexts — pure type inference doesn't care whether the resolver
+    /// came from Salsa or an in-memory map.
+    function_signatures: HashMap<String, FunctionSig>,
+    /// `TableExpr`-parameter name → caller-supplied columns (Phase 15).
+    /// Populated at call-site expansion so the body's SQL FROM scope
+    /// sees bare column names from the caller's schema, and shadow-
+    /// warning detection can enumerate columns per parameter.
+    tableexpr_param_schemas: HashMap<String, Vec<(String, TypedColumn)>>,
+    /// Per-call row-variable bindings produced by a successful
+    /// [`smelt_types::signatures::check_schema_requirement`] against a
+    /// named row tail (`..r`). Phase 16 records the captured extras
+    /// so later phases (17 / 37) can reference the variable from the
+    /// body and return type. In Phase 16 itself the map is write-only
+    /// from the call-site's point of view — body expressions cannot
+    /// reference `r` yet, so no lookup path consults it.
+    ///
+    /// Doc-hidden pub accessor; exposed for unit tests only.
+    row_var_env: HashMap<String, Vec<(String, smelt_types::DataType)>>,
+    /// CTE names whose output schema could not be determined (e.g. a CTE
+    /// that does `SELECT * FROM smelt.fn.some_fn(...)` where the function's
+    /// output columns aren't known at pure-function-check time). Any unqualified
+    /// column lookup that otherwise fails will match against these names and
+    /// return `Unknown` instead of failing — suppressing false-positive
+    /// `UnknownIdentifier` diagnostics for columns that come from opaque-schema
+    /// CTEs. Introduced in Phase 22 of smelt-functions.
+    opaque_ctes: std::collections::HashSet<String>,
+    /// Fragment-typed parameters (`SelectItems<Kind>`) seeded during function
+    /// body checks. Maps param name → declared [`ExprKind`] so that
+    /// [`infer_expression_kind`] can return the correct kind for bare
+    /// references to these params inside `PASSING` bodies (Phase 44b).
+    ///
+    /// A bare identifier that matches a key in this map inherits its declared
+    /// kind instead of falling through to the default `Scalar` return value.
+    fragment_param_kinds: HashMap<String, ExprKind>,
+    /// Expected return type for the expression currently being inferred
+    /// (bidirectional inference, Phase 27, §16 #14 Decision 14).
+    ///
+    /// Set by the caller when a specific return type is expected (e.g. a
+    /// `Tier2CallSite(expected_ret)` check mode). `try_registry_inference`
+    /// passes this to [`unify_call_with_expected`] so that a built-in generic
+    /// call in a checking context can widen its type-variable binding to match
+    /// the expected type (e.g. `COALESCE(1, 2)` in a `Double` context yields
+    /// `Double` rather than `Integer`).
+    ///
+    /// `None` in all other contexts — preserves the pre-Phase-27 behaviour.
+    pub expected_return: Option<DataType>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -36,6 +96,13 @@ impl PartialEq for TypeContext {
             && self.cte_columns == other.cte_columns
             && self.cte_names == other.cte_names
             && self.aliases == other.aliases
+            && self.function_params == other.function_params
+            && self.function_signatures == other.function_signatures
+            && self.tableexpr_param_schemas == other.tableexpr_param_schemas
+            && self.row_var_env == other.row_var_env
+            && self.opaque_ctes == other.opaque_ctes
+            && self.fragment_param_kinds == other.fragment_param_kinds
+            && self.expected_return == other.expected_return
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -50,6 +117,13 @@ impl Clone for TypeContext {
             cte_columns: self.cte_columns.clone(),
             cte_names: self.cte_names.clone(),
             aliases: self.aliases.clone(),
+            function_params: self.function_params.clone(),
+            function_signatures: self.function_signatures.clone(),
+            tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
+            row_var_env: self.row_var_env.clone(),
+            opaque_ctes: self.opaque_ctes.clone(),
+            fragment_param_kinds: self.fragment_param_kinds.clone(),
+            expected_return: self.expected_return.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -93,6 +167,23 @@ impl TypeContext {
     pub fn add_alias(&mut self, alias: &str, qualified_name: &str) {
         self.aliases
             .insert(alias.to_string(), qualified_name.to_string());
+    }
+
+    /// Mark a CTE as having an opaque (unknowable at analysis time) output
+    /// schema. Any column lookup against this CTE will return
+    /// `Unknown`-typed instead of failing. Used for CTEs whose body SELECTs
+    /// from a `smelt.fn.*` call with a wildcard — we can't expand the
+    /// wildcard without the function's body AST (Phase 22).
+    pub fn mark_cte_opaque(&mut self, cte_name: &str) {
+        self.opaque_ctes.insert(cte_name.to_string());
+        // Also register as a CTE name so `is_cte` returns true.
+        self.cte_names.insert(cte_name.to_string());
+    }
+
+    /// Return `true` when `cte_name` was marked as having an opaque schema
+    /// (its output columns cannot be determined at pure-function-check time).
+    pub fn is_opaque_cte(&self, cte_name: &str) -> bool {
+        self.opaque_ctes.contains(cte_name)
     }
 
     /// Add a CTE column to the context
@@ -178,6 +269,16 @@ impl TypeContext {
         result
     }
 
+    // Static sentinel for opaque-CTE fallback returns — avoids creating a
+    // `TypedColumn` on the heap for every opaque-CTE column lookup.
+    fn opaque_column() -> &'static TypedColumn {
+        static OPAQUE: std::sync::OnceLock<TypedColumn> = std::sync::OnceLock::new();
+        OPAQUE.get_or_init(|| TypedColumn {
+            data_type: DataType::Unknown,
+            nullable: true,
+        })
+    }
+
     fn lookup_column_inner(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
         // If we have a qualifier, use it directly
         if let Some(q) = qualifier {
@@ -188,6 +289,14 @@ impl TypeContext {
             let cte_key = format!("{}.{}", resolved_qualifier, name);
             if let Some(t) = self.cte_columns.get(&cte_key) {
                 return Some(t);
+            }
+
+            // Phase 22: if the qualifier resolves to an opaque CTE (one
+            // whose schema couldn't be inferred from a `smelt.fn.*` call),
+            // return Unknown rather than failing — we can't validate column
+            // names against an unknown schema.
+            if self.opaque_ctes.contains(resolved_qualifier) {
+                return Some(Self::opaque_column());
             }
 
             // Try model columns
@@ -231,7 +340,253 @@ impl TypeContext {
             }
         }
 
+        // Phase 22: if there are any opaque CTEs in scope, an unqualified
+        // column lookup that failed all known scopes may still be valid —
+        // it could reference a column from the opaque CTE's unknown schema.
+        // Return Unknown rather than None to suppress false-positive
+        // `UnknownIdentifier` diagnostics in function bodies that SELECT
+        // from `smelt.fn.*`-derived CTEs.
+        if !self.opaque_ctes.is_empty() {
+            return Some(Self::opaque_column());
+        }
+
         None
+    }
+
+    /// Seed a function parameter binding into the context.
+    ///
+    /// Phase 5 hinge: `check_function_body` calls this once per declared
+    /// parameter before re-checking the body. Subsequent unqualified lookups
+    /// via [`TypeContext::lookup_identifier`] will return the bound type
+    /// instead of falling through to source/model/CTE scopes.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn add_function_param(&mut self, name: &str, col: TypedColumn) {
+        self.function_params.insert(name.to_string(), col);
+    }
+
+    /// Is `name` bound as a function parameter in this context?
+    pub fn has_function_param(&self, name: &str) -> bool {
+        self.function_params.contains_key(name)
+    }
+
+    /// Record that `name` is a `SelectItems<Kind>` fragment parameter with
+    /// the given declared [`ExprKind`] (Phase 44b).
+    ///
+    /// After this call, [`infer_expression_kind`] will return `kind` for a
+    /// bare unqualified identifier expression whose text matches `name`, so
+    /// that forwarding a fragment-typed parameter through to an inner call's
+    /// PASSING body doesn't produce spurious `FragmentKindMismatch` errors.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn add_fragment_param_kind(&mut self, name: &str, kind: ExprKind) {
+        self.fragment_param_kinds.insert(name.to_string(), kind);
+    }
+
+    /// Look up the declared [`ExprKind`] for a fragment-typed parameter by
+    /// name (Phase 44b). Returns `None` when `name` was not registered via
+    /// [`TypeContext::add_fragment_param_kind`].
+    pub fn lookup_fragment_param_kind(&self, name: &str) -> Option<ExprKind> {
+        self.fragment_param_kinds.get(name).copied()
+    }
+
+    /// Return `true` when `name` is a fragment-typed (SelectItems<Kind>)
+    /// parameter registered in this context (Phase 44b).
+    pub fn is_fragment_param(&self, name: &str) -> bool {
+        self.fragment_param_kinds.contains_key(name)
+    }
+
+    /// Seed a `TableExpr` parameter's caller-supplied schema as a
+    /// FROM-scope entry (Phase 15, §16 #7).
+    ///
+    /// The columns are registered both as bare-column lookups (so
+    /// unqualified `revenue` inside the body resolves via
+    /// [`TypeContext::lookup_column`]) and as qualified lookups under
+    /// the parameter's name (so `source.revenue` resolves through the
+    /// same path any other model alias would).
+    ///
+    /// Parameter names are also tracked separately via
+    /// [`TypeContext::tableexpr_param_columns`] so the Phase-15 shadow
+    /// warning checker can enumerate which columns a caller supplied.
+    ///
+    /// Pure — no Salsa interaction. Called at call-site expansion by the
+    /// `smelt-functions` call-site checker.
+    pub fn add_tableexpr_param(&mut self, param_name: &str, columns: &[(String, TypedColumn)]) {
+        for (col_name, typed_col) in columns {
+            // `add_model_column` keys on `param_name.col_name`; the
+            // existing unqualified-suffix lookup in `lookup_column_inner`
+            // then resolves bare `col_name` via this entry.
+            self.add_model_column(param_name, col_name, typed_col.clone());
+        }
+        // Bind the parameter name as an alias to itself so
+        // `describe_qualifier` / qualified lookups succeed without
+        // special-casing.
+        self.add_alias(param_name, param_name);
+        // Record the schema separately — used by the shadow-warning
+        // check which needs to enumerate columns by parameter without
+        // round-tripping through `model_columns` keys.
+        self.tableexpr_param_schemas
+            .insert(param_name.to_string(), columns.to_vec());
+    }
+
+    /// Return the caller-supplied columns for a `TableExpr` parameter,
+    /// if one with this name has been seeded via
+    /// [`TypeContext::add_tableexpr_param`].
+    pub fn tableexpr_param_columns(&self, param_name: &str) -> Option<&[(String, TypedColumn)]> {
+        self.tableexpr_param_schemas
+            .get(param_name)
+            .map(|v| v.as_slice())
+    }
+
+    /// Iterate all `TableExpr` parameter schemas seeded in this context.
+    pub fn tableexpr_param_schemas_iter(
+        &self,
+    ) -> impl Iterator<Item = (&str, &[(String, TypedColumn)])> {
+        self.tableexpr_param_schemas
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    /// Record a named row-variable binding in the per-call
+    /// `row_var_env` (Phase 16).
+    ///
+    /// `name` is the variable's source name (e.g. `"r"`); `extras` is
+    /// the ordered `(column_name, data_type)` list of caller columns
+    /// captured by the row tail. Overwrites any previous binding for
+    /// `name` — matching the simple "innermost wins" rule; later
+    /// phases may introduce scope stacking if user code can actually
+    /// reference `r`.
+    ///
+    /// Doc-hidden — Phase 16 only needs this to exist so subsequent
+    /// phases can build atop it; user-visible binding behaviour lands
+    /// in Phases 17+.
+    #[doc(hidden)]
+    pub fn set_row_var_binding(
+        &mut self,
+        name: &str,
+        extras: Vec<(String, smelt_types::DataType)>,
+    ) {
+        self.row_var_env.insert(name.to_string(), extras);
+    }
+
+    /// Unit-test-only accessor for the named row-variable bindings
+    /// recorded by [`TypeContext::set_row_var_binding`] (Phase 16).
+    ///
+    /// Returns the captured `(column_name, data_type)` pairs for the
+    /// named row variable, or `None` when no binding exists. The
+    /// [`doc(hidden)`] marker keeps this out of the public surface
+    /// while still permitting cross-crate tests to observe the map
+    /// — matches the project's existing pattern for internal hooks
+    /// exposed for test access (e.g. property-test infrastructure).
+    #[doc(hidden)]
+    pub fn row_var_binding(&self, name: &str) -> Option<&[(String, smelt_types::DataType)]> {
+        self.row_var_env.get(name).map(|v| v.as_slice())
+    }
+
+    /// Register a resolved [`FunctionSig`] so `smelt.fn.<name>` call-site
+    /// type inference can look up the declared return type.
+    ///
+    /// Pure — no Salsa interaction. Phase 6 callers build the map by
+    /// asking Salsa for each unique name that appears in the file.
+    pub fn add_function_signature(&mut self, name: &str, sig: FunctionSig) {
+        self.function_signatures.insert(name.to_string(), sig);
+    }
+
+    /// Resolve a `smelt.fn.<name>` reference to its [`FunctionSig`].
+    pub fn lookup_function_signature(&self, name: &str) -> Option<&FunctionSig> {
+        self.function_signatures.get(name)
+    }
+
+    /// Iterate all registered function signatures.
+    ///
+    /// Used by Phase 22's CTE schema extraction to propagate the caller's
+    /// workspace-function map into the body context so nested
+    /// `smelt.fn.*` calls inside CTE bodies (e.g.
+    /// `SELECT * FROM smelt.fn.sessionize(...)`) can resolve their return
+    /// schemas during wildcard expansion.
+    pub fn function_signatures_iter(&self) -> impl Iterator<Item = (&str, &FunctionSig)> {
+        self.function_signatures
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Unqualified-or-qualified identifier lookup that honours the
+    /// function-parameter scope.
+    ///
+    /// Per §16 #1 of the smelt-functions research, function parameters
+    /// resolve **before** any SQL scope. This matters in Step 1 only inside
+    /// `smelt.define` bodies (no FROM scope is in play), but the
+    /// mechanism is wired in now so Phase 6+ composition is trivial.
+    ///
+    /// - Qualified lookups (`qualifier.is_some()`) bypass the function-param
+    ///   map entirely — params are always bare names.
+    /// - Unqualified lookups return a function param before falling through
+    ///   to [`TypeContext::lookup_column`].
+    pub fn lookup_identifier(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
+        if qualifier.is_none() {
+            if let Some(col) = self.function_params.get(name) {
+                return Some(col);
+            }
+            // Phase 37: a bare identifier that resolves as a table alias (e.g. `e`
+            // in `smelt.fn.with_hour(e)`) is a valid reference even though it is
+            // not itself a column.  Treat it as Unknown-typed to suppress false-
+            // positive `UndeclaredColumn` diagnostics for table aliases used as
+            // struct arguments.
+            if self.aliases.contains_key(name) {
+                return Some(Self::opaque_column());
+            }
+        }
+        self.lookup_column(qualifier, name)
+    }
+
+    /// Return all `(column_name, typed_column)` pairs whose qualifier
+    /// (the part before the `.`) matches `qualifier` in any of the
+    /// source, model, or CTE column maps.
+    ///
+    /// Used by Phase 36 struct-parameter resolution to enumerate the
+    /// concrete columns reachable through a table alias passed as a
+    /// struct argument (e.g. `smelt.fn.event_hour(e)` where `e` is an
+    /// alias for `smelt.source('source.events') AS e`).
+    ///
+    /// Alias resolution is applied first so `e` maps to `events` (or
+    /// whatever the underlying table name is). Returns an empty `Vec`
+    /// when no columns are found under `qualifier`.
+    pub fn columns_for_qualifier(&self, qualifier: &str) -> Vec<(&str, &TypedColumn)> {
+        // Resolve alias first.
+        let resolved = self
+            .aliases
+            .get(qualifier)
+            .map(|s| s.as_str())
+            .unwrap_or(qualifier);
+        let prefix = format!("{}.", resolved);
+
+        let mut result: Vec<(&str, &TypedColumn)> = Vec::new();
+
+        // CTE columns.
+        for (key, tc) in &self.cte_columns {
+            if let Some(col) = key.strip_prefix(&prefix) {
+                result.push((col, tc));
+            }
+        }
+        // Model columns.
+        for (key, tc) in &self.model_columns {
+            if let Some(col) = key.strip_prefix(&prefix) {
+                result.push((col, tc));
+            }
+        }
+        // Source columns (stored as `src.tbl.col` or `tbl.col`).
+        // We match both the simple `<table>.col` form and the
+        // fully-qualified `<source>.<table>.col` form.
+        for (key, tc) in &self.source_columns {
+            if let Some(col) = key.strip_prefix(&prefix) {
+                // Avoid nested qualifiers: `col` must be a bare name.
+                if !col.contains('.') {
+                    result.push((col, tc));
+                }
+            }
+        }
+
+        result
     }
 
     /// Take and clear the list of column lookups that returned None.
@@ -271,6 +626,23 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // Try function call (aggregates, etc.)
     if let Some(func) = expr.as_function_call() {
         return infer_function_type(&func, ctx);
+    }
+
+    // Try smelt.fn.<name>(...) user-function call site. Returns the declared
+    // return type of the resolved signature, or Unknown if the function
+    // cannot be resolved / lacks a return annotation. Diagnostics for
+    // unresolved functions / arg mismatches are emitted elsewhere
+    // (`function_body_check::check_smelt_fn_call`), so this path is
+    // type-only.
+    if let Some(call) = expr.as_smelt_fn_call() {
+        return infer_smelt_fn_call_type(&call, ctx);
+    }
+
+    // Try smelt.as_struct(alias [EXCEPT cols]) — Phase 38.
+    // Resolves the alias's columns from the TypeContext, filters EXCEPT
+    // columns, and returns DataType::Struct(remaining_fields).
+    if let Some(call) = expr.as_smelt_as_struct_call() {
+        return infer_as_struct_type(&call, ctx);
     }
 
     // Try binary expression
@@ -329,7 +701,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try column reference (includes struct field access for qualified refs like s.field_name)
     if let Some(col_ref) = expr.as_column_ref() {
-        if let Some(typed_col) = ctx.lookup_column(col_ref.qualifier(), col_ref.name()) {
+        // Use `lookup_identifier` so that seeded function parameters (§16 #1)
+        // resolve before any SQL FROM scope. For `TypeContext`s with no
+        // function params seeded (the common case — all pre-Phase-5 call
+        // sites), this is semantically identical to `lookup_column`.
+        if let Some(typed_col) = ctx.lookup_identifier(col_ref.qualifier(), col_ref.name()) {
             return Some(typed_col.clone());
         }
         // If qualified ref didn't resolve as a column, try struct field access:
@@ -361,6 +737,301 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
 
     // Try literal inference (also handles typed literals like DATE '2025-01-15')
     infer_literal_type(&text)
+}
+
+/// Infer the [`ExprKind`] (Scalar / Agg / Window) of an expression
+/// (Phase 14, §16 #24).
+///
+/// The kind is synthesised in the same pure pass as [`infer_expression_type`]
+/// — column references and literals are `Scalar`; arithmetic / case / cast
+/// take the ceiling of their sub-kinds; function calls consult the
+/// [`BuiltinRegistry`]. A call site that carries an `OVER (…)` clause
+/// produces [`ExprKind::Window`] regardless of the callee's seeded kind
+/// (the canonical SQL dual-mode behaviour for aggregates).
+///
+/// Pure: no Salsa access, deterministic, side-effect free.
+pub fn infer_expression_kind(expr: &Expr, ctx: &TypeContext) -> ExprKind {
+    // Any expression with an attached OVER (...) clause is a window
+    // expression. This dominates the callee's seeded kind — `SUM(x) OVER
+    // (...)` is `Window`, not `Agg`.
+    if expr.window_spec().is_some() {
+        return ExprKind::Window;
+    }
+
+    // CAST(<inner> AS T) inherits the inner expression's kind.
+    if let Some(cast_expr) = expr.as_cast() {
+        return cast_expr
+            .expression()
+            .as_ref()
+            .map(|inner| infer_expression_kind(inner, ctx))
+            .unwrap_or(ExprKind::Scalar);
+    }
+
+    // CASE: ceiling over WHEN result branches and the optional ELSE.
+    if let Some(case_expr) = expr.as_case() {
+        let mut kinds: Vec<ExprKind> = Vec::new();
+        for when in case_expr.when_clauses() {
+            if let Some(result) = when.result() {
+                kinds.push(infer_expression_kind(&result, ctx));
+            }
+            if let Some(cond) = when.condition() {
+                kinds.push(infer_expression_kind(&cond, ctx));
+            }
+        }
+        if let Some(else_expr) = case_expr.else_expr() {
+            kinds.push(infer_expression_kind(&else_expr, ctx));
+        }
+        return kind_ceiling(&kinds);
+    }
+
+    // EXTRACT(field FROM expr) inherits the inner expression's kind.
+    if let Some(extract_expr) = expr.as_extract() {
+        return extract_expr
+            .expression()
+            .as_ref()
+            .map(|inner| infer_expression_kind(inner, ctx))
+            .unwrap_or(ExprKind::Scalar);
+    }
+
+    // Subquery: scalar — the subquery's inner kinds are checked against
+    // its own splice points, not propagated outward. The subquery itself
+    // is a Scalar value at the outer position.
+    if expr.as_subquery().is_some() {
+        return ExprKind::Scalar;
+    }
+
+    // SQL built-in / aggregate / window function call.
+    if let Some(func) = expr.as_function_call() {
+        return infer_function_call_kind(&func, ctx);
+    }
+
+    // smelt.fn.* user-defined call: scalar today (Phase 14 doesn't track
+    // kind through user-defined fragments; that's a later phase). Until
+    // then, treat as the most permissive kind so call sites in WHERE
+    // don't false-positive.
+    if expr.as_smelt_fn_call().is_some() {
+        return ExprKind::Scalar;
+    }
+
+    // Binary expr: ceiling over LHS and RHS.
+    if let Some(binary) = expr.as_binary() {
+        let lhs = binary
+            .left()
+            .as_ref()
+            .map(|e| infer_expression_kind(e, ctx))
+            .unwrap_or(ExprKind::Scalar);
+        let rhs = binary
+            .right()
+            .as_ref()
+            .map(|e| infer_expression_kind(e, ctx))
+            .unwrap_or(ExprKind::Scalar);
+        return kind_ceiling(&[lhs, rhs]);
+    }
+
+    // BETWEEN / IN / EXISTS / array / row / struct: walk children and
+    // take their ceiling. Most are scalar but if any sub-expr is Agg or
+    // Window the wrapper inherits it.
+    let mut kinds: Vec<ExprKind> = Vec::new();
+    for child in expr.syntax().children() {
+        if let Some(child_expr) = Expr::cast(child) {
+            kinds.push(infer_expression_kind(&child_expr, ctx));
+        }
+    }
+    if !kinds.is_empty() {
+        return kind_ceiling(&kinds);
+    }
+
+    // Column refs, literals, identifiers — Scalar.
+    // Phase 44b exception: a bare unqualified identifier that matches a
+    // registered fragment-typed parameter inherits that parameter's declared
+    // kind. This lets `PASSING metrics AS (metrics)` forward a
+    // `SelectItems<Agg>` parameter without producing a `FragmentKindMismatch`.
+    if let Some(col_ref) = expr.as_column_ref() {
+        if col_ref.qualifier().is_none() {
+            if let Some(kind) = ctx.lookup_fragment_param_kind(col_ref.name()) {
+                return kind;
+            }
+        }
+    }
+    ExprKind::Scalar
+}
+
+/// Compute the [`ExprKind`] of a SQL function-call site.
+///
+/// Looks the function up in the [`BuiltinRegistry`] for its seeded kind.
+/// Unknown functions fall back to [`ExprKind::Scalar`]. (Aggregates with
+/// an attached `OVER (…)` clause are handled by the caller — see
+/// [`infer_expression_kind`]'s window check.)
+fn infer_function_call_kind(func: &FunctionCall, _ctx: &TypeContext) -> ExprKind {
+    let Some(name) = func.name() else {
+        return ExprKind::Scalar;
+    };
+    let upper = name.to_uppercase();
+    BuiltinRegistry::resolve(&upper)
+        .map(|sig| sig.kind)
+        .unwrap_or(ExprKind::Scalar)
+}
+
+/// Structured info about a window-in-scalar-context error (Phase 14).
+///
+/// Returned by [`check_window_in_scalar_contexts`] for each WHERE /
+/// GROUP BY position whose expression resolves to [`ExprKind::Window`].
+/// The caller (`check_file_diagnostics`) maps these into
+/// [`crate::DiagnosticCode::WindowInScalarContext`] entries.
+#[derive(Debug, Clone)]
+pub struct WindowInScalarContextInfo {
+    /// Free-form clause name (`"WHERE"`, `"GROUP BY"`) for the message.
+    pub clause: &'static str,
+    /// Source span of the offending expression.
+    pub range: TextRange,
+    /// Trimmed text of the offending expression — quoted in the message.
+    pub expression_text: String,
+}
+
+/// Pure check: collect every expression in WHERE / GROUP BY / HAVING whose
+/// synthesised kind is [`ExprKind::Window`] (Phase 14, §16 #24).
+///
+/// Also recurses into scalar subqueries nested inside those clauses so that
+/// `WHERE col > (SELECT ROW_NUMBER() OVER (...) FROM t)` is flagged as a
+/// `"WHERE"` violation (Phase 49).
+///
+/// FROM-clause subqueries are intentionally excluded: they are not scalar
+/// contexts, and window functions are valid inside derived-table SELECT lists.
+pub fn check_window_in_scalar_contexts(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<WindowInScalarContextInfo> {
+    let mut out = Vec::new();
+
+    if let Some(where_clause) = select_stmt.where_clause() {
+        if let Some(expr) = where_clause.expression() {
+            check_expr_and_scalar_subqueries(&expr, "WHERE", ctx, &mut out);
+        }
+    }
+
+    if let Some(group_by) = select_stmt.group_by_clause() {
+        for expr in group_by.expressions() {
+            check_expr_and_scalar_subqueries(&expr, "GROUP BY", ctx, &mut out);
+        }
+    }
+
+    if let Some(having_clause) = select_stmt.having_clause() {
+        if let Some(expr) = having_clause.expression() {
+            check_expr_and_scalar_subqueries(&expr, "HAVING", ctx, &mut out);
+        }
+    }
+
+    out
+}
+
+/// Check a single expression in a scalar clause (WHERE / GROUP BY / HAVING):
+///
+/// 1. If the expression itself is `Window`-kinded, emit an error.
+/// 2. Recursively descend into any scalar subqueries found within the
+///    expression tree. For each scalar subquery found:
+///    - Check its SELECT list for Window-kinded expressions (a window function
+///      inside a scalar-subquery SELECT list is invalid because the subquery
+///      must return a scalar value).
+///    - Call [`check_window_in_scalar_contexts`] on it to catch violations in
+///      its nested WHERE / GROUP BY / HAVING clauses.
+///
+/// FROM-clause subqueries are **not** visited here — they live under
+/// `TABLE_REF` nodes, which are children of `FROM_CLAUSE`, which is a child
+/// of `SELECT_STMT`, not of an expression node.  Since we only enter this
+/// function from expression positions (WHERE / GROUP BY / HAVING), every
+/// `SUBQUERY` descendant of `expr` is guaranteed to be a scalar subquery.
+fn check_expr_and_scalar_subqueries(
+    expr: &Expr,
+    clause: &'static str,
+    ctx: &TypeContext,
+    out: &mut Vec<WindowInScalarContextInfo>,
+) {
+    use smelt_parser::SyntaxKind;
+
+    // Top-level: if this expression is Window-kinded, report it directly.
+    if infer_expression_kind(expr, ctx) == ExprKind::Window {
+        out.push(WindowInScalarContextInfo {
+            clause,
+            range: expr.text_range(),
+            expression_text: expr.text().trim().to_string(),
+        });
+    }
+
+    // Recurse into scalar subqueries nested inside this expression.
+    // All SUBQUERY nodes in an expression tree are scalar contexts (they are
+    // not FROM-clause derived tables), so we check their inner SELECT
+    // statements with the same outer clause name.
+    for node in expr.syntax().descendants() {
+        if node.kind() == SyntaxKind::SUBQUERY {
+            if let Some(subquery) = Subquery::cast(node) {
+                if let Some(inner_select) = subquery.select_stmt() {
+                    // (a) Check the inner SELECT's own SELECT list: a window
+                    // function in the select list of a scalar subquery is
+                    // invalid because the subquery must produce a scalar value.
+                    check_scalar_subquery_select_list(&inner_select, clause, out);
+
+                    // (b) Recurse into the inner SELECT's WHERE/GROUP BY/HAVING
+                    // clauses (and any further nested scalar subqueries there).
+                    out.extend(check_window_in_scalar_contexts(&inner_select, ctx));
+                }
+            }
+        }
+    }
+}
+
+/// For a [`SelectStmt`] that appears as a scalar subquery, check each item in
+/// its SELECT list. If any item contains a Window-kinded expression (directly
+/// or buried inside an aggregate wrapping a window call), emit an entry with
+/// `clause` preserved from the outer scalar context.
+///
+/// This is needed because `infer_expression_kind` treats outer function calls
+/// by their registry kind (e.g. `MAX(ROW_NUMBER() OVER (...))` → `Agg`), so a
+/// raw top-level kind check would miss the nested window expression. Here we
+/// walk the expression's descendants looking for any node with an OVER clause.
+fn check_scalar_subquery_select_list(
+    inner_select: &SelectStmt,
+    clause: &'static str,
+    out: &mut Vec<WindowInScalarContextInfo>,
+) {
+    use smelt_parser::SyntaxKind;
+
+    let Some(select_list) = inner_select.select_list() else {
+        return;
+    };
+    for item in select_list.items() {
+        let Some(item_expr) = item.expression() else {
+            continue;
+        };
+        // Walk every descendant of this select-item expression looking for
+        // any EXPRESSION node that carries an OVER clause (i.e. a window
+        // function call).
+        //
+        // We look for EXPRESSION nodes (not FUNCTION_CALL) because the parser
+        // puts the WINDOW_SPEC as a sibling of the FUNCTION_CALL inside a
+        // parent EXPRESSION: `EXPRESSION { FUNCTION_CALL { ARG_LIST } WINDOW_SPEC }`.
+        // An `Expr` wrapping that EXPRESSION node will find the WINDOW_SPEC via
+        // `window_spec()`, while an `Expr` wrapping the inner FUNCTION_CALL won't.
+        //
+        // We do NOT use `infer_expression_kind` on the top-level item because an
+        // aggregate wrapping a window call (e.g. `MAX(ROW_NUMBER() OVER (...))`)
+        // would be classified as `Agg` by the registry lookup, hiding the inner
+        // window function.
+        for desc_node in item_expr.syntax().descendants() {
+            if desc_node.kind() == SyntaxKind::EXPRESSION {
+                if let Some(desc_expr) = Expr::cast(desc_node) {
+                    if desc_expr.window_spec().is_some() {
+                        out.push(WindowInScalarContextInfo {
+                            clause,
+                            range: desc_expr.text_range(),
+                            expression_text: desc_expr.text().trim().to_string(),
+                        });
+                        // One hit per select item is sufficient.
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Infer the type of a CAST expression.
@@ -504,6 +1175,13 @@ fn infer_subquery_type(subquery: &Subquery, ctx: &TypeContext) -> Option<TypedCo
 pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext) -> TypeContext {
     let mut ctx = parent_ctx.clone();
 
+    // Phase 27: Do not propagate `expected_return` into subquery contexts.
+    // The outer function's bidirectional hint applies to the top-level body
+    // expression only. Propagating it into subqueries would incorrectly widen
+    // registry-migrated generics inside nested SELECT statements, producing
+    // wrong inferred types for sub-expressions that have no declared return.
+    ctx.expected_return = None;
+
     // Process any WITH clause in this subquery
     if let Some(with_clause) = select_stmt.with_clause() {
         for cte in with_clause.ctes() {
@@ -537,10 +1215,321 @@ pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext
     ctx
 }
 
+/// Infer the return type of a `smelt.fn.<name>(...)` call site.
+///
+/// Uses the workspace function-signature index seeded on [`TypeContext`]
+/// (via [`TypeContext::add_function_signature`]) — no Salsa access. Returns:
+///   - `Some(TypedColumn)` with the declared return type when the signature
+///     resolves and carries a `-> Expr<Concrete(T)>` annotation.
+///   - `Some(TypedColumn { data_type: Double, .. })` when the return is
+///     `Expr<Numeric>` — matches `param_binding_type`'s widening rule in
+///     `function_body_check.rs` so callers doing `CAST(... AS DOUBLE) /
+///     safe_divide(...)` stay well-typed.
+///   - `Some(TypedColumn { data_type: Unknown, .. })` for `Expr<Any>`,
+///     malformed annotations, or missing annotations — diagnostic emission
+///     is the call-site checker's job, not inference's.
+///   - `None` only when the function cannot be resolved in this context.
+fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<TypedColumn> {
+    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+    let name = segments.last()?;
+    let sig = ctx.lookup_function_signature(name)?;
+
+    let dt = match &sig.return_type {
+        Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(dt)))) => dt.clone(),
+        Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => DataType::Double,
+        // `Ordered` (Phase 7) is only reachable via generics in v1 signatures
+        // (§16 #14) — Phase 8 adds the inference machinery. In the monomorphic
+        // `smelt.define` path we stay conservative: no precise return type
+        // known yet, surface `Unknown` like `Any`.
+        Some(Ok(SmeltType::Expr(TypeConstraint::Ordered))) => DataType::Unknown,
+        Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => DataType::Unknown,
+        // `TableExpr` return (Phase 15) — scalar inference has no
+        // DataType for a whole row set. Downstream Phase 17 plumbs the
+        // inferred output schema; for now the call-site sees an opaque
+        // Unknown.
+        Some(Ok(SmeltType::TableExpr(_))) => DataType::Unknown,
+        // `SelectItems<Kind>` (Phase 21) is not a scalar type.
+        Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
+        // Phase 37: `Struct<{declared_fields, ..r}>` return type — resolve
+        // the row variable `r` by examining the call-site argument that
+        // corresponds to the first struct parameter.  When the extras can
+        // be determined we build a concrete `DataType::Struct` from the
+        // declared fields plus the extras; otherwise fall back to Unknown.
+        Some(Ok(SmeltType::Struct {
+            fields: ret_fields,
+            tail,
+        })) => resolve_struct_return_type(call, ctx, sig, ret_fields, tail),
+        Some(Err(_)) => DataType::Unknown,
+        None => DataType::Unknown,
+    };
+    Some(TypedColumn::nullable(dt))
+}
+
+/// Resolve a `Struct<{declared_fields, ..r}>` return type to a concrete
+/// `DataType::Struct` by consulting the call-site argument schema (Phase 37).
+///
+/// Algorithm:
+/// 1. Find the first struct parameter (one whose type is `SmeltType::Struct`).
+/// 2. Get the corresponding call-site argument expression.
+/// 3. Resolve the argument to a column set via `ctx.columns_for_qualifier`.
+/// 4. Run `check_struct_row_var_binding` to compute the extras for the row var.
+/// 5. Return `DataType::Struct(ret_fields + extras)`.
+///
+/// Falls back to `DataType::Unknown` whenever any step cannot be completed.
+fn resolve_struct_return_type(
+    call: &SmeltFnCall,
+    ctx: &TypeContext,
+    sig: &smelt_types::signatures::FunctionSig,
+    ret_fields: &[(String, DataType)],
+    tail: &smelt_types::signatures::StructRowTail,
+) -> DataType {
+    use crate::function_body_check::{check_struct_row_var_binding, struct_param_fields};
+    use smelt_types::signatures::StructRowTail;
+
+    // If no named row var, just return the declared fields as a concrete struct.
+    let var_name = match tail {
+        StructRowTail::Named(n) => n.as_str(),
+        StructRowTail::Anon | StructRowTail::None => {
+            // No row variable — build concrete struct from declared fields only.
+            let concrete: Vec<(String, DataType)> = ret_fields.to_vec();
+            return DataType::Struct(concrete);
+        }
+    };
+
+    // Find the struct parameter index.
+    let struct_param_idx = sig
+        .params
+        .iter()
+        .position(|p| matches!(&p.type_ref, Some(Ok(SmeltType::Struct { .. }))));
+    let Some(idx) = struct_param_idx else {
+        return DataType::Unknown;
+    };
+
+    // Get the corresponding argument expression.
+    let arg_list = call.arg_list();
+    let positional: Vec<_> = arg_list
+        .as_ref()
+        .map(|al| al.positional_args())
+        .unwrap_or_default();
+    let arg_expr = positional.get(idx).cloned().or_else(|| {
+        // Named argument lookup.
+        let param_name = &sig.params[idx].name;
+        let named: Vec<_> = arg_list
+            .as_ref()
+            .map(|al| al.named_params().collect())
+            .unwrap_or_default();
+        named.into_iter().find_map(|np| {
+            if np.name().as_deref() == Some(param_name.as_str()) {
+                np.value_expr()
+            } else {
+                None
+            }
+        })
+    });
+    let Some(arg) = arg_expr else {
+        return DataType::Unknown;
+    };
+
+    // Resolve the argument to a column set.
+    let qualifier = arg.text().trim().to_string();
+    if qualifier.is_empty() {
+        return DataType::Unknown;
+    }
+    let cols: Vec<(String, DataType)> = ctx
+        .columns_for_qualifier(&qualifier)
+        .into_iter()
+        .map(|(col_name, tc)| (col_name.to_string(), tc.data_type.clone()))
+        .collect();
+    if cols.is_empty() {
+        return DataType::Unknown;
+    }
+
+    // Extract declared fields from the struct parameter to compute extras.
+    let param = &sig.params[idx];
+    let Some((declared_fields, param_tail)) = struct_param_fields(param) else {
+        return DataType::Unknown;
+    };
+
+    // Run struct row-var unification to get extras.
+    let extras = match check_struct_row_var_binding(declared_fields, &cols, param_tail) {
+        Ok(Some(extras)) => extras,
+        Ok(None) => vec![],
+        Err(_) => return DataType::Unknown,
+    };
+
+    // Check that the row var name matches between param and return type.
+    let param_var_matches = match param_tail {
+        StructRowTail::Named(param_var) => param_var.as_str() == var_name,
+        _ => false,
+    };
+    if !param_var_matches {
+        return DataType::Unknown;
+    }
+
+    // Build the concrete return type: declared return fields + extras.
+    let mut concrete: Vec<(String, DataType)> = ret_fields.to_vec();
+    concrete.extend(extras);
+    DataType::Struct(concrete)
+}
+
+/// Infer the type of a `smelt.as_struct(alias [EXCEPT col1, col2])` call
+/// (Phase 38).
+///
+/// Algorithm:
+/// 1. Read the alias name from the `SmeltAsStructCall`.
+/// 2. Collect columns for that qualifier via `ctx.columns_for_qualifier`.
+/// 3. Remove columns named in the EXCEPT list.
+/// 4. Return `DataType::Struct(remaining_fields)`.
+///
+/// Returns `None` when the alias cannot be resolved in the context.
+fn infer_as_struct_type(call: &SmeltAsStructCall, ctx: &TypeContext) -> Option<TypedColumn> {
+    let alias = call.alias()?;
+    let except = call.except_columns();
+    let cols = ctx.columns_for_qualifier(&alias);
+    if cols.is_empty() {
+        return None;
+    }
+    let fields: Vec<(String, DataType)> = cols
+        .into_iter()
+        .filter(|(name, _)| !except.contains(&name.to_string()))
+        .map(|(name, tc)| (name.to_string(), tc.data_type.clone()))
+        .collect();
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false,
+    })
+}
+
+/// LUB adapter: the canonical numeric-promotion routine lives in
+/// [`promote_types`] (this module) but signatures-side [`unify_call`] needs a
+/// plain `Fn(&DataType, &DataType) -> DataType`. This wrapper keeps
+/// `smelt-types` dependency-free per the plan's cross-phase design choice.
+fn registry_lub(a: &DataType, b: &DataType) -> DataType {
+    let lhs = TypedColumn {
+        data_type: a.clone(),
+        nullable: true,
+    };
+    let rhs = TypedColumn {
+        data_type: b.clone(),
+        nullable: true,
+    };
+    promote_types(&lhs, &rhs).data_type
+}
+
+/// Names we've migrated from the hand-written match to registry-driven
+/// inference. Phase 9 deliberately keeps this allowlist small — each entry is
+/// one that the registry's `unify_call` shape reproduces the legacy
+/// `infer_function_type` behaviour for. Entries NOT on this list continue
+/// through the legacy match unchanged (see coverage-spike findings in the
+/// Phase 9 implementer report).
+///
+/// The list is ordered by family for easy review.
+const REGISTRY_MIGRATED: &[&str] = &[
+    // Aggregates — simple identity-return or fixed-return.
+    "AVG",   // registry: <T: Numeric>(T) → Double — matches legacy (Double, nullable=true)
+    "MIN",   // registry: <T: Ordered>(T) → T — matches legacy first-arg + nullable=true
+    "MAX",   // same as MIN
+    "COUNT", // registry: (Any) → BigInt — matches legacy (BigInt, nullable=false)
+    // Arithmetic scalars.
+    "ABS", // registry: <T: Numeric>(T) → T — matches legacy (preserves arg type + nullable)
+    // Text scalars (registry demands Text arg; legacy is permissive. On a
+    // constraint violation we fall back to legacy).
+    "LOWER",
+    "UPPER",
+    "TRIM",
+    "CONCAT",
+    // Date/time basics (fixed returns).
+    "DATE",
+    "NOW",
+    "CURRENT_DATE",
+    "CURRENT_TIMESTAMP",
+    "DATE_TRUNC",
+];
+
+/// Policy for deriving [`TypedColumn::nullable`] on a registry-resolved call.
+///
+/// The registry itself doesn't track nullability (§16 defers it — see "Out of
+/// scope" in the plan), so Phase 9 mirrors the legacy per-function rule via a
+/// tiny lookup table. Migrating a new entry to the registry means adding a row
+/// here.
+fn registry_result_nullable(name: &str, arg_nullable: &[bool]) -> bool {
+    match name {
+        // Non-nullable aggregates / niladic clocks.
+        "COUNT" | "NOW" | "CURRENT_DATE" | "CURRENT_TIMESTAMP" => false,
+        // ABS preserves its arg's nullability — legacy returns the arg
+        // TypedColumn verbatim when a single-arg inference succeeds.
+        "ABS" => arg_nullable.first().copied().unwrap_or(true),
+        // Everything else is nullable per legacy.
+        _ => true,
+    }
+}
+
+/// Registry-first inference for the allowlisted subset of built-ins.
+///
+/// Returns:
+/// * `Some(Some(tc))` when the registry resolved the call cleanly — the caller
+///   uses this directly and skips the legacy match.
+/// * `Some(None)` when the function is known to the registry but arg types
+///   couldn't be inferred up-front — the caller should fall through to the
+///   legacy match which handles Unknown args more gracefully.
+/// * `None` when the function isn't on [`REGISTRY_MIGRATED`] or the registry
+///   doesn't know about it — caller uses the legacy match.
+fn try_registry_inference(
+    upper_name: &str,
+    func: &FunctionCall,
+    ctx: &TypeContext,
+) -> Option<Option<TypedColumn>> {
+    if !REGISTRY_MIGRATED.contains(&upper_name) {
+        return None;
+    }
+    let sig = BuiltinRegistry::resolve(upper_name)?;
+
+    // Collect arg DataTypes + nullability. If any arg fails to infer, defer
+    // to the legacy match — it has per-function fallback behaviour for
+    // Unknown args that the registry doesn't model.
+    let args = func.arguments();
+    let mut arg_types: Vec<DataType> = Vec::with_capacity(args.len());
+    let mut arg_nullable: Vec<bool> = Vec::with_capacity(args.len());
+    for arg in &args {
+        match infer_expression_type(arg, ctx) {
+            Some(tc) => {
+                arg_types.push(tc.data_type);
+                arg_nullable.push(tc.nullable);
+            }
+            None => {
+                // Missing arg inference — fall back to legacy, which has
+                // function-specific Unknown handling (e.g. `first_arg_type_or`
+                // supplies a sensible default for MIN/MAX).
+                return Some(None);
+            }
+        }
+    }
+
+    match unify_call_with_expected(sig, &arg_types, ctx.expected_return.as_ref(), &registry_lub) {
+        Ok(result) => {
+            let nullable = registry_result_nullable(upper_name, &arg_nullable);
+            Some(Some(TypedColumn {
+                data_type: result.return_type,
+                nullable,
+            }))
+        }
+        // Unification failed — fall back to the legacy match so permissive
+        // behaviour (e.g. LOWER on Integer, MIN on Unknown) is preserved.
+        Err(_) => Some(None),
+    }
+}
+
 /// Infer the type of a function call (aggregates, etc.)
 fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<TypedColumn> {
     let name = func.name()?.to_uppercase();
     let sql_func = SqlFunction::from_name(&name)?;
+
+    // Phase 9: registry-first lookup for the allowlisted subset. When the
+    // registry returns a concrete result we use it; on miss/fall-through we
+    // continue into the legacy match below.
+    if let Some(Some(tc)) = try_registry_inference(&name, func, ctx) {
+        return Some(tc);
+    }
 
     /// Helper: return the type of the first argument, or `fallback` if inference fails.
     /// For COALESCE and similar, this intentionally only checks the first arg —
@@ -1768,7 +2757,14 @@ pub fn check_undeclared_columns(
                 return;
             }
 
-            if ctx.lookup_column(qualifier, col_name).is_some() {
+            // Use `lookup_identifier` so bound function parameters
+            // (seeded via `add_function_param` at call-site expansion
+            // for `Expr<T>` kinds) resolve before falling back to the
+            // FROM scopes. Phase 17 hinge: a SELECT-shaped function
+            // body that references `ts_col` / `gap` must see the
+            // Expr<Timestamp> / Expr<Interval> bindings populated by
+            // the call-site checker.
+            if ctx.lookup_identifier(qualifier, col_name).is_some() {
                 return;
             }
 
@@ -1798,46 +2794,64 @@ pub fn check_undeclared_columns(
 /// This extracts columns from the CTE's query and optionally overrides
 /// the inferred names with explicit column names if provided.
 pub fn infer_cte_columns(cte: &Cte, ctx: &TypeContext) -> Vec<(String, TypedColumn)> {
-    let mut columns = Vec::new();
-
-    // Get explicit column names (if present)
-    let explicit_names = cte.column_names();
-
     // Get the CTE's query (SELECT statement)
     let select_stmt = match cte.query().and_then(|q| q.select_stmt()) {
         Some(s) => s,
-        None => return columns,
+        None => return Vec::new(),
     };
 
-    // Build a context that includes any nested CTEs in this CTE's query
-    let cte_ctx = build_subquery_context(&select_stmt, ctx);
+    // Phase 46: factor the per-select-item inference into a sibling
+    // helper so derived-table / inline-subquery argument resolution
+    // (in `tableexpr_schema_lookup`) can share the same path.
+    let mut columns = infer_select_output_schema(&select_stmt, ctx);
+
+    // CTE-specific concern: the WITH clause may declare explicit
+    // column names that override any inferred names from the SELECT
+    // list. Apply the override after the shared inference runs.
+    let explicit_names = cte.column_names();
+    for (i, name) in explicit_names.iter().enumerate() {
+        if i < columns.len() {
+            columns[i].0 = name.clone();
+        }
+    }
+
+    columns
+}
+
+/// Phase 46: infer the output schema of a SELECT statement (shared
+/// helper used by CTE inference and by `TableExpr` argument resolution
+/// for derived tables / inline subqueries).
+///
+/// Walks the SELECT list, deriving each column's name (from explicit
+/// `AS alias`, falling back to a name inferred from the expression, or
+/// a generated `colN` when neither applies) and inferring its type via
+/// `infer_expression_type` against a context that includes any nested
+/// `WITH` clauses in the SELECT.
+pub fn infer_select_output_schema(
+    select_stmt: &SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<(String, TypedColumn)> {
+    let mut columns = Vec::new();
+
+    // Build a context that includes any nested CTEs in this SELECT
+    let inner_ctx = build_subquery_context(select_stmt, ctx);
 
     let select_list = match select_stmt.select_list() {
         Some(l) => l,
         None => return columns,
     };
 
-    // Process each select item
     for (i, item) in select_list.items().enumerate() {
-        // Determine column name:
-        // 1. Use explicit name from CTE column list (if available at this position)
-        // 2. Use explicit alias from AS clause
-        // 3. Try to infer from expression (column reference name)
-        // 4. Fall back to generated name
-        let col_name = if i < explicit_names.len() {
-            explicit_names[i].clone()
-        } else if let Some(alias) = item.alias() {
+        let col_name = if let Some(alias) = item.alias() {
             alias
         } else if let Some(expr) = item.expression() {
-            // Try to infer name from expression
             infer_column_name(&expr).unwrap_or_else(|| format!("col{}", i + 1))
         } else {
             format!("col{}", i + 1)
         };
 
-        // Infer type from expression using the CTE's context (includes nested CTEs)
         let typed_col = if let Some(expr) = item.expression() {
-            infer_expression_type(&expr, &cte_ctx).unwrap_or(TypedColumn {
+            infer_expression_type(&expr, &inner_ctx).unwrap_or(TypedColumn {
                 data_type: DataType::Unknown,
                 nullable: true,
             })
@@ -3095,6 +4109,130 @@ mod tests {
             types[0].data_type,
             DataType::Double,
             "CAST AS FLOAT should infer as Double"
+        );
+    }
+
+    /// Phase 5 unit: seeded function parameters shadow outer column scope.
+    ///
+    /// §16 #1 of the smelt-functions research pins the resolution order:
+    /// params resolve *before* any SQL scope. This test proves the
+    /// ordering in isolation — no parser, no Salsa — so Phase 6 and
+    /// beyond can compose on top of it with confidence.
+    #[test]
+    fn param_shadows_outer_name_lookup_logic() {
+        let mut ctx = TypeContext::new();
+        // Seed a model column `bar.x: Integer` — this is what
+        // `lookup_column` would return if we consulted it directly.
+        ctx.add_model_column("bar", "x", TypedColumn::nullable(DataType::Integer));
+
+        // Sanity: `lookup_column(None, "x")` currently sees only the model
+        // column, returning Integer.
+        let via_column = ctx
+            .lookup_column(None, "x")
+            .expect("model column should be resolvable before param binding");
+        assert_eq!(via_column.data_type, DataType::Integer);
+
+        // Now seed a function param `x: Double`. Per §16 #1, the param
+        // wins on unqualified lookups through `lookup_identifier`.
+        ctx.add_function_param("x", TypedColumn::nullable(DataType::Double));
+        assert!(ctx.has_function_param("x"));
+
+        let via_identifier = ctx
+            .lookup_identifier(None, "x")
+            .expect("seeded param should resolve through lookup_identifier");
+        assert_eq!(
+            via_identifier.data_type,
+            DataType::Double,
+            "param type must shadow model type on unqualified lookups"
+        );
+
+        // Qualified lookups still bypass the param scope — params are
+        // bare names.
+        let via_qualified = ctx.lookup_identifier(Some("bar"), "x");
+        assert_eq!(
+            via_qualified.map(|c| c.data_type.clone()),
+            Some(DataType::Integer),
+            "qualified lookup must ignore function params"
+        );
+    }
+
+    // ── Phase 49: check_window_in_scalar_contexts recurses into subqueries ──
+
+    fn parse_select(sql: &str) -> smelt_parser::ast::SelectStmt {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        file.select_stmt().expect("no SelectStmt in parsed SQL")
+    }
+
+    /// WHERE contains a scalar subquery whose body includes a window function.
+    /// Expected: at least one WindowInScalarContextInfo with clause "WHERE".
+    #[test]
+    fn where_subquery_with_window_func_errors() {
+        let sql = "SELECT col FROM t WHERE col > \
+                   (SELECT MAX(ROW_NUMBER() OVER (PARTITION BY col ORDER BY col)) FROM t)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.iter().any(|i| i.clause == "WHERE"),
+            "expected a WindowInScalarContext error in WHERE for a subquery containing \
+             a window function, got: {infos:?}"
+        );
+    }
+
+    /// HAVING contains a scalar subquery whose body includes a window function.
+    /// Expected: at least one WindowInScalarContextInfo with clause "HAVING".
+    #[test]
+    fn having_subquery_with_window_func_errors() {
+        let sql = "SELECT col, COUNT(*) FROM t GROUP BY col \
+                   HAVING COUNT(*) > (SELECT AVG(RANK() OVER (ORDER BY col)) FROM t)";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.iter().any(|i| i.clause == "HAVING"),
+            "expected a WindowInScalarContext error in HAVING for a subquery containing \
+             a window function, got: {infos:?}"
+        );
+    }
+
+    /// Window function in SELECT-list subquery — must NOT produce any error
+    /// (regression guard: only WHERE / GROUP BY / HAVING are restricted).
+    ///
+    /// The outer query intentionally includes a WHERE clause so that the
+    /// checker has a non-trivial scalar context to walk.  A buggy
+    /// implementation that descended into SELECT-list subqueries and
+    /// misattributed the inner window function to the outer WHERE would
+    /// emit a spurious error here — this test catches that regression.
+    #[test]
+    fn select_list_subquery_with_window_func_allowed() {
+        let sql = "SELECT (SELECT ROW_NUMBER() OVER (ORDER BY col) FROM inner_t) AS rn, col \
+             FROM outer_t \
+             WHERE col > 0";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.is_empty(),
+            "window function inside a SELECT-list subquery must not be flagged \
+             even when the outer query has a WHERE clause, got: {infos:?}"
+        );
+    }
+
+    /// Window function in FROM-clause derived-table — must NOT produce any error
+    /// (regression guard: FROM subqueries are not scalar contexts).
+    #[test]
+    fn from_clause_subquery_with_window_func_allowed() {
+        let sql = "SELECT * FROM (SELECT ROW_NUMBER() OVER (ORDER BY col) AS rn FROM t) sub";
+        let select = parse_select(sql);
+        let ctx = TypeContext::new();
+        let infos = check_window_in_scalar_contexts(&select, &ctx);
+        assert!(
+            infos.is_empty(),
+            "window function inside a FROM-clause subquery must not be flagged, \
+             got: {infos:?}"
         );
     }
 }

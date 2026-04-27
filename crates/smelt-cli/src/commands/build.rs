@@ -1,8 +1,12 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 
 use crate::{BuildArgs, RunArgs, SeedArgs};
 
 pub async fn build(args: BuildArgs) -> Result<()> {
+    if args.show_plan {
+        return show_plan(args);
+    }
+
     // Step 1: Seed
     let seed_args = SeedArgs {
         project_dir: args.project_dir.clone(),
@@ -34,4 +38,63 @@ pub async fn build(args: BuildArgs) -> Result<()> {
         allow_full_refresh: false,
     };
     super::run::run(run_args).await
+}
+
+fn show_plan(args: BuildArgs) -> Result<()> {
+    use std::path::Path;
+
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_core::find_project_root_by_walking_up;
+    use smelt_db::Workspace;
+    use smelt_planner::logical_plan_rules::{apply_rules_to_fixed_point, show_plan_rules};
+    use smelt_planner::plan_printer::format_plan;
+
+    let file = args.file.ok_or_else(|| {
+        anyhow!("--show-plan requires a model file path as a positional argument")
+    })?;
+
+    let abs_file = std::fs::canonicalize(&file)
+        .with_context(|| format!("Failed to resolve model file path: {}", file.display()))?;
+
+    // Prefer an explicit --project-dir if the user passed one (i.e. anything
+    // other than the default "."); otherwise walk up from the file.
+    let project_dir = if args.project_dir != Path::new(".") {
+        args.project_dir.clone()
+    } else {
+        find_project_root_by_walking_up(&abs_file).ok_or_else(|| {
+            anyhow!(
+                "Could not locate smelt.yml above {}; pass --project-dir explicitly",
+                abs_file.display()
+            )
+        })?
+    };
+
+    let config = Config::load(&project_dir).with_context(|| "Failed to load smelt.yml")?;
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let mut models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+    let function_files = discovery
+        .discover_function_files()
+        .with_context(|| "Failed to discover function files")?;
+    models.extend(function_files);
+
+    let db = init_db(&project_dir, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let source_file = db.source_file(&abs_file).ok_or_else(|| {
+        anyhow!(
+            "File {} is not registered in the workspace",
+            abs_file.display()
+        )
+    })?;
+
+    let plan = smelt_db::logical_plan(&db, ws, source_file)
+        .ok_or_else(|| anyhow!("File {} did not parse as a valid model", abs_file.display()))?;
+
+    let optimised = apply_rules_to_fixed_point(plan, &show_plan_rules());
+
+    print!("{}", format_plan(&optimised));
+    Ok(())
 }

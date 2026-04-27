@@ -39,6 +39,808 @@ impl File {
             .filter_map(FunctionCall::cast)
             .filter_map(SourceCall::from_function_call)
     }
+
+    /// Iterate over top-level `smelt.define` declarations in this file.
+    pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
+        self.0.children().filter_map(SmeltDefine::cast)
+    }
+
+    /// Iterate over top-level `smelt.extern` declarations in this file.
+    pub fn externs(&self) -> impl Iterator<Item = SmeltExtern> + '_ {
+        self.0.children().filter_map(SmeltExtern::cast)
+    }
+}
+
+// ===== smelt.define (Step 1, Phase 1) =====
+
+/// Top-level `smelt.define name(params) [-> Type] AS (body)` declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltDefine(SyntaxNode);
+
+impl SmeltDefine {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_DEFINE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The declared function name (text of the single IDENT inside DEFINE_NAME).
+    pub fn name(&self) -> Option<String> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the DEFINE_NAME node (the function name identifier).
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let ident = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)?;
+        Some(ident.text_range())
+    }
+
+    /// The parameter list, if parsed successfully.
+    pub fn param_list(&self) -> Option<ParamList> {
+        self.0.children().find_map(ParamList::cast)
+    }
+
+    /// The declared return type, if any (the TypeRef inside a RETURN_ARROW node).
+    pub fn return_type(&self) -> Option<TypeRef> {
+        self.0
+            .children()
+            .find(|n| n.kind() == RETURN_ARROW)?
+            .children()
+            .find_map(TypeRef::cast)
+    }
+
+    /// The body expression block.
+    pub fn body(&self) -> Option<DefineBody> {
+        self.0.children().find_map(DefineBody::cast)
+    }
+
+    /// Byte offset at which this declaration starts in the source text.
+    ///
+    /// Since `strip_frontmatter` preserves byte offsets (each stripped
+    /// line becomes `-- <spaces>` of the same byte length), offsets into
+    /// the stripped text are identical to offsets into the raw text.
+    /// Callers can therefore use this offset to look up a
+    /// per-declaration frontmatter block in the raw source.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+
+    /// Text of the frontmatter block that immediately precedes this
+    /// declaration in `raw_text`, if any.
+    ///
+    /// Returns `None` when there is no `---`/`---` block directly
+    /// before the declaration, or when the gap between the block and
+    /// the declaration contains SQL / another declaration.
+    ///
+    /// Introduced in Phase 11 (per-declaration frontmatter).
+    pub fn frontmatter(&self, raw_text: &str) -> Option<String> {
+        let off = self.source_offset();
+        let attached = crate::attach_frontmatter_to_decls(raw_text, &[off]);
+        attached.into_iter().next().flatten().map(|b| b.inner_text)
+    }
+}
+
+/// Top-level `smelt.extern name(params) -> Type` declaration (Phase 10).
+///
+/// Shape mirrors [`SmeltDefine`] but without a body — externs bind a
+/// user-chosen name to a backend-provided function. The return type is
+/// mandatory (the extern signature is the only information the checker has
+/// about the imported function).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltExtern(SyntaxNode);
+
+impl SmeltExtern {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_EXTERN {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The declared extern's function name.
+    ///
+    /// For the legacy single-IDENT form (`smelt.extern foo(...)`) this is
+    /// just `foo`. For the dotted backend-namespace form
+    /// (`smelt.extern duckdb.read_parquet(...)`), this returns
+    /// `read_parquet` — the backend prefix is available separately via
+    /// [`SmeltExtern::backend_namespace`].
+    pub fn name(&self) -> Option<String> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let idents: Vec<_> = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        idents.last().map(|t| t.text().to_string())
+    }
+
+    /// The text range of the extern's function-name identifier. For the
+    /// dotted form this points at the second IDENT (the function name,
+    /// not the backend prefix); diagnostics anchored here therefore
+    /// underline the part users will care about.
+    pub fn name_range(&self) -> Option<TextRange> {
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let idents: Vec<_> = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        idents.last().map(|t| t.text_range())
+    }
+
+    /// The parameter list, if parsed successfully.
+    pub fn param_list(&self) -> Option<ParamList> {
+        self.0.children().find_map(ParamList::cast)
+    }
+
+    /// The declared return type, if any (the TypeRef inside a RETURN_ARROW node).
+    pub fn return_type(&self) -> Option<TypeRef> {
+        self.0
+            .children()
+            .find(|n| n.kind() == RETURN_ARROW)?
+            .children()
+            .find_map(TypeRef::cast)
+    }
+
+    /// Byte offset at which this declaration starts in the source text.
+    /// See `SmeltDefine::source_offset` for the offset-stability rationale.
+    pub fn source_offset(&self) -> usize {
+        usize::from(self.0.text_range().start())
+    }
+
+    /// Optional backend namespace captured from a dotted extern name,
+    /// e.g. `smelt.extern duckdb.read_parquet(...)` — returns
+    /// `Some("duckdb")`. Single-segment extern names return `None`.
+    ///
+    /// Introduced in Phase 11 (backend namespace sugar for externs).
+    pub fn backend_namespace(&self) -> Option<String> {
+        // We stored the backend prefix as the *first* IDENT inside the
+        // DEFINE_NAME node, followed by a DOT and a second IDENT whose
+        // text is returned by `name()`. If the node only contains a
+        // single IDENT (the legacy form), return None.
+        let name_node = self.0.children().find(|n| n.kind() == DEFINE_NAME)?;
+        let tokens: Vec<_> = name_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT || t.kind() == DOT)
+            .collect();
+        if tokens.len() >= 3
+            && tokens[0].kind() == IDENT
+            && tokens[1].kind() == DOT
+            && tokens[2].kind() == IDENT
+        {
+            Some(tokens[0].text().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Text of the frontmatter block that immediately precedes this
+    /// declaration. See `SmeltDefine::frontmatter` for semantics.
+    pub fn frontmatter(&self, raw_text: &str) -> Option<String> {
+        let off = self.source_offset();
+        let attached = crate::attach_frontmatter_to_decls(raw_text, &[off]);
+        attached.into_iter().next().flatten().map(|b| b.inner_text)
+    }
+}
+
+/// Parameter list of a `smelt.define`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ParamList(SyntaxNode);
+
+impl ParamList {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PARAM_LIST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over declared parameters.
+    pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
+        self.0.children().filter_map(Param::cast)
+    }
+}
+
+/// A single parameter inside a `smelt.define` parameter list.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Param(SyntaxNode);
+
+impl Param {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PARAM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The parameter name (the first IDENT token of the PARAM node).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The text range of the parameter-name identifier token, if present.
+    /// Used by Phase 5 to anchor duplicate-parameter-name diagnostics on the
+    /// second occurrence's name span.
+    pub fn name_range(&self) -> Option<TextRange> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text_range())
+    }
+
+    /// The parameter's declared type, if any.
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
+    }
+
+    /// The parameter's default-value node, if any. Structured access will come
+    /// in a later phase; for now callers can inspect the SyntaxNode directly.
+    pub fn default_value(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| n.kind() == DEFAULT_VALUE)
+    }
+
+    /// The expression inside the DEFAULT_VALUE node, if any. Phase 6 uses this
+    /// so the `fill-missing-arg` check can infer the default's type at the
+    /// call site.
+    pub fn default_value_expr(&self) -> Option<Expr> {
+        self.default_value()
+            .and_then(|dv| dv.children().find_map(Expr::cast))
+    }
+}
+
+/// Flat type reference. Phase 4 parses the text into a structured
+/// [`smelt_types::SmeltType`]; Phase 13 adds structured CST children for
+/// the non-`Expr` sorts (`TableExpr`, `AggExpr`, `WindowExpr`,
+/// `SelectItems`) so downstream phases can walk them without re-parsing
+/// the raw text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeRef(SyntaxNode);
+
+/// Classification of a `TYPE_REF`'s leading sort keyword.
+///
+/// Phase 13 recognises these heads inside `parse_type_ref` and emits
+/// structured CST children where appropriate. `Other` captures sort
+/// keywords that are not one of the recognised heads — in practice an
+/// unknown head is reported as a parse error, but a post-parse walker
+/// may still see the unknown name here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeRefHead {
+    /// `Expr<...>` — scalar-expression fragment sort.
+    Expr,
+    /// `AggExpr<...>` — aggregate-expression fragment sort.
+    AggExpr,
+    /// `WindowExpr<...>` — window-expression fragment sort.
+    WindowExpr,
+    /// `TableExpr` / `TableExpr<{...}>` — table-expression fragment sort.
+    TableExpr,
+    /// `SelectItems<...>` — select-list fragment sort.
+    SelectItems,
+    /// Unknown or missing sort keyword; the raw identifier text is carried
+    /// for diagnostic callers. `None` means the `TYPE_REF` had no leading
+    /// identifier (error-recovery shape).
+    Other(Option<String>),
+}
+
+/// Kind tag emitted on `Expr<T>` / `AggExpr<T>` / `WindowExpr<T>` type refs.
+///
+/// Phase 14 attaches this kind to every typed AST node during inference;
+/// Phase 13 only records it on the signature's parameter type refs so the
+/// signature extractor can thread the kind through without re-parsing the
+/// raw text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprKindTag {
+    /// `Expr<T>` — scalar expression.
+    Scalar,
+    /// `AggExpr<T>` — aggregate expression.
+    Agg,
+    /// `WindowExpr<T>` — window expression.
+    Window,
+}
+
+/// Trailing row-polymorphism marker inside a `ROW_REQUIREMENT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowTail {
+    /// No tail was written.
+    None,
+    /// `..` — anonymous fresh row variable, cannot be referenced.
+    Anon,
+    /// `..name` — named row variable.
+    Named(String),
+}
+
+/// Structured view over a `ROW_REQUIREMENT` child of a `TableExpr<{...}>`
+/// type reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowRequirement(SyntaxNode);
+
+/// A single `name: TypeRef` field inside a `ROW_REQUIREMENT`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowField(SyntaxNode);
+
+impl TypeRef {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == TYPE_REF {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Raw text of the type reference (including internal whitespace).
+    pub fn text(&self) -> String {
+        self.0.text().to_string()
+    }
+
+    /// Classify the `TYPE_REF`'s leading sort keyword.
+    ///
+    /// Looks at the first `IDENT` token in document order (skipping any
+    /// error / trivia tokens). Returns [`TypeRefHead::Other(None)`] if
+    /// no leading identifier is present.
+    pub fn kind(&self) -> TypeRefHead {
+        let head = leading_ident_text(&self.0);
+        match head.as_deref() {
+            Some("Expr") => TypeRefHead::Expr,
+            Some("AggExpr") => TypeRefHead::AggExpr,
+            Some("WindowExpr") => TypeRefHead::WindowExpr,
+            Some("TableExpr") => TypeRefHead::TableExpr,
+            Some("SelectItems") => TypeRefHead::SelectItems,
+            Some(other) => TypeRefHead::Other(Some(other.to_string())),
+            None => TypeRefHead::Other(None),
+        }
+    }
+
+    /// Return the [`ExprKindTag`] attached to this type ref, if any.
+    ///
+    /// Populated only for `Expr<T>`, `AggExpr<T>`, and `WindowExpr<T>`
+    /// heads. Other heads (TableExpr, SelectItems, etc.) return `None`.
+    pub fn expr_kind(&self) -> Option<ExprKindTag> {
+        for child in self.0.children() {
+            match child.kind() {
+                EXPR_KIND_SCALAR => return Some(ExprKindTag::Scalar),
+                EXPR_KIND_AGG => return Some(ExprKindTag::Agg),
+                EXPR_KIND_WINDOW => return Some(ExprKindTag::Window),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Return the structured row requirement of a `TableExpr<{...}>`, if
+    /// present. Only `TableExpr` heads carry a `ROW_REQUIREMENT` child.
+    pub fn row_requirement(&self) -> Option<RowRequirement> {
+        self.0
+            .children()
+            .find(|n| n.kind() == ROW_REQUIREMENT)
+            .map(RowRequirement)
+    }
+
+    /// The `SELECTITEMS_KIND` argument text (e.g. `"Agg"`), if any.
+    pub fn selectitems_kind(&self) -> Option<String> {
+        let node = self.0.children().find(|n| n.kind() == SELECTITEMS_KIND)?;
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The `SELECTITEMS_CTX` argument text (e.g. `"sessionized"`), if any.
+    pub fn selectitems_ctx(&self) -> Option<String> {
+        let node = self.0.children().find(|n| n.kind() == SELECTITEMS_CTX)?;
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The `EXPR_CTX` context-binding identifier (e.g. `"source"`) from
+    /// `Expr<Boolean, source>`, if present (Phase 19).
+    pub fn expr_ctx(&self) -> Option<String> {
+        let node = self.0.children().find(|n| n.kind() == EXPR_CTX)?;
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// First IDENT token in the sub-tree's document order, if any.
+fn leading_ident_text(node: &SyntaxNode) -> Option<String> {
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string())
+}
+
+impl RowRequirement {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_REQUIREMENT {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// All `ROW_FIELD` children in declared order.
+    pub fn fields(&self) -> Vec<RowField> {
+        self.0.children().filter_map(RowField::cast).collect()
+    }
+
+    /// The trailing row variable marker, if any.
+    pub fn tail(&self) -> RowTail {
+        if self.0.children().any(|n| n.kind() == ROW_TAIL_ANON) {
+            return RowTail::Anon;
+        }
+        if let Some(named) = self.0.children().find(|n| n.kind() == ROW_TAIL_NAMED) {
+            if let Some(name) = named
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| t.kind() == IDENT)
+                .map(|t| t.text().to_string())
+            {
+                return RowTail::Named(name);
+            }
+        }
+        RowTail::None
+    }
+}
+
+impl RowField {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_FIELD {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The field's declared name, if present.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The field's declared `TYPE_REF`, if present.
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
+    }
+}
+
+/// Parenthesized body expression of a `smelt.define`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DefineBody(SyntaxNode);
+
+impl DefineBody {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == DEFINE_BODY {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The first expression-like child of the body, if any.
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The body's SELECT statement, if the body is shaped as a bare
+    /// top-level SELECT (e.g. a `TableExpr`-returning define whose
+    /// body is `(SELECT ... FROM source)`). Distinct from
+    /// [`DefineBody::expression`] which returns `None` for SELECT-shaped
+    /// bodies because `Expr::cast(SELECT_STMT)` does not recognise
+    /// SELECT as an expression in this grammar.
+    pub fn select_stmt(&self) -> Option<SelectStmt> {
+        self.0.children().find_map(SelectStmt::cast)
+    }
+}
+
+// ===== smelt.fn.* user-declared function call (Phase 2) =====
+
+/// `smelt.fn.<path>(args)` call node. Distinct from `FUNCTION_CALL` — this
+/// node is only produced for calls that start with the literal `smelt.fn.`
+/// prefix, which names user-declared functions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltFnCall(SyntaxNode);
+
+impl SmeltFnCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_FN_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The dotted call path node (`smelt.fn.<...>.name`), if present.
+    pub fn call_path(&self) -> Option<CallPath> {
+        self.0.children().find_map(CallPath::cast)
+    }
+
+    /// The argument list node (`(args)`), if present.
+    pub fn arg_list(&self) -> Option<ArgList> {
+        self.0.children().find_map(ArgList::cast)
+    }
+
+    /// The full dotted path text including the `smelt.fn.` prefix, joined
+    /// with `.` and with whitespace/trivia stripped — e.g.
+    /// `smelt.fn.core.safe_divide`.
+    pub fn path_text(&self) -> String {
+        match self.call_path() {
+            Some(p) => {
+                p.0.children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == IDENT)
+                    .map(|t| t.text().to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            }
+            None => String::new(),
+        }
+    }
+
+    /// The text range of the `CALL_PATH` node (the dotted path including the
+    /// `smelt.fn.` prefix). Phase 6 anchors `UnknownSmeltFn` diagnostics here.
+    pub fn call_path_range(&self) -> Option<TextRange> {
+        self.call_path().map(|p| p.0.text_range())
+    }
+
+    /// Text range of the whole SMELT_FN_CALL node (path + args). Used as a
+    /// fallback anchor when the call path is missing.
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
+
+    /// Iterate over the `PASSING_CLAUSE` children of this `SMELT_FN_CALL`, in
+    /// source order. Phase 28 attaches zero or more of these after the closing
+    /// `)` of the argument list.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
+}
+
+/// A `smelt.as_struct(alias [EXCEPT col1, col2, ...])` expression (Phase 38).
+///
+/// The alias is the table/parameter qualifier whose columns are collected
+/// into a struct. The optional `EXCEPT` list excludes specific column names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltAsStructCall(SyntaxNode);
+
+impl SmeltAsStructCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_AS_STRUCT_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The alias identifier — the first `IDENT` token after the opening `(`.
+    pub fn alias(&self) -> Option<String> {
+        let mut after_paren = false;
+        for tok in self.0.children_with_tokens().filter_map(|e| e.into_token()) {
+            if tok.kind() == LPAREN {
+                after_paren = true;
+            } else if after_paren && tok.kind() == IDENT {
+                return Some(tok.text().to_string());
+            }
+        }
+        None
+    }
+
+    /// Column names that appear after `EXCEPT`, if any.
+    pub fn except_columns(&self) -> Vec<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == EXCEPT_COL_LIST)
+            .map(|except| {
+                except
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| t.kind() == IDENT)
+                    .map(|t| t.text().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Text range of the whole `SMELT_AS_STRUCT_CALL` node.
+    pub fn text_range(&self) -> rowan::TextRange {
+        self.0.text_range()
+    }
+}
+
+/// The dotted path inside a `SMELT_FN_CALL` — includes the literal
+/// `smelt.fn.` prefix tokens as well as all subsequent namespace / name
+/// segments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallPath(SyntaxNode);
+
+impl CallPath {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == CALL_PATH {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The logical path segments AFTER the `smelt.fn.` prefix. For
+    /// `smelt.fn.core.math.safe_divide` this returns
+    /// `["core", "math", "safe_divide"]`.
+    pub fn segments(&self) -> Vec<String> {
+        let idents: Vec<String> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .collect();
+        // Drop the leading `smelt` and `fn` tokens (the prefix). If for some
+        // reason the path is shorter than expected (e.g. an error-recovery
+        // case) we just return whatever remains.
+        idents.into_iter().skip(2).collect()
+    }
+}
+
+/// A single `PASSING <name> AS (<body>)` clause attached to a `SMELT_FN_CALL`.
+/// Phase 28 introduces these as children of `SMELT_FN_CALL` nodes when the
+/// call is followed by one or more contextual `PASSING` keywords.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PassingClause(SyntaxNode);
+
+impl PassingClause {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PASSING_CLAUSE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The binding name — the `IDENT` text inside the `PASSING_NAME` child.
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == PASSING_NAME)?
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .next()
+    }
+
+    /// Raw text of the expression inside `(...)` in the `PASSING_BODY` child,
+    /// with leading/trailing whitespace trimmed. Returns `None` if the body
+    /// node is absent (error-recovery case).
+    pub fn body_text(&self) -> Option<String> {
+        let body_node = self.0.children().find(|n| n.kind() == PASSING_BODY)?;
+        Some(body_node.text().to_string().trim().to_string())
+    }
+
+    /// The expression AST node inside the `PASSING_BODY`. Returns `None` when
+    /// the body node is absent or contains no parseable expression (error-recovery
+    /// path). Use this for type-checking the body at the call site (Phase 29).
+    pub fn body_expr(&self) -> Option<Expr> {
+        let body_node = self.0.children().find(|n| n.kind() == PASSING_BODY)?;
+        body_node.children().find_map(Expr::cast)
+    }
+
+    /// The text range of the `PASSING_NAME` child — used to anchor
+    /// `UnknownPassingParameter` diagnostics at the name token (Phase 29).
+    pub fn name_range(&self) -> Option<TextRange> {
+        self.0
+            .children()
+            .find(|n| n.kind() == PASSING_NAME)
+            .map(|n| n.text_range())
+    }
+}
+
+/// Argument list node (`(arg, arg, ...)`) used by both `FUNCTION_CALL` and
+/// `SMELT_FN_CALL`. Minimal wrapper in this phase — callers that need the
+/// richer `FunctionCall::named_params` helper can continue to use that
+/// wrapper directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArgList(SyntaxNode);
+
+impl ArgList {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARG_LIST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over the direct `NAMED_PARAM` children of this argument list.
+    pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
+        self.0.children().filter_map(NamedParam::cast)
+    }
+
+    /// Iterate over positional (non-named) expression arguments in this arg
+    /// list, in source order. NAMED_PARAM children are skipped — callers that
+    /// want both should iterate `named_params()` separately.
+    pub fn positional_args(&self) -> Vec<Expr> {
+        self.0
+            .children()
+            .filter(|n| n.kind() != NAMED_PARAM)
+            .filter_map(Expr::cast)
+            .collect()
+    }
 }
 
 /// SELECT statement
@@ -97,9 +899,13 @@ impl SelectStmt {
             .any(|t| t.kind() == DISTINCT_KW)
     }
 
-    /// Get the underlying syntax node (for printer)
-    #[allow(dead_code)] // Used by printer module
-    pub(crate) fn syntax(&self) -> &SyntaxNode {
+    /// Get the underlying syntax node.
+    ///
+    /// Originally `pub(crate)` and named for the printer module; made
+    /// `pub` in Phase 15 so the SELECT-body walker in smelt-db can
+    /// descendants-walk a SELECT_STMT body to dispatch nested
+    /// `smelt.fn.*` calls.
+    pub fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
 
@@ -293,6 +1099,45 @@ impl SelectItem {
         }) && self.expression().is_none()
     }
 
+    /// If this select item is a qualified wildcard `<qualifier>.*`,
+    /// return the qualifier identifier text. Returns `None` for a bare
+    /// `*` (see [`Self::is_wildcard`]) or any non-wildcard item.
+    ///
+    /// The parser emits a `SELECT_ITEM` whose tokens are `IDENT DOT
+    /// STAR` for this shape (no wrapping `EXPRESSION` node). Phase 17
+    /// uses this accessor to expand `source.*` inside a
+    /// `TableExpr`-returning function body.
+    pub fn qualified_wildcard_target(&self) -> Option<String> {
+        if !self.is_wildcard() {
+            return None;
+        }
+        // Walk tokens; if we see `IDENT DOT STAR` before the STAR, the
+        // IDENT is the qualifier. Bare `*` has no leading IDENT.
+        let mut last_ident: Option<String> = None;
+        let mut last_was_dot = false;
+        for child in self.0.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                match token.kind() {
+                    IDENT => {
+                        last_ident = Some(token.text().to_string());
+                        last_was_dot = false;
+                    }
+                    DOT => {
+                        last_was_dot = true;
+                    }
+                    STAR | MULTIPLY => {
+                        if last_was_dot {
+                            return last_ident;
+                        }
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Get the text range of this select item
     pub fn range(&self) -> TextRange {
         self.0.text_range()
@@ -463,6 +1308,17 @@ impl TableRef {
         self.0.children().find_map(FunctionCall::cast)
     }
 
+    /// Get the `smelt.fn.*` call if this table ref is one (Phase 15+).
+    ///
+    /// `SMELT_FN_CALL` nodes are distinct from `FUNCTION_CALL`; the
+    /// parser emits them for calls starting with the `smelt.fn.`
+    /// prefix. Phase 17 uses this accessor to resolve a
+    /// `TableExpr`-returning call in FROM position to its inferred
+    /// output schema.
+    pub fn smelt_fn_call(&self) -> Option<SmeltFnCall> {
+        self.0.children().find_map(SmeltFnCall::cast)
+    }
+
     pub fn identifier(&self) -> Option<String> {
         self.0
             .children_with_tokens()
@@ -619,7 +1475,9 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR => Some(Self(node)),
+            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL | SMELT_AS_STRUCT_CALL => {
+                Some(Self(node))
+            }
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -635,6 +1493,7 @@ impl Expr {
                             | BETWEEN_EXPR
                             | IN_EXPR
                             | EXISTS_EXPR
+                            | SMELT_FN_CALL
                     )
                 }) {
                     Some(Self(node))
@@ -717,6 +1576,24 @@ impl Expr {
             // Check if this node itself is a function call
             FunctionCall::cast(self.0.clone())
         })
+    }
+
+    /// Check if this is a `smelt.fn.*` user-declared function call. Distinct
+    /// from `as_function_call()` — SQL built-in function calls produce a
+    /// `FUNCTION_CALL` node; `smelt.fn.*` calls produce a `SMELT_FN_CALL`.
+    pub fn as_smelt_fn_call(&self) -> Option<SmeltFnCall> {
+        self.0
+            .children()
+            .find_map(SmeltFnCall::cast)
+            .or_else(|| SmeltFnCall::cast(self.0.clone()))
+    }
+
+    /// Check if this expression is a `smelt.as_struct(alias [EXCEPT cols])`
+    /// call (Phase 38). Matches both when this `Expr` node IS the
+    /// `SMELT_AS_STRUCT_CALL` and when it wraps one as a direct child.
+    pub fn as_smelt_as_struct_call(&self) -> Option<SmeltAsStructCall> {
+        SmeltAsStructCall::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(SmeltAsStructCall::cast))
     }
 
     /// Check if this is a CASE expression
@@ -1349,6 +2226,29 @@ impl NamedParam {
             String::new()
         }
     }
+
+    /// The value expression (the sub-expression after `=>`), if one can be
+    /// extracted as an `Expr`. Phase 6 uses this to type-check the value
+    /// against the declared parameter's type at a call site.
+    pub fn value_expr(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Text range of the parameter-name identifier (before `=>`), suitable
+    /// for anchoring `MissingArgument` / duplicate-name diagnostics at the
+    /// call site.
+    pub fn name_range(&self) -> Option<TextRange> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text_range())
+    }
+
+    /// Full text range of this NAMED_PARAM node (name + `=>` + value).
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
 }
 
 /// ref('model_name') function call wrapper
@@ -1774,6 +2674,13 @@ impl Subquery {
     /// Get the SELECT statement
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// Phase 44b: if the subquery's body is a bare `smelt.fn.*` call
+    /// (produced when a CTE body is `smelt.fn.foo(...) PASSING ...`),
+    /// return that call. Returns `None` for SELECT-shaped subqueries.
+    pub fn smelt_fn_call_body(&self) -> Option<SmeltFnCall> {
+        self.0.children().find_map(SmeltFnCall::cast)
     }
 }
 
@@ -2242,6 +3149,13 @@ impl Cte {
         self.0.children().find_map(Subquery::cast)
     }
 
+    /// Phase 44b: if this CTE's body is a bare `smelt.fn.*` call
+    /// (produced when a CTE body is `smelt.fn.foo(...) PASSING ...`),
+    /// return that call directly. Returns `None` for SELECT-shaped CTEs.
+    pub fn smelt_fn_call_body(&self) -> Option<SmeltFnCall> {
+        self.query()?.smelt_fn_call_body()
+    }
+
     /// Get the column names from the optional column list
     pub fn column_names(&self) -> Vec<String> {
         // Extract column names between first LPAREN and RPAREN (before AS)
@@ -2267,5 +3181,186 @@ impl Cte {
         }
 
         columns
+    }
+}
+
+// ===== Phase 35: Struct type references and brace-struct literals =====
+
+/// Structured view over a `STRUCT_TYPE` CST node produced by
+/// `Expr<Struct<{field: Type, ..tail}>>` type references (Phase 35).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructType(SyntaxNode);
+
+impl StructType {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_TYPE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over the declared `STRUCT_FIELD` children in source order.
+    pub fn fields(&self) -> impl Iterator<Item = StructField> + '_ {
+        self.0.children().filter_map(StructField::cast)
+    }
+
+    /// The trailing row-tail marker, if any.
+    pub fn row_tail(&self) -> Option<StructRowTailNode> {
+        self.0.children().find_map(StructRowTailNode::cast)
+    }
+}
+
+/// A single `name: Type` field declaration inside a `STRUCT_TYPE` node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructField(SyntaxNode);
+
+impl StructField {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_FIELD {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The field's declared name (first IDENT token).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+
+    /// The field's declared `TYPE_REF`, if present.
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
+    }
+}
+
+/// The trailing row-variable marker (`ROW_TAIL` node) inside a `STRUCT_TYPE`.
+///
+/// A `ROW_TAIL` with an IDENT child is a *named* tail (`..r`).
+/// A `ROW_TAIL` with no IDENT child is an *anonymous* tail (`..`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructRowTailNode(SyntaxNode);
+
+impl StructRowTailNode {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ROW_TAIL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The row-variable name for a named tail (e.g. `r` for `..r`).
+    /// Returns `None` for an anonymous tail (`..`).
+    pub fn var_name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// A `{expr AS name, ..spread}` brace-struct literal (Phase 35).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BraceStructLiteral(SyntaxNode);
+
+impl BraceStructLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == BRACE_STRUCT_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over `STRUCT_FIELD_ITEM` children.
+    pub fn field_items(&self) -> impl Iterator<Item = StructFieldItem> + '_ {
+        self.0.children().filter_map(StructFieldItem::cast)
+    }
+
+    /// Iterate over `SPREAD_ITEM` children.
+    pub fn spread_items(&self) -> impl Iterator<Item = SpreadItem> + '_ {
+        self.0.children().filter_map(SpreadItem::cast)
+    }
+}
+
+/// A single `expr AS alias` field inside a `BRACE_STRUCT_LITERAL`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructFieldItem(SyntaxNode);
+
+impl StructFieldItem {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == STRUCT_FIELD_ITEM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The value expression (before `AS`).
+    pub fn expression(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The declared alias (after `AS`).
+    pub fn alias(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+    }
+}
+
+/// A `..name` spread item inside a `BRACE_STRUCT_LITERAL`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpreadItem(SyntaxNode);
+
+impl SpreadItem {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SPREAD_ITEM {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The identifier being spread (e.g. `event` for `..event`).
+    pub fn name(&self) -> Option<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
     }
 }

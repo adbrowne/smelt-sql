@@ -83,6 +83,8 @@ fn translate_for_backend(sql: &str, backend: &str) -> String {
         schema: "main",
         ephemeral_models: std::collections::HashSet::new(),
         cross_engine_refs: std::collections::HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }

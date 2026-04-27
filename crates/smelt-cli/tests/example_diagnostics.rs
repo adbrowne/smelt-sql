@@ -23,6 +23,12 @@ fn check_workspace_no_diagnostics(example_dir: &str) {
     let discovery = ModelDiscovery::new(path.clone(), config.model_paths.clone());
     let mut models = discovery.discover_models().unwrap();
 
+    // Discover function files under `functions/`. Phase 3 registers them as
+    // Salsa `SourceFile` inputs alongside models so the signature index sees
+    // them. Workspaces without a `functions/` directory get an empty vec.
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
     // Discover Python models (executes Python to get generated SQL)
     let python_files = discovery.discover_python_files().unwrap();
     if !python_files.is_empty() {
@@ -101,4 +107,9 @@ fn multi_engine_no_diagnostics() {
 #[test]
 fn ecommerce_no_diagnostics() {
     check_workspace_no_diagnostics("examples/ecommerce");
+}
+
+#[test]
+fn functions_demo_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/functions_demo");
 }

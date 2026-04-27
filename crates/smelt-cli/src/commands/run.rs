@@ -77,6 +77,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // Filter out test models — they shouldn't be materialized
     models.retain(|m| !m.is_test());
 
+    // Discover function files (smelt.define / smelt.extern). These are NOT
+    // materialisable models (they don't enter the LogicalGraph) but they must
+    // be registered with the Salsa DB so `build_fn_body_map` can extract
+    // bodies for `smelt.fn.*` expansion at compile time.
+    let function_files = discovery
+        .discover_function_files()
+        .with_context(|| "Failed to discover function files")?;
+
     // Discover and execute Python models
     let python_files = discovery
         .discover_python_files()
@@ -485,7 +493,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .map(|node| &node.model_file)
         .cloned()
         .collect();
-    let type_db = init_db(&project_dir, &all_models);
+    // Function files must be registered alongside models so `parse_file` can
+    // resolve `smelt.define` bodies for `build_fn_body_map`. They are
+    // intentionally excluded from `all_models` (which feeds
+    // `UpstreamSchemas::from_database` and the physical graph) — they are
+    // not materialisable models.
+    let mut db_files: Vec<_> = all_models.clone();
+    db_files.extend(function_files.iter().cloned());
+    let type_db = init_db(&project_dir, &db_files);
 
     // Build upstream schemas (model + seed + source columns) once and share
     // them across every compiler in the registry. Without this, the CLI's
@@ -497,6 +512,19 @@ pub async fn run(args: RunArgs) -> Result<()> {
         &all_models,
     ));
     compilers.set_upstream_schemas_all(upstream_schemas);
+
+    // Wire `smelt.fn.*` function bodies through every compiler. Skipped when
+    // the project has no functions so legacy projects compile byte-for-byte
+    // identically to the pre-Phase-56 codepath (the `Option<Arc<FnBodyMap>>`
+    // field stays `None`).
+    {
+        let workspace =
+            smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
+        let fn_bodies = smelt_cli::build_fn_body_map(&type_db, workspace);
+        if !fn_bodies.is_empty() {
+            compilers.set_function_bodies_all(fn_bodies);
+        }
+    }
 
     let file_store = FileStore::new(&project_dir);
 

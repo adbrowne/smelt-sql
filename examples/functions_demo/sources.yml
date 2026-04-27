@@ -1,0 +1,34 @@
+version: 1
+
+sources:
+  source:
+    tables:
+      events:
+        description: "Raw event data used by functions_demo fixtures"
+        columns:
+          - name: event_id
+            type: INTEGER
+            description: "Unique event identifier"
+
+          - name: user_id
+            type: INTEGER
+            description: "User who triggered event"
+
+          - name: event_type
+            type: VARCHAR
+            description: "Type of event (page_view, click, etc.)"
+
+          - name: ts
+            type: TIMESTAMP
+            description: "Event timestamp (Phase 36: used by event_hour struct param)"
+
+      session_events:
+        description: "Events laid out for sessionize — Phase 17 fixture"
+        columns:
+          - name: session_user
+            type: VARCHAR
+            description: "User identifier (as text for sessionize)"
+
+          - name: session_time
+            type: TIMESTAMP
+            description: "Event timestamp used for session bucketing"

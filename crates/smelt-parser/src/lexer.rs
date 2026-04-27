@@ -167,6 +167,14 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 RBRACKET
             }
+            '{' => {
+                self.advance();
+                LBRACE
+            }
+            '}' => {
+                self.advance();
+                RBRACE
+            }
             ':' if self.peek_char() != Some(':') => {
                 self.advance();
                 COLON

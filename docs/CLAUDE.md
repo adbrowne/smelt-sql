@@ -8,13 +8,11 @@ This directory is dedicated to **planning, design documentation, and architectur
 
 ## Important Constraints
 
-**DO NOT access code outside this directory** - The only exception is:
-- `../README.md` - The main project specification
-
 **DO NOT make code changes** - This session is for documentation only:
-- NO reading parser, CLI, or LSP source code
 - NO editing implementation files
 - NO running code examples or tests
+
+Reading implementation code is fine when it informs the documentation or plan you are writing.
 
 **DO reference existing documentation** freely:
 - All files in this `docs/` directory
@@ -108,11 +106,8 @@ When working in `docs/`:
 
 ## What NOT to Do
 
-- ❌ Read or reference implementation code (parser, CLI, LSP, etc.)
 - ❌ Make code changes or propose specific code edits
 - ❌ Run commands, tests, or examples
-- ❌ Look at test workspaces or example code
-- ❌ Access files outside this directory (except README.md)
 
 ## Project Context (High-Level Only)
 

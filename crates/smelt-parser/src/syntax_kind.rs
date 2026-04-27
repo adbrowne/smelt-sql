@@ -120,6 +120,8 @@ pub enum SyntaxKind {
     CONCAT,       // || (string concatenation)
     LBRACKET,     // [
     RBRACKET,     // ]
+    LBRACE,       // { (row-requirement opener in TableExpr<{...}>, Phase 13)
+    RBRACE,       // } (row-requirement closer in TableExpr<{...}>, Phase 13)
     COLON,        // : (used in array slices)
     // JSON operators
     JSON_ARROW,      // ->
@@ -203,6 +205,60 @@ pub enum SyntaxKind {
     WITHIN_GROUP_CLAUSE, // WITHIN GROUP (ORDER BY ...)
     FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
     FETCH_CLAUSE,        // FETCH FIRST N ROWS ONLY
+
+    // smelt.define top-level declaration
+    SMELT_DEFINE,  // smelt.define name(params) [-> TypeRef] AS (body)
+    DEFINE_NAME,   // Wraps the function's identifier in a smelt.define
+    PARAM_LIST,    // Parameter list of a smelt.define: ( param, param, ... )
+    PARAM,         // Single parameter: name [: TypeRef] [= DEFAULT_VALUE]
+    TYPE_REF,      // Type reference (flat in Phase 1: e.g. tokens `Expr < Numeric >`)
+    DEFINE_BODY,   // Parenthesized body expression of a smelt.define
+    RETURN_ARROW,  // Return type arrow: -> <TypeRef>
+    DEFAULT_VALUE, // Default value of a parameter: = <expression>
+
+    // smelt.fn.* user-declared function call (Phase 2)
+    SMELT_FN_CALL, // smelt.fn.namespace.name(args)
+    CALL_PATH,     // The dotted call path inside a SMELT_FN_CALL (incl. `smelt.fn.` prefix)
+
+    // PASSING clauses (Phase 28)
+    PASSING_CLAUSE, // One clause: PASSING <name> AS ( <body> )
+    PASSING_NAME,   // The identifier after PASSING
+    PASSING_BODY,   // The expression inside (...)
+
+    // smelt.extern top-level declaration (Phase 10)
+    SMELT_EXTERN, // smelt.extern name(params) -> TypeRef
+
+    // Phase 35: Struct type references and brace-struct literals
+    STRUCT_TYPE,          // Struct<{field: Type, ..tail}> in a type reference
+    STRUCT_FIELD,         // Single `name: Type` pair inside a STRUCT_TYPE
+    ROW_TAIL,             // The trailing `..r` or `..` inside a STRUCT_TYPE
+    BRACE_STRUCT_LITERAL, // {expr AS name, ..spread} struct-literal expression
+    STRUCT_FIELD_ITEM,    // Single `expr AS name` item inside a BRACE_STRUCT_LITERAL
+    SPREAD_ITEM,          // `..name` spread item inside a BRACE_STRUCT_LITERAL
+
+    // Phase 38: smelt.as_struct() call
+    SMELT_AS_STRUCT_CALL, // smelt.as_struct(alias [EXCEPT col1, col2, ...])
+    EXCEPT_COL_LIST,      // EXCEPT col1, col2, ... inside SMELT_AS_STRUCT_CALL
+
+    // Phase 13: structured TypeRef children for TableExpr / AggExpr /
+    // WindowExpr / SelectItems parameter sorts. These are emitted as
+    // children of a TYPE_REF node by parse_type_ref when the leading
+    // identifier matches one of the recognised sort heads.
+    //
+    // The EXPR_KIND_* nodes are zero-width markers whose variant
+    // classifies the head (Scalar / Agg / Window). They contain no
+    // tokens so they don't alter the TYPE_REF's text range — the AST
+    // wrapper classifies via SyntaxKind rather than a stored string.
+    EXPR_KIND_SCALAR, // Marker: `Expr<T>` has `Scalar` kind.
+    EXPR_KIND_AGG,    // Marker: `AggExpr<T>` has `Agg` kind.
+    EXPR_KIND_WINDOW, // Marker: `WindowExpr<T>` has `Window` kind.
+    ROW_REQUIREMENT,  // { field: Type [, ..r] } under a TableExpr<...>
+    ROW_FIELD,        // Single field inside ROW_REQUIREMENT: `name: TypeRef`
+    ROW_TAIL_NAMED,   // `..<ident>` tail in a ROW_REQUIREMENT
+    ROW_TAIL_ANON,    // bare `..` tail in a ROW_REQUIREMENT
+    SELECTITEMS_KIND, // Capital-Kind argument of SelectItems<K, ctx>
+    SELECTITEMS_CTX,  // lowercase context argument of SelectItems<K, ctx>
+    EXPR_CTX,         // lowercase context argument of Expr<T, ctx>
 
     // Error handling
     ERROR, // Invalid syntax

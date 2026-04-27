@@ -8,6 +8,7 @@ description = "Type system definitions for smelt"
 repository = "https://github.com/adbrowne/smelt-sql"
 
 [dependencies]
+smelt-parser = { path = "../smelt-parser" }
 thiserror.workspace = true
 
 [dev-dependencies]

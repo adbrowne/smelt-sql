@@ -222,6 +222,7 @@ pub fn build_model_details(
                     DiagnosticSeverity::Error => "error".to_string(),
                     DiagnosticSeverity::Warning => "warning".to_string(),
                     DiagnosticSeverity::Info => "info".to_string(),
+                    DiagnosticSeverity::Hint => "hint".to_string(),
                 },
                 message: d.message.clone(),
                 line: Some(d.range.start.line),

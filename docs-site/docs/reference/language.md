@@ -37,6 +37,81 @@ Reference an external source table defined in `sources.yml`:
 FROM smelt.source('source.table')
 ```
 
+### smelt.define — user-defined functions
+
+Declare a reusable SQL fragment with optional type annotations. Files live in `functions/`.
+
+```sql
+-- Tier 1 (unannotated)
+smelt.define add_one(x) AS (x + 1)
+
+-- Tier 2 (parameters annotated)
+smelt.define safe_divide(
+  numerator: Expr<Numeric>,
+  denominator: Expr<Numeric>
+) AS (
+  CASE WHEN denominator = 0 OR denominator IS NULL
+    THEN NULL
+    ELSE CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE)
+  END
+)
+
+-- Tier 3 (fully annotated, return type verified)
+smelt.define safe_divide(
+  numerator: Expr<Numeric>,
+  denominator: Expr<Numeric>
+) -> Expr<Double> AS (
+  CASE WHEN denominator = 0 OR denominator IS NULL
+    THEN NULL
+    ELSE CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE)
+  END
+)
+```
+
+See the [Functions guide](../guide/functions.md) for the full type annotation language, fragment sorts (`TableExpr`, `SelectItems`), and `PASSING` clauses.
+
+### smelt.fn.* — calling user-defined functions
+
+```sql
+-- Positional arguments
+SELECT smelt.fn.safe_divide(revenue, cost) AS margin FROM smelt.ref('orders')
+
+-- Named arguments
+SELECT * FROM smelt.fn.sessionize(
+  smelt.ref('events'),
+  user_col => user_id,
+  ts_col   => event_time
+)
+
+-- PASSING clause for fragment parameters
+SELECT *
+FROM smelt.fn.session_rollup(smelt.ref('events'), user_id, event_time)
+PASSING metrics AS (COUNT(*) AS events, SUM(amount) AS total)
+```
+
+### smelt.extern — external function declarations
+
+Declare a backend-native function so smelt can type-check call sites:
+
+```sql
+smelt.extern regex_match(
+  text: Expr<Text>,
+  pattern: Expr<Text>
+) -> Expr<Boolean>
+```
+
+### smelt.as_struct() — struct packing
+
+Bundle columns from a table alias into a struct value:
+
+```sql
+SELECT
+  smelt.as_struct(o EXCEPT customer_id) AS order_data,
+  smelt.as_struct(c EXCEPT customer_id) AS customer_data
+FROM orders AS o
+JOIN customers AS c ON o.customer_id = c.customer_id
+```
+
 ## JOIN syntax
 
 All standard JOIN types are supported:

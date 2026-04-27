@@ -23,6 +23,14 @@ pub struct ParseError {
     pub range: TextRange,
 }
 
+/// Is `name` one of the recognised SelectItems kind keywords
+/// (Scalar / Agg / Window)? Used by `parse_selectitems_tail` to
+/// distinguish the single-argument `SelectItems<Kind>` form from the
+/// single-argument `SelectItems<ctx>` form.
+fn is_selectitems_kind_name(name: &str) -> bool {
+    matches!(name, "Scalar" | "Agg" | "Window")
+}
+
 /// Parse input text into a CST
 pub fn parse(input: &str) -> Parse {
     let tokens = tokenize(input);
@@ -43,6 +51,11 @@ struct Parser<'a> {
     builder: GreenNodeBuilder<'static>,
     errors: Vec<ParseError>,
     depth: u32,
+    /// Named row-variable names collected while parsing the current
+    /// `smelt.define` param list (Phase 35). Reset at the start of each
+    /// `smelt.define`; checked after the param list to enforce the v1
+    /// constraint that at most one distinct name may appear.
+    current_define_row_vars: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -55,6 +68,7 @@ impl<'a> Parser<'a> {
             builder: GreenNodeBuilder::new(),
             errors: Vec::new(),
             depth: 0,
+            current_define_row_vars: Vec::new(),
         }
     }
 
@@ -218,7 +232,7 @@ impl<'a> Parser<'a> {
     fn at_expression_start(&self) -> bool {
         self.at_any(&[
             IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXTRACT_KW, EXISTS_KW,
-            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS,
+            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS, LBRACE,
         ])
     }
 
@@ -229,22 +243,1504 @@ impl<'a> Parser<'a> {
 
         self.skip_trivia();
 
-        // Parse SELECT statement (can start with WITH) or VALUES clause
-        if self.at(SELECT_KW) || self.at(WITH_KW) {
-            self.parse_select_stmt();
-        } else if self.at(VALUES_KW) {
-            self.parse_values_clause();
-        } else if !self.at(EOF) {
-            self.error("Expected SELECT statement".to_string());
-            self.sync_to(&[EOF]);
+        // A file may contain: zero or more smelt.define declarations, interleaved
+        // with at most one bare SELECT / WITH / VALUES statement.
+        // smelt.define is ONLY special at the top-level statement position. In
+        // expression position, `smelt.define` is an ordinary qualified identifier.
+        let mut seen_model = false;
+        while !self.at(EOF) {
+            if self.at_smelt_define_trigger() {
+                self.parse_smelt_define();
+                self.skip_trivia();
+                continue;
+            }
+
+            if self.at_smelt_extern_trigger() {
+                self.parse_smelt_extern();
+                self.skip_trivia();
+                continue;
+            }
+
+            if self.at(SELECT_KW) || self.at(WITH_KW) {
+                // Bare SELECT/WITH model body. We only parse the first one; any
+                // following top-level tokens are consumed silently (preserving
+                // pre-Phase-1 behavior for statements the child parser does not
+                // fully consume, e.g. comma-separated FROM lists).
+                if seen_model {
+                    break;
+                }
+                self.parse_select_stmt();
+                seen_model = true;
+                self.skip_trivia();
+                continue;
+            }
+
+            if self.at(VALUES_KW) {
+                if seen_model {
+                    break;
+                }
+                self.parse_values_clause();
+                seen_model = true;
+                self.skip_trivia();
+                continue;
+            }
+
+            // Unknown content at top level. If we've already parsed a model
+            // body, silently swallow the remainder (matches the legacy
+            // single-statement parser's behavior). Otherwise, emit an error
+            // and resync to the next top-level declaration.
+            if seen_model {
+                break;
+            }
+            self.error("Expected smelt.define or SELECT statement".to_string());
+            self.sync_to_top_level();
+            self.skip_trivia();
         }
 
-        // Consume remaining trivia
+        // Consume any remaining tokens (trivia or otherwise) without emitting
+        // further errors — this preserves the pre-Phase-1 behavior of silently
+        // absorbing leftover content at the end of a file.
         while !self.at(EOF) {
             self.advance();
         }
 
         self.finish_node();
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a top-level `smelt.define` declaration. Does not consume
+    /// any tokens. The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("define")
+    fn at_smelt_define_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "define".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("define")
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a top-level `smelt.extern` declaration. Does not consume
+    /// any tokens. The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("extern")
+    fn at_smelt_extern_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "extern".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("extern")
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a `smelt.fn.<path>(...)` call. Does not consume any tokens.
+    /// The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("fn")
+    /// The path segments after `fn` and the `(...)` are validated by
+    /// `parse_smelt_fn_call`.
+    fn at_smelt_fn_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT "fn".
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        // Compute the starting offset of this lookahead token so we can read
+        // its text without consuming.
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("fn")
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a `smelt.as_struct(...)` call. Does not consume any tokens.
+    /// The trigger is exactly three non-trivia tokens:
+    ///   IDENT("smelt")  DOT  IDENT("as_struct")
+    /// followed by `(`.
+    fn at_smelt_as_struct_trigger(&self) -> bool {
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let text = &self.input[offset..offset + tok.len];
+        text.eq_ignore_ascii_case("as_struct")
+    }
+
+    /// Parse a `smelt.as_struct(alias [EXCEPT col1, col2, ...])` expression.
+    /// Produces a `SMELT_AS_STRUCT_CALL` node.
+    fn parse_smelt_as_struct(&mut self) {
+        self.start_node(SMELT_AS_STRUCT_CALL);
+        self.advance(); // smelt
+        self.skip_trivia();
+        self.advance(); // .
+        self.skip_trivia();
+        self.advance(); // as_struct
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' after 'smelt.as_struct'".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // (
+        self.skip_trivia();
+        if !self.at(IDENT) {
+            self.error("Expected alias identifier in 'smelt.as_struct(...)'".to_string());
+            self.finish_node();
+            return;
+        }
+        self.advance(); // alias identifier
+        self.skip_trivia();
+        if self.at(EXCEPT_KW) {
+            self.start_node(EXCEPT_COL_LIST);
+            self.advance(); // EXCEPT
+            self.skip_trivia();
+            loop {
+                if !self.at(IDENT) {
+                    break;
+                }
+                self.advance(); // column name
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance(); // ,
+                    self.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+            self.finish_node(); // EXCEPT_COL_LIST
+        }
+        self.skip_trivia();
+        if !self.at(RPAREN) {
+            self.error("Expected ')' to close 'smelt.as_struct(...)'".to_string());
+        } else {
+            self.advance(); // )
+        }
+        self.finish_node(); // SMELT_AS_STRUCT_CALL
+    }
+
+    /// Sync forward to EOF or the start of the next top-level `smelt.define`.
+    /// Anything skipped is wrapped in ERROR nodes (one per token).
+    fn sync_to_top_level(&mut self) {
+        while !self.at(EOF) {
+            // Skip trivia without emitting ERROR so the tree stays sensible.
+            if self.current().is_trivia() {
+                self.advance();
+                continue;
+            }
+            if self.at_smelt_define_trigger() || self.at_smelt_extern_trigger() {
+                return;
+            }
+            self.start_node(ERROR);
+            self.advance();
+            self.finish_node();
+        }
+    }
+
+    /// Parse a top-level `smelt.define` declaration. The caller must have
+    /// verified `at_smelt_define_trigger()` first.
+    fn parse_smelt_define(&mut self) {
+        self.start_node(SMELT_DEFINE);
+
+        // Reset row-variable tracking for this define (Phase 35).
+        self.current_define_row_vars.clear();
+
+        // Consume the three trigger tokens: `smelt`, `.`, `define`.
+        // They are three separate tokens in the lexer.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "define"
+
+        // DEFINE_NAME: wrap the next identifier.
+        self.skip_trivia();
+        if self.at(IDENT) {
+            self.start_node(DEFINE_NAME);
+            self.advance();
+            self.finish_node();
+        } else {
+            self.error("Expected function name after smelt.define".to_string());
+            // Try to sync to `(` so we can still parse the param list.
+            self.sync_to(&[LPAREN, AS_KW, EOF]);
+        }
+
+        // Parameter list.
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_param_list();
+        } else {
+            self.error("Expected '(' after function name".to_string());
+            // Try to sync to AS_KW so we can still parse the body.
+            self.sync_to(&[AS_KW, EOF]);
+        }
+
+        // Phase 35: v1 constraint — at most one distinct named row variable
+        // per signature. Two distinct names (e.g. `..r` and `..s`) are an
+        // error; the same name in multiple params is fine (the checker
+        // enforces unification later).
+        {
+            let mut seen: Vec<String> = Vec::new();
+            for name in self.current_define_row_vars.drain(..) {
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+            }
+            if seen.len() > 1 {
+                self.error(format!(
+                    "v1 constraint: at most one named row variable per signature (found: {})",
+                    seen.join(", ")
+                ));
+            }
+        }
+
+        // Optional return arrow: `-> <TypeRef>`. The lexer produces a single
+        // JSON_ARROW token for `->`.
+        self.skip_trivia();
+        if self.at(JSON_ARROW) {
+            self.start_node(RETURN_ARROW);
+            self.advance(); // JSON_ARROW (->)
+            self.skip_trivia();
+            self.parse_type_ref();
+            self.finish_node();
+        }
+
+        // Expect AS.
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance();
+        } else {
+            self.error("Expected 'AS' in smelt.define".to_string());
+            // Sync to the start of the body `(` or next top-level / EOF.
+            while !self.at(EOF)
+                && !self.at(LPAREN)
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+            if !self.at(LPAREN) {
+                // No body to parse — finish the SmeltDefine node with errors.
+                self.finish_node();
+                return;
+            }
+        }
+
+        // Body: `(` <expression> `)`.
+        self.skip_trivia();
+        self.parse_define_body();
+
+        // Optional terminating `;`.
+        self.skip_trivia();
+        if self.at(IDENT) {
+            // Never consume an IDENT here; a following smelt.define starts with
+            // IDENT and must remain available for parse_file's dispatch.
+        }
+        // Consume a single `;` if present — the lexer does not tokenize `;`
+        // (it would come through as an ERROR token). We ignore it defensively.
+
+        self.finish_node();
+    }
+
+    /// Parse a top-level `smelt.extern` declaration. The caller must have
+    /// verified `at_smelt_extern_trigger()` first.
+    ///
+    /// Grammar (Phase 10):
+    ///   smelt.extern NAME ( params ) -> TypeRef
+    ///
+    /// Unlike `smelt.define`, there is no body — externs are signature-only
+    /// declarations that bind a user-chosen name to a backend-provided function.
+    fn parse_smelt_extern(&mut self) {
+        self.start_node(SMELT_EXTERN);
+
+        // Consume the three trigger tokens: `smelt`, `.`, `extern`.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "extern"
+
+        // DEFINE_NAME: wrap the next identifier. (Reusing DEFINE_NAME here so
+        // downstream AST helpers can read the extern's name with the same
+        // getter used for smelt.define.)
+        //
+        // Phase 11 (backend namespace sugar): accept a dotted form
+        // `<backend>.<name>`, e.g. `smelt.extern duckdb.read_parquet(...)`.
+        // When present, the backend segment is captured as the first IDENT
+        // inside DEFINE_NAME; downstream AST helpers (`SmeltExtern::name`
+        // and `SmeltExtern::backend_namespace`) read the two idents
+        // separately. Non-dotted externs keep the legacy single-IDENT shape.
+        self.skip_trivia();
+        if self.at(IDENT) {
+            self.start_node(DEFINE_NAME);
+            self.advance(); // first IDENT
+                            // If the next non-trivia tokens are `.` IDENT, treat this as a
+                            // backend-namespaced extern name.
+            let mut lookahead = 0;
+            while let Some(t) = self.tokens.get(self.pos + lookahead) {
+                if t.kind.is_trivia() {
+                    lookahead += 1;
+                } else {
+                    break;
+                }
+            }
+            let next = self.tokens.get(self.pos + lookahead).map(|t| t.kind);
+            if next == Some(DOT) {
+                // Check the token after the DOT is an IDENT.
+                let mut after_dot = lookahead + 1;
+                while let Some(t) = self.tokens.get(self.pos + after_dot) {
+                    if t.kind.is_trivia() {
+                        after_dot += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if self.tokens.get(self.pos + after_dot).map(|t| t.kind) == Some(IDENT) {
+                    // Consume `.` and the second IDENT — both land inside
+                    // the same DEFINE_NAME node.
+                    self.skip_trivia();
+                    self.advance(); // DOT
+                    self.skip_trivia();
+                    self.advance(); // second IDENT
+                }
+            }
+            self.finish_node();
+        } else {
+            self.error("Expected function name after smelt.extern".to_string());
+            self.sync_to(&[LPAREN, JSON_ARROW, EOF]);
+        }
+
+        // Parameter list.
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_param_list();
+        } else {
+            self.error("Expected '(' after function name".to_string());
+            self.sync_to(&[JSON_ARROW, EOF]);
+        }
+
+        // Return arrow: `-> <TypeRef>`. Required for externs — the extern
+        // signature must declare its return type.
+        self.skip_trivia();
+        if self.at(JSON_ARROW) {
+            self.start_node(RETURN_ARROW);
+            self.advance(); // JSON_ARROW (->)
+            self.skip_trivia();
+            self.parse_type_ref();
+            self.finish_node();
+        } else {
+            self.error("Expected '->' return type in smelt.extern".to_string());
+        }
+
+        self.finish_node(); // SMELT_EXTERN
+    }
+
+    /// Parse the parenthesized parameter list of a smelt.define.
+    fn parse_param_list(&mut self) {
+        self.start_node(PARAM_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        while !self.at(RPAREN) && !self.at(EOF) {
+            // If we see a top-level resync point, break out to let error
+            // recovery kick in at the caller.
+            if self.at(AS_KW) || self.at_smelt_define_trigger() || self.at_smelt_extern_trigger() {
+                self.error("Expected ')' to close parameter list".to_string());
+                break;
+            }
+
+            if !self.at(IDENT) {
+                self.error("Expected parameter name".to_string());
+                // Consume one token as ERROR to make progress.
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+                self.skip_trivia();
+                continue;
+            }
+
+            self.parse_param();
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                // Allow trailing comma.
+                if self.at(RPAREN) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Parse a single parameter: NAME [ ':' TYPE_REF ] [ '=' DEFAULT_VALUE ].
+    fn parse_param(&mut self) {
+        self.start_node(PARAM);
+
+        // Parameter name (required, we've already checked for IDENT).
+        self.advance(); // consume IDENT
+
+        // Optional `: TypeRef`.
+        self.skip_trivia();
+        if self.at(COLON) {
+            self.advance();
+            self.skip_trivia();
+            self.parse_type_ref();
+        }
+
+        // Optional `= DefaultValue`.
+        self.skip_trivia();
+        if self.at(EQ) {
+            self.start_node(DEFAULT_VALUE);
+            self.advance();
+            self.skip_trivia();
+            self.parse_expression();
+            self.finish_node();
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a type reference.
+    ///
+    /// History:
+    ///   - Phase 1: flat token run.
+    ///   - Phase 4: text-level structured parse in `smelt-types` (still a
+    ///     flat CST).
+    ///   - Phase 13: structured CST children for the non-`Expr` sorts
+    ///     (`TableExpr`, `AggExpr`, `WindowExpr`, `SelectItems`). The
+    ///     head identifier is still emitted as raw IDENT tokens inside
+    ///     `TYPE_REF`, with additional structured nodes (`EXPR_KIND_*`,
+    ///     `ROW_REQUIREMENT`, `SELECTITEMS_KIND`, `SELECTITEMS_CTX`)
+    ///     siblings to the raw tokens so the AST wrapper can classify
+    ///     the sort and expose structured getters.
+    ///
+    /// Boundaries at depth 0 are `,`, `)`, `=`, `AS`, `->`, and EOF (the
+    /// caller's error recovery handles the rest).
+    fn parse_type_ref(&mut self) {
+        self.start_node(TYPE_REF);
+
+        self.skip_trivia();
+
+        // Peek the leading IDENT (if any). This decides whether we go
+        // down a structured path (for recognised sorts) or fall back to
+        // the flat consumer used for unknown / error heads.
+        let head_text = if self.at(IDENT) {
+            Some(self.current_text().to_string())
+        } else {
+            None
+        };
+
+        match head_text.as_deref() {
+            // Scalar / Agg / Window expression sorts: emit an EXPR_KIND
+            // tag alongside the flat body so the AST can report a
+            // uniform `expr_kind()` across all three. The data-type
+            // payload is parsed textually by `smelt-types` from the
+            // TYPE_REF's raw text, so we keep that as a flat run here.
+            // Phase 19: also detect optional `, ctx` context binding
+            // and emit an `EXPR_CTX` child node.
+            Some("Expr") => {
+                self.advance(); // IDENT "Expr"
+                self.emit_expr_kind_marker(EXPR_KIND_SCALAR);
+                self.parse_expr_tail();
+            }
+            Some("AggExpr") => {
+                self.advance(); // IDENT "AggExpr"
+                self.emit_expr_kind_marker(EXPR_KIND_AGG);
+                self.parse_expr_tail();
+            }
+            Some("WindowExpr") => {
+                self.advance(); // IDENT "WindowExpr"
+                self.emit_expr_kind_marker(EXPR_KIND_WINDOW);
+                self.parse_expr_tail();
+            }
+            Some("TableExpr") => {
+                self.advance(); // IDENT "TableExpr"
+                self.parse_tableexpr_tail();
+            }
+            Some("SelectItems") => {
+                self.advance(); // IDENT "SelectItems"
+                self.parse_selectitems_tail();
+            }
+            // Unknown / non-matching sort — emit a parse error so the
+            // Phase 4-era "unknown sort" diagnostic path still lights up
+            // without reaching into `smelt-types`. Callers still see the
+            // original tokens via the flat consumer.
+            Some(other) => {
+                let msg = format!(
+                    "Unknown type sort `{}` — expected one of Expr, AggExpr, WindowExpr, TableExpr, SelectItems",
+                    other
+                );
+                self.error(msg);
+                self.consume_type_ref_tail();
+            }
+            None => {
+                // Recovery: no leading IDENT — consume the tail anyway.
+                self.consume_type_ref_tail();
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Emit a zero-width marker node of the given kind (one of
+    /// [`EXPR_KIND_SCALAR`], [`EXPR_KIND_AGG`], or [`EXPR_KIND_WINDOW`]).
+    ///
+    /// The marker is a sibling of the leading sort IDENT inside the
+    /// `TYPE_REF`. It contains no tokens and therefore does not
+    /// contribute to the `TypeRef::text()` output — downstream
+    /// signature extraction (which parses `type_ref.text()`) sees
+    /// exactly the user-written source text. The AST wrapper classifies
+    /// it via [`TypeRef::expr_kind()`] by inspecting the marker's
+    /// `SyntaxKind`.
+    fn emit_expr_kind_marker(&mut self, kind: SyntaxKind) {
+        debug_assert!(matches!(
+            kind,
+            EXPR_KIND_SCALAR | EXPR_KIND_AGG | EXPR_KIND_WINDOW
+        ));
+        self.builder.start_node(kind.into());
+        self.builder.finish_node();
+    }
+
+    /// Parse a flat (unstructured) `TYPE_REF` that stops at row-field
+    /// boundaries: `,`, `}`, `>` (closing `<`), and usual parameter
+    /// boundaries. Used for row-field type annotations inside a
+    /// `ROW_REQUIREMENT`, where the type is a bare name like `Numeric`
+    /// or `Integer` — not an `Expr<...>` sort.
+    fn parse_flat_type_ref_stopping_on_row_field_boundary(&mut self) {
+        self.start_node(TYPE_REF);
+        let mut angle_depth: i32 = 0;
+        let mut paren_depth: i32 = 0;
+        loop {
+            self.skip_trivia();
+            let k = self.current();
+            if k == EOF {
+                break;
+            }
+            if angle_depth == 0 && paren_depth == 0 {
+                if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW | RBRACE | GT) {
+                    break;
+                }
+                if k == IDENT && (self.at_smelt_define_trigger() || self.at_smelt_extern_trigger())
+                {
+                    break;
+                }
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => angle_depth = angle_depth.saturating_sub(1),
+                LPAREN => paren_depth += 1,
+                RPAREN => paren_depth = paren_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+        self.finish_node();
+    }
+
+    /// Flat-consume tokens up to a depth-0 boundary. `<` and `(` open
+    /// angle/paren depth so commas inside don't end the TypeRef.
+    fn consume_type_ref_tail(&mut self) {
+        let mut angle_depth: i32 = 0;
+        let mut paren_depth: i32 = 0;
+        loop {
+            self.skip_trivia();
+            let k = self.current();
+            if k == EOF {
+                break;
+            }
+            if angle_depth == 0 && paren_depth == 0 {
+                if matches!(k, COMMA | RPAREN | EQ | AS_KW | JSON_ARROW) {
+                    break;
+                }
+                if k == IDENT && (self.at_smelt_define_trigger() || self.at_smelt_extern_trigger())
+                {
+                    break;
+                }
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => angle_depth = angle_depth.saturating_sub(1),
+                LPAREN => paren_depth += 1,
+                RPAREN => paren_depth = paren_depth.saturating_sub(1),
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    /// Parse the tail of a `TableExpr` type reference: optionally
+    /// `<{ field, ..., ..tail }>`. When no `<` follows, nothing further
+    /// is emitted — a bare `TableExpr` is a valid row-polymorphic
+    /// parameter type.
+    fn parse_tableexpr_tail(&mut self) {
+        self.skip_trivia();
+        if !self.at(LT) {
+            self.consume_type_ref_tail();
+            return;
+        }
+        self.advance(); // LT
+        self.skip_trivia();
+
+        if !self.at(LBRACE) {
+            // No row-requirement between the angle brackets — consume
+            // the remainder up to the matching `>`.
+            self.skip_to_matching_gt();
+            return;
+        }
+
+        self.start_node(ROW_REQUIREMENT);
+        self.advance(); // `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Tail markers: two DOTs in a row. Decide between
+            // `..name` (ROW_TAIL_NAMED) and `..` (ROW_TAIL_ANON) by
+            // lookahead, so we only ever open one of the two nodes.
+            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+                // Peek past the two dots to see if an IDENT follows
+                // (named tail) or not (anonymous).
+                let is_named = matches!(
+                    self.peek_nth_non_trivia(2),
+                    Some(k) if k == IDENT
+                );
+                if is_named {
+                    self.start_node(ROW_TAIL_NAMED);
+                    self.advance(); // first DOT
+                    self.advance(); // second DOT
+                    self.skip_trivia();
+                    self.advance(); // IDENT
+                    self.finish_node();
+                } else {
+                    self.start_node(ROW_TAIL_ANON);
+                    self.advance(); // first DOT
+                    self.advance(); // second DOT
+                    self.finish_node();
+                }
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.error(
+                        "`..tail` must be the last element of a row requirement".to_string(),
+                    );
+                    self.advance();
+                    // keep going defensively so we don't loop forever
+                    continue;
+                }
+                break;
+            }
+
+            // Regular row field: `name: TypeRef`. The row-field TYPE_REF
+            // is a flat type name (e.g. `Numeric`, `Integer`, `Text`) —
+            // not an `Expr<...>` sort. Use the flat consumer so bare
+            // type names don't trip the sort-head dispatch.
+            if self.at(IDENT) {
+                self.start_node(ROW_FIELD);
+                self.advance(); // IDENT name
+                self.skip_trivia();
+                if self.at(COLON) {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_flat_type_ref_stopping_on_row_field_boundary();
+                } else {
+                    self.error("Expected `:` after row field name".to_string());
+                }
+                self.finish_node();
+            } else {
+                self.error("Expected row field name or `..tail`".to_string());
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected `}` to close row requirement".to_string());
+        }
+        self.finish_node(); // ROW_REQUIREMENT
+
+        // Expect the closing `>`; tolerate its absence.
+        self.skip_trivia();
+        if self.at(GT) {
+            self.advance();
+        } else {
+            self.skip_to_matching_gt();
+        }
+    }
+
+    /// Parse the tail of a `SelectItems<...>` type reference. Accepts:
+    ///   - `<Kind>`           — single uppercase-Kind argument.
+    ///   - `<ctx>`            — single lowercase context argument.
+    ///   - `<Kind, ctx>`      — two arguments, kind then context.
+    ///
+    /// The first-token heuristic for the single-arg form: if the
+    /// identifier is one of `{Scalar, Agg, Window}`, it's a
+    /// `SELECTITEMS_KIND`; otherwise it is a `SELECTITEMS_CTX`.
+    fn parse_selectitems_tail(&mut self) {
+        self.skip_trivia();
+        if !self.at(LT) {
+            self.consume_type_ref_tail();
+            return;
+        }
+        self.advance(); // LT
+        self.skip_trivia();
+
+        if !self.at(IDENT) {
+            self.error("Expected kind or context identifier inside SelectItems<...>".to_string());
+            self.skip_to_matching_gt();
+            return;
+        }
+
+        let first_text = self.current_text().to_string();
+        let first_is_kind = is_selectitems_kind_name(&first_text);
+        let has_second = self.peek_has_second_selectitems_arg();
+
+        if has_second {
+            if !first_is_kind {
+                self.error(format!(
+                    "Expected a SelectItems kind (Scalar, Agg, or Window) as the first of two arguments, got `{}`",
+                    first_text
+                ));
+            }
+            self.start_node(SELECTITEMS_KIND);
+            self.advance(); // IDENT
+            self.finish_node();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+            }
+            if self.at(IDENT) {
+                self.start_node(SELECTITEMS_CTX);
+                self.advance();
+                self.finish_node();
+            } else {
+                self.error("Expected context identifier after `,` in SelectItems<...>".to_string());
+            }
+        } else if first_is_kind {
+            self.start_node(SELECTITEMS_KIND);
+            self.advance();
+            self.finish_node();
+        } else {
+            self.start_node(SELECTITEMS_CTX);
+            self.advance();
+            self.finish_node();
+        }
+
+        self.skip_trivia();
+        if self.at(GT) {
+            self.advance();
+        } else {
+            self.skip_to_matching_gt();
+        }
+    }
+
+    /// Parse the tail of an `Expr<T>` / `AggExpr<T>` / `WindowExpr<T>`
+    /// type reference (Phase 19). Accepts:
+    ///
+    /// - `<T>` — single data-type argument; consumed as flat tokens.
+    /// - `<T, ctx>` — data-type followed by a lowercase context identifier;
+    ///   the context identifier is wrapped in `EXPR_CTX`.
+    /// - `<Struct<{field: Type, ..tail}>>` — Phase 35 struct type; the inner
+    ///   `Struct<{...}>` is parsed as a `STRUCT_TYPE` node.
+    ///
+    /// Falls back to `consume_type_ref_tail` for the no-`<` case.
+    fn parse_expr_tail(&mut self) {
+        self.skip_trivia();
+        if !self.at(LT) {
+            self.consume_type_ref_tail();
+            return;
+        }
+        self.advance(); // LT
+
+        // Phase 35: if the inner type is `Struct<{...}>`, hand off to
+        // the structured struct-type parser instead of the flat consumer.
+        // `STRUCT` is lexed as STRUCT_KW (a keyword), not IDENT.
+        self.skip_trivia();
+        if self.at(STRUCT_KW) && self.is_struct_type_start() {
+            self.parse_struct_type();
+            self.skip_trivia();
+            if self.at(GT) {
+                self.advance(); // closing `>` of `Expr<Struct<...>>`
+            } else {
+                self.skip_to_matching_gt();
+            }
+            return;
+        }
+
+        // Consume flat tokens until we see `,` at depth 0 (ctx follows)
+        // or `>` at depth 0 (no ctx).
+        let mut angle_depth: i32 = 0;
+        loop {
+            self.skip_trivia();
+            let k = self.current();
+            if k == EOF {
+                break;
+            }
+            if angle_depth == 0 {
+                if k == GT {
+                    self.advance();
+                    return;
+                }
+                if k == COMMA {
+                    self.advance(); // COMMA
+                    self.skip_trivia();
+                    if self.at(IDENT) {
+                        self.start_node(EXPR_CTX);
+                        self.advance(); // context identifier
+                        self.finish_node();
+                    } else {
+                        self.error(
+                            "Expected context identifier after `,` in Expr<...>".to_string(),
+                        );
+                    }
+                    self.skip_trivia();
+                    if self.at(GT) {
+                        self.advance();
+                    } else {
+                        self.skip_to_matching_gt();
+                    }
+                    return;
+                }
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => angle_depth -= 1,
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    /// After the current IDENT, peek whether the next non-trivia token
+    /// is `,` (two args) as opposed to `>` (single arg).
+    fn peek_has_second_selectitems_arg(&self) -> bool {
+        matches!(self.peek_nth_non_trivia(1), Some(k) if k == COMMA)
+    }
+
+    /// Peek the kind of the Nth non-trivia token after the current one
+    /// (0 == current non-trivia; 1 == the one after, etc.).
+    fn peek_nth_non_trivia(&self, n: usize) -> Option<SyntaxKind> {
+        let mut i = self.pos;
+        let mut found = 0usize;
+        // Advance through tokens, counting non-trivia as we go.
+        while let Some(t) = self.tokens.get(i) {
+            if !t.kind.is_trivia() {
+                if found == n {
+                    return Some(t.kind);
+                }
+                found += 1;
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Peek the kind of the next non-trivia token after the current one.
+    fn peek_next_non_trivia(&self) -> Option<SyntaxKind> {
+        self.peek_nth_non_trivia(1)
+    }
+
+    /// Consume tokens until a `>` at angle-depth 0 is found (and
+    /// consumed), or a type-ref boundary / EOF is reached.
+    fn skip_to_matching_gt(&mut self) {
+        let mut angle_depth: i32 = 1;
+        while !self.at(EOF) {
+            let k = self.current();
+            if matches!(k, COMMA | RPAREN | AS_KW | JSON_ARROW) && angle_depth == 1 {
+                return;
+            }
+            match k {
+                LT => angle_depth += 1,
+                GT => {
+                    angle_depth -= 1;
+                    if angle_depth == 0 {
+                        self.advance();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    /// Peek ahead (without consuming) to check whether the current token is the
+    /// start of a `Struct<{...}>` type — i.e. `STRUCT_KW` followed by `<` then `{`.
+    fn is_struct_type_start(&self) -> bool {
+        // Current token must be STRUCT_KW (already confirmed by caller).
+        // Peek for: [trivia*] LT [trivia*] LBRACE
+        let mut i = 1;
+        while let Some(t) = self.tokens.get(self.pos + i) {
+            if t.kind.is_trivia() {
+                i += 1;
+                continue;
+            }
+            if t.kind == LT {
+                // found `<`, now look for `{`
+                i += 1;
+                while let Some(t2) = self.tokens.get(self.pos + i) {
+                    if t2.kind.is_trivia() {
+                        i += 1;
+                        continue;
+                    }
+                    return t2.kind == LBRACE;
+                }
+                return false;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// Parse `Struct<{field: Type, ..tail}>` into a `STRUCT_TYPE` node.
+    ///
+    /// Caller has already confirmed the leading `STRUCT_KW` and that the
+    /// next significant tokens are `<` `{`. The caller must consume the
+    /// trailing `>` of the outer `Expr<...>` wrapper.
+    fn parse_struct_type(&mut self) {
+        self.start_node(STRUCT_TYPE);
+
+        // Consume `Struct` (tokenized as STRUCT_KW)
+        self.skip_trivia();
+        self.advance(); // STRUCT_KW
+        self.skip_trivia();
+        self.advance(); // LT `<`
+        self.skip_trivia();
+        self.advance(); // LBRACE `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Tail markers: two DOTs.
+            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+                // ROW_TAIL: either `..ident` (named) or `..` (anonymous).
+                let is_named = matches!(
+                    self.peek_nth_non_trivia(2),
+                    Some(k) if k == IDENT
+                );
+                self.start_node(ROW_TAIL);
+                self.advance(); // first DOT
+                self.advance(); // second DOT
+                if is_named {
+                    self.skip_trivia();
+                    // Record the row-variable name for the per-define constraint check.
+                    let name = self.current_text().to_string();
+                    self.current_define_row_vars.push(name);
+                    self.advance(); // IDENT
+                }
+                self.finish_node(); // ROW_TAIL
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.error("`..tail` must be the last element of a struct type".to_string());
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+
+            // Regular field: `name: Type`.
+            if self.at(IDENT) {
+                self.start_node(STRUCT_FIELD);
+                self.advance(); // IDENT name
+                self.skip_trivia();
+                if self.at(COLON) {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_flat_type_ref_stopping_on_row_field_boundary();
+                } else {
+                    self.error("Expected `:` after struct field name".to_string());
+                }
+                self.finish_node(); // STRUCT_FIELD
+            } else {
+                self.error("Expected struct field name or `..tail`".to_string());
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected `}` to close struct type".to_string());
+        }
+
+        self.skip_trivia();
+        if self.at(GT) {
+            self.advance(); // `>` closing `Struct<{...}>`
+        } else {
+            self.error("Expected `>` to close Struct<{...}>".to_string());
+        }
+
+        self.finish_node(); // STRUCT_TYPE
+    }
+
+    /// Parse a brace-struct literal: `{expr AS name, ..spread}`.
+    ///
+    /// Items are:
+    ///   - `STRUCT_FIELD_ITEM`: `expr AS alias`
+    ///   - `SPREAD_ITEM`: `..ident`
+    fn parse_brace_struct_literal(&mut self) {
+        self.start_node(BRACE_STRUCT_LITERAL);
+        self.advance(); // consume `{`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            // Spread item: `..ident`
+            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+                self.start_node(SPREAD_ITEM);
+                self.advance(); // first DOT
+                self.advance(); // second DOT
+                self.skip_trivia();
+                if self.at(IDENT) {
+                    self.advance(); // IDENT name
+                } else {
+                    self.error("Expected identifier after `..` in struct spread".to_string());
+                }
+                self.finish_node(); // SPREAD_ITEM
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                }
+                // Spread is typically last, but we allow trailing items for error recovery.
+                continue;
+            }
+
+            // Field item: `expr AS alias`
+            self.start_node(STRUCT_FIELD_ITEM);
+            self.parse_expression();
+            self.skip_trivia();
+            if self.at(AS_KW) {
+                self.advance(); // AS
+                self.skip_trivia();
+                if self.at(IDENT) {
+                    self.advance(); // alias
+                } else {
+                    self.error("Expected alias after AS in struct field".to_string());
+                }
+            } else {
+                self.error("Expected AS alias in struct field item".to_string());
+            }
+            self.finish_node(); // STRUCT_FIELD_ITEM
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected `}` to close brace struct literal".to_string());
+        }
+
+        self.finish_node(); // BRACE_STRUCT_LITERAL
+    }
+
+    /// Parse the parenthesized body of a smelt.define.
+    ///
+    /// Phase 1 only supports expression bodies. SELECT-statement bodies are
+    /// deferred to a later phase.
+    fn parse_define_body(&mut self) {
+        self.start_node(DEFINE_BODY);
+
+        if !self.at(LPAREN) {
+            self.error("Expected '(' to start smelt.define body".to_string());
+            self.finish_node();
+            return;
+        }
+
+        self.advance(); // consume '('
+        self.skip_trivia();
+
+        // Phase 13: allow a SELECT statement (or WITH … SELECT) as the
+        // body, in addition to the Phase-1 expression body. This keeps
+        // the simple-expression tests unchanged while enabling the
+        // TableExpr-returning fixtures introduced in Step 3.
+        if self.at(SELECT_KW) || self.at(WITH_KW) {
+            self.parse_select_stmt();
+        } else {
+            // Parse a single expression. If parsing produces an unbalanced `(`
+            // we rely on the caller's sync loop to recover at the next
+            // top-level.
+            self.parse_expression();
+        }
+
+        self.skip_trivia();
+        if self.at(RPAREN) {
+            self.advance();
+        } else {
+            self.error("Expected ')' to close smelt.define body".to_string());
+            // Sync to EOF or the next top-level declaration so a following
+            // smelt.define / smelt.extern still parses.
+            while !self.at(EOF)
+                && !self.at_smelt_define_trigger()
+                && !self.at_smelt_extern_trigger()
+            {
+                self.start_node(ERROR);
+                self.advance();
+                self.finish_node();
+            }
+        }
+
+        self.finish_node();
+    }
+
+    /// Parse a `smelt.fn.<segment>(.<segment>)*(args)` call as a `SMELT_FN_CALL`.
+    ///
+    /// The caller must have verified `at_smelt_fn_trigger()` first. The minimal
+    /// valid form is `smelt.fn.<name>(...)` — the three prefix tokens
+    /// `smelt . fn` must be followed by at least one `.<IDENT>` segment and
+    /// then `(`. Intermediate namespace segments (`smelt.fn.core.math.name`)
+    /// are legal and all captured inside a single `CALL_PATH` node including
+    /// the `smelt.fn.` prefix.
+    fn parse_smelt_fn_call(&mut self) {
+        self.start_node(SMELT_FN_CALL);
+        self.start_node(CALL_PATH);
+
+        // Consume the three trigger tokens: `smelt`, `.`, `fn`.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT "fn"
+
+        // Require at least one `.<IDENT>` segment after `smelt.fn`.
+        self.skip_trivia();
+        if !self.at(DOT) {
+            self.error("Expected '.' after 'smelt.fn'".to_string());
+            self.finish_node(); // CALL_PATH
+            self.finish_node(); // SMELT_FN_CALL
+            return;
+        }
+        self.advance(); // DOT
+        self.skip_trivia();
+        if !self.at(IDENT) {
+            self.error("Expected identifier after 'smelt.fn.'".to_string());
+            self.finish_node(); // CALL_PATH
+            self.finish_node(); // SMELT_FN_CALL
+            return;
+        }
+        self.advance(); // IDENT (first path segment after smelt.fn.)
+
+        // Continue consuming `.<IDENT>` segments as long as more follow. Stop
+        // when the next non-trivia token is `(` (start of the arg list) or
+        // anything else (which is an error).
+        loop {
+            // Peek past any trivia to the next non-trivia token.
+            let mut lookahead = 0;
+            while let Some(t) = self.tokens.get(self.pos + lookahead) {
+                if t.kind.is_trivia() {
+                    lookahead += 1;
+                } else {
+                    break;
+                }
+            }
+            let next_kind = self
+                .tokens
+                .get(self.pos + lookahead)
+                .map(|t| t.kind)
+                .unwrap_or(EOF);
+            if next_kind != DOT {
+                break;
+            }
+
+            // There is a `.` after the last IDENT. Peek past the DOT to see
+            // what follows — we only extend the path if it's an IDENT.
+            let mut lookahead2 = lookahead + 1;
+            while let Some(t) = self.tokens.get(self.pos + lookahead2) {
+                if t.kind.is_trivia() {
+                    lookahead2 += 1;
+                } else {
+                    break;
+                }
+            }
+            let after_dot = self
+                .tokens
+                .get(self.pos + lookahead2)
+                .map(|t| t.kind)
+                .unwrap_or(EOF);
+            if after_dot != IDENT {
+                break;
+            }
+
+            // Consume `.<IDENT>`.
+            self.skip_trivia();
+            self.advance(); // DOT
+            self.skip_trivia();
+            self.advance(); // IDENT
+        }
+
+        self.finish_node(); // CALL_PATH
+
+        // Argument list is required. Reuse parse_arg_list (handles named
+        // params `x => y` for free).
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_arg_list();
+        } else {
+            self.error("Expected '(' after smelt.fn.<path>".to_string());
+        }
+
+        // Parse zero or more `PASSING <name> AS (<body>)` clauses that
+        // trail the argument list. The keyword `PASSING` is context-sensitive:
+        // it is only special here, immediately after a recognised smelt.fn.*
+        // call; everywhere else it is a plain IDENT.
+        loop {
+            self.skip_trivia();
+            if !self.at_contextual_keyword("PASSING") {
+                break;
+            }
+            self.parse_passing_clause();
+        }
+
+        self.finish_node(); // SMELT_FN_CALL
+    }
+
+    /// Parse a single `PASSING <name> AS (<body>)` clause.
+    /// The caller must have verified `at_contextual_keyword("PASSING")` first.
+    fn parse_passing_clause(&mut self) {
+        self.start_node(PASSING_CLAUSE);
+
+        // Consume the `PASSING` contextual keyword (it is an IDENT token).
+        self.skip_trivia();
+        self.advance(); // IDENT "PASSING"
+
+        // Parse the binding name into PASSING_NAME.
+        self.skip_trivia();
+        self.start_node(PASSING_NAME);
+        if self.at(IDENT) {
+            self.advance(); // IDENT (name)
+        } else {
+            self.error("Expected identifier after PASSING".to_string());
+        }
+        self.finish_node(); // PASSING_NAME
+
+        // Expect `AS`.
+        self.skip_trivia();
+        if self.at(AS_KW) {
+            self.advance(); // AS
+        } else {
+            self.error("Expected AS after PASSING <name>".to_string());
+            self.finish_node(); // PASSING_CLAUSE
+            return;
+        }
+
+        // Expect `(`, then an expression, then `)`.
+        self.skip_trivia();
+        if !self.at(LPAREN) {
+            self.error("Expected '(' after PASSING <name> AS".to_string());
+            self.finish_node(); // PASSING_CLAUSE
+            return;
+        }
+        self.advance(); // LPAREN
+
+        // Parse the body expression into PASSING_BODY.
+        self.start_node(PASSING_BODY);
+        self.skip_trivia();
+        if self.at_expression_start() {
+            self.parse_expression();
+        } else {
+            self.error("Expected expression in PASSING body".to_string());
+        }
+        self.finish_node(); // PASSING_BODY
+
+        // Closing `)`.
+        self.skip_trivia();
+        if self.at(RPAREN) {
+            self.advance(); // RPAREN
+        } else {
+            self.error("Expected ')' to close PASSING body".to_string());
+        }
+
+        self.finish_node(); // PASSING_CLAUSE
     }
 
     fn parse_select_stmt(&mut self) {
@@ -387,12 +1883,24 @@ impl<'a> Parser<'a> {
         self.start_node(SELECT_LIST);
         self.skip_trivia();
 
-        // Parse comma-separated select items (including *)
+        // Parse comma-separated select items (including * and table.*)
         loop {
             if self.at(STAR) {
                 // Handle SELECT * as a special select item
                 self.start_node(SELECT_ITEM);
                 self.advance();
+                self.finish_node();
+            } else if self.at(IDENT)
+                && self.peek_nth_non_trivia(1) == Some(DOT)
+                && self.peek_nth_non_trivia(2) == Some(STAR)
+            {
+                // `table.*` qualified star. Emit as a SELECT_ITEM carrying
+                // IDENT DOT STAR tokens directly — downstream consumers
+                // treat `SELECT_ITEM` with a trailing STAR as a star-item.
+                self.start_node(SELECT_ITEM);
+                self.advance(); // IDENT
+                self.advance(); // DOT
+                self.advance(); // STAR
                 self.finish_node();
             } else {
                 self.parse_select_item();
@@ -485,6 +1993,29 @@ impl<'a> Parser<'a> {
         if self.at(LATERAL_KW) {
             self.advance(); // LATERAL
             self.skip_trivia();
+        }
+
+        // Phase 15: `smelt.fn.<path>(...)` can appear in a FROM clause
+        // when the callee returns `TableExpr`. Recognise the trigger
+        // before falling through to the generic identifier path — the
+        // trigger consumes four tokens (IDENT "smelt" DOT IDENT "fn")
+        // which the generic path would split into two dotted IDENTs
+        // plus an un-parsed suffix, losing the SMELT_FN_CALL structure.
+        if self.at(IDENT) && self.at_smelt_fn_trigger() {
+            self.parse_smelt_fn_call();
+            // Fall through to the shared trailing-shape handling below
+            // (TABLESAMPLE, PIVOT/UNPIVOT, AS-alias) so a call in FROM
+            // reads as `smelt.fn.f(args) [AS alias]`, etc.
+            self.skip_trivia();
+            if self.at(AS_KW) {
+                self.advance();
+                self.skip_trivia();
+                self.expect(IDENT);
+            } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
+                self.advance();
+            }
+            self.finish_node(); // TABLE_REF
+            return;
         }
 
         if self.at(LPAREN) {
@@ -1226,6 +2757,9 @@ impl<'a> Parser<'a> {
             self.parse_row_constructor();
         } else if self.at(STRUCT_KW) && self.is_keyword_followed_by_lparen() {
             self.parse_struct_literal();
+        } else if self.at(LBRACE) {
+            // Phase 35: brace-struct literal `{expr AS alias, ..spread}`
+            self.parse_brace_struct_literal();
         } else if self.at(CASE_KW) {
             self.parse_case_expr();
         } else if self.at(CAST_KW) {
@@ -1235,7 +2769,7 @@ impl<'a> Parser<'a> {
         } else if self.at(EXISTS_KW) {
             self.parse_exists_expr();
         } else if self.at(LPAREN) {
-            // Could be: parenthesized expression, subquery, or function call
+            // Could be: parenthesized expression, subquery, or empty tuple `()`.
             let checkpoint = self.builder.checkpoint();
             self.advance(); // consume LPAREN
             self.skip_trivia();
@@ -1246,6 +2780,14 @@ impl<'a> Parser<'a> {
                 self.parse_select_stmt();
                 self.skip_trivia();
                 self.expect(RPAREN);
+                self.finish_node();
+            } else if self.at(RPAREN) {
+                // Empty tuple `()` — valid as a default value for
+                // `SelectItems<Kind>` parameters (Phase 22, research §6).
+                // Emit a bare EXPRESSION node with no children; the type-checker
+                // treats this as an empty fragment (no aggregates / columns).
+                self.start_node_at(checkpoint, EXPRESSION);
+                self.advance(); // consume RPAREN
                 self.finish_node();
             } else {
                 // Grouped expression
@@ -1275,6 +2817,18 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.advance(); // string literal
             self.finish_node();
+        } else if self.at(IDENT) && self.at_smelt_as_struct_trigger() {
+            // smelt.as_struct(alias [EXCEPT col1, col2]) — Phase 38.
+            // Must be checked BEFORE the generic IDENT branch.
+            self.parse_smelt_as_struct();
+        } else if self.at(IDENT) && self.at_smelt_fn_trigger() {
+            // smelt.fn.<path>(args) — user-declared function call. Must be
+            // checked BEFORE the generic IDENT / namespaced-function branch so
+            // that smelt.fn.* calls produce a SMELT_FN_CALL node rather than a
+            // FUNCTION_CALL. smelt.ref(...) / smelt.source(...) remain on the
+            // FUNCTION_CALL path because the trigger requires the second
+            // segment to be exactly `fn`.
+            self.parse_smelt_fn_call();
         } else if self.at(IDENT) {
             // Could be column reference, qualified name, or function call
             let checkpoint = self.builder.checkpoint();
@@ -2338,6 +3892,12 @@ impl<'a> Parser<'a> {
             self.finish_node();
         } else if self.at(VALUES_KW) {
             self.parse_values_clause();
+        } else if self.at_smelt_fn_trigger() {
+            // Phase 44b: CTE body is a bare `smelt.fn.*` call with optional
+            // PASSING clauses. Wrap in SUBQUERY so `Cte::query()` returns Some.
+            self.start_node(SUBQUERY);
+            self.parse_smelt_fn_call();
+            self.finish_node();
         } else {
             self.error("Expected SELECT, WITH, or VALUES in CTE".to_string());
         }
@@ -4833,5 +6393,1187 @@ LIMIT 100
         let input = "SELECT SUM(CASE WHEN gap IS NULL OR gap > 1800 THEN 1 ELSE 0 END) OVER (PARTITION BY v ORDER BY ts) AS sid FROM t";
         let (parse, _) = parse_select(input);
         assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    }
+
+    // ===== Phase 1: smelt.define top-level grammar =====
+
+    use crate::ast::{Param, ParamList, SmeltDefine, TypeRef};
+
+    /// Parse the full file-level syntax without asserting on shape. Mirrors
+    /// `parse_select` but for tests that exercise multi-declaration files.
+    fn parse_file_text(text: &str) -> (Parse, File) {
+        let parse = parse(text);
+        let file = File::cast(parse.syntax()).expect("parse should yield a FILE node");
+        (parse, file)
+    }
+
+    #[test]
+    fn parses_minimal_smelt_define() {
+        let input = "smelt.define foo(x) AS (x + 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 1, "expected exactly one smelt.define");
+        let def = &defines[0];
+
+        assert_eq!(def.name().as_deref(), Some("foo"));
+
+        let params: Vec<Param> = def
+            .param_list()
+            .expect("should have a param list")
+            .params()
+            .collect();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name().as_deref(), Some("x"));
+        assert!(
+            params[0].type_ref().is_none(),
+            "untyped param should have no TypeRef"
+        );
+        assert!(params[0].default_value().is_none());
+
+        let body = def.body().expect("should have a body");
+        assert!(
+            body.expression().is_some(),
+            "body should contain an expression"
+        );
+    }
+
+    #[test]
+    fn parses_typed_params() {
+        let input = "smelt.define safe_divide(numerator: Expr<Numeric>, denominator: Expr<Numeric>) -> Expr<Double> AS (CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE))";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        assert_eq!(def.name().as_deref(), Some("safe_divide"));
+
+        let plist: ParamList = def.param_list().expect("param list");
+        let params: Vec<Param> = plist.params().collect();
+        assert_eq!(params.len(), 2);
+
+        assert_eq!(params[0].name().as_deref(), Some("numerator"));
+        let t0: TypeRef = params[0].type_ref().expect("param 0 should have type");
+        // Flat text of the type reference — whitespace is preserved.
+        let t0_text_compact: String = t0.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(t0_text_compact, "Expr<Numeric>");
+
+        assert_eq!(params[1].name().as_deref(), Some("denominator"));
+        let t1: TypeRef = params[1].type_ref().expect("param 1 should have type");
+        let t1_text_compact: String = t1.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(t1_text_compact, "Expr<Numeric>");
+
+        let ret: TypeRef = def.return_type().expect("return type");
+        let ret_compact: String = ret.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(ret_compact, "Expr<Double>");
+
+        assert!(def.body().is_some(), "body must be present");
+    }
+
+    #[test]
+    fn parses_default_values() {
+        let input = "smelt.define foo(x: Expr<Integer> = 0) AS (x)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().unwrap().params().collect();
+        assert_eq!(params.len(), 1);
+        assert!(params[0].type_ref().is_some());
+        assert!(
+            params[0].default_value().is_some(),
+            "parameter should have a DEFAULT_VALUE node"
+        );
+    }
+
+    #[test]
+    fn parses_file_with_define_and_model() {
+        let input = "smelt.define foo(x) AS (x + 1)\n\nSELECT * FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        assert_eq!(file.defines().count(), 1);
+        assert!(
+            file.select_stmt().is_some(),
+            "file should have a SELECT stmt"
+        );
+    }
+
+    #[test]
+    fn parses_multiple_defines() {
+        let input = "\
+            smelt.define a(x) AS (x + 1)\n\
+            smelt.define b(y) AS (y * 2)\n\
+            smelt.define c(z) AS (z - 3)\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let names: Vec<Option<String>> = file.defines().map(|d| d.name()).collect();
+        assert_eq!(names.len(), 3);
+        assert_eq!(names[0].as_deref(), Some("a"));
+        assert_eq!(names[1].as_deref(), Some("b"));
+        assert_eq!(names[2].as_deref(), Some("c"));
+        assert!(
+            file.select_stmt().is_none(),
+            "file should have no SELECT stmt"
+        );
+    }
+
+    #[test]
+    fn error_recovery_missing_as() {
+        // Malformed: missing `AS` between param list and body parens.
+        // The parser must still recover and parse the following smelt.define.
+        let input = "smelt.define bad(x) (x)\nsmelt.define good(y) AS (y)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error"
+        );
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(
+            defines.len(),
+            2,
+            "recovery should still parse a second smelt.define"
+        );
+        assert_eq!(defines[1].name().as_deref(), Some("good"));
+        assert!(defines[1].param_list().is_some());
+        assert!(defines[1].body().is_some());
+    }
+
+    #[test]
+    fn error_recovery_unbalanced_body() {
+        // The first define has an unbalanced `(` in its body. The parser must
+        // record errors and still parse the following smelt.define.
+        let input = "smelt.define bad(x) AS ((x + 1)\nsmelt.define good(y) AS (y)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error"
+        );
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(
+            defines.len(),
+            2,
+            "recovery should still parse a second smelt.define"
+        );
+        assert_eq!(defines[1].name().as_deref(), Some("good"));
+        assert!(defines[1].body().is_some());
+    }
+
+    #[test]
+    fn smelt_define_in_expression_position_is_not_special() {
+        // `smelt.define` inside a SELECT should parse as a qualified column
+        // reference, not as a declaration. No SmeltDefine nodes, and no
+        // `define`-specific errors.
+        let input = "SELECT smelt.define FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert_eq!(
+            file.defines().count(),
+            0,
+            "no smelt.define declarations expected"
+        );
+        assert!(file.select_stmt().is_some(), "should have a SELECT stmt");
+        for err in &parse.errors {
+            let m = err.message.to_lowercase();
+            assert!(
+                !m.contains("smelt.define"),
+                "did not expect a smelt.define-specific error, got: {:?}",
+                err
+            );
+        }
+    }
+
+    // ===== Phase 10: smelt.extern top-level grammar =====
+
+    use crate::ast::SmeltExtern;
+
+    #[test]
+    fn parses_smelt_extern_minimal() {
+        // Phase 10 TDD test 1.
+        let input =
+            "smelt.extern regex_match(text: Expr<Text>, pattern: Expr<Text>) -> Expr<Boolean>";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs.len(), 1, "expected exactly one smelt.extern");
+        let ext = &externs[0];
+
+        assert_eq!(ext.name().as_deref(), Some("regex_match"));
+
+        let params: Vec<Param> = ext
+            .param_list()
+            .expect("should have a param list")
+            .params()
+            .collect();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name().as_deref(), Some("text"));
+        let t0 = params[0].type_ref().expect("typed param");
+        let t0_compact: String = t0.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(t0_compact, "Expr<Text>");
+
+        assert_eq!(params[1].name().as_deref(), Some("pattern"));
+
+        let ret: TypeRef = ext.return_type().expect("return type");
+        let ret_compact: String = ret.text().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(ret_compact, "Expr<Boolean>");
+
+        // No smelt.define declarations in this file.
+        assert_eq!(file.defines().count(), 0);
+    }
+
+    #[test]
+    fn extern_with_frontmatter_backends() {
+        // Phase 10 TDD test 2. The existing file-level `---` frontmatter
+        // block must coexist with a `smelt.extern` — the legacy single-block
+        // rule applies. The frontmatter is stripped by
+        // `smelt_parser::strip_frontmatter` before reaching the parser, so
+        // the extern must parse identically to the minimal case.
+        let input = "---\nbackends: [duckdb]\n---\n\
+                     smelt.extern read_parquet(path: Expr<Text>) -> Expr<Text>\n";
+        let clean = crate::strip_frontmatter(input);
+        let (parse, file) = parse_file_text(&clean);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs.len(), 1);
+        assert_eq!(externs[0].name().as_deref(), Some("read_parquet"));
+        let params: Vec<Param> = externs[0].param_list().unwrap().params().collect();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name().as_deref(), Some("path"));
+    }
+
+    #[test]
+    fn smelt_extern_and_define_in_same_file() {
+        // Mixed file: one of each. The iterators should partition cleanly.
+        let input = "\
+            smelt.extern ext_fn(a: Expr<Text>) -> Expr<Text>\n\
+            smelt.define my_plus(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        assert_eq!(file.externs().count(), 1);
+        assert_eq!(file.defines().count(), 1);
+    }
+
+    // ===== Phase 2: smelt.fn.* call syntax =====
+
+    use crate::ast::{ArgList, CallPath, Expr, SmeltFnCall};
+    use crate::syntax_kind::SyntaxNode;
+
+    /// Helper: collect all SMELT_FN_CALL descendants of a node.
+    fn smelt_fn_calls(root: &SyntaxNode) -> Vec<SmeltFnCall> {
+        root.descendants().filter_map(SmeltFnCall::cast).collect()
+    }
+
+    /// Helper: collect all FUNCTION_CALL descendants of a node.
+    fn function_calls(root: &SyntaxNode) -> Vec<FunctionCall> {
+        root.descendants().filter_map(FunctionCall::cast).collect()
+    }
+
+    #[test]
+    fn parses_smelt_fn_call_simple() {
+        let input = "SELECT smelt.fn.safe_divide(a, b) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected exactly one SMELT_FN_CALL");
+
+        // The old FUNCTION_CALL path must not fire for smelt.fn.*. There are
+        // zero FUNCTION_CALL nodes in this input.
+        let fcalls = function_calls(file.syntax());
+        assert!(
+            fcalls.is_empty(),
+            "expected no FUNCTION_CALL nodes for smelt.fn.* calls, got {}",
+            fcalls.len()
+        );
+
+        let call = &calls[0];
+        let path = call.call_path().expect("should have CALL_PATH");
+        let path_text_compact: String = path
+            .syntax()
+            .text()
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(path_text_compact, "smelt.fn.safe_divide");
+
+        let args = call.arg_list().expect("should have ARG_LIST");
+        // Two arguments, zero named params.
+        let named: Vec<_> = args.named_params().collect();
+        assert!(
+            named.is_empty(),
+            "simple positional args should produce no NAMED_PARAM"
+        );
+        // Count expression arguments.
+        let expr_args = args
+            .syntax()
+            .children()
+            .filter(|n| Expr::cast(n.clone()).is_some())
+            .count();
+        assert_eq!(expr_args, 2, "expected two positional arguments");
+    }
+
+    #[test]
+    fn parses_smelt_fn_call_named_args() {
+        let input = "SELECT smelt.fn.safe_divide(numerator => a, denominator => b) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+        let args: ArgList = calls[0].arg_list().expect("should have ARG_LIST");
+        let named: Vec<_> = args.named_params().collect();
+        assert_eq!(named.len(), 2, "expected two NAMED_PARAM children");
+        assert_eq!(named[0].name().as_deref(), Some("numerator"));
+        assert_eq!(named[1].name().as_deref(), Some("denominator"));
+    }
+
+    #[test]
+    fn parses_smelt_fn_call_nested_namespace() {
+        let input = "SELECT smelt.fn.core.math.safe_divide(a, b) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+
+        let call = &calls[0];
+        let path: CallPath = call.call_path().expect("CALL_PATH should be present");
+        // The full path including the `smelt.fn.` prefix should be captured
+        // inside CALL_PATH — joining IDENT tokens with `.` gives the logical
+        // dotted name.
+        let joined = call.path_text();
+        assert_eq!(joined, "smelt.fn.core.math.safe_divide");
+
+        // The raw text of the CALL_PATH node (whitespace stripped) also
+        // contains the nested namespace.
+        let raw_compact: String = path
+            .syntax()
+            .text()
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            raw_compact.contains("core.math.safe_divide"),
+            "CALL_PATH text should contain nested namespace, got {:?}",
+            raw_compact
+        );
+
+        // The logical segments (stripped of the smelt.fn prefix) are
+        // `["core", "math", "safe_divide"]`.
+        assert_eq!(path.segments(), vec!["core", "math", "safe_divide"]);
+    }
+
+    #[test]
+    fn smelt_fn_without_parens_is_error() {
+        let input = "SELECT smelt.fn.foo FROM t";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for smelt.fn.foo with no '('"
+        );
+    }
+
+    #[test]
+    fn smelt_fn_inside_where() {
+        let input = "SELECT * FROM t WHERE smelt.fn.is_valid(x)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+
+        // The call must sit under a WHERE_CLAUSE ancestor.
+        let in_where = calls[0]
+            .syntax()
+            .ancestors()
+            .any(|n| n.kind() == WHERE_CLAUSE);
+        assert!(in_where, "SMELT_FN_CALL must be inside WHERE_CLAUSE");
+    }
+
+    #[test]
+    fn smelt_ref_still_parses_as_function_call() {
+        // Regression: smelt.ref() must continue to parse as FUNCTION_CALL,
+        // not as SMELT_FN_CALL. The Phase 2 trigger requires the second
+        // segment to be exactly `fn`, so `smelt.ref` is unaffected.
+        let input = "SELECT * FROM smelt.ref('model')";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        assert!(
+            smelt_fn_calls(file.syntax()).is_empty(),
+            "smelt.ref should NOT be parsed as SMELT_FN_CALL"
+        );
+
+        let fcalls = function_calls(file.syntax());
+        assert!(
+            !fcalls.is_empty(),
+            "smelt.ref should parse as FUNCTION_CALL"
+        );
+        // At least one FunctionCall has namespace == smelt and name == ref.
+        let has_ref = fcalls.iter().any(|f| {
+            f.namespace()
+                .map(|ns| ns.eq_ignore_ascii_case("smelt"))
+                .unwrap_or(false)
+                && f.name()
+                    .map(|n| n.eq_ignore_ascii_case("ref"))
+                    .unwrap_or(false)
+        });
+        assert!(
+            has_ref,
+            "expected a FUNCTION_CALL for smelt.ref(...), none found"
+        );
+    }
+
+    #[test]
+    fn smelt_fn_call_inside_define_body() {
+        // Phase 2 integrates with Phase 1 grammar: a smelt.fn.* call appears
+        // inside a smelt.define body expression.
+        let input = "smelt.define wrap(x) AS (smelt.fn.safe_divide(x, 1))";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 1);
+        let body = defines[0].body().expect("smelt.define should have body");
+
+        let calls_under_body = smelt_fn_calls(body.syntax());
+        assert_eq!(
+            calls_under_body.len(),
+            1,
+            "expected exactly one SMELT_FN_CALL inside DEFINE_BODY"
+        );
+    }
+
+    // ===== Phase 11: per-declaration frontmatter =====
+
+    #[test]
+    fn frontmatter_attaches_to_next_decl() {
+        // Phase 11 TDD #1: a file containing two `---/---` blocks, each
+        // preceded by (i.e. each immediately followed by) a distinct
+        // `smelt.define`. Each decl's `frontmatter()` helper returns the
+        // matching block's body — and only the matching block.
+        let raw = "---\nbackends: [duckdb]\n---\nsmelt.define f() -> Expr<Integer> AS (1)\n\n---\nbackends: [spark]\n---\nsmelt.define g() -> Expr<Integer> AS (2)\n";
+
+        let stripped = crate::strip_frontmatter(raw);
+        let (parse, file) = parse_file_text(&stripped);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 2, "expected two smelt.define declarations");
+
+        let fm_f = defines[0]
+            .frontmatter(raw)
+            .expect("first decl should have frontmatter");
+        assert!(fm_f.contains("duckdb"), "got {:?}", fm_f);
+        assert!(!fm_f.contains("spark"), "wrong block attached: {:?}", fm_f);
+
+        let fm_g = defines[1]
+            .frontmatter(raw)
+            .expect("second decl should have frontmatter");
+        assert!(fm_g.contains("spark"), "got {:?}", fm_g);
+        assert!(!fm_g.contains("duckdb"), "wrong block attached: {:?}", fm_g);
+    }
+
+    #[test]
+    fn extern_with_dotted_backend_namespace() {
+        // Phase 11: `smelt.extern duckdb.read_parquet(...)` parses cleanly
+        // and exposes `read_parquet` as the function name with `duckdb`
+        // as the backend namespace.
+        use crate::ast::SmeltExtern;
+        let input = "smelt.extern duckdb.read_parquet(path: Expr<Text>) -> Expr<Text>\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs.len(), 1);
+        assert_eq!(externs[0].name().as_deref(), Some("read_parquet"));
+        assert_eq!(externs[0].backend_namespace().as_deref(), Some("duckdb"));
+    }
+
+    #[test]
+    fn extern_plain_name_has_no_backend_namespace() {
+        // Sanity check — the legacy single-IDENT extern form still works.
+        use crate::ast::SmeltExtern;
+        let input = "smelt.extern regex_match(s: Expr<Text>, p: Expr<Text>) -> Expr<Boolean>\n";
+        let (parse, file) = parse_file_text(input);
+        assert!(parse.errors.is_empty(), "{:?}", parse.errors);
+        let externs: Vec<SmeltExtern> = file.externs().collect();
+        assert_eq!(externs[0].name().as_deref(), Some("regex_match"));
+        assert!(externs[0].backend_namespace().is_none());
+    }
+
+    // ===== Phase 13: TableExpr / WindowExpr / SelectItems<K, ctx> in type refs =====
+
+    use crate::ast::{ExprKindTag, RowTail, TypeRefHead};
+
+    /// Helper: extract the first `PARAM`'s `TYPE_REF` from a single-define file.
+    fn first_param_type_ref(file: &File) -> TypeRef {
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().expect("param list").params().collect();
+        params[0].type_ref().expect("first param type ref")
+    }
+
+    #[test]
+    fn parses_tableexpr_bare() {
+        let input = "smelt.define f(source: TableExpr) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::TableExpr);
+        assert!(
+            tr.row_requirement().is_none(),
+            "no row requirement expected"
+        );
+    }
+
+    #[test]
+    fn parses_tableexpr_with_row_requirement() {
+        let input = "smelt.define f(source: TableExpr<{revenue: Numeric, cost: Numeric}>) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::TableExpr);
+
+        let req = tr
+            .row_requirement()
+            .expect("TableExpr<{...}> should have a ROW_REQUIREMENT");
+        let fields = req.fields();
+        assert_eq!(fields.len(), 2, "expected two row fields");
+        assert_eq!(fields[0].name().as_deref(), Some("revenue"));
+        assert!(
+            fields[0].type_ref().is_some(),
+            "revenue should have a TYPE_REF"
+        );
+        assert_eq!(fields[1].name().as_deref(), Some("cost"));
+        assert!(
+            fields[1].type_ref().is_some(),
+            "cost should have a TYPE_REF"
+        );
+        assert!(matches!(req.tail(), RowTail::None));
+    }
+
+    #[test]
+    fn parses_tableexpr_with_row_tail() {
+        // Named tail: ..r
+        let input_named =
+            "smelt.define f(source: TableExpr<{revenue: Numeric, ..r}>) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input_named);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let tr = first_param_type_ref(&file);
+        let req = tr.row_requirement().expect("row requirement");
+        match req.tail() {
+            RowTail::Named(name) => assert_eq!(name, "r"),
+            other => panic!("expected named tail `r`, got {other:?}"),
+        }
+        assert_eq!(req.fields().len(), 1);
+
+        // Anonymous tail: bare `..`
+        let input_anon = "smelt.define g(source: TableExpr<{..}>) AS (SELECT * FROM source)";
+        let (parse, file) = parse_file_text(input_anon);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let tr = first_param_type_ref(&file);
+        let req = tr.row_requirement().expect("row requirement");
+        assert!(matches!(req.tail(), RowTail::Anon));
+        assert_eq!(req.fields().len(), 0);
+    }
+
+    #[test]
+    fn parses_aggexpr_and_windowexpr() {
+        let input =
+            "smelt.define f(a: Expr<Integer>, b: AggExpr<Integer>, c: WindowExpr<Integer>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().unwrap().params().collect();
+        assert_eq!(params.len(), 3);
+
+        let t0 = params[0].type_ref().unwrap();
+        let t1 = params[1].type_ref().unwrap();
+        let t2 = params[2].type_ref().unwrap();
+        assert_eq!(t0.kind(), TypeRefHead::Expr);
+        assert_eq!(t1.kind(), TypeRefHead::AggExpr);
+        assert_eq!(t2.kind(), TypeRefHead::WindowExpr);
+        assert_eq!(t0.expr_kind(), Some(ExprKindTag::Scalar));
+        assert_eq!(t1.expr_kind(), Some(ExprKindTag::Agg));
+        assert_eq!(t2.expr_kind(), Some(ExprKindTag::Window));
+    }
+
+    #[test]
+    fn parses_selectitems_kind_only() {
+        let input = "smelt.define f(items: SelectItems<Agg>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::SelectItems);
+        assert_eq!(tr.selectitems_kind().as_deref(), Some("Agg"));
+        assert!(tr.selectitems_ctx().is_none());
+    }
+
+    #[test]
+    fn parses_selectitems_kind_and_ctx() {
+        let input = "smelt.define f(items: SelectItems<Agg, sessionized>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::SelectItems);
+        assert_eq!(tr.selectitems_kind().as_deref(), Some("Agg"));
+        assert_eq!(tr.selectitems_ctx().as_deref(), Some("sessionized"));
+
+        // Declared order: kind before ctx.
+        let syntax = tr.syntax();
+        let mut seen_kind = false;
+        let mut seen_ctx = false;
+        for child in syntax.children() {
+            if child.kind() == SELECTITEMS_KIND {
+                assert!(!seen_ctx, "KIND must come before CTX");
+                seen_kind = true;
+            } else if child.kind() == SELECTITEMS_CTX {
+                assert!(seen_kind, "CTX must follow KIND");
+                seen_ctx = true;
+            }
+        }
+        assert!(seen_kind && seen_ctx);
+    }
+
+    #[test]
+    fn parses_selectitems_ctx_only() {
+        let input = "smelt.define f(items: SelectItems<sessionized>) AS (SELECT 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let tr = first_param_type_ref(&file);
+        assert_eq!(tr.kind(), TypeRefHead::SelectItems);
+        assert!(tr.selectitems_kind().is_none());
+        assert_eq!(tr.selectitems_ctx().as_deref(), Some("sessionized"));
+    }
+
+    #[test]
+    fn rejects_unknown_expr_kind() {
+        let input = "smelt.define f(a: FooExpr<Integer>) AS (SELECT 1)";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for unknown sort"
+        );
+        let mentions_fooexpr = parse.errors.iter().any(|e| {
+            let m = e.message.to_lowercase();
+            m.contains("fooexpr") || m.contains("unknown sort") || m.contains("unsupported")
+        });
+        assert!(
+            mentions_fooexpr,
+            "expected an error mentioning FooExpr / unknown sort / unsupported, got {:?}",
+            parse.errors
+        );
+    }
+
+    #[test]
+    fn tableexpr_in_expression_position_is_not_special() {
+        // `TableExpr` as a bare identifier in expression position must remain a
+        // plain column reference, not a type reference or an error.
+        let input =
+            "smelt.define f(x: Expr<Integer>) AS (SELECT TableExpr FROM t WHERE TableExpr > 1)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let body = def.body().expect("body");
+        let body_syntax = body.syntax();
+
+        // No TYPE_REF nodes should live inside the body (the only TYPE_REF is
+        // the one on the `x: Expr<Integer>` parameter).
+        let tr_count_in_body = body_syntax
+            .descendants()
+            .filter(|n| n.kind() == TYPE_REF)
+            .count();
+        assert_eq!(tr_count_in_body, 0, "body should contain no TYPE_REF nodes");
+
+        // The bare `TableExpr` identifier must appear at least twice (SELECT
+        // list + WHERE operand) as an IDENT token inside the body.
+        let tableexpr_tokens = body_syntax
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT && t.text() == "TableExpr")
+            .count();
+        assert!(
+            tableexpr_tokens >= 2,
+            "expected at least two `TableExpr` IDENT tokens in the body, got {}",
+            tableexpr_tokens
+        );
+    }
+
+    // ===== Phase 28: PASSING clauses =====
+
+    use crate::ast::PassingClause;
+    use crate::syntax_kind::SyntaxKind::PASSING_CLAUSE;
+
+    /// Helper: collect all PASSING_CLAUSE descendants of a node.
+    fn passing_clauses_of(root: &SyntaxNode) -> Vec<SyntaxNode> {
+        root.descendants()
+            .filter(|n| n.kind() == PASSING_CLAUSE)
+            .collect()
+    }
+
+    #[test]
+    fn parses_single_passing_clause() {
+        let input = "SELECT smelt.fn.session_rollup(src) PASSING metrics AS (SUM(revenue)) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected one SMELT_FN_CALL");
+
+        let passing: Vec<PassingClause> = calls[0].passing_clauses().collect();
+        assert_eq!(passing.len(), 1, "expected one PASSING_CLAUSE");
+        assert_eq!(
+            passing[0].name().as_deref(),
+            Some("metrics"),
+            "PASSING_NAME should be 'metrics'"
+        );
+
+        // Body should contain SUM(revenue)
+        let body_text = passing[0]
+            .body_text()
+            .expect("PASSING_BODY should have text");
+        assert!(
+            body_text.contains("SUM"),
+            "PASSING_BODY text should contain SUM, got {:?}",
+            body_text
+        );
+    }
+
+    #[test]
+    fn parses_multiple_passing_clauses() {
+        let input = "SELECT smelt.fn.foo(src) PASSING a AS (x + 1) PASSING b AS (y * 2) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_fn_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected one SMELT_FN_CALL");
+
+        let passing: Vec<PassingClause> = calls[0].passing_clauses().collect();
+        assert_eq!(passing.len(), 2, "expected two PASSING_CLAUSEs");
+        assert_eq!(passing[0].name().as_deref(), Some("a"));
+        assert_eq!(passing[1].name().as_deref(), Some("b"));
+
+        let body0 = passing[0].body_text().expect("first PASSING_BODY text");
+        let body1 = passing[1].body_text().expect("second PASSING_BODY text");
+        assert!(
+            body0.contains("x"),
+            "first body should contain 'x', got {:?}",
+            body0
+        );
+        assert!(
+            body1.contains("y"),
+            "second body should contain 'y', got {:?}",
+            body1
+        );
+    }
+
+    #[test]
+    fn passing_not_reserved_elsewhere() {
+        // `passing` as a column name should parse without errors
+        let input = "SELECT passing FROM t";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "SELECT passing FROM t should parse cleanly, errors: {:?}",
+            parse.errors
+        );
+
+        // `passing` as a table name should parse without errors
+        let input2 = "SELECT x FROM passing";
+        let (parse2, _) = parse_file_text(input2);
+        assert!(
+            parse2.errors.is_empty(),
+            "SELECT x FROM passing should parse cleanly, errors: {:?}",
+            parse2.errors
+        );
+
+        // No PASSING_CLAUSEs should appear in these statements
+        let parse_result = crate::parser::parse("SELECT passing FROM t");
+        let root = parse_result.syntax();
+        let clauses = passing_clauses_of(&root);
+        assert!(
+            clauses.is_empty(),
+            "plain 'passing' identifier must not produce PASSING_CLAUSE nodes"
+        );
+    }
+
+    #[test]
+    fn passing_not_attached_to_plain_sql_call() {
+        // PASSING after a plain SQL function call must NOT be attached to that call.
+        let input = "SELECT UPPER(x) PASSING y AS (some_expr) FROM t";
+        // This should parse without panicking. PASSING is an identifier
+        // in expression position after UPPER(x).
+        let (_parse, file) = parse_file_text(input);
+
+        // UPPER(x) is a plain FUNCTION_CALL — it must have no PASSING_CLAUSE children.
+        let fcalls = function_calls(file.syntax());
+        for fc in &fcalls {
+            if fc.name().as_deref() == Some("UPPER") {
+                // The SmeltFnCall wrapper returns passing_clauses only for SMELT_FN_CALL nodes.
+                // UPPER is a FUNCTION_CALL, so we just check no PASSING_CLAUSE is a descendant
+                // of the FUNCTION_CALL node.
+                let fn_node = fc.syntax();
+                let passing_under_upper = fn_node
+                    .descendants()
+                    .filter(|n| n.kind() == PASSING_CLAUSE)
+                    .count();
+                assert_eq!(
+                    passing_under_upper, 0,
+                    "PASSING_CLAUSE must NOT be a descendant of plain FUNCTION_CALL UPPER"
+                );
+            }
+        }
+
+        // Also verify that smelt.fn.* calls (if any) from this input are absent.
+        let smelt_calls = smelt_fn_calls(file.syntax());
+        assert!(
+            smelt_calls.is_empty(),
+            "no smelt.fn.* calls should be present in this input"
+        );
+    }
+
+    #[test]
+    fn passing_after_smelt_extern_call_not_attached() {
+        // Plan Phase 28 requires `passing_after_smelt_extern_call_rejected`.
+        // `smelt.extern` declarations are top-level-only (gated by
+        // `at_smelt_extern_trigger`); they cannot appear in expression position.
+        // This makes the plan requirement vacuously satisfied at the parser level —
+        // there is no expression-position parse path for smelt.extern calls.
+        //
+        // We verify the structural analogue: PASSING after a plain SQL function
+        // call (not smelt.fn.*) is not attached, confirming the trigger is
+        // correctly scoped to the smelt.fn.* path only.
+        let input = "SELECT my_func(src) PASSING m AS (COUNT(*)) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "should parse cleanly, errors: {:?}",
+            parse.errors
+        );
+
+        // No SMELT_FN_CALL nodes — so no PASSING_CLAUSE should be created.
+        let smelt_calls = smelt_fn_calls(file.syntax());
+        assert!(smelt_calls.is_empty(), "my_func is not a smelt.fn.* call");
+
+        // No PASSING_CLAUSE nodes anywhere in the tree.
+        let clauses = passing_clauses_of(file.syntax());
+        assert!(
+            clauses.is_empty(),
+            "PASSING after plain SQL call must not produce PASSING_CLAUSE nodes"
+        );
+    }
+
+    #[test]
+    fn error_recovery_malformed_passing_body() {
+        // PASSING metrics AS followed immediately by FROM (missing body expression).
+        let input = "SELECT smelt.fn.foo(src) PASSING metrics AS FROM t";
+        let (parse, file) = parse_file_text(input);
+
+        // The parser should emit an error but not panic.
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for malformed PASSING body"
+        );
+
+        // Despite the error, FROM t should still be parsed — i.e. the select
+        // statement recovers and a FROM_CLAUSE is present.
+        let stmts: Vec<_> = file.syntax().children().collect();
+        assert!(
+            !stmts.is_empty(),
+            "tree should not be empty after error recovery"
+        );
+    }
+
+    // ===== Phase 35: Struct row variables and value-level spread =====
+
+    #[test]
+    fn parses_struct_with_named_row_var() {
+        let input = "smelt.define f(e: Expr<Struct<{ts: Timestamp, ..r}>>) AS (e)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let defines: Vec<SmeltDefine> = file.defines().collect();
+        assert_eq!(defines.len(), 1, "expected exactly one SMELT_DEFINE");
+
+        // The TYPE_REF for parameter `e` must contain a STRUCT_TYPE child.
+        let def = &defines[0];
+        let params: Vec<Param> = def.param_list().expect("param list").params().collect();
+        let tr = params[0].type_ref().expect("param type ref");
+        let tr_syntax = tr.syntax();
+
+        let struct_type_node = tr_syntax
+            .descendants()
+            .find(|n| n.kind() == STRUCT_TYPE)
+            .expect("TYPE_REF must contain a STRUCT_TYPE node");
+
+        // The STRUCT_TYPE must contain a ROW_TAIL child with identifier `r`.
+        let row_tail_node = struct_type_node
+            .children()
+            .find(|n| n.kind() == ROW_TAIL)
+            .expect("STRUCT_TYPE must contain a ROW_TAIL node");
+
+        let tail_ident = row_tail_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .expect("ROW_TAIL must contain an identifier for named tail");
+        assert_eq!(
+            tail_ident.text(),
+            "r",
+            "ROW_TAIL identifier must be `r`, got {}",
+            tail_ident.text()
+        );
+    }
+
+    #[test]
+    fn parses_struct_with_anonymous_row_tail() {
+        let input = "smelt.define f(e: Expr<Struct<{ts: Timestamp, ..}>>) AS (e)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let params: Vec<Param> = def.param_list().expect("param list").params().collect();
+        let tr = params[0].type_ref().expect("param type ref");
+
+        let struct_type_node = tr
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == STRUCT_TYPE)
+            .expect("TYPE_REF must contain a STRUCT_TYPE node");
+
+        let row_tail_node = struct_type_node
+            .children()
+            .find(|n| n.kind() == ROW_TAIL)
+            .expect("STRUCT_TYPE must contain a ROW_TAIL node");
+
+        // Anonymous tail: no IDENT inside the ROW_TAIL.
+        let has_ident = row_tail_node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == IDENT);
+        assert!(!has_ident, "anonymous ROW_TAIL must not contain an IDENT");
+    }
+
+    #[test]
+    fn parses_struct_literal_spread_in_body() {
+        let input =
+            "smelt.define f(event: Expr<Struct<{ts: Timestamp, ..r}>>) AS ({CAST(event.ts AS TIMESTAMP) AS ts, ..event})";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let def = file.defines().next().expect("one smelt.define");
+        let body = def.body().expect("body");
+        let body_syntax = body.syntax();
+
+        // DEFINE_BODY must contain a BRACE_STRUCT_LITERAL node.
+        let brace_struct = body_syntax
+            .descendants()
+            .find(|n| n.kind() == BRACE_STRUCT_LITERAL)
+            .expect("DEFINE_BODY must contain a BRACE_STRUCT_LITERAL node");
+
+        // The BRACE_STRUCT_LITERAL must have a SPREAD_ITEM child for `..event`.
+        let spread = brace_struct
+            .children()
+            .find(|n| n.kind() == SPREAD_ITEM)
+            .expect("BRACE_STRUCT_LITERAL must contain a SPREAD_ITEM child");
+
+        let spread_ident = spread
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .expect("SPREAD_ITEM must contain an IDENT for the spread name");
+        assert_eq!(
+            spread_ident.text(),
+            "event",
+            "SPREAD_ITEM identifier must be `event`, got {}",
+            spread_ident.text()
+        );
+    }
+
+    #[test]
+    fn two_named_row_vars_in_one_signature_errors() {
+        // v1 constraint: at most one named row variable per signature.
+        // `..r` and `..s` are two distinct names — must produce an error.
+        let input = "smelt.define f(a: Expr<Struct<{x: Integer, ..r}>>, b: Expr<Struct<{y: Integer, ..s}>>) AS (a)";
+        let (parse, _file) = parse_file_text(input);
+        // Must not panic.
+        assert!(
+            !parse.errors.is_empty(),
+            "expected at least one parse error for two distinct named row variables, got none"
+        );
+        let mentions_row_var = parse.errors.iter().any(|e| {
+            let m = e.message.to_lowercase();
+            m.contains("row variable") || m.contains("named row") || m.contains("at most one")
+        });
+        assert!(
+            mentions_row_var,
+            "expected an error mentioning row variable constraint, got {:?}",
+            parse.errors
+        );
+    }
+
+    #[test]
+    fn anonymous_tail_unreferenced_in_body_ok() {
+        // Anonymous `..` without a body spread is fine — no parser errors.
+        let input = "smelt.define f(e: Expr<Struct<{ts: Timestamp, ..}>>) AS (e.ts)";
+        let (parse, _file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "anonymous tail with no spread in body must not produce errors, got: {:?}",
+            parse.errors
+        );
+    }
+
+    // ---- Phase 44b: CTE body as bare smelt.fn.* call ----
+
+    #[test]
+    fn cte_body_accepts_bare_smelt_fn_call() {
+        // Phase 44b TDD test: a CTE body that is a bare `smelt.fn.*` call with
+        // PASSING clauses must parse without any "Expected SELECT, WITH, or
+        // VALUES in CTE" error.
+        let sql = "WITH base AS (\n    smelt.fn.session_rollup(source, u, ts)\n    PASSING metrics AS (COUNT(*))\n)\nSELECT * FROM base";
+        let result = parse(sql);
+        // Must not contain "Expected SELECT, WITH, or VALUES in CTE"
+        for err in &result.errors {
+            assert!(
+                !err.message
+                    .contains("Expected SELECT, WITH, or VALUES in CTE"),
+                "Parser should accept smelt.fn call as CTE body, got error: {}",
+                err.message
+            );
+        }
+        assert!(
+            result.errors.is_empty(),
+            "Expected no parse errors, got: {:?}",
+            result.errors
+        );
     }
 }

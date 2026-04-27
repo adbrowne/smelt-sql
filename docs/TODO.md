@@ -33,7 +33,7 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - [x] **Mixed-type binary operations** — `BinaryOp` generator now picks two columns of different numeric types (e.g., `int_col + bigint_col`) with correct type promotion (Double > Decimal > BigInt > Integer).
 - [x] **Boolean/unary expressions** — Added `ExprKind::IsNull` (`col IS NULL`/`IS NOT NULL`), `Comparison` (`col = col`, `<`, `>`, etc.), `UnaryNot` (`NOT bool_col`), `UnaryMinus` (`-num_col`), `Exists` (`EXISTS (SELECT ...)`).
 - [x] **LIKE / ILIKE operators** — Added `LIKE_KW`/`ILIKE_KW` to parser lexer, parsed as binary expressions, type inference returns Boolean, generators produce `str_col LIKE '%pattern%'`.
-- [x] **Additional functions** — Added STRING_AGG, ANY_VALUE, APPROX_COUNT_DISTINCT to generators. EXTRACT and MAKE_DATE/MAKE_TIMESTAMP have generator code but are excluded from `expr_kind_strategy()` due to EXTRACT's `FROM` keyword confusing the parser's alias extraction. TO_CHAR omitted (not available in DuckDB).
+- [x] **Additional functions** — Added STRING_AGG, ANY_VALUE, APPROX_COUNT_DISTINCT to generators. EXTRACT and MAKE_DATE/MAKE_TIMESTAMP re-enabled in `expr_kind_strategy()` in Phase 58 (April 27, 2026): the historical `FROM`-inside-EXTRACT bug had already been fixed end-to-end (parser, AST `Expr::cast`, alias extraction, type inference); a regression test in `crates/smelt-db/tests/extract_alias_extraction.rs` now pins the behaviour, and 500 prop cases run cleanly. TO_CHAR omitted (not available in DuckDB).
 
 ### Types
 
@@ -59,7 +59,7 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - [ ] **Two-column aggregates (CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE)** — Needs multi-column aggregate generator support
 - [ ] **Aggregate FILTER clause** — `COUNT(*) FILTER (WHERE cond)`, parsed but not generated
 - [ ] **WITHIN GROUP (ORDER BY)** — For STRING_AGG/LISTAGG, parsed but not generated
-- [ ] **EXTRACT parser support** — `EXTRACT(YEAR FROM col)` uses `FROM` keyword inside function args, which confuses the parser's alias extraction and SELECT item parsing. Needs dedicated parser handling (like CAST). Affects cross-model type propagation and conformance test wrapping. Generator code exists (`ExprKind::Extract`, `ExprKind::MakeTemporal`) but is excluded from `expr_kind_strategy()` until parser is fixed.
+- [x] **EXTRACT parser support** — `EXTRACT(YEAR FROM col)` and `MAKE_DATE`/`MAKE_TIMESTAMP` are now exercised end-to-end by `expr_kind_strategy()`. Phase 58 (April 27, 2026) confirmed the historical `FROM`-inside-EXTRACT bug had already been fixed across the parser, AST, alias extraction, and type inference; a dedicated regression test (`crates/smelt-db/tests/extract_alias_extraction.rs`) was added before re-enabling the generator entries.
 
 ## smelt test
 
@@ -74,4 +74,10 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - **SIGN**: DuckDB and Spark both return TINYINT (SmallInt) regardless of input type; fixed smelt inference to match
 - **`~*`, `!~`, `!~*`**: DuckDB only supports `~` (case-sensitive regex); `~*` (case-insensitive), `!~`, `!~*` are not available. Generator uses `~` only.
 - **TO_CHAR**: Not available in DuckDB (PostgreSQL-only). Omitted from generators.
-- **EXTRACT(part FROM col)**: The `FROM` keyword inside EXTRACT confuses the parser — it's consumed as the query-level FROM clause, breaking alias extraction and SELECT item parsing. Generator code exists but is excluded from strategies.
+
+## smelt.as_struct follow-ups (Phase 38 deferred)
+
+- [x] **Relocate as_struct lowering helper to smelt-planner** — Phase 42 (2026-04-25): `as_struct_to_sql` and `backend_supports_struct_literal` moved to `crates/smelt-planner/src/lowering/as_struct.rs`. The smelt-db site re-exports them so existing call sites and tests keep working; the lowering helper is now the canonical production location.
+- [x] **Wire as_struct into `format_plan` / SQL emission** — Phase 55 (2026-04-27): `PrintContext` in `smelt-dialect` now carries optional `smelt_as_struct` and `smelt_fn` closure fields. `SMELT_AS_STRUCT_CALL` and `SMELT_FN_CALL` nodes are expanded during SQL printing; `SqlCompiler` in `smelt-cli` wires up both closures from the TypeContext and function body map. See commit 6d6e5b1.
+- [x] **as_struct in function bodies that declare no backends** — Phase 42 (2026-04-25): `as_struct_backend_diagnostics_for_file` now consults `project_active_backends`, a new Salsa-tracked query that parses `smelt.yml`'s `targets:` map. When a function's `BackendSet` is `All` (no explicit `backends:` frontmatter), the diagnostic intersects against the workspace's active backends and fires when any of them lacks struct-literal capability.
+- [x] **ABS(Decimal) returns Double** — Phase 53 (2026-04-26): divergence registered in `crates/smelt-db/tests/prop_helpers/divergences.rs` as `abs_decimal` and `abs_decimal_schema_resolved`. Property-test regressions file updated. See commit 0ee244c.

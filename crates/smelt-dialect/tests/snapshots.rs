@@ -11,6 +11,8 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         schema,
         ephemeral_models: HashSet::new(),
         cross_engine_refs: HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -29,6 +31,8 @@ fn print_with_ephemerals(
         schema,
         ephemeral_models: ephemerals.iter().copied().collect(),
         cross_engine_refs: HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
     };
     print(&parsed.syntax(), &ctx)
 }
