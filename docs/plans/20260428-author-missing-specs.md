@@ -30,7 +30,7 @@ This is a documentation-authoring plan, not an implementation plan. Each phase c
 | 3     | gradual_typing              | done     | 7f23f15 | 2026-04-29 |
 | 4     | architecture (extend)       | done     | 6b50cc8 | 2026-04-29 |
 | 5     | planner_integration         | done     | 2fc8bdf | 2026-04-29 |
-| 6     | expansion                   | done     |        | 2026-04-29 |
+| 6     | expansion                   | done     | f088305 | 2026-04-29 |
 
 ---
 
