@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777382368833,
+  "lastUpdate": 1777382371020,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18545,6 +18545,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 26.04551827771237,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "deedf8751a4899b9034e3cb77b903ff0b89c97ea",
+          "message": "parser: skip trivia between IDENT/DOT/STAR in qualified-wildcard select item\n\nThe qualified-star branch of parse_select_list peeked across trivia to\ndetect `table.*` but advanced raw tokens, so a comment between `.` and\n`*` (e.g. `TTTQ./**/*`) left STAR outside the SELECT_ITEM. The printer\nthen emitted `SELECT TTTQ./**/` which fails to re-parse, triggering the\nnightly fuzz round_trip target.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-04-28T23:16:55+10:00",
+          "tree_id": "7446d5314ec19ccd6618ae8307409a9c7bde0209",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/deedf8751a4899b9034e3cb77b903ff0b89c97ea"
+        },
+        "date": 1777382370386,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.00786602112996,
             "unit": "MB/s"
           }
         ]
