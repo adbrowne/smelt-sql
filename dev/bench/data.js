@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777283487390,
+  "lastUpdate": 1777382368833,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14099,6 +14099,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.846356,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "deedf8751a4899b9034e3cb77b903ff0b89c97ea",
+          "message": "parser: skip trivia between IDENT/DOT/STAR in qualified-wildcard select item\n\nThe qualified-star branch of parse_select_list peeked across trivia to\ndetect `table.*` but advanced raw tokens, so a comment between `.` and\n`*` (e.g. `TTTQ./**/*`) left STAR outside the SELECT_ITEM. The printer\nthen emitted `SELECT TTTQ./**/` which fails to re-parse, triggering the\nnightly fuzz round_trip target.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-04-28T23:16:55+10:00",
+          "tree_id": "7446d5314ec19ccd6618ae8307409a9c7bde0209",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/deedf8751a4899b9034e3cb77b903ff0b89c97ea"
+        },
+        "date": 1777382367733,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.048767000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.745801,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.621142,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.348526,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003006,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 489.668477,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 1.070727,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.912222,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.829389,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.8446769999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 550.911939,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 14.86277,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.26514,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.864954,
             "unit": "ms"
           }
         ]
