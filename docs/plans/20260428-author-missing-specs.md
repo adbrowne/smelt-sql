@@ -28,7 +28,7 @@ This is a documentation-authoring plan, not an implementation plan. Each phase c
 | 1     | functions                   | done     | 3e042cd | 2026-04-29 |
 | 2     | scoping                     | done     | 3195ae9 | 2026-04-29 |
 | 3     | gradual_typing              | done     | 7f23f15 | 2026-04-29 |
-| 4     | architecture (extend)       | pending  |        |      |
+| 4     | architecture (extend)       | done     | 6b50cc8 | 2026-04-29 |
 | 5     | planner_integration         | pending  |        |      |
 | 6     | expansion                   | pending  |        |      |
 
