@@ -190,3 +190,21 @@ fn test_round_trip_ref_call() {
     let sql = "SELECT * FROM smelt.ref('events')";
     assert_round_trip(sql);
 }
+
+// Regression: fuzz crash where a comment between `.` and `*` in a qualified
+// wildcard caused the STAR to be left outside the SELECT_ITEM, so the printer
+// emitted `SELECT TTTQ./**/` which fails to re-parse.
+#[test]
+fn test_round_trip_qualified_star_with_comment() {
+    let sql = "SELECT TTTQ./**/*";
+    assert_round_trip(sql);
+}
+
+// Regression: original crash input from fuzz corpus (round_trip target).
+// Trailing junk after the SELECT body must not produce a parse with zero
+// errors that the printer cannot reproduce verbatim.
+#[test]
+fn test_round_trip_fuzz_crash_qualified_star_trailing_junk() {
+    let sql = "SELECT\nTTTQ./**/*///4/*T";
+    assert_round_trip(sql);
+}

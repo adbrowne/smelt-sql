@@ -1897,9 +1897,14 @@ impl<'a> Parser<'a> {
                 // `table.*` qualified star. Emit as a SELECT_ITEM carrying
                 // IDENT DOT STAR tokens directly — downstream consumers
                 // treat `SELECT_ITEM` with a trailing STAR as a star-item.
+                // The peek check skipped trivia, so we must do the same
+                // between advances or the comment between `.` and `*`
+                // would leave STAR outside the SELECT_ITEM.
                 self.start_node(SELECT_ITEM);
                 self.advance(); // IDENT
+                self.skip_trivia();
                 self.advance(); // DOT
+                self.skip_trivia();
                 self.advance(); // STAR
                 self.finish_node();
             } else {
