@@ -25,7 +25,7 @@ This is a documentation-authoring plan, not an implementation plan. Each phase c
 
 | Phase | Spec slug                   | Status   | Commit | Date |
 |-------|-----------------------------|----------|--------|------|
-| 1     | functions                   | pending  |        |      |
+| 1     | functions                   | done     |        | 2026-04-29 |
 | 2     | scoping                     | pending  |        |      |
 | 3     | gradual_typing              | pending  |        |      |
 | 4     | architecture (extend)       | pending  |        |      |
