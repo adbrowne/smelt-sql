@@ -55,8 +55,9 @@ Wait for the user to confirm or correct. The spec is normative — drafting it o
 
 Use `docs/specs/SPEC_TEMPLATE.md` as the starting structure. Hard rules:
 
-- **Surface section is exhaustive** for what users can interact with. If you skip something here, `smelt:validate` won't catch its drift.
+- **Surface section is exhaustive** for what callers depend on (users for feature specs; other components for system specs). If you skip something here, `smelt:validate` won't catch its drift.
 - **Semantics section uses normative language** ("must", "must not", "if X then Y"). Avoid hedging like "should usually" — pick a rule.
+- **Design section captures the why.** Record the load-bearing decisions and the alternatives rejected, so the spec doesn't read as "rules from nowhere". Keep it dense — link to `docs/research/` for deeper justification.
 - **Known Divergences is honest.** If DESIGN.md says one thing and code does another, name it. Don't pretend the spec matches reality if it doesn't.
 - **References point to current paths**, not commit-pinned ones. Plans go under "Plans (history)" oldest first.
 - **Frontmatter `last_reviewed` = today's date** (use `date -I`).
@@ -86,7 +87,7 @@ Suggested next steps:
 ## Important Rules
 
 1. **Spec is normative.** It describes what is true, not what was true. If you're unsure, flag it under Known Divergences instead of guessing.
-2. **No prescription beyond the surface.** The spec says *what* — the implementation says *how*. Don't pin internal architecture in the spec unless it's an invariant.
+2. **Capture design and invariants; skip implementation choices.** The spec records the surface, the rules, the design rationale (why this shape, what alternatives were rejected), and the invariants the implementation must preserve. It does *not* prescribe specific data structures, function names, or code layout — those change without spec drift. "What vs how" collapses two distinct things; the right cut is "design vs implementation".
 3. **Read source files in your own context first.** A spec written from delegated summaries is unreliable.
 4. **Don't refactor while specing.** Note divergences; let the next plan fix them.
 5. **Spec stays under ~300 lines for most features.** If it's growing past that, consider splitting (e.g., `incremental_models.md` + `incremental_strategies.md`).

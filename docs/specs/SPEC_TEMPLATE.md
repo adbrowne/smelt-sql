@@ -13,14 +13,16 @@ owners: [andrew]
 
 ## Surface
 
-The user-visible API. Anything a user can observe, type, or be told by an error message. If you change anything in this section, you must update the corresponding `docs-site/` page in the same PR.
+The contract this spec defines — what callers can observe, depend on, and be told by error messages. For feature specs, "callers" are users; for system specs (`architecture.md`), "callers" can include other crates / components, and the surface includes contracts between them.
+
+If anything in this section is user-visible, you must update the corresponding `docs-site/` page in the same PR.
 
 - Syntax additions or changes
 - YAML frontmatter fields, their types and defaults
 - CLI flags / subcommands
-- Public Rust API (only if user-facing — internal APIs go in code, not here)
+- Public Rust API (user-facing or cross-crate)
 - Error messages and diagnostic codes the user will see
-- Wire-format / on-disk artifacts the user can interact with
+- Wire-format / on-disk artifacts users or downstream tools interact with
 
 ## Semantics
 
@@ -30,6 +32,17 @@ Formal behavior. What the system does given the surface. Use precise language ("
 - Edge cases and how they're handled
 - Failure modes (what error fires when, and why)
 - Interactions with adjacent features (link to their specs, don't duplicate)
+
+## Design
+
+The rationale — *why* the spec is shaped this way. Captures the load-bearing decisions and the alternatives rejected, so future contributors can tell when a constraint is structural versus when it's open to revisit.
+
+- Why each surface choice (annotation form, default, error code) is what it is
+- Alternatives considered and why rejected (briefly — the spec is not a research doc; link to `docs/research/` if there is more)
+- Cross-feature interactions that drove the shape (link to other specs)
+- Architectural decisions the implementation must respect (these often graduate into Constraints & Invariants below)
+
+Keep this section dense — one paragraph per decision, not an essay. If a decision needs deep justification, write it in `docs/research/` and link.
 
 ## Constraints & Invariants
 
