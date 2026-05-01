@@ -43,6 +43,8 @@ For each item in the spec's **Surface** section:
 For each item in `docs-site/` referenced by the spec:
 - Confirm everything documented there is present in the spec's Surface section. Pages can document something the spec doesn't if it's marked deprecated — flag that explicitly.
 
+- Confirm that any (non broken) examples conform to the spec.
+
 ### Step 4: Semantics drift check
 
 For each normative rule in the spec's **Semantics** section:
