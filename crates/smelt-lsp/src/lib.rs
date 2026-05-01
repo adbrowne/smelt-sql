@@ -2299,6 +2299,15 @@ impl LanguageServer for Backend {
                                 }
                             }
                         }
+                        Some(SymbolAtCursor::PathRef { segments }) => {
+                            // Resolve via the unified path data plane (Phase 2a).
+                            let ws = Workspace::try_get(&db);
+                            ws.and_then(|w| {
+                                smelt_db::resolve_ref_path(&db, w, segments)
+                                    .and_then(|r| r.source_file)
+                                    .map(|f| GotoTarget::RefModel(f.path(&db).clone()))
+                            })
+                        }
                         None => None,
                     }
                 } else {
@@ -4382,6 +4391,50 @@ impl LanguageServer for Backend {
 
                 items
             }
+            CompletionContext::SmeltPath => {
+                // Phase 2c: return all workspace entities as `smelt.<segments>` labels.
+                let ws = Workspace::try_get(&db);
+                let Some(w) = ws else { return Ok(None) };
+                let all_files = w.files(&db).clone();
+                // Determine the project root from the current file.
+                let project_root = file_project_root(&db, &effective_path);
+                let mut items: Vec<CompletionItem> = all_files
+                    .iter()
+                    .filter_map(|f| {
+                        let file_path = f.path(&db);
+                        // Only SQL files.
+                        if file_path.extension().and_then(|e| e.to_str()) != Some("sql") {
+                            return None;
+                        }
+                        let rel = file_path.strip_prefix(&project_root).ok()?;
+                        let parent = rel.parent()?;
+                        let mut segments: Vec<String> = parent
+                            .components()
+                            .filter_map(|c| match c {
+                                std::path::Component::Normal(s) => {
+                                    Some(s.to_string_lossy().into_owned())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        let stem = file_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())?;
+                        segments.push(stem.clone());
+                        let label = format!("smelt.{}", segments.join("."));
+                        let insert = segments.join(".");
+                        Some(CompletionItem {
+                            label,
+                            insert_text: Some(insert),
+                            kind: Some(CompletionItemKind::MODULE),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.label.cmp(&b.label));
+                items
+            }
             CompletionContext::None => Vec::new(),
         };
 
@@ -4395,12 +4448,16 @@ impl LanguageServer for Backend {
 
 /// Completion context types
 #[derive(Debug)]
-enum CompletionContext {
+pub enum CompletionContext {
     InsideRef,               // Cursor inside ref('|')
     InsideSource,            // Cursor inside source('|')
     ColumnName,              // Cursor in a position where column name is expected
     QualifiedColumn(String), // Cursor after alias. (e.g., "t." for table alias t)
     FromClause,              // Cursor in FROM/JOIN position (offer CTE names)
+    /// Phase 2c: cursor positioned after a `smelt.` prefix (path form), e.g.
+    /// `FROM smelt.|` or `FROM smelt.models.|`. Completion should return all
+    /// workspace entities as `smelt.<segments>` labels.
+    SmeltPath,
     /// Phase 48: cursor inside the body of a `PASSING <name> AS (|)` clause
     /// attached to a `smelt.fn.<callee>(...)` call. Carries the parameter
     /// name and the trailing call-path segment so the completion list can
@@ -4413,7 +4470,7 @@ enum CompletionContext {
 }
 
 /// Determine what kind of completion to provide based on cursor position
-fn determine_completion_context(text: &str, offset: usize) -> CompletionContext {
+pub fn determine_completion_context(text: &str, offset: usize) -> CompletionContext {
     // Look backward from cursor to determine context
     let before_cursor = &text[..offset.min(text.len())];
 
@@ -4424,6 +4481,37 @@ fn determine_completion_context(text: &str, offset: usize) -> CompletionContext 
     // most recent `smelt.fn.<...>` call before the PASSING.
     if let Some(ctx) = detect_passing_body(before_cursor) {
         return ctx;
+    }
+
+    // Phase 2c: detect cursor after a `smelt.` path prefix. This must be
+    // checked before the legacy `ref(` / `source(` checks so that
+    // `smelt.ref(` still falls through to InsideRef.
+    // Pattern: text ends with `smelt.` or `smelt.<word>.` (possibly with
+    // partial segment at cursor).
+    {
+        // Find the last word boundary: scan back from cursor for valid path chars
+        // (alphanumeric, _, .) until we hit whitespace or other delimiter.
+        let trimmed = before_cursor
+            .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        let suffix = &before_cursor[trimmed.len()..];
+        // A smelt path starts with `smelt.` and contains only word chars and dots.
+        if suffix.starts_with("smelt.")
+            && suffix[6..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            // Make sure this is NOT `smelt.ref(` or `smelt.source(` (legacy forms
+            // get their own context below).
+            let rest = &suffix[6..];
+            let is_legacy = rest.starts_with("ref(")
+                || rest.starts_with("ref('")
+                || rest.starts_with("source(")
+                || rest.starts_with("source('")
+                || rest.starts_with("fn.");
+            if !is_legacy {
+                return CompletionContext::SmeltPath;
+            }
+        }
     }
 
     // Check if we're inside source('')

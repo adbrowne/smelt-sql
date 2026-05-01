@@ -70,14 +70,21 @@ impl LogicalGraph {
         let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
         for model in models {
-            // Only LegacyRef (smelt.ref) entries are model-to-model deps in
-            // the string-keyed graph; LegacyFn / Path entries are handled by
-            // the path-tuple graph.
+            // Use the unified path adapter so both LegacyRef and Path-form
+            // model refs resolve to the same model-to-model dep. Non-model
+            // paths (seeds, sources, functions) produce first segment ≠
+            // "models" and are skipped.
             let deps: Vec<String> = model
                 .refs
                 .iter()
-                .filter(|r| matches!(r.smelt_ref, smelt_core::refs::SmeltRef::LegacyRef(_)))
-                .map(|r| r.model_name.clone())
+                .filter_map(|r| {
+                    let path = r.smelt_ref.to_path(&smelt_core::refs::NoLocator);
+                    if path.first().map(|s| s.as_str()) == Some("models") && path.len() >= 2 {
+                        path.last().cloned()
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             let metadata = model.metadata.as_ref().map(|b| b.as_ref());
 

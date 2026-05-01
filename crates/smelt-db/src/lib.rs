@@ -4909,7 +4909,95 @@ pub fn logical_plan(
         })
         .collect();
 
-    Some(build_logical_plan_pure(call_inputs))
+    // Phase 2c: second pass for SmeltPathCall nodes (`smelt.<path>(args)`).
+    // These coexist with SmeltFnCall in this phase (no dedup needed — the two
+    // node types are distinct). We follow the same resolution logic as for
+    // SmeltFnCall, deriving `fn_id` from the last path segment.
+    let path_call_inputs: Vec<FnCallInput> = ast
+        .syntax()
+        .descendants()
+        .filter_map(smelt_parser::ast::SmeltPathCall::cast)
+        .map(|call| {
+            let segments = call.segments(); // without leading "smelt"
+                                            // fn_id: last segment (e.g., ["functions", "session_rollup"] → "session_rollup")
+            let fn_id = segments.last().cloned().unwrap_or_default();
+
+            let sig_opt = if fn_id.is_empty() {
+                None
+            } else {
+                resolve_function(db, workspace, fn_id.clone()).map(|arc| (*arc).clone())
+            };
+
+            let transparent = sig_opt
+                .as_ref()
+                .map(|sig| sig.origin == smelt_types::SigOrigin::Define)
+                .unwrap_or(false);
+
+            // Locate the declaring file and read its frontmatter via Salsa.
+            let mut properties = sig_opt
+                .as_ref()
+                .and_then(|_| {
+                    workspace
+                        .files(db)
+                        .iter()
+                        .copied()
+                        .find(|f| {
+                            file_signature_inputs(db, *f)
+                                .iter()
+                                .any(|s| s.name == fn_id)
+                        })
+                        .and_then(|decl_file| {
+                            let decl_parse = parse_file(db, decl_file);
+                            let decl_syntax = decl_parse.syntax();
+                            let decl_ast = AstFile::cast(decl_syntax)?;
+                            let decl_raw = decl_file.text(db).clone();
+                            let fm = decl_ast
+                                .defines()
+                                .find(|d| d.name().as_deref() == Some(fn_id.as_str()))
+                                .and_then(|d| d.frontmatter(&decl_raw))
+                                .or_else(|| {
+                                    decl_ast
+                                        .externs()
+                                        .find(|e| e.name().as_deref() == Some(fn_id.as_str()))
+                                        .and_then(|e| e.frontmatter(&decl_raw))
+                                });
+                            fm.map(|text| {
+                                smelt_planner::logical::parse_function_properties(&text).0
+                            })
+                        })
+                })
+                .unwrap_or_default();
+
+            // Enforce unstable_schema gate on `provenance:` (same as SmeltFnCall path).
+            let resolved_provenance =
+                if matches!(properties.provenance, Provenance::Declared(_)) && !unstable_schema {
+                    Provenance::Unknown
+                } else {
+                    std::mem::replace(&mut properties.provenance, Provenance::Unknown)
+                };
+
+            // Attach body text for transparent calls not in a cycle.
+            let body_text = if transparent && !cycle_set.contains(&fn_id) {
+                bodies.get(&fn_id).cloned()
+            } else {
+                None
+            };
+
+            FnCallInput {
+                fn_id,
+                transparent,
+                properties,
+                provenance: resolved_provenance,
+                body_text,
+            }
+        })
+        .collect();
+
+    // Merge both sets: legacy SmeltFnCall inputs first, then SmeltPathCall inputs.
+    let mut all_call_inputs = call_inputs;
+    all_call_inputs.extend(path_call_inputs);
+
+    Some(build_logical_plan_pure(all_call_inputs))
 }
 
 /// Pure plan builder — takes no `db` reference and calls no Salsa queries.

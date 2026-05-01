@@ -3,7 +3,8 @@
 //! Pure function that maps a cursor offset to the symbol under the cursor.
 //! Used by goto-definition, find-references, rename, and code actions.
 
-use crate::ast::File as AstFile;
+use crate::ast::{File as AstFile, SmeltPathRef};
+use crate::syntax_kind::SyntaxKind;
 
 /// The kind of symbol found at a cursor position.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,9 @@ pub enum SymbolAtCursor {
         source_name: String,
         table_name: String,
     },
+    /// Cursor is on a `smelt.<path>` path ref (e.g., `smelt.models.users`).
+    /// `segments` holds the path components after the leading `smelt` token.
+    PathRef { segments: Vec<String> },
     /// Cursor is on a CTE name in a FROM/JOIN clause (reference site)
     CteReference { name: String },
     /// Cursor is on a CTE name in a WITH clause (definition site)
@@ -31,6 +35,24 @@ pub enum SymbolAtCursor {
 /// This is a pure function — no Salsa or database dependency.
 /// Returns `None` if the cursor is not on a recognizable symbol.
 pub fn symbol_at_cursor(file: &AstFile, _text: &str, offset: usize) -> Option<SymbolAtCursor> {
+    // Check SmeltPathRef nodes FIRST — they are more specific than legacy calls.
+    for node in file.syntax().descendants() {
+        if node.kind() == SyntaxKind::SMELT_PATH_REF {
+            if let Some(path_ref) = SmeltPathRef::cast(node) {
+                let range = path_ref.text_range();
+                let start: usize = range.start().into();
+                let end: usize = range.end().into();
+                if offset >= start && offset <= end {
+                    let segments = path_ref.segments();
+                    if !segments.is_empty() {
+                        return Some(SymbolAtCursor::PathRef { segments });
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
     // Check RefCall at cursor position
     for ref_call in file.refs() {
         let range = ref_call.range();
