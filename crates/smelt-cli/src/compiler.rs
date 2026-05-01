@@ -7,7 +7,7 @@ use smelt_db::type_inference::infer_select_column_types;
 use smelt_db::{build_type_context, StaticRefSchemaProvider};
 use smelt_dialect::{
     wrap_with_type_casts, AsStructEmitter, BackendCapabilities, PrintContext, SmeltFnExpander,
-    SqlDialect,
+    SmeltPathCallExpander, SmeltPathRefResolver, SqlDialect,
 };
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
@@ -109,6 +109,10 @@ fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabil
 /// them with qualified table names.
 pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     let parse = smelt_parser::parse(sql);
+    let schema_owned = schema.to_string();
+    let path_ref_resolver: SmeltPathRefResolver<'static> = Box::new(move |segs: &[String]| {
+        segs.last().map(|leaf| format!("{}.{}", schema_owned, leaf))
+    });
     let ctx = PrintContext {
         dialect: &SqlDialect::DuckDB,
         capabilities: &BackendCapabilities::duckdb(),
@@ -117,6 +121,8 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
         cross_engine_refs: std::collections::HashMap::new(),
         smelt_as_struct: None,
         smelt_fn: None,
+        smelt_path_ref: Some(path_ref_resolver),
+        smelt_path_call: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -265,12 +271,13 @@ impl SqlCompiler {
         self.fn_bodies = Some(bodies);
     }
 
-    /// Build the `smelt.as_struct` emitter and `smelt.fn.*` expander closures
-    /// for use in [`PrintContext`]. Pulled out of the per-`compile_*` methods
-    /// so every code path (including the production `compile_with_ephemerals`
-    /// path used by `commands/run.rs`) wires them identically.
+    /// Build the `smelt.as_struct` emitter, `smelt.fn.*` expander, and
+    /// `smelt.<path>(args)` path-call expander closures for use in
+    /// [`PrintContext`]. Pulled out of the per-`compile_*` methods so every
+    /// code path (including the production `compile_with_ephemerals` path
+    /// used by `commands/run.rs`) wires them identically.
     ///
-    /// Returns `(None, None)` when there is no syntax to analyse or no
+    /// Returns `(None, None, None)` when there is no syntax to analyse or no
     /// function bodies / upstream schemas have been configured — preserving
     /// the previous behaviour for tests that don't set them.
     fn build_emitters(
@@ -279,6 +286,7 @@ impl SqlCompiler {
     ) -> (
         Option<AsStructEmitter<'static>>,
         Option<SmeltFnExpander<'static>>,
+        Option<SmeltPathCallExpander<'static>>,
     ) {
         // Build a TypeContext from the parsed file so smelt.as_struct() can
         // look up column types for each qualifier/alias in scope.
@@ -333,7 +341,88 @@ impl SqlCompiler {
             expander
         });
 
-        (as_struct_emitter, fn_expander)
+        // Build a path-call expander that mirrors the fn expander: the leaf
+        // segment of the path is used as the function name lookup key in
+        // `fn_bodies`.  When `fn_bodies` is `None` (no functions configured)
+        // we still wire `Some(expander)` so that the closure is present — it
+        // will return `None` for every call, causing the printer to fall back
+        // to verbatim output.  This ensures production PrintContexts always
+        // have `smelt_path_call: Some(...)` rather than `None`.
+        let path_call_expander: Option<SmeltPathCallExpander<'static>> =
+            Some(match self.fn_bodies.as_ref() {
+                Some(bodies) => {
+                    let bodies = Arc::clone(bodies);
+                    let expander: SmeltPathCallExpander<'static> = Box::new(
+                        move |segs: &[String],
+                              positional: Vec<String>,
+                              _named: Vec<(String, String)>| {
+                            let fn_name = segs.last()?;
+                            let (param_names, body_sql) = bodies.get(fn_name)?;
+                            Some(substitute_params(body_sql, param_names, &positional))
+                        },
+                    );
+                    expander
+                }
+                None => {
+                    let expander: SmeltPathCallExpander<'static> = Box::new(
+                        |_segs: &[String],
+                         _positional: Vec<String>,
+                         _named: Vec<(String, String)>| None,
+                    );
+                    expander
+                }
+            });
+
+        (as_struct_emitter, fn_expander, path_call_expander)
+    }
+
+    /// Build a `SmeltPathRefResolver` for a specific `schema` string, wiring
+    /// `smelt.models.*` / `smelt.sources.*` / `smelt.seeds.*` to the
+    /// appropriate backend SQL expressions.
+    ///
+    /// - `["models", name]` → `schema.name` (or cross-engine expression)
+    /// - `["seeds", name...]` → `schema.<name_joined_with_underscores>`
+    /// - `["sources", src_name, table_name]` → `src_name.table_name`
+    ///   (matching the legacy `smelt.source('src.tbl')` resolution)
+    ///
+    /// Paths not matching any known namespace return `None`, leaving the
+    /// node verbatim — forward-compatible with new namespaces.
+    fn make_path_ref_resolver(&self, schema: &str) -> SmeltPathRefResolver<'static> {
+        let schema = schema.to_string();
+        let cross_engine_refs = self.cross_engine_refs.clone();
+        let sources = self.upstream_schemas.sources.clone();
+
+        Box::new(move |segs: &[String]| {
+            match segs {
+                // smelt.models.<name>
+                [ns, name] if ns == "models" => {
+                    if let Some(parquet_expr) = cross_engine_refs.get(name) {
+                        Some(parquet_expr.clone())
+                    } else {
+                        Some(format!("{}.{}", schema, name))
+                    }
+                }
+                // smelt.seeds.<name...> — join path segments with '_'
+                [ns, rest @ ..] if ns == "seeds" && !rest.is_empty() => {
+                    let table_name = rest.join("_");
+                    Some(format!("{}.{}", schema, table_name))
+                }
+                // smelt.sources.<source_name>.<table_name>
+                [ns, source_name, table_name] if ns == "sources" => {
+                    // Apply any `identifier` override from sources.yml.
+                    let emit_name = sources
+                        .sources
+                        .iter()
+                        .find(|s| s.name == *source_name)
+                        .and_then(|src| src.tables.iter().find(|t| t.name == *table_name))
+                        .and_then(|tbl| tbl.identifier.as_deref())
+                        .unwrap_or(table_name.as_str())
+                        .to_string();
+                    Some(format!("{}.{}", source_name, emit_name))
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
@@ -359,7 +448,8 @@ impl SqlCompiler {
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let parse = smelt_parser::parse(&clean_content);
 
-        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
+        let (as_struct_emitter, fn_expander, path_call_expander) =
+            self.build_emitters(&parse.syntax());
 
         let ctx = PrintContext {
             dialect: &self.dialect,
@@ -369,6 +459,8 @@ impl SqlCompiler {
             cross_engine_refs: self.cross_engine_refs.clone(),
             smelt_as_struct: as_struct_emitter,
             smelt_fn: fn_expander,
+            smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
+            smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -460,7 +552,8 @@ impl SqlCompiler {
         sql: &str,
     ) -> Result<CompiledModel> {
         let parse = smelt_parser::parse(sql);
-        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
+        let (as_struct_emitter, fn_expander, path_call_expander) =
+            self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
             dialect: &self.dialect,
             capabilities: &self.capabilities,
@@ -469,6 +562,8 @@ impl SqlCompiler {
             cross_engine_refs: self.cross_engine_refs.clone(),
             smelt_as_struct: as_struct_emitter,
             smelt_fn: fn_expander,
+            smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
+            smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -509,7 +604,8 @@ impl SqlCompiler {
             .collect();
 
         let parse = smelt_parser::parse(sql);
-        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
+        let (as_struct_emitter, fn_expander, path_call_expander) =
+            self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
             dialect: &self.dialect,
             capabilities: &self.capabilities,
@@ -518,6 +614,8 @@ impl SqlCompiler {
             cross_engine_refs: self.cross_engine_refs.clone(),
             smelt_as_struct: as_struct_emitter,
             smelt_fn: fn_expander,
+            smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
+            smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
@@ -639,6 +737,8 @@ impl EphemeralResolver {
             cross_engine_refs: std::collections::HashMap::new(),
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         let compiled = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -985,7 +1085,8 @@ impl SqlCompiler {
             .map(|s| s.as_str())
             .collect();
 
-        let (as_struct_emitter, fn_expander) = self.build_emitters(&parse.syntax());
+        let (as_struct_emitter, fn_expander, path_call_expander) =
+            self.build_emitters(&parse.syntax());
 
         let ctx = PrintContext {
             dialect: &self.dialect,
@@ -995,6 +1096,8 @@ impl SqlCompiler {
             cross_engine_refs: self.cross_engine_refs.clone(),
             smelt_as_struct: as_struct_emitter,
             smelt_fn: fn_expander,
+            smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
+            smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);

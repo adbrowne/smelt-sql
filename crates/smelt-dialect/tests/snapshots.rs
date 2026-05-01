@@ -13,6 +13,8 @@ fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities, schem
         cross_engine_refs: HashMap::new(),
         smelt_as_struct: None,
         smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: None,
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -33,6 +35,8 @@ fn print_with_ephemerals(
         cross_engine_refs: HashMap::new(),
         smelt_as_struct: None,
         smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: None,
     };
     print(&parsed.syntax(), &ctx)
 }
@@ -417,4 +421,184 @@ fn spark_combined_rewrites() {
         "main",
     );
     insta::assert_snapshot!(result);
+}
+
+// ===== SmeltPathRef resolver tests =====
+
+fn make_path_ref_ctx<'a>(
+    dialect: &'a SqlDialect,
+    caps: &'a BackendCapabilities,
+    schema: &'a str,
+    resolver: smelt_dialect::SmeltPathRefResolver<'a>,
+) -> PrintContext<'a> {
+    PrintContext {
+        dialect,
+        capabilities: caps,
+        schema,
+        ephemeral_models: HashSet::new(),
+        cross_engine_refs: HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
+        smelt_path_ref: Some(resolver),
+        smelt_path_call: None,
+    }
+}
+
+fn make_path_call_ctx<'a>(
+    dialect: &'a SqlDialect,
+    caps: &'a BackendCapabilities,
+    schema: &'a str,
+    expander: smelt_dialect::SmeltPathCallExpander<'a>,
+) -> PrintContext<'a> {
+    PrintContext {
+        dialect,
+        capabilities: caps,
+        schema,
+        ephemeral_models: HashSet::new(),
+        cross_engine_refs: HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: Some(expander),
+    }
+}
+
+/// Test 1: path_ref_to_model_emits_schema_qualified_name
+/// `smelt.models.users` with resolver returning `main.users` → output is `SELECT * FROM main.users`
+#[test]
+fn path_ref_to_model_emits_schema_qualified_name() {
+    let sql = "SELECT * FROM smelt.models.users";
+    let parsed = parse(sql);
+    let dialect = SqlDialect::DuckDB;
+    let caps = BackendCapabilities::duckdb();
+    let resolver: smelt_dialect::SmeltPathRefResolver = Box::new(|segs: &[String]| {
+        if segs == ["models", "users"] {
+            Some("main.users".to_string())
+        } else {
+            None
+        }
+    });
+    let ctx = make_path_ref_ctx(&dialect, &caps, "main", resolver);
+    let result = print(&parsed.syntax(), &ctx);
+    assert_eq!(
+        result, "SELECT * FROM main.users",
+        "expected schema-qualified name, got: {}",
+        result
+    );
+}
+
+/// Test 2: path_ref_to_seed_emits_seed_table_name
+/// `smelt.seeds.raw.users` resolver returns `main.users` (schema-qualified leaf name,
+/// consistent with `make_path_ref_resolver` in compiler.rs which uses
+/// `format!("{}.{}", schema, rest.join("_"))` → `main.raw_users` for multi-segment seeds
+/// or `main.users` for single-segment; the compiler joins all rest segments with '_',
+/// so ["seeds", "raw", "users"] → `main.raw_users`).
+#[test]
+fn path_ref_to_seed_emits_seed_table_name() {
+    let sql = "SELECT * FROM smelt.seeds.raw.users";
+    let parsed = parse(sql);
+    let dialect = SqlDialect::DuckDB;
+    let caps = BackendCapabilities::duckdb();
+    // Mirrors what `make_path_ref_resolver` emits: schema + rest.join("_")
+    let resolver: smelt_dialect::SmeltPathRefResolver = Box::new(|segs: &[String]| {
+        if let Some(("seeds", rest)) = segs.split_first().map(|(h, t)| (h.as_str(), t)) {
+            if !rest.is_empty() {
+                return Some(format!("main.{}", rest.join("_")));
+            }
+        }
+        None
+    });
+    let ctx = make_path_ref_ctx(&dialect, &caps, "main", resolver);
+    let result = print(&parsed.syntax(), &ctx);
+    assert!(
+        result.contains("main.raw_users"),
+        "expected schema-qualified seed table name `main.raw_users`, got: {}",
+        result
+    );
+}
+
+/// Test 3: path_ref_to_source_emits_source_declared_name
+/// `smelt.sources.raw.events` resolver returns `raw_events`
+#[test]
+fn path_ref_to_source_emits_source_declared_name() {
+    let sql = "SELECT * FROM smelt.sources.raw.events";
+    let parsed = parse(sql);
+    let dialect = SqlDialect::DuckDB;
+    let caps = BackendCapabilities::duckdb();
+    let resolver: smelt_dialect::SmeltPathRefResolver = Box::new(|segs: &[String]| {
+        if segs == ["sources", "raw", "events"] {
+            Some("raw_events".to_string())
+        } else {
+            None
+        }
+    });
+    let ctx = make_path_ref_ctx(&dialect, &caps, "main", resolver);
+    let result = print(&parsed.syntax(), &ctx);
+    assert!(
+        result.contains("raw_events"),
+        "expected source table name, got: {}",
+        result
+    );
+}
+
+/// Test 4: path_call_emits_expanded_function_body
+/// `smelt.functions.patterns.session_rollup(events, 30)` expander returns a SELECT
+#[test]
+fn path_call_emits_expanded_function_body() {
+    let sql = "SELECT * FROM smelt.functions.patterns.session_rollup(events, 30)";
+    let parsed = parse(sql);
+    let dialect = SqlDialect::DuckDB;
+    let caps = BackendCapabilities::duckdb();
+    let expander: smelt_dialect::SmeltPathCallExpander = Box::new(
+        |segs: &[String], _positional: Vec<String>, _named: Vec<(String, String)>| {
+            if segs == ["functions", "patterns", "session_rollup"] {
+                Some("SELECT user_id, COUNT(*) AS cnt FROM events GROUP BY user_id".to_string())
+            } else {
+                None
+            }
+        },
+    );
+    let ctx = make_path_call_ctx(&dialect, &caps, "main", expander);
+    let result = print(&parsed.syntax(), &ctx);
+    assert!(
+        result.contains("SELECT user_id"),
+        "expected expanded function body, got: {}",
+        result
+    );
+}
+
+/// Test 5: extern_call_unchanged
+/// `SELECT read_parquet('foo.parquet')` with no path resolver → byte-identical to input
+#[test]
+fn extern_call_unchanged() {
+    let sql = "SELECT read_parquet('foo.parquet')";
+    let result = print_with(
+        sql,
+        &SqlDialect::DuckDB,
+        &BackendCapabilities::duckdb(),
+        "main",
+    );
+    assert_eq!(
+        result, sql,
+        "extern call (no smelt extension) must be byte-identical, got: {}",
+        result
+    );
+}
+
+/// Test 6: duckdb_byte_identity_preserved_on_path_form
+/// Plain DuckDB SQL (no smelt extensions) must be byte-identical through the printer
+#[test]
+fn duckdb_byte_identity_preserved_on_path_form() {
+    let sql = "SELECT id FROM main.users WHERE id > 1";
+    let result = print_with(
+        sql,
+        &SqlDialect::DuckDB,
+        &BackendCapabilities::duckdb(),
+        "main",
+    );
+    assert_eq!(
+        result, sql,
+        "plain DuckDB SQL must be byte-identical, got: {}",
+        result
+    );
 }

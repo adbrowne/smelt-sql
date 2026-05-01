@@ -12,7 +12,7 @@
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
-use smelt_parser::ast::{SmeltAsStructCall, SmeltFnCall};
+use smelt_parser::ast::{SmeltAsStructCall, SmeltFnCall, SmeltPathCall, SmeltPathRef};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall, RefCall, SourceCall};
 
@@ -28,6 +28,17 @@ pub type AsStructEmitter<'a> = Box<dyn Fn(&str, &[String]) -> Option<String> + '
 /// Called with `(fn_name, positional_arg_sqls, named_args)` → expanded SQL, or `None`.
 pub type SmeltFnExpander<'a> =
     Box<dyn Fn(&str, Vec<String>, Vec<(String, String)>) -> Option<String> + 'a>;
+
+/// Resolver closure type for `smelt.<path>` value references (`SMELT_PATH_REF`).
+/// Called with path segments (everything after `smelt`); returns backend SQL or `None` to
+/// emit verbatim.
+pub type SmeltPathRefResolver<'a> = Box<dyn Fn(&[String]) -> Option<String> + 'a>;
+
+/// Expander closure type for `smelt.<path>(<args>)` call forms (`SMELT_PATH_CALL`).
+/// Called with `(path_segments, positional_arg_sqls, named_arg_sqls)` → expanded SQL, or `None`
+/// to emit verbatim.
+pub type SmeltPathCallExpander<'a> =
+    Box<dyn Fn(&[String], Vec<String>, Vec<(String, String)>) -> Option<String> + 'a>;
 
 /// Context for dialect-aware printing.
 pub struct PrintContext<'a> {
@@ -49,6 +60,17 @@ pub struct PrintContext<'a> {
     /// Called with `(fn_name, positional_arg_sqls, named_args)` and returns the expanded SQL.
     /// `None` = pass through verbatim (backward compat for tests / contexts without function info).
     pub smelt_fn: Option<SmeltFnExpander<'a>>,
+    /// Resolver for `smelt.<path>` value references (`SMELT_PATH_REF`).
+    ///
+    /// Called with path segments (everything after `smelt`) and returns the backend SQL string.
+    /// `None` = pass through verbatim (backward compat for callers that have not configured
+    /// path resolution).
+    pub smelt_path_ref: Option<SmeltPathRefResolver<'a>>,
+    /// Expander for `smelt.<path>(<args>)` call forms (`SMELT_PATH_CALL`).
+    ///
+    /// Called with `(path_segments, positional_arg_sqls, named_arg_sqls)` and returns the
+    /// expanded SQL. `None` = pass through verbatim.
+    pub smelt_path_call: Option<SmeltPathCallExpander<'a>>,
 }
 
 /// Print a CST node as dialect-specific SQL.
@@ -116,6 +138,58 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                             return;
                         }
                     }
+                }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::SMELT_PATH_REF => {
+            if let (Some(ref resolver), Some(path_ref)) =
+                (&ctx.smelt_path_ref, SmeltPathRef::cast(node.clone()))
+            {
+                let segs = path_ref.segments();
+                if let Some(sql) = resolver(&segs) {
+                    out.push_str(&sql);
+                    return;
+                }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::SMELT_PATH_CALL => {
+            if let (Some(ref expander), Some(path_call)) =
+                (&ctx.smelt_path_call, SmeltPathCall::cast(node.clone()))
+            {
+                let segs = path_call.segments();
+                let positional: Vec<String> = path_call
+                    .arg_list()
+                    .map(|al| {
+                        al.positional_args()
+                            .into_iter()
+                            .map(|arg| {
+                                let mut s = String::new();
+                                print_node(arg.syntax(), ctx, &mut s);
+                                s
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let named: Vec<(String, String)> = path_call
+                    .arg_list()
+                    .map(|al| {
+                        al.named_params()
+                            .filter_map(|np| {
+                                let name = np.name()?;
+                                let expr = np.value_expr()?;
+                                let mut s = String::new();
+                                print_node(expr.syntax(), ctx, &mut s);
+                                Some((name, s))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(expanded) = expander(&segs, positional, named) {
+                    let reparsed = smelt_parser::parse(&expanded);
+                    print_node(&reparsed.syntax(), ctx, out);
+                    return;
                 }
             }
             print_children(node, ctx, out);
@@ -514,6 +588,8 @@ mod tests {
             cross_engine_refs: HashMap::new(),
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         print(&parsed.syntax(), &ctx)
     }
@@ -613,6 +689,8 @@ mod tests {
             cross_engine_refs: cross_refs,
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
@@ -650,6 +728,8 @@ mod tests {
             cross_engine_refs: cross_refs,
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
