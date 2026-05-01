@@ -64,7 +64,7 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 | 2b    | done     | 8864f26 | 2026-05-01 |
 | 2c    | done     | 59c7f16 | 2026-05-01 |
 | 3     | done     | 19e412b | 2026-05-01 |
-| 4     | pending  |        |      |
+| 4     | done     | 7a7d320 | 2026-05-01 |
 
 ---
 
@@ -334,6 +334,7 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 - **`examples/broken/` not migrated to path form** (Phase 3). The `broken/` workspace fixtures use `smelt.fn.*` calls to trigger specific function type diagnostics (`ArgTypeMismatch`, `UnknownIdentifier` with expansion frames). The `smelt_fn_call_diagnostics_for_file` type checker only operates on `SmeltFnCall` nodes, not yet `SmeltPathCall`. Migrating `broken/` would silence these diagnostics. Fix deferred to a follow-on phase that extends function-call type checking to handle `SmeltPathCall`; the `all_examples_use_path_syntax` test skips `broken/` with an explanatory comment. Tracked in `docs/specs/functions.md` Known Divergences.
 - **`SMELT_PATH_REF` trailing-trivia printer bug fixed in Phase 3** (smelt-dialect). The parser's `skip_trivia()` look-ahead before `start_node_at(outer_checkpoint, SMELT_PATH_REF)` wrapped trailing whitespace inside the node. The printer then emitted the resolved SQL without that whitespace, collapsing `raw.orders AS o` → `raw.ordersAS o`. Fixed in `printer.rs` by re-emitting trailing trivia tokens after the resolver replacement.
 - **Path resolver only matched `[ns, name]` (two-segment models)**. `smelt.models.staging.stg_events` (three segments) returned `None` from `make_path_ref_resolver`, causing DuckDB `NameListToString` errors. Fixed by changing the pattern to `[ns, rest @ ..] if ns == "models"` and using `rest.last()` as the physical table name.
+- **`smelt.fn.*` / `SmeltFnCall` removal deferred** (Phase 4). The `examples/broken/` workspace still uses `smelt.fn.*` calls to exercise `ArgTypeMismatch`, `UnknownIdentifier` with expansion frames, and other function-body diagnostics. The `smelt_fn_call_diagnostics_for_file` type checker operates on `SmeltFnCall` nodes only; removing `SMELT_FN_CALL`/`SmeltFnCall` would silence those diagnostics. `SmeltRef::LegacyFn` is kept in `smelt-core` for now. Full removal requires extending function-call type checking to `SmeltPathCall` first, then migrating `broken/` fixtures to path form.
 
 ## Verification
 
