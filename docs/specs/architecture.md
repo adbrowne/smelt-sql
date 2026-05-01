@@ -1,7 +1,7 @@
 ---
 feature: architecture
 status: stable
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-01
 owners: [andrew]
 ---
 
@@ -44,7 +44,7 @@ Each crate has a single job; downstream crates depend on it but never the revers
 | `smelt-dialect`        | sync, lightweight  | `SqlDialect`, `BackendCapabilities`, dialect-aware printer   |
 | `smelt-planner`        | sync               | Model-graph transforms; rule-based optimization              |
 | `smelt-lsp`            | async (tower-lsp)  | Thin async shell over sync Salsa queries                     |
-| `smelt-cli`            | sync (entry point) | CLI surface, model discovery, dialect selection              |
+| `smelt-cli`            | async (entry point) | CLI surface, model discovery, dialect selection — async because the entry point drives the async execution stage |
 | `smelt-backend`        | async              | `Backend` trait, `ExecutionResult`                           |
 | `smelt-backend-duckdb` | async              | DuckDB execution                                             |
 | `smelt-backend-spark`  | async              | Spark execution                                              |
@@ -175,18 +175,22 @@ The planner outputs values, never mutations. The user-visible enum surface:
 
 ```rust
 enum Transformation {
-    CreateModel { name, sql, materialization },
-    RedirectRef { model, old_ref, new_ref },
-    RemoveModel { name },
+    // Single-model transformations
+    ReplaceWithPlan   { model, steps: Vec<ExecutionStep> },
+    SetIncremental    { model, event_time_column, partition_column, granularity },
     SetMaterialization { model, materialization },
-    ReplaceWithPlan { model, steps: Vec<ExecutionStep> },
+
+    // Graph-level transformations
+    CreateNode        { name, sql, dependencies, origin, materialization },
+    RemoveNode        { model },
+    RedirectRef       { from, to },
 }
 
 enum ExecutionStep {
-    CreateTemp { name, sql },
+    CreateTemp   { name, sql },
     AppendToTemp { name, sql },
-    FinalQuery { sql },
-    DropTemp { name },
+    FinalQuery   { sql },
+    DropTemp     { name },
 }
 ```
 
@@ -240,7 +244,7 @@ This section captures the load-bearing rationale behind the pipeline, the crate 
 
 **CSTs are not mutated; the planner outputs `Transformation` values.** A mutating planner (`rule.apply(&mut cst)`) is harder to debug — the diff between "before" and "after" only exists in the rule's head — and forecloses speculative planning (try a rewrite, measure, discard). Returning `Vec<Transformation>` makes rules composable (stack them, inspect them, render them in `--show-plan`), unit-testable as plain values, and reversible. See `planner_integration.md` for how rules consume frontmatter to decide which transformations to emit.
 
-**Sync core, async edges.** Parsing, analysis, planning, and printing are CPU-bound; the per-task overhead of `tokio::spawn` would slow incremental compilation in `smelt-db` and add no parallelism (each query is small and sequential under Salsa's invalidation graph). Async lives only at the LSP shell — where the protocol demands it — and at execution, where I/O against backends dominates. Crate-level async/sync labelling in the Surface table is the contract; a sync crate may not transitively depend on an async runtime.
+**Sync core, async edges.** Parsing, analysis, planning, and printing are CPU-bound; the per-task overhead of `tokio::spawn` would slow incremental compilation in `smelt-db` and add no parallelism (each query is small and sequential under Salsa's invalidation graph). Async lives at execution (where I/O against backends dominates) and at the process entry points that drive execution — the LSP server (where the protocol demands it), the CLI, and the UI. Crate-level async/sync labelling in the Surface table is the contract; a sync crate may not transitively depend on an async runtime.
 
 **`smelt-dialect` is lightweight.** Both `smelt-lsp` (which surfaces "this construct is unsupported on Spark" diagnostics) and `smelt-cli` (which selects a backend dialect) must link the dialect crate. If `smelt-dialect` pulled in Arrow / Tokio / DuckDB, every consumer would inherit those dependencies — including the planner, which has no business compiling DuckDB. Keeping the dialect crate to `SqlDialect`, `BackendCapabilities`, and the printer means it sits cleanly between analysis and execution without becoming a fan-in chokepoint.
 
@@ -265,7 +269,7 @@ These are normative and must be upheld across all features.
 1. **Rowan CST is the single representation.** No intermediate IR (no DataFusion `LogicalPlan` analogue). The same CST flows from parse to generation.
 2. **`smelt-db` analysis logic is pure.** Pure functions take AST + data; Salsa queries wrap them. Analysis never calls another Salsa query *inside* the pure function — inputs are gathered by the wrapper. Current acceptable exceptions: `file_diagnostics()` and `type_context()` orchestrate Salsa to gather inputs before calling the pure check.
 3. **CSTs are not mutated.** Planner output is `Transformation` values. Generated SQL is a `String`. The original CST is unchanged.
-4. **Sync core, async edges.** Parsing, analysis, planning, and printing are sync. Async is only at execution and at the LSP shell.
+4. **Sync core, async edges.** Parsing, analysis, planning, and printing are sync. Async is at execution and at the process entry points that drive execution (LSP server, CLI, UI).
 5. **`smelt-dialect` is lightweight.** No Arrow / Tokio / DuckDB dependencies. The LSP and CLI link it freely; backends do not flow back through it.
 6. **No circular crate dependencies.** The dependency graph in the Surface table is total order modulo `smelt-types` (root) and `smelt-backend-*` (leaves).
 7. **Parser produces a usable CST on invalid input.** No panics, no aborts, no truncated trees on syntax errors.
