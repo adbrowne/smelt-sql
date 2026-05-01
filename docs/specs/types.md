@@ -173,9 +173,9 @@ Columns carry `nullable: bool` in `TypedColumn`. Inference rules:
 
 ### 12. Models are functions
 
-A model file `m.sql` is equivalent to a `smelt.define m(...)` whose `TableExpr` parameters default to `smelt.ref()`/`smelt.source()` resolution. The materialization decision (`table` / `view` / `ephemeral` / `materialized_view`) is orthogonal to the type system. In particular:
+A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.define m(...)` whose `TableExpr` parameters default to `smelt.<path>` references resolved against the workspace (the universal addressing scheme — see `architecture.md` §"Resolution"). The materialization decision (`table` / `view` / `ephemeral` / `materialized_view`) is orthogonal to the type system. In particular:
 
-- A model's input refs/sources contribute `TypedColumn` entries to the body's `TypeContext`, exactly as `TableExpr` parameters do for functions.
+- A model's `smelt.<path>` references — whatever they resolve to (upstream model, source, seed) — contribute `TypedColumn` entries to the body's `TypeContext`, exactly as `TableExpr` parameters do for functions.
 - The output of a model is a `ModelSchema` (`Vec<Column>` + row extensions + input constraints), which is the same data a function returning `TableExpr` would produce.
 - `TableExpr<{…}>` row-polymorphism applies identically to function parameters and to model input constraints.
 

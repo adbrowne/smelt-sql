@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Functions
 
-> **Scope.** Normative spec for the user-facing function surface: `smelt.define`, `smelt.fn.*` calls, `smelt.extern`, `PASSING` clauses, `smelt.as_struct`, function frontmatter, default values, and the cycle/overload/recursion rules. Type vocabulary and fragment-sort rules live in `types.md` and are referenced — not duplicated — here. Scoping inside bodies (parameters-first, no-overlap, splice-context inference) lives in `scoping.md`. The three-tier checking model lives in `gradual_typing.md`. Planner integration of frontmatter properties lives in `planner_integration.md`.
+> **Scope.** Normative spec for the user-facing function surface: `smelt.define`, `smelt.<path>(...)` calls, `smelt.extern`, `PASSING` clauses, `smelt.as_struct`, function frontmatter, default values, and the cycle/overload/recursion rules. Type vocabulary and fragment-sort rules live in `types.md` and are referenced — not duplicated — here. Scoping inside bodies (parameters-first, no-overlap, splice-context inference) lives in `scoping.md`. The three-tier checking model lives in `gradual_typing.md`. Planner integration of frontmatter properties lives in `planner_integration.md`. The universal `smelt.<path>` addressing scheme (which produces the function's call path from its file location plus declared name) is specified in `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme".
 
 ## Surface
 
@@ -17,17 +17,19 @@ A `.sql` file is a sequence of top-level **items**. Each item is one of:
 
 - A `smelt.define` declaration.
 - A `smelt.extern` declaration.
-- A bare model `SELECT` (the file's model body).
+- A bare model `SELECT`.
+- A `smelt.test` declaration (declaration shape and assertion semantics owned by a future `tests.md` spec; this spec covers only the parsing-contract sharing).
 
 Each item may be preceded by an optional YAML **frontmatter** block (`---` … `---`). Frontmatter attaches to the immediately following declaration; there is no file-level frontmatter scope. (Research §16 #22.)
 
 Rules:
 
 - Items are separated by whitespace only — no separator token.
-- A file may contain **at most one** bare model `SELECT`. Multiple model `SELECT`s in one file are not in the grammar (the second one is a parse error).
-- A file may contain **zero or more** `smelt.define` and `smelt.extern` items, interleaved freely with each other and with the optional model `SELECT`.
-- File **kind** (model file vs. function file) is a function of grammar, not directory placement (architecture spec, "Project layout"). The directory only drives `smelt.fn.*` namespacing — `functions/patterns/session_rollup.sql` declares `smelt.fn.patterns.session_rollup`.
-- A trailing `;` after a `smelt.define` or `smelt.extern` declaration is allowed but optional.
+- A file may contain **any number** of bare model `SELECT`s. The naming rule (lone-anonymous OR all-named via frontmatter `name:`, never mixed) is specified in `architecture.md` §"Project layout — Bare-model naming".
+- A file may contain **zero or more** `smelt.define`, `smelt.extern`, and `smelt.test` items, interleaved freely with each other and with bare model `SELECT`s.
+- All declared names within a file (bare-SELECT names, `smelt.define`s, `smelt.extern`s, `smelt.test`s) must be unique.
+- File **kind** is a property of each declaration, not of the file (architecture spec, "Resolution"). The directory containing the file contributes to the entity's `smelt.<path>` namespace — e.g. `functions/patterns/session_rollup.sql` declaring `session_rollup` produces the call path `smelt.functions.patterns.session_rollup`. Externs are flat and ambient: their declaring path affects navigation only, never the call surface (see `architecture.md` §"Externs are flat").
+- A trailing `;` after a `smelt.define`, `smelt.extern`, or `smelt.test` declaration is allowed but optional.
 
 ### `smelt.define` grammar
 
@@ -35,7 +37,7 @@ Rules:
 smelt.define <name>(<param-list>) [-> <Type>] AS (<body>) [;]
 ```
 
-- **Name.** Bare identifier. Function paths under `smelt.fn.*` are derived from the directory layout under `functions/` plus the declared name.
+- **Name.** Bare identifier. The function's call path under `smelt.<path>` is derived from the workspace-relative directory of the declaring file plus the declared name (architecture spec §"Resolution"). Renaming a function or moving its file changes the call path, exactly like renaming or moving a model.
 - **Parameter list.** Balanced `(...)`. Each parameter is `name [: <Type>] [= <default>]`. Trailing commas are allowed.
 - **Return arrow.** Optional `-> <Type>`. Presence of the arrow controls Tier 3 dispatch (see `gradual_typing.md`).
 - **Body marker.** Required `AS` keyword (case-insensitive).
@@ -55,27 +57,27 @@ smelt.extern <name>(<param-list>) -> <Type> [;]
 - Backend-namespace sugar: `smelt.extern duckdb.read_parquet(...)` is equivalent to declaring `smelt.extern read_parquet(...)` with frontmatter `backends: { duckdb: { emit: read_parquet } }`.
 - Externs share a name namespace with the canonical built-in registry.
 
-### `smelt.fn.*` call syntax
+### Function call syntax
 
 ```
-smelt.fn.<path>(<arg-list>)
+smelt.<path>(<arg-list>)
 ```
 
-- `<path>` is the directory-derived dotted namespace plus the function name.
+- `<path>` is the workspace-relative directory of the declaring file (segments separated by `.`) joined with the function name. Examples: a `smelt.define session_rollup(...)` declared in `functions/patterns/x.sql` is called as `smelt.functions.patterns.session_rollup(...)`; a `smelt.define helper(...)` declared in `random/x.sql` is called as `smelt.random.x.helper(...)`. The same `smelt.<path>` resolution rule that locates models, seeds, and sources locates functions — see `architecture.md` §"Resolution".
 - Arguments may be positional or named with `param => value` (PostgreSQL/Oracle convention).
 - Named-argument syntax does **not** apply to variadic positions.
-- Externs are called by their **bare** declared name (e.g. `read_parquet(x)`), not via `smelt.fn.*`. Built-ins are likewise called by bare name.
+- Externs are called by their **bare** declared name (e.g. `read_parquet(x)`), not via `smelt.<path>`. Built-ins are likewise called by bare name. The bare-name namespace is workspace-wide; the declaring path of an extern is irrelevant to the call surface (see `architecture.md` §"Externs are flat").
 
 ### `PASSING` clauses
 
 ```
-smelt.fn.foo(<inline-args>)
+smelt.<path>(<inline-args>)
 PASSING <name1> AS (<body1>)
 PASSING <name2> AS (<body2>)
 …
 ```
 
-- `PASSING` is a **context-sensitive keyword** (research §16 #18). It is reserved only at the syntactic position immediately following the closing `)` of a smelt function call (`smelt.fn.<…>(...)` or a call to a `smelt.define`-declared function). Everywhere else (column names, aliases, CTE names, ordinary identifiers) `PASSING` is a regular identifier.
+- `PASSING` is a **context-sensitive keyword** (research §16 #18). It is reserved only at the syntactic position immediately following the closing `)` of a smelt function call (any `smelt.<path>(...)` call, or a call to a `smelt.define`-declared function — equivalently, the same thing). Everywhere else (column names, aliases, CTE names, ordinary identifiers) `PASSING` is a regular identifier.
 - Each clause binds a single fragment-typed parameter by name. Multiple clauses may attach to one call.
 - Trigger rule: after the call's closing `)`, the parser peeks one token; if it is `PASSING`, a clause sequence begins; otherwise normal SQL parsing resumes.
 - The trigger rule is uniform in expression position and FROM position.
@@ -106,7 +108,7 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 | `provenance` | structured map (shape TBD) | absent | Declared column-provenance map. Gated behind `smelt.yml: unstable_schema: true`. |
 | `backends.<name>.emit` | string | declared name | (`smelt.extern` only) Backend-specific emitted name. |
 
-Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all three declaration kinds.
+Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all four declaration kinds (model `SELECT`, `smelt.define`, `smelt.extern`, `smelt.test`).
 
 ### Diagnostic codes
 
@@ -116,7 +118,7 @@ User-visible codes anchored to the surface above. Full descriptions live alongsi
 |---|---|
 | `DuplicateFunctionDefinition` | Two `smelt.define`s (or `smelt.extern`s) share a name in the workspace. |
 | `DuplicateParameterName` | Two parameters in one signature share a name. |
-| `UnknownSmeltFn` | `smelt.fn.<path>(...)` references an unregistered function. |
+| `UnknownSmeltFn` | A `smelt.<path>(...)` call references a path that does not resolve to a function (no file at that path, the file is not a `.sql`, the file does not declare a `smelt.define` of that name, or the path resolves to a non-callable kind such as a model or seed used in call position). |
 | `MissingArgument` | Call omits a required (non-defaulted) parameter. |
 | `ArgTypeMismatch` | Argument's type fails the parameter's `TypeConstraint`. |
 | `FunctionBodyTypeMismatch` | Type error inside a `smelt.define` body. |
@@ -135,7 +137,7 @@ User-visible codes anchored to the surface above. Full descriptions live alongsi
 
 These rules are normative.
 
-1. **All functions are public.** `smelt.define` has no visibility modifier in v1. The function's directory-derived namespace path is its identity. Adding visibility is non-breaking (default stays public).
+1. **All functions are public.** `smelt.define` has no visibility modifier in v1. The function's `smelt.<path>` (workspace-relative directory plus declared name) is its identity. Adding visibility is non-breaking (default stays public).
 2. **No overloading.** Function names are unique within their namespace. Overloading combined with gradual typing produces annotation-tier-dependent resolution rules and is excluded by construction.
 3. **No recursion.** A function may not call itself, directly or transitively. The compiler runs a workspace-wide cycle pre-pass on the call graph and emits `FunctionCallCycle` at every declaration participating in a cycle. The planner aborts splicing for those `fn_id`s — generated SQL must never inline a non-terminating expansion.
 4. **No nesting.** `smelt.define` and `smelt.extern` may not appear inside a SELECT, CTE, or another function body. They are top-level-only. Local/nested defines may be added later without breaking changes.
@@ -151,11 +153,11 @@ These rules are normative.
    - For `Expr<Boolean>` filter parameters that should default to "no filter," the idiom is `= TRUE`.
    - Defaults on row-polymorphic parameters are not permitted in v1.
 10. **`smelt.metric()` is out of scope** (research §16 #6). It is a semantic-layer concept with different design constraints; this spec does not address it.
-11. **Multiple defines per file** (research §16 #6). A file is a compilation unit, not a one-definition container. Defines and the optional bare model `SELECT` may interleave freely.
+11. **Multiple defines per file** (research §16 #6). A file is a compilation unit, not a one-definition container. Defines, externs, tests, and bare model `SELECT`s may interleave freely. Naming uniqueness within a file is enforced across all four kinds.
 12. **Frontmatter attachment.** Each frontmatter block attaches to the immediately following declaration. Each declaration may carry its own. There is no file-level frontmatter and no frontmatter inheritance across declarations.
 13. **`PASSING` parses without type information.** The trigger rule (one-token lookahead after `)`) does not require knowing the callee's parameter list. Name validation, sort compatibility, and binding all run after parsing in the type-checker.
 14. **Externs treated as atomic.** `smelt.extern` calls are checked against their declared signature exactly like built-ins. The planner treats them as atomic nodes (see `planner_integration.md`).
-15. **Error recovery.** `smelt.define`, `smelt.extern`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
+15. **Error recovery.** `smelt.define`, `smelt.extern`, `smelt.test`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `smelt.test`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
 
 ### Interactions with adjacent specs
 
@@ -163,7 +165,7 @@ These rules are normative.
 - **Body scoping (parameters-first, no-overlap, splice-context inference, `Expr<T, ctx>` semantics)** — see `scoping.md`.
 - **Three-tier checking (Tier 1 / 2 / 3 dispatch, error-tracing contract, LSP stability)** — see `gradual_typing.md`.
 - **Planner consumption of `deterministic` / `idempotent` / `append_only` / `joins` / `provenance`** — see `planner_integration.md`.
-- **Models-as-functions equivalence (a model is a `smelt.define` whose `TableExpr` parameters default to refs/sources)** — see `architecture.md`.
+- **Models-as-functions equivalence (a model is a `smelt.define` whose `TableExpr` parameters default to `smelt.<path>`-resolved upstream refs/sources)** — see `architecture.md`.
 
 ## Design
 
@@ -175,7 +177,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 **CAST-enforced canonical return types.** Output schemas are an ETL contract; users downstream of a model rely on them. If `SUM(integer)` returned smelt's `BigInt` on DuckDB and PostgreSQL's native `Decimal(38,0)` on PostgreSQL, the same model would write different schemas to different warehouses. The generated SQL therefore wraps canonical built-ins in `CAST(... AS <canonical>)` whenever the engine's native return type diverges. The backend namespace is the explicit opt-out — `postgres.sum(col)` inherits the engine type and marks the model non-portable in the `backends:` set (research §13).
 
-**Directory-derived `smelt.fn.*` namespacing.** `functions/patterns/session_rollup.sql` declaring `smelt.fn.patterns.session_rollup` matches the `models/` mental model dbt users already have. There is no manifest file to maintain and no import statement to write — discovery is a directory walk. An explicit-import / manifest design was considered and rejected as ceremony for negligible benefit at smelt's scale; the cost (renames touch call sites) is identical either way (research §3).
+**Directory-derived `smelt.<path>` namespacing for functions.** A `smelt.define session_rollup` in `functions/patterns/session_rollup.sql` is callable as `smelt.functions.patterns.session_rollup(...)` because the `smelt.<path>` resolver applies uniformly to every project-defined entity (architecture spec §"Resolution"). There is no manifest file to maintain and no import statement to write — discovery is a directory walk. An explicit-import / manifest design was considered and rejected as ceremony for negligible benefit at smelt's scale; the cost (renames touch call sites) is identical either way (research §3). The earlier `smelt.fn.*` prefix was retired alongside `smelt.ref(...)` and `smelt.source(...)` when addressing was unified; the rationale lives in `architecture.md` Design §"Single addressing scheme".
 
 **`backends:` may only narrow, never widen.** The body is the source of truth for what a function can run on — a body that calls `duckdb.read_parquet(...)` cannot execute on Spark, and no frontmatter declaration should be allowed to claim otherwise. The inference rule (intersection of backend-namespace calls in the body) is a hard ceiling; declared `backends:` may shrink the set further (e.g., to mark a function as restricted for portability reasons even though its body would run anywhere) but never expand it. `BackendsWideningNotAllowed` fires when a declaration tries to widen — better a clear diagnostic than a generated SQL fragment that silently fails on the engine the metadata claimed to support (research §16 #23).
 
@@ -193,7 +195,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 1. The `smelt.define` body is parenthesised. The closing `)` of the body terminates the declaration without lookahead into SQL.
 2. The transparent-function call graph is acyclic. The cycle pre-pass in `smelt-db` runs workspace-wide and feeds the planner; downstream stages may assume termination.
-3. `smelt.fn.*` paths are stable identifiers — they are derived from directory layout plus the declared name and do not depend on file contents elsewhere in the workspace.
+3. `smelt.<path>` function paths are stable identifiers — they are derived from the declaring file's workspace-relative directory plus the declared name, and do not depend on file contents elsewhere in the workspace.
 4. `smelt.extern` and `smelt.define` share one workspace-wide name namespace with built-ins. A clash is a hard error at the second declaration (or at the `smelt.extern` if it shadows a built-in: `ExternCollidesWithBuiltin`).
 5. The frontmatter parser is shared across model, `smelt.define`, and `smelt.extern` declarations. Property semantics differ; the parsing contract does not.
 6. Adding a new frontmatter key is non-breaking; a previously-unknown key produces a `FrontmatterParseError` at Warning severity until it is recognised.
@@ -211,7 +213,8 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 - **`smelt.as_struct` is partially landed.** The grammar parses, the diagnostic `AsStructUnsupportedBackend` is wired, but per research §16 #19 the full design is deferred to post-v1 alongside struct row polymorphism (`Expr<Struct<{…, ..r}>>`). Strategies 1 (CTE rename) and 2 (typed `TableExpr<{…}>` parameter) are the recommended v1 paths; `smelt.as_struct` should be treated as "design sketch, available but not finalised" until Step 8 of the smelt-functions plan revisits it.
 - **`joins:` and `provenance:` parsing is partial.** The keys are recognised in frontmatter and gated by `unstable_schema: true`; structured-map shape and the `ProvenanceMismatch` / `JoinsMismatch` validation phase land in Phase 51 of the smelt-functions plan. Until that lands, declaring these properties is unstable in both surface and behaviour.
-- **End-to-end `smelt build` execution of `smelt.fn.*` calls is incomplete.** Phases 56–57 of `docs/plans/20260422-smelt-functions.md` cover the codegen integration that finalises function expansion at build time. LSP-time checking and `--show-plan` work today; the full build-and-execute path is in progress.
+- **End-to-end `smelt build` execution of `smelt.<path>(...)` function calls is incomplete.** Phases 56–57 of `docs/plans/20260422-smelt-functions.md` cover the codegen integration that finalises function expansion at build time. LSP-time checking and `--show-plan` work today; the full build-and-execute path is in progress.
+- **`smelt.<path>` call grammar is pre-implementation.** The current parser still recognises `smelt.fn.<path>(...)` as the function-call form. The migration to `smelt.<path>(...)` (one node kind covering all project-defined callables) is tracked under `architecture.md` Known Divergences alongside the lexer/parser/AST work. Until the migration lands, this spec describes the intended grammar; existing examples and tests still emit the legacy form.
 - **Frontmatter validation depth.** Unknown keys currently emit `FrontmatterParseError` at Warning severity, which means typos like `deterministc: true` are silently ignored beyond a warning. Whether this should escalate to Error is open.
 - **Workspace-wide vs. directory-scoped name uniqueness.** The implementation today applies `DuplicateFunctionDefinition` workspace-wide. The research originally framed it directory-scoped; the workspace rule is stricter and matches the single canonical-namespace doctrine, but the spec author should confirm this is intended before treating it as final.
 
@@ -237,7 +240,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 ### User docs
 
-- `docs-site/docs/concepts/functions.md` (and adjacent `smelt.fn.*` / `smelt.extern` pages) — to be reconciled against this spec via `/smelt:validate functions`
+- `docs-site/docs/concepts/functions.md` (and adjacent `smelt.<path>` call / `smelt.extern` pages) — to be reconciled against this spec via `/smelt:validate functions`
 
 ### Plans (history) — oldest → newest
 

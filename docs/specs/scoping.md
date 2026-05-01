@@ -63,7 +63,7 @@ Bare-name resolution inside a `smelt.define` body proceeds in this order, and st
 1. **Function parameters** (the function's declared parameter list).
 2. **CTE columns** for any CTE in scope at the reference site (a `WITH name AS (...)` binding earlier in the body).
 3. **FROM-scope columns** contributed by `TableExpr` parameters in scope. A bare column resolves only when **exactly one** `TableExpr` exposes a column of that name; ties are reported as ambiguity (currently surfaced as `UnknownIdentifier` with a hint until a dedicated `AmbiguousColumn` code lands — see Known Divergences).
-4. **Upstream model and source schemas** reachable through `TableExpr`-parameter values (e.g. when a `TableExpr` is bound to `smelt.ref('m')`, columns of model `m` are reachable through SQL FROM resolution against the bound argument).
+4. **Upstream model and source schemas** reachable through `TableExpr`-parameter values (e.g. when a `TableExpr` is bound to `smelt.models.m`, columns of model `m` are reachable through SQL FROM resolution against the bound argument; the same applies to seeds and sources resolved via `smelt.<path>`).
 
 A qualified reference (`alias.column`) skips step 1 and resolves against the named alias's schema directly. This is the explicit escape hatch when a parameter shadows a desired column.
 
@@ -111,7 +111,7 @@ When both an explicit `ctx` annotation and an inferred splice context exist for 
 
 ### Call-site fragment validation
 
-At a `smelt.fn.<name>(…)` call site (whether arguments are inline or supplied via `PASSING`; see `functions.md`), each caller-provided fragment is validated against the parameter's inferred splice context:
+At a `smelt.<path>(...)` call site (whether arguments are inline or supplied via `PASSING`; see `functions.md`), each caller-provided fragment is validated against the parameter's inferred splice context:
 
 - A column reference inside the fragment that is not present in the splice context emits `FragmentColumnMissing` at the offending column reference.
 - A fragment whose synthesised expression kind is **lower** than the parameter's required `Kind` (e.g. a bare scalar passed for `SelectItems<Agg>`) emits `FragmentKindMismatch` at the argument expression. The kind ladder is `Scalar <: Agg <: Window` (see `types.md`).
@@ -122,7 +122,7 @@ At a `smelt.fn.<name>(…)` call site (whether arguments are inline or supplied 
 CTEs declared inside a `smelt.define` body participate in scoping as follows:
 
 - A CTE name is in scope from the start of its declaration to the end of the body, except inside its own definition (no recursive CTE references in v1).
-- CTE schemas are computed using the same schema inference applied to models and function calls; a CTE that selects from a `smelt.fn.*` whose output schema cannot be determined at body-check time is marked **opaque**, and bare-column lookups against it return an `Unknown`-typed result rather than `UnknownIdentifier`.
+- CTE schemas are computed using the same schema inference applied to models and function calls; a CTE that selects from a `smelt.<path>(...)` call whose output schema cannot be determined at body-check time is marked **opaque**, and bare-column lookups against it return an `Unknown`-typed result rather than `UnknownIdentifier`.
 - A cyclic CTE graph (`A` references `B` references `A`, directly or via `*`-expansion) emits `CteCycle` anchored at every CTE declaration participating in the cycle.
 - A CTE name is also a valid `ctx` identifier in fragment annotations — the parameter's columns are scoped to that CTE's output.
 
@@ -165,7 +165,7 @@ This section captures the load-bearing rationale behind the scoping rules above.
 
 ## Known Divergences / Open Questions
 
-- **Bare-column resolution from JOIN aliases inside `TableExpr` bodies.** When a `TableExpr` is provided by the caller as a complex expression (e.g. `smelt.ref('a') JOIN smelt.ref('b') ON …`), the body's bare-column resolution depends on the alias surface that survives the join. Phase 45 of `docs/plans/20260422-smelt-functions.md` covers the remaining work; until it lands, prefer explicit CTE renames inside the body.
+- **Bare-column resolution from JOIN aliases inside `TableExpr` bodies.** When a `TableExpr` is provided by the caller as a complex expression (e.g. `smelt.models.a JOIN smelt.models.b ON …`), the body's bare-column resolution depends on the alias surface that survives the join. Phase 45 of `docs/plans/20260422-smelt-functions.md` covers the remaining work; until it lands, prefer explicit CTE renames inside the body.
 - **CTE alpha-renaming is deferred** (research §16 #12). When a body CTE name collides with one introduced by an expansion frame, v1 emits a collision diagnostic rather than alpha-renaming. This is a hygiene gap, not a soundness gap; see `expansion.md` (when authored) for the planned v2 fix.
 - **`smelt.as_struct(...)`** as a no-overlap escape hatch is partially landed: the grammar parses and `AsStructUnsupportedBackend` is wired, but the full semantic finalisation (Step 8 of the smelt-functions plan, alongside struct row polymorphism) is post-v1. Treat Strategy 3 as design-sketch in v1.
 - **Ambiguous bare-column references** (a name reachable through two `TableExpr` parameters) currently surface as `UnknownIdentifier` with a hint rather than a dedicated `AmbiguousColumn` code. Whether to mint a distinct code is open.

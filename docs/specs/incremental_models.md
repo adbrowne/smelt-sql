@@ -31,7 +31,7 @@ incremental:
 ---
 
 SELECT order_date, customer_id, SUM(amount) AS total
-FROM smelt.ref('orders')
+FROM smelt.models.orders
 GROUP BY order_date, customer_id
 ```
 
@@ -90,7 +90,7 @@ DuckDB currently always uses `DeleteInsert`.
 For an incremental run with `[start, end)`:
 
 1. **DELETE** from the output table where `partition_column >= start AND partition_column < end`.
-2. **Inject** an AST-level `WHERE` filter on the model's logical SQL: `partition_column >= start AND partition_column < end`. The injection is per-model (whole-query), not per-`smelt.ref()`.
+2. **Inject** an AST-level `WHERE` filter on the model's logical SQL: `partition_column >= start AND partition_column < end`. The injection is per-model (whole-query), not per-`smelt.<path>` reference inside the body.
 3. **INSERT** the filtered query's result into the output table.
 
 This is idempotent: re-running the same `[start, end)` range produces the same final state.
@@ -139,7 +139,7 @@ Optional run-state tracking with gap detection is planned (Phase 5 of the increm
 1. **Logical model is pure SQL.** No `is_incremental()`, no `{{ ... }}` macros, no conditional branches. The same SQL describes both the full-build and the incremental-build behavior; the framework injects the time filter.
 2. **Strategy is not on the model.** Frontmatter declares `unique_key` and `partition_column`; the backend chooses `DeleteInsert` / `Merge` / etc. Model files do not name a strategy.
 3. **smelt does not manage computational state.** Watermarks, offsets, and run-history live in the backend. The framework only generates SQL artifacts.
-4. **Time filter injection is per-model.** The injected `WHERE` is applied to the outer model query once, not pushed into each `smelt.ref()` source. Source-level filtering depends on temporal-dependency analysis (planned).
+4. **Time filter injection is per-model.** The injected `WHERE` is applied to the outer model query once, not pushed into each `smelt.<path>` reference in the body. Source-level filtering depends on temporal-dependency analysis (planned).
 5. **Idempotence under fixed input.** For a given backend and unchanged source data, running the same `[start, end)` range repeatedly converges to the same output table state.
 6. **Granularity is closed under partition arithmetic.** A `[start, end)` range must align to whole granularity units; partial-unit ranges are rejected.
 7. **Safety check overrides are explicit.** A safety override must name the specific check it bypasses. There is no global "disable all safety checks" switch.
