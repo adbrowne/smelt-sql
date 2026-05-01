@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT channel, rating, os_name
-    FROM smelt.ref('subscriptions')
+    FROM smelt.models.subscriptions
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.rating
 FROM aggregated a
 INNER JOIN filtered f ON a.channel = f.channel
+

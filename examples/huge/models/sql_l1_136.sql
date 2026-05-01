@@ -10,4 +10,5 @@ SELECT
     segment,
     transaction_id,
     ROW_NUMBER() OVER (PARTITION BY segment ORDER BY created_at) AS win_val
-FROM smelt.ref('orders')
+FROM smelt.models.orders
+

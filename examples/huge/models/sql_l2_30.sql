@@ -11,5 +11,6 @@ SELECT
     profit,
     segment,
     tier
-FROM smelt.ref('sql_l1_96')
+FROM smelt.models.sql_l1_96
 WHERE platform = 'web'
+

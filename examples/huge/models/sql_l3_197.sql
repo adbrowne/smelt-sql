@@ -10,7 +10,8 @@ SELECT
     session_id,
     plan_type,
     event_type
-FROM smelt.ref('sql_l2_13')
+FROM smelt.models.sql_l2_13
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_99') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.models.sql_l2_99 WHERE category IS NOT NULL
 )
+

@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('week', event_time) AS period,
     SUM(revenue) AS metric_1,
     MIN(created_at) AS metric_2
-FROM smelt.ref('sql_l3_66')
+FROM smelt.models.sql_l3_66
 GROUP BY DATE_TRUNC('week', event_time)
+

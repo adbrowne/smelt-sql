@@ -11,5 +11,6 @@ SELECT
     plan_type,
     transaction_id,
     price
-FROM smelt.ref('sql_l2_126')
+FROM smelt.models.sql_l2_126
 WHERE platform = 'web'
+

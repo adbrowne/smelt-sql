@@ -10,7 +10,8 @@ SELECT
     status,
     duration_seconds,
     amount
-FROM smelt.ref('sql_l1_232')
+FROM smelt.models.sql_l1_232
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_63') WHERE score >= 50
+    SELECT user_id FROM smelt.models.sql_l1_63 WHERE score >= 50
 )
+

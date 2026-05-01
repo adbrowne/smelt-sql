@@ -30,9 +30,10 @@ SELECT
     COALESCE(user_id, 0) AS user_id_or_zero,
     GREATEST(event_id, user_id, 0) AS max_numeric,
     CONCAT(event_type, '-', event_type) AS doubled_event_type,
-    smelt.fn.widen_to_double(event_id) AS event_id_as_double,
+    smelt.functions.widen_to_double(event_id) AS event_id_as_double,
     STDDEV(event_id) AS stddev_event_id,
     NTILE(4) OVER (ORDER BY event_id) AS event_quartile,
     LEFT(event_type, 3) AS event_type_prefix,
     DATE_PART('year', ts) AS event_year
-FROM smelt.source('source.events')
+FROM smelt.sources.source.events
+

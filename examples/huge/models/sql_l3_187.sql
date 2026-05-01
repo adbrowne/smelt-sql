@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT session_id, browser, revenue
-    FROM smelt.ref('sql_l2_51')
+    FROM smelt.models.sql_l2_51
     WHERE quantity > 0
 )
 SELECT
     b.session_id,
     AVG(price) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l2_123') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l2_123 j ON b.user_id = j.user_id
 GROUP BY b.session_id
+

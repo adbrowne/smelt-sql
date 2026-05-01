@@ -11,5 +11,6 @@ SELECT
     region,
     os_name,
     transaction_id
-FROM smelt.ref('sql_l2_89')
+FROM smelt.models.sql_l2_89
 WHERE country = 'US'
+

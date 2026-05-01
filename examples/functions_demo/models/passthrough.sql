@@ -4,4 +4,5 @@ SELECT
     event_id,
     user_id,
     event_type
-FROM smelt.source('source.events')
+FROM smelt.sources.source.events
+

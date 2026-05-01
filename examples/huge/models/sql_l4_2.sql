@@ -10,5 +10,6 @@ SELECT
     channel,
     AVG(amount) AS agg_0,
     COUNT(*) AS agg_1
-FROM smelt.ref('sql_l3_96')
+FROM smelt.models.sql_l3_96
 GROUP BY channel
+

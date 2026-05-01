@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cost, page_path, platform
-    FROM smelt.ref('sql_l1_77')
+    FROM smelt.models.sql_l1_77
     WHERE event_type = 'purchase'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.page_path
 FROM aggregated a
 INNER JOIN filtered f ON a.cost = f.cost
+

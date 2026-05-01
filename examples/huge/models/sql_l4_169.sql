@@ -12,5 +12,6 @@ SELECT
     AVG(amount) AS agg_1,
     COUNT(DISTINCT user_id) AS agg_2,
     SUM(amount) AS agg_3
-FROM smelt.ref('sql_l3_178')
+FROM smelt.models.sql_l3_178
 GROUP BY rating
+

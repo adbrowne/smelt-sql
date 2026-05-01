@@ -11,5 +11,6 @@ SELECT
     quantity,
     is_active,
     amount
-FROM smelt.ref('errors')
+FROM smelt.models.errors
 WHERE event_type = 'purchase'
+

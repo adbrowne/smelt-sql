@@ -2738,8 +2738,12 @@ pub fn resolve_ref_path(
         // workspace-relative path tuple, and compare.
         for file in workspace.files(db).iter().copied() {
             let file_path = file.path(db);
-            // Only consider SQL files for path resolution.
-            if file_path.extension().and_then(|e| e.to_str()) != Some("sql") {
+            // Accept .sql files, .py files (Python models whose content is
+            // generated SQL), and virtual `*.sql::model_name` paths created
+            // by multi-model file splitting.
+            let path_str = file_path.to_str().unwrap_or("");
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "sql" && ext != "py" && !path_str.contains(".sql::") {
                 continue;
             }
             // Match if file_path lives under project_root.

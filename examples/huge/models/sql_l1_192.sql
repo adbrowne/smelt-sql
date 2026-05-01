@@ -10,7 +10,8 @@ SELECT
     channel,
     country,
     browser
-FROM smelt.ref('signups')
+FROM smelt.models.signups
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('signups') WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.models.signups WHERE event_type = 'purchase'
 )
+

@@ -8,3 +8,4 @@
 -- The workspace remains diagnostic-clean so long as no call sites pass a
 -- wrong-typed argument.
 smelt.extern regex_match(text: Expr<Text>, pattern: Expr<Text>) -> Expr<Boolean>
+

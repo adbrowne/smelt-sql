@@ -11,5 +11,6 @@ SELECT
     discount,
     product_id,
     category
-FROM smelt.ref('sql_l1_163')
+FROM smelt.models.sql_l1_163
 WHERE is_active = true
+

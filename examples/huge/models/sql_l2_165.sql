@@ -11,5 +11,6 @@ SELECT
     transaction_id,
     channel,
     is_active
-FROM smelt.ref('sql_l1_221')
+FROM smelt.models.sql_l1_221
 WHERE status = 'active'
+

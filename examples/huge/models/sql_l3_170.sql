@@ -11,5 +11,6 @@ SELECT
     tier,
     order_id,
     is_verified
-FROM smelt.ref('sql_l2_71')
+FROM smelt.models.sql_l2_71
 WHERE score >= 50
+

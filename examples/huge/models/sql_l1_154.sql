@@ -10,6 +10,7 @@ SELECT
     profit,
     AVG(duration_seconds) AS val_1,
     AVG(amount) AS val_2
-FROM smelt.ref('logs')
+FROM smelt.models.logs
 GROUP BY profit
 HAVING COUNT(*) > 10
+

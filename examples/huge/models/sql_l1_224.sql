@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT user_id, profit, campaign_id
-    FROM smelt.ref('invoices')
+    FROM smelt.models.invoices
     WHERE platform = 'web'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.profit
 FROM aggregated a
 INNER JOIN filtered f ON a.user_id = f.user_id
+

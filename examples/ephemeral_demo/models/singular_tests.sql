@@ -6,3 +6,4 @@ materialization: test
 SELECT order_date, total_revenue
 FROM main.daily_revenue
 WHERE total_revenue < 0
+

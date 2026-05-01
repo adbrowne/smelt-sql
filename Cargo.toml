@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "tools/migrate_smelt_path"]
 exclude = ["crates/smelt-parser/fuzz"]
 resolver = "2"
 

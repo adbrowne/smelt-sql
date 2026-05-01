@@ -13,5 +13,6 @@ SELECT
     SUM(revenue) AS agg_2,
     MIN(created_at) AS agg_3,
     COUNT(DISTINCT user_id) AS agg_4
-FROM smelt.ref('sql_l3_2')
+FROM smelt.models.sql_l3_2
 GROUP BY discount
+

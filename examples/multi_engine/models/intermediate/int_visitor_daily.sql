@@ -19,5 +19,6 @@ SELECT
     MAX(session_start) AS last_session,
     COUNT(DISTINCT traffic_source) AS traffic_source_count,
     COUNT(DISTINCT device_type) AS device_count
-FROM smelt.ref('stg_sessions')
+FROM smelt.models.staging.stg_sessions
 GROUP BY visitor_id, session_date, country
+

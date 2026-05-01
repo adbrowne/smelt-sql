@@ -10,5 +10,6 @@ SELECT
     a.price,
     a.cost,
     b.category
-FROM smelt.ref('sql_l1_238') a
-INNER JOIN smelt.ref('sql_l1_151') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l1_238 a
+INNER JOIN smelt.models.sql_l1_151 b ON a.user_id = b.user_id
+

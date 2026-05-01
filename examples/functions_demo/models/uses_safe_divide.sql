@@ -11,9 +11,10 @@
 -- INTEGER `event_id`). These calls still flow through the hand-written
 -- inference match; Phase 9 rewires them through the new registry.
 SELECT
-    smelt.fn.safe_divide(user_id, event_id) AS safe_ratio,
+    smelt.functions.safe_divide(user_id, event_id) AS safe_ratio,
     LOWER(event_type) AS event_type_lower,
     UPPER(event_type) AS event_type_upper,
     LENGTH(event_type) AS event_type_len,
     ABS(event_id) AS event_id_abs
-FROM smelt.source('source.events')
+FROM smelt.sources.source.events
+

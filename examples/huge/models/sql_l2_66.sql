@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     MIN(created_at) AS metric_1,
     COUNT(*) AS metric_2
-FROM smelt.ref('sql_l1_224')
+FROM smelt.models.sql_l1_224
 GROUP BY DATE_TRUNC('month', event_time)
+

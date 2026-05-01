@@ -4,3 +4,4 @@
 -- into `try_registry_inference` so LUB(Integer, Double) = Double, and
 -- the body check passes without a ReturnTypeMismatch.
 smelt.define widen_to_double(x: Expr<Integer>) -> Expr<Double> AS (ABS(x))
+

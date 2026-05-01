@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT profit, cohort_date, transaction_id
-    FROM smelt.ref('sql_l1_170')
+    FROM smelt.models.sql_l1_170
     WHERE category IS NOT NULL
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.cohort_date
 FROM aggregated a
 INNER JOIN filtered f ON a.profit = f.profit
+

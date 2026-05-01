@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_date, duration_seconds, is_verified
-    FROM smelt.ref('campaigns')
+    FROM smelt.models.campaigns
     WHERE event_type = 'purchase'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.duration_seconds
 FROM aggregated a
 INNER JOIN filtered f ON a.event_date = f.event_date
+

@@ -13,5 +13,6 @@ SELECT
     AVG(price) AS agg_2,
     COUNT(*) AS agg_3,
     MIN(created_at) AS agg_4
-FROM smelt.ref('sql_l1_205')
+FROM smelt.models.sql_l1_205
 GROUP BY browser
+

@@ -5,3 +5,4 @@ smelt.define event_hour(
 ) -> Expr<BigInt> AS (
     EXTRACT(HOUR FROM event.ts)
 )
+

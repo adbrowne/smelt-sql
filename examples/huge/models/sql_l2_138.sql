@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT order_id, segment, is_verified
-    FROM smelt.ref('sql_l1_37')
+    FROM smelt.models.sql_l1_37
     WHERE is_active = true
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.segment
 FROM aggregated a
 INNER JOIN filtered f ON a.order_id = f.order_id
+

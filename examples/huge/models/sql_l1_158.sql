@@ -11,6 +11,7 @@ SELECT
     b.is_active,
     c.cohort_date,
     c.session_id
-FROM smelt.ref('refunds') a
-INNER JOIN smelt.ref('refunds') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('refunds') c ON a.user_id = c.user_id
+FROM smelt.models.refunds a
+INNER JOIN smelt.models.refunds b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.refunds c ON a.user_id = c.user_id
+

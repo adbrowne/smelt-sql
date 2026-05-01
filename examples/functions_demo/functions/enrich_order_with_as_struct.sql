@@ -14,3 +14,4 @@ smelt.define enrich_order_with_as_struct(
   FROM orders AS o
   JOIN customers AS c ON o.customer_id = c.customer_id
 )
+

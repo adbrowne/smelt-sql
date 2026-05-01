@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT plan_type, channel, revenue
-    FROM smelt.ref('sql_l1_89')
+    FROM smelt.models.sql_l1_89
     WHERE is_active = true
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.channel
 FROM aggregated a
 INNER JOIN filtered f ON a.plan_type = f.plan_type
+

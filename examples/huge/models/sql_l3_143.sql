@@ -11,5 +11,6 @@ SELECT
     referrer,
     country,
     price
-FROM smelt.ref('sql_l2_102')
+FROM smelt.models.sql_l2_102
 WHERE platform = 'web'
+

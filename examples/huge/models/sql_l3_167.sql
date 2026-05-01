@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT plan_type, score, is_verified
-    FROM smelt.ref('sql_l2_115')
+    FROM smelt.models.sql_l2_115
     WHERE event_type = 'purchase'
 )
 SELECT
     b.plan_type,
     AVG(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l2_43') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l2_43 j ON b.user_id = j.user_id
 GROUP BY b.plan_type
+

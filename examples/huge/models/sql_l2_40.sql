@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT ip_address, segment, os_name
-    FROM smelt.ref('sql_l1_47')
+    FROM smelt.models.sql_l1_47
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.segment
 FROM aggregated a
 INNER JOIN filtered f ON a.ip_address = f.ip_address
+

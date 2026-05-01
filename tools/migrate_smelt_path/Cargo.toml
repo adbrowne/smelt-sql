@@ -1,0 +1,19 @@
+[package]
+name = "migrate_smelt_path"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "migrate_smelt_path"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies]
+walkdir = "2"
+regex = "1"
+anyhow = "1"

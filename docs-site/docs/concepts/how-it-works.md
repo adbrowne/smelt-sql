@@ -2,7 +2,7 @@
 
 ## What is smelt
 
-smelt is a SQL-to-SQL compiler and orchestrator for data transformation pipelines. You write SQL models that reference each other using `smelt.ref()`, and smelt takes care of the rest: resolving dependencies, compiling to target-specific SQL, and executing against your database.
+smelt is a SQL-to-SQL compiler and orchestrator for data transformation pipelines. You write SQL models that reference each other using `smelt.models.<name>`, and smelt takes care of the rest: resolving dependencies, compiling to target-specific SQL, and executing against your database.
 
 ```sql
 -- models/marts/active_users.sql
@@ -12,7 +12,7 @@ materialization: table
 SELECT
     user_id,
     COUNT(*) AS login_count
-FROM smelt.ref('staging.user_logins')
+FROM smelt.models.staging.user_logins
 WHERE login_date >= CURRENT_DATE - INTERVAL '30 days'
 GROUP BY user_id
 ```
@@ -25,7 +25,7 @@ The core architectural insight behind smelt is the separation of **what to compu
 
 **Logical layer (what you write):**
 
-- SQL models with `smelt.ref()` calls
+- SQL models with `smelt.models.<name>` calls
 - YAML frontmatter for configuration
 - Pure data transformation logic
 
@@ -56,7 +56,7 @@ SQL Files --> Parse --> Analyze --> Plan --> Generate --> Execute
 :   The error-recovery parser produces a complete syntax tree even from incomplete or invalid SQL. This powers both the CLI and the LSP -- you get diagnostics and autocompletion while typing, not just at build time.
 
 **Analyze**
-:   Resolve `smelt.ref()` and `smelt.source()` calls to their targets. Infer column types. Validate schemas and detect mismatches. Build the dependency graph.
+:   Resolve `smelt.models.<name>` and `smelt.sources.<name>` calls to their targets. Infer column types. Validate schemas and detect mismatches. Build the dependency graph.
 
 **Plan**
 :   Determine execution order from the dependency graph. Detect optimization opportunities (predicate pushdown, model fusion). Choose materialization strategies. For incremental models, generate the appropriate merge logic.
@@ -95,7 +95,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT * FROM smelt.ref('events')
+SELECT * FROM smelt.models.events
 ```
 
 ### Automatic incrementalization
@@ -108,7 +108,7 @@ You declare *intent* (enable incremental with a partition column), and smelt han
 
 The smelt LSP catches errors before you run anything:
 
-- Undefined `smelt.ref()` targets
+- Undefined `smelt.models.<name>` targets
 - Column type mismatches between models
 - Schema validation against source definitions
 - Parse errors with precise line/column positions
@@ -130,10 +130,10 @@ Model
 :   A SQL file in `models/` that defines a data transformation. Each model produces one table or view.
 
 Ref
-:   `smelt.ref('model_name')` creates a dependency on another model. smelt resolves these to actual table names and ensures correct execution order.
+:   `smelt.models.model_name` creates a dependency on another model. smelt resolves these to actual table names and ensures correct execution order.
 
 Source
-:   `smelt.source('schema.table')` references an external table defined in `sources.yml`. Sources are not managed by smelt but are validated for schema correctness.
+:   `smelt.sources.schema.table` references an external table defined in `sources.yml`. Sources are not managed by smelt but are validated for schema correctness.
 
 Materialization
 :   How a model's results are persisted in the database: `table` (full rebuild), `view` (virtual), `ephemeral` (inlined into downstream queries), or `materialized_view`.

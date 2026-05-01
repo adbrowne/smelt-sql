@@ -10,6 +10,7 @@ SELECT
     quantity,
     SUM(quantity) AS val_1,
     AVG(price) AS val_2
-FROM smelt.ref('sql_l3_4')
+FROM smelt.models.sql_l3_4
 GROUP BY quantity
 HAVING COUNT(*) > 10
+

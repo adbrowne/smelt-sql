@@ -10,5 +10,6 @@ SELECT
     a.event_time,
     a.plan_type,
     b.browser
-FROM smelt.ref('sql_l1_135') a
-INNER JOIN smelt.ref('sql_l1_177') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l1_135 a
+INNER JOIN smelt.models.sql_l1_177 b ON a.user_id = b.user_id
+

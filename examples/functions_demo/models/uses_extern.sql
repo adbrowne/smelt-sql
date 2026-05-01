@@ -4,5 +4,6 @@
 -- unified resolver dispatches user-declared externs through the same path
 -- as `smelt.define` (minus the body re-walk), so this file must remain
 -- diagnostic-clean.
-SELECT smelt.fn.regex_match(event_type, 'prefix_.*') AS event_type_matches
-FROM smelt.source('source.events')
+SELECT smelt.functions.regex_match(event_type, 'prefix_.*') AS event_type_matches
+FROM smelt.sources.source.events
+

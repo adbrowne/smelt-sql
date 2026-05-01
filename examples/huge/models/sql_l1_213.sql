@@ -11,5 +11,6 @@ SELECT
     campaign_id,
     country,
     region
-FROM smelt.ref('sessions')
+FROM smelt.models.sessions
 WHERE event_type = 'purchase'
+

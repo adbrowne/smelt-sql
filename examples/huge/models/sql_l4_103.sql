@@ -10,5 +10,6 @@ SELECT
     a.plan_type,
     a.event_type,
     b.region
-FROM smelt.ref('sql_l3_236') a
-LEFT JOIN smelt.ref('sql_l3_236') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_236 a
+LEFT JOIN smelt.models.sql_l3_236 b ON a.user_id = b.user_id
+

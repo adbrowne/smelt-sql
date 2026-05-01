@@ -11,5 +11,6 @@ SELECT
     order_id,
     country,
     is_active
-FROM smelt.ref('reviews')
+FROM smelt.models.reviews
 WHERE is_active = true
+

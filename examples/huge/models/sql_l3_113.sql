@@ -10,5 +10,6 @@ SELECT
     revenue,
     AVG(price) AS agg_0,
     AVG(amount) AS agg_1
-FROM smelt.ref('sql_l2_16')
+FROM smelt.models.sql_l2_16
 GROUP BY revenue
+

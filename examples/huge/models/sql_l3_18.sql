@@ -10,4 +10,5 @@ SELECT
     category,
     browser,
     RANK() OVER (PARTITION BY category ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l2_18')
+FROM smelt.models.sql_l2_18
+

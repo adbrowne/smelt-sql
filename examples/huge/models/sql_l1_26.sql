@@ -11,5 +11,6 @@ SELECT
     ip_address,
     product_id,
     country
-FROM smelt.ref('campaigns')
+FROM smelt.models.campaigns
 WHERE event_type = 'purchase'
+

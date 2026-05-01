@@ -10,7 +10,8 @@ SELECT
     status,
     device_type,
     session_id
-FROM smelt.ref('sql_l1_164')
+FROM smelt.models.sql_l1_164
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_164') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.models.sql_l1_164 WHERE category IS NOT NULL
 )
+

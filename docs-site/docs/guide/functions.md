@@ -64,19 +64,19 @@ smelt.define sessionize(
 
 ## Calling a function
 
-Use `smelt.fn.<name>()` to call a user-defined function:
+Use `smelt.functions.<name>()` to call a user-defined function:
 
 ```sql
 -- In a model file
 SELECT
-  smelt.fn.safe_divide(revenue, cost) AS margin
-FROM smelt.ref('orders')
+  smelt.functions.safe_divide(revenue, cost) AS margin
+FROM smelt.models.orders
 ```
 
 For namespace-qualified names (e.g. if the function file uses a subdirectory):
 
 ```sql
-SELECT smelt.fn.analytics.safe_divide(a, b)
+SELECT smelt.functions.analytics.safe_divide(a, b)
 ```
 
 ### Named arguments
@@ -85,8 +85,8 @@ Pass arguments by name to improve readability or skip over defaulted parameters:
 
 ```sql
 SELECT *
-FROM smelt.fn.sessionize(
-  smelt.ref('events'),
+FROM smelt.functions.sessionize(
+  smelt.models.events,
   user_col => user_id,
   ts_col   => event_time,
   gap      => INTERVAL '1 hour'
@@ -170,7 +170,7 @@ Fragment sorts are the key to composable pipelines. They let you pass table-valu
 
 ### TableExpr — table-valued parameters
 
-`TableExpr` parameters accept a table reference (`smelt.ref(...)`, `smelt.source(...)`, a CTE, or a subquery):
+`TableExpr` parameters accept a table reference (`smelt.models.<name>`, `smelt.sources.<name>`, a CTE, or a subquery):
 
 ```sql
 smelt.define add_margin(
@@ -184,7 +184,7 @@ smelt.define add_margin(
 Call it with any table that has at least those columns:
 
 ```sql
-SELECT * FROM smelt.fn.add_margin(smelt.ref('orders'))
+SELECT * FROM smelt.functions.add_margin(smelt.models.orders)
 ```
 
 The row-requirement annotation `TableExpr<{revenue: Numeric, cost: Numeric}>` is checked at each call site — the compiler reports a `RowRequirementMissing` diagnostic if the supplied table is missing a required column.
@@ -202,7 +202,7 @@ smelt.define session_rollup(
   metrics: SelectItems<Agg, sessionized> = ()
 ) -> TableExpr AS (
   WITH sessionized AS (
-    SELECT * FROM smelt.fn.sessionize(source, user_col, ts_col, gap)
+    SELECT * FROM smelt.functions.sessionize(source, user_col, ts_col, gap)
   )
   SELECT
     user_col, session_id,
@@ -224,8 +224,8 @@ Instead of passing `SelectItems` arguments inline, use a trailing `PASSING` clau
 
 ```sql
 -- Inline style
-SELECT * FROM smelt.fn.session_rollup(
-  smelt.source('source.events'),
+SELECT * FROM smelt.functions.session_rollup(
+  smelt.sources.source.events,
   user_col => user_id,
   ts_col   => event_time,
   metrics  => (COUNT(*) AS event_count, SUM(amount) AS total_amount)
@@ -233,8 +233,8 @@ SELECT * FROM smelt.fn.session_rollup(
 
 -- Block style with PASSING
 SELECT *
-FROM smelt.fn.session_rollup(
-  smelt.source('source.events'),
+FROM smelt.functions.session_rollup(
+  smelt.sources.source.events,
   user_col => user_id,
   ts_col   => event_time
 ) PASSING metrics AS (
@@ -246,7 +246,7 @@ FROM smelt.fn.session_rollup(
 Multiple PASSING clauses are allowed (one per fragment parameter):
 
 ```sql
-FROM smelt.fn.session_rollup(source, user_id, ts)
+FROM smelt.functions.session_rollup(source, user_id, ts)
 PASSING metrics AS (COUNT(*), SUM(revenue))
 PASSING filters AS (amount > 0)
 ```
@@ -264,7 +264,7 @@ smelt.extern regex_match(
 ) -> Expr<Boolean>
 ```
 
-The function is then callable as `smelt.fn.regex_match(col, 'pattern')` with full type checking at call sites. Unlike `smelt.define`, there is no `AS (...)` body.
+The function is then callable as `smelt.functions.regex_match(col, 'pattern')` with full type checking at call sites. Unlike `smelt.define`, there is no `AS (...)` body.
 
 !!! note
     `smelt.extern` only accepts scalar (`Expr<T>`) and table (`TableExpr`) parameter types. Fragment-sort parameters (`SelectItems`, `AggExpr`, `WindowExpr`) are not supported on extern declarations.
@@ -350,7 +350,7 @@ smelt.define add_margin_with_provenance(
 |---|---|---|
 | `ArgTypeMismatch` | Argument type doesn't satisfy the parameter constraint | CAST the argument or widen the annotation |
 | `MissingArgument` | A required parameter was not supplied | Provide the argument or add a default |
-| `UnknownSmeltFn` | `smelt.fn.name` not found in any function file | Check the name and ensure the file is in `functions/` |
+| `UnknownSmeltFn` | `smelt.functions.name` not found in any function file | Check the name and ensure the file is in `functions/` |
 | `FunctionBodyTypeMismatch` | A subexpression in the body has an unexpected type | Fix the body expression |
 | `ReturnTypeMismatch` | Body evaluates to a type incompatible with the `-> Expr<T>` return annotation | Adjust the body or the declared return type |
 | `RowRequirementMissing` | A `TableExpr` argument is missing a required column | Ensure the table has the column, or relax the row-requirement annotation |

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT user_id, segment, order_id
-    FROM smelt.ref('sql_l3_247')
+    FROM smelt.models.sql_l3_247
     WHERE amount > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.segment
 FROM aggregated a
 INNER JOIN filtered f ON a.user_id = f.user_id
+

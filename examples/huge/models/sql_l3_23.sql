@@ -10,4 +10,5 @@ SELECT
     quantity,
     email_domain,
     ROW_NUMBER() OVER (PARTITION BY quantity ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l2_83')
+FROM smelt.models.sql_l2_83
+

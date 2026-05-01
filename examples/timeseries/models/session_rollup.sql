@@ -13,7 +13,7 @@ SELECT
   CASE WHEN GROUPING(platform)         = 1 THEN 'all' ELSE platform         END AS platform,
   CASE WHEN GROUPING(visit_campaign)   = 1 THEN 'all' ELSE visit_campaign   END AS visit_campaign,
   CASE WHEN GROUPING(product_category) = 1 THEN 'all' ELSE product_category END AS product_category
-FROM smelt.source('raw.sessions') AS sessions
+FROM smelt.sources.raw.sessions AS sessions
 GROUP BY CUBE(
   sessions.visit_source,
   sessions.platform,
@@ -21,3 +21,4 @@ GROUP BY CUBE(
   sessions.product_category,
   sessions.foo_bar
 )
+

@@ -4,3 +4,4 @@
 -- the actual model) lands in Phase 2a — until then this file is parser-only
 -- coverage.
 SELECT * FROM smelt.models.users
+

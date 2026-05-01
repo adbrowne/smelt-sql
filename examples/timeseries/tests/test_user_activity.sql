@@ -14,3 +14,4 @@ test:
     - {user_id: 1, user_name: Alice, total_events: 2}
     - {user_id: 2, user_name: Bob, total_events: 1}
 ---
+

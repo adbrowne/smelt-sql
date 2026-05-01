@@ -11,6 +11,7 @@ SELECT
     b.cost,
     c.updated_at,
     c.event_date
-FROM smelt.ref('sql_l3_143') a
-INNER JOIN smelt.ref('sql_l3_1') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sql_l3_104') c ON a.user_id = c.user_id
+FROM smelt.models.sql_l3_143 a
+INNER JOIN smelt.models.sql_l3_1 b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.sql_l3_104 c ON a.user_id = c.user_id
+

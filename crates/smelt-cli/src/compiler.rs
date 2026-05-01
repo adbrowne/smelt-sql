@@ -394,8 +394,10 @@ impl SqlCompiler {
 
         Box::new(move |segs: &[String]| {
             match segs {
-                // smelt.models.<name>
-                [ns, name] if ns == "models" => {
+                // smelt.models.<path...>.<name> — subdirectory models use the
+                // leaf segment as the physical table name.
+                [ns, rest @ ..] if ns == "models" && !rest.is_empty() => {
+                    let name = rest.last().expect("rest non-empty");
                     if let Some(parquet_expr) = cross_engine_refs.get(name) {
                         Some(parquet_expr.clone())
                     } else {

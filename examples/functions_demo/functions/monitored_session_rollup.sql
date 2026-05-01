@@ -20,10 +20,11 @@ smelt.define monitored_session_rollup(
     alerts: SelectItems<Agg, base> = ()
 ) -> TableExpr AS (
     WITH base AS (
-        smelt.fn.session_rollup(source, user_col, ts_col)
+        smelt.functions.session_rollup(source, user_col, ts_col)
         PASSING metrics AS (metrics)
     )
     SELECT base.*,
         alerts
     FROM base
 )
+

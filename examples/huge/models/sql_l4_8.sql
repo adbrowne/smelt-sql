@@ -10,5 +10,6 @@ SELECT
     order_id,
     AVG(price) AS agg_0,
     AVG(amount) AS agg_1
-FROM smelt.ref('sql_l3_127')
+FROM smelt.models.sql_l3_127
 GROUP BY order_id
+

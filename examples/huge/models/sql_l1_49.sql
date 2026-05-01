@@ -10,7 +10,8 @@ SELECT
     is_verified,
     category,
     created_at
-FROM smelt.ref('orders')
+FROM smelt.models.orders
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('orders') WHERE created_at >= '2024-01-01'
+    SELECT user_id FROM smelt.models.orders WHERE created_at >= '2024-01-01'
 )
+

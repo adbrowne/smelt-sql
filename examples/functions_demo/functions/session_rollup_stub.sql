@@ -8,3 +8,4 @@ smelt.define session_rollup_stub(
 ) -> TableExpr AS (
     SELECT * FROM source WHERE filters
 )
+

@@ -10,5 +10,6 @@ SELECT
     a.profit,
     a.plan_type,
     b.channel
-FROM smelt.ref('sql_l3_124') a
-LEFT JOIN smelt.ref('sql_l3_124') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_124 a
+LEFT JOIN smelt.models.sql_l3_124 b ON a.user_id = b.user_id
+

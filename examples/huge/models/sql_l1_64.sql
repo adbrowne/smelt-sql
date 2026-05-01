@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT duration_seconds, event_type, event_date
-    FROM smelt.ref('sessions')
+    FROM smelt.models.sessions
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.event_type
 FROM aggregated a
 INNER JOIN filtered f ON a.duration_seconds = f.duration_seconds
+

@@ -11,6 +11,7 @@ SELECT
     b.region,
     c.revenue,
     c.event_type
-FROM smelt.ref('sql_l1_127') a
-INNER JOIN smelt.ref('sql_l1_181') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sql_l1_73') c ON a.user_id = c.user_id
+FROM smelt.models.sql_l1_127 a
+INNER JOIN smelt.models.sql_l1_181 b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.sql_l1_73 c ON a.user_id = c.user_id
+

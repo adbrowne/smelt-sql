@@ -10,7 +10,8 @@ SELECT
     page_path,
     email_domain,
     event_type
-FROM smelt.ref('sql_l3_36')
+FROM smelt.models.sql_l3_36
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_8') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.sql_l3_8 WHERE status = 'active'
 )
+

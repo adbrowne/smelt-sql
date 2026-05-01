@@ -10,7 +10,8 @@ SELECT
     event_date,
     user_id,
     tier
-FROM smelt.ref('sql_l3_210')
+FROM smelt.models.sql_l3_210
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_59') WHERE score >= 50
+    SELECT user_id FROM smelt.models.sql_l3_59 WHERE score >= 50
 )
+

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT channel, session_id, is_active
-    FROM smelt.ref('sql_l1_100')
+    FROM smelt.models.sql_l1_100
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.session_id
 FROM aggregated a
 INNER JOIN filtered f ON a.channel = f.channel
+

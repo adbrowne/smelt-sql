@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT is_active, platform, duration_seconds
-    FROM smelt.ref('sql_l1_159')
+    FROM smelt.models.sql_l1_159
     WHERE platform = 'web'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.platform
 FROM aggregated a
 INNER JOIN filtered f ON a.is_active = f.is_active
+

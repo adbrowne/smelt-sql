@@ -8,3 +8,4 @@ smelt.define margin_tier3(
          ELSE CAST(revenue - cost AS DOUBLE) / CAST(cost AS DOUBLE)
     END
 )
+

@@ -10,5 +10,6 @@ SELECT
     a.channel,
     a.campaign_id,
     b.cost
-FROM smelt.ref('reviews') a
-LEFT JOIN smelt.ref('reviews') b ON a.user_id = b.user_id
+FROM smelt.models.reviews a
+LEFT JOIN smelt.models.reviews b ON a.user_id = b.user_id
+

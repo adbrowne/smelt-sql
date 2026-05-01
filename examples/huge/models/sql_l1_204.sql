@@ -11,5 +11,6 @@ SELECT
     cost,
     product_id,
     duration_seconds
-FROM smelt.ref('clicks')
+FROM smelt.models.clicks
 WHERE created_at >= '2024-01-01'
+

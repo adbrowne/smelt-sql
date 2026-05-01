@@ -11,5 +11,6 @@ SELECT
     category,
     rating,
     event_type
-FROM smelt.ref('subscriptions')
+FROM smelt.models.subscriptions
 WHERE category IS NOT NULL
+

@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT created_at, product_id, device_type
-    FROM smelt.ref('invoices')
+    FROM smelt.models.invoices
     WHERE category IS NOT NULL
 )
 SELECT
     b.created_at,
     MAX(created_at) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('invoices') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.invoices j ON b.user_id = j.user_id
 GROUP BY b.created_at
+

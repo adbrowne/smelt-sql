@@ -10,7 +10,8 @@ SELECT
     country,
     updated_at,
     campaign_id
-FROM smelt.ref('payments')
+FROM smelt.models.payments
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('payments') WHERE country = 'US'
+    SELECT user_id FROM smelt.models.payments WHERE country = 'US'
 )
+

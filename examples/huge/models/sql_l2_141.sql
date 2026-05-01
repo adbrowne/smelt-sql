@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_type, os_name, email_domain
-    FROM smelt.ref('sql_l1_75')
+    FROM smelt.models.sql_l1_75
     WHERE is_active = true
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.os_name
 FROM aggregated a
 INNER JOIN filtered f ON a.event_type = f.event_type
+

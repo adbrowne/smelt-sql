@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_type, is_active, event_time
-    FROM smelt.ref('transactions')
+    FROM smelt.models.transactions
     WHERE quantity > 0
 )
 SELECT
     b.event_type,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('transactions') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.transactions j ON b.user_id = j.user_id
 GROUP BY b.event_type
+

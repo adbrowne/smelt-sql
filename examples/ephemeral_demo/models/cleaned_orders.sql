@@ -8,7 +8,7 @@ SELECT
     user_id,
     amount,
     created_at AS order_date
-FROM smelt.ref('raw_orders')
+FROM smelt.models.raw_orders
 WHERE status = 'completed'
 
 --- name: test_cleaned_orders ---
@@ -24,3 +24,4 @@ test:
     - {order_id: 1, user_id: 100, amount: 29.99, order_date: '2024-01-15'}
     - {order_id: 2, user_id: 101, amount: 49.99, order_date: '2024-01-15'}
 ---
+

@@ -10,6 +10,7 @@ SELECT
     amount,
     COUNT(*) AS val_1,
     COUNT(DISTINCT user_id) AS val_2
-FROM smelt.ref('sql_l3_52')
+FROM smelt.models.sql_l3_52
 GROUP BY amount
 HAVING COUNT(*) > 10
+

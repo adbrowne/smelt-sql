@@ -11,5 +11,6 @@ SELECT
     AVG(price) AS agg_0,
     COUNT(*) AS agg_1,
     AVG(amount) AS agg_2
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 GROUP BY status
+

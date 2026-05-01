@@ -11,5 +11,6 @@ SELECT
     order_id,
     duration_seconds,
     revenue
-FROM smelt.ref('notifications')
+FROM smelt.models.notifications
 WHERE category IS NOT NULL
+

@@ -18,5 +18,6 @@ SELECT
     ROUND(CAST(SUM(conversions) AS DOUBLE) / COUNT(DISTINCT visitor_id) * 100, 2) AS conversion_rate_pct,
     ROUND(CAST(SUM(total_page_views) AS DOUBLE) / SUM(session_count), 1) AS avg_pages_per_session,
     ROUND(SUM(total_revenue_cents) / 100.0 / NULLIF(SUM(conversions), 0), 2) AS avg_order_value
-FROM smelt.ref('int_visitor_daily')
+FROM smelt.models.intermediate.int_visitor_daily
 GROUP BY session_date
+

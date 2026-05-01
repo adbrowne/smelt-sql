@@ -167,7 +167,7 @@ When models on different backends reference each other, smelt automatically hand
 **How it works:**
 
 1. A Spark model writes its output as Parquet files in the warehouse directory
-2. A DuckDB model references the Spark model with `smelt.ref('spark_model')`
+2. A DuckDB model references the Spark model with `smelt.models.spark_model`
 3. smelt resolves the cross-engine reference and emits a `read_parquet()` call pointing to the Spark model's output files
 4. DuckDB natively reads the Parquet files -- no explicit copy step
 
@@ -200,7 +200,7 @@ models:
 -- models/reporting_summary.sql
 -- This ref resolves to read_parquet('warehouse/analytics/heavy_transform/**/*.parquet')
 SELECT category, SUM(amount) as total
-FROM smelt.ref('heavy_transform')
+FROM smelt.models.heavy_transform
 GROUP BY 1
 ```
 
@@ -209,7 +209,7 @@ GROUP BY 1
 
 ## Cross-engine SQL compilation
 
-smelt compiles SQL to the target's dialect automatically. You write standard SQL with `smelt.ref()` and `smelt.source()`, and smelt translates function calls, types, and syntax to match the target backend.
+smelt compiles SQL to the target's dialect automatically. You write standard SQL with `smelt.models.<name>` and `smelt.sources.<name>`, and smelt translates function calls, types, and syntax to match the target backend.
 
 !!! note
     Not all SQL features are available on all backends. If you use a backend-specific function, smelt will report an error when targeting a backend that does not support it.

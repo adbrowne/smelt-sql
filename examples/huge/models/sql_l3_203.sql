@@ -10,6 +10,7 @@ SELECT
     country,
     MAX(created_at) AS val_1,
     SUM(amount) AS val_2
-FROM smelt.ref('sql_l2_114')
+FROM smelt.models.sql_l2_114
 GROUP BY country
 HAVING COUNT(*) > 10
+

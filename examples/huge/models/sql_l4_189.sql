@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, session_id, region
-    FROM smelt.ref('sql_l3_238')
+    FROM smelt.models.sql_l3_238
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.session_id
 FROM aggregated a
 INNER JOIN filtered f ON a.amount = f.amount
+

@@ -11,6 +11,7 @@ SELECT
     b.revenue,
     c.tier,
     c.event_type
-FROM smelt.ref('shipments') a
-INNER JOIN smelt.ref('shipments') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('shipments') c ON a.user_id = c.user_id
+FROM smelt.models.shipments a
+INNER JOIN smelt.models.shipments b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.shipments c ON a.user_id = c.user_id
+

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, rating, category
-    FROM smelt.ref('sql_l3_116')
+    FROM smelt.models.sql_l3_116
     WHERE is_active = true
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.rating
 FROM aggregated a
 INNER JOIN filtered f ON a.amount = f.amount
+

@@ -113,3 +113,76 @@ fn ecommerce_no_diagnostics() {
 fn functions_demo_no_diagnostics() {
     check_workspace_no_diagnostics("examples/functions_demo");
 }
+
+/// Test 4 (TDD): All example SQL files must use the unified `smelt.<path>`
+/// syntax.  This test FAILS until the migration tool has been run on all
+/// example workspaces.
+#[test]
+fn all_examples_use_path_syntax() {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples");
+    let mut legacy_usages: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(&examples_dir) {
+        let entry = entry.unwrap();
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("sql") {
+            continue;
+        }
+        // `examples/broken/` is excluded: those fixtures intentionally use
+        // legacy `smelt.fn.*` syntax to trigger specific type diagnostics.
+        // Migrating them requires extending the function-call diagnostic
+        // system to handle `SmeltPathCall` nodes (deferred).
+        if entry.path().components().any(|c| c.as_os_str() == "broken") {
+            continue;
+        }
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        for (line_no, line) in content.lines().enumerate() {
+            // Skip comment lines
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("--") {
+                continue;
+            }
+            for pattern in &["smelt.ref(", "smelt.source(", "smelt.fn."] {
+                if line.contains(pattern) {
+                    legacy_usages.push(format!(
+                        "{}:{}: {}",
+                        entry.path().display(),
+                        line_no + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        legacy_usages.is_empty(),
+        "Found legacy smelt syntax in examples (must be migrated to smelt.<path>):\n{}",
+        legacy_usages.join("\n")
+    );
+}
+
+/// Test 5 (TDD): All known-good example workspaces must produce zero LSP
+/// diagnostics after migration.  This re-runs every non-broken workspace in
+/// one sweep so a migration regression is caught quickly.
+///
+/// The per-workspace `*_no_diagnostics` tests above also cover this — this
+/// test is a belt-and-suspenders sweep that makes the intent explicit.
+#[test]
+fn all_examples_have_zero_lsp_diagnostics_after_migration() {
+    // This serves as a combined check; the individual per-workspace tests
+    // above cover the same workspaces individually for better error messages.
+    for workspace in &[
+        "examples/timeseries",
+        "examples/retail_analytics",
+        "examples/test_workspace",
+        "examples/ephemeral_demo",
+        "examples/multi_engine",
+        "examples/ecommerce",
+        "examples/functions_demo",
+    ] {
+        check_workspace_no_diagnostics(workspace);
+    }
+}

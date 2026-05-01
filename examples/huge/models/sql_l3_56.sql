@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_time, referrer, duration_seconds
-    FROM smelt.ref('sql_l2_132')
+    FROM smelt.models.sql_l2_132
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.referrer
 FROM aggregated a
 INNER JOIN filtered f ON a.event_time = f.event_time
+

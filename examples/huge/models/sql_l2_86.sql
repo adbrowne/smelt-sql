@@ -11,5 +11,6 @@ SELECT
     amount,
     status,
     discount
-FROM smelt.ref('sql_l1_191')
+FROM smelt.models.sql_l1_191
 WHERE amount > 0
+

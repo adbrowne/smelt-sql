@@ -17,5 +17,6 @@ SELECT
     -- where TypeContext must learn column types from upstream MODELS, not
     -- just from sources.yml. (Bug #3 sub-case: B8.)
     o.gross_amount * o.qty AS line_revenue
-FROM smelt.source('raw.orders') AS o
-LEFT JOIN smelt.ref('order_statuses') AS s ON o.status_code = s.status_code
+FROM smelt.sources.raw.orders AS o
+LEFT JOIN smelt.models.order_statuses AS s ON o.status_code = s.status_code
+

@@ -10,6 +10,7 @@ SELECT
     cohort_date,
     MIN(created_at) AS val_1,
     COUNT(DISTINCT user_id) AS val_2
-FROM smelt.ref('sql_l3_217')
+FROM smelt.models.sql_l3_217
 GROUP BY cohort_date
 HAVING COUNT(*) > 10
+

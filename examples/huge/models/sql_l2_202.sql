@@ -10,7 +10,8 @@ SELECT
     created_at,
     os_name,
     ip_address
-FROM smelt.ref('sql_l1_16')
+FROM smelt.models.sql_l1_16
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_82') WHERE created_at >= '2024-01-01'
+    SELECT user_id FROM smelt.models.sql_l1_82 WHERE created_at >= '2024-01-01'
 )
+

@@ -10,7 +10,8 @@ SELECT
     duration_seconds,
     category,
     browser
-FROM smelt.ref('sql_l1_241')
+FROM smelt.models.sql_l1_241
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_130') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.models.sql_l1_130 WHERE category IS NOT NULL
 )
+

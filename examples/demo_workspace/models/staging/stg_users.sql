@@ -4,4 +4,5 @@ SELECT
     LOWER(email) AS email,
     signup_date,
     plan_type
-FROM smelt.source('raw.users')
+FROM smelt.sources.raw.users
+

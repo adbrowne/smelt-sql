@@ -10,7 +10,8 @@ SELECT
     created_at,
     event_time,
     session_id
-FROM smelt.ref('sql_l3_52')
+FROM smelt.models.sql_l3_52
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_151') WHERE quantity > 0
+    SELECT user_id FROM smelt.models.sql_l3_151 WHERE quantity > 0
 )
+

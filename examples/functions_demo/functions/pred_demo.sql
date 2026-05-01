@@ -8,3 +8,4 @@ smelt.define pred_demo(
 ) -> TableExpr AS (
     SELECT id, SUM(amount) AS total FROM source WHERE pred GROUP BY id HAVING pred
 )
+

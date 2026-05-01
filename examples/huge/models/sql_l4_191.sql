@@ -11,5 +11,6 @@ SELECT
     referrer,
     device_type,
     category
-FROM smelt.ref('sql_l3_130')
+FROM smelt.models.sql_l3_130
 WHERE is_active = true
+

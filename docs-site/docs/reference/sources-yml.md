@@ -114,11 +114,11 @@ Source tables declared in `sources.yml` serve several purposes:
 - **Documentation**: Descriptions provide context for source data in the project graph.
 - **LSP support**: The language server uses source definitions to provide diagnostics and completions.
 
-Models reference source tables using `smelt.source()` with the schema-qualified name:
+Models reference source tables using `smelt.sources.<name>` with the schema-qualified name:
 
 ```sql
 SELECT user_id, event_type, event_timestamp
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
 ```
 
 ---

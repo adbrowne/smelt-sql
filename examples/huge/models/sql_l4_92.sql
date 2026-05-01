@@ -11,5 +11,6 @@ SELECT
     region,
     category,
     is_verified
-FROM smelt.ref('sql_l3_176')
+FROM smelt.models.sql_l3_176
 WHERE score >= 50
+

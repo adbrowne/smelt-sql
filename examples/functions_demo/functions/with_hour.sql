@@ -6,3 +6,4 @@ smelt.define with_hour(
 ) -> Expr<Struct<{hour: BigInt, ..r}>> AS (
     {EXTRACT(HOUR FROM event.ts) AS hour, ..event}
 )
+

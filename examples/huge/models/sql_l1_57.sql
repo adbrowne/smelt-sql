@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_time, category, channel
-    FROM smelt.ref('invoices')
+    FROM smelt.models.invoices
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.category
 FROM aggregated a
 INNER JOIN filtered f ON a.event_time = f.event_time
+

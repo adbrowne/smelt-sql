@@ -149,6 +149,17 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                 let segs = path_ref.segments();
                 if let Some(sql) = resolver(&segs) {
                     out.push_str(&sql);
+                    // Re-emit trailing trivia (whitespace/comments) captured
+                    // inside this node by the parser's look-ahead skip_trivia
+                    // call. These are direct-child tokens after the SMELT_PATH
+                    // sub-node (e.g. the space before an `AS` alias).
+                    for child in node.children_with_tokens() {
+                        if let SyntaxElement::Token(t) = child {
+                            if t.kind().is_trivia() {
+                                out.push_str(t.text());
+                            }
+                        }
+                    }
                     return;
                 }
             }

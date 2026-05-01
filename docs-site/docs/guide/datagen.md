@@ -426,8 +426,8 @@ SELECT
     c.customer_id,
     c.segment,
     COUNT(*) as order_count
-FROM smelt.ref('raw', 'customers') c
-JOIN smelt.ref('raw', 'orders') o ON c.customer_id = o.customer_id
+FROM smelt.sources.raw.customers c
+JOIN smelt.sources.raw.orders o ON c.customer_id = o.customer_id
 GROUP BY c.customer_id, c.segment
 ```
 

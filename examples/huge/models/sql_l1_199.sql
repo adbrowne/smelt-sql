@@ -10,5 +10,6 @@ SELECT
     a.is_active,
     a.event_type,
     b.status
-FROM smelt.ref('payments') a
-LEFT JOIN smelt.ref('payments') b ON a.user_id = b.user_id
+FROM smelt.models.payments a
+LEFT JOIN smelt.models.payments b ON a.user_id = b.user_id
+

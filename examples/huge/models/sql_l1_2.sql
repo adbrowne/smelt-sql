@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT user_id, revenue, email_domain
-    FROM smelt.ref('invoices')
+    FROM smelt.models.invoices
     WHERE category IS NOT NULL
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.revenue
 FROM aggregated a
 INNER JOIN filtered f ON a.user_id = f.user_id
+

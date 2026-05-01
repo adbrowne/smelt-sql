@@ -13,5 +13,6 @@ SELECT
     SUM(amount) AS agg_2,
     AVG(duration_seconds) AS agg_3,
     AVG(price) AS agg_4
-FROM smelt.ref('page_views')
+FROM smelt.models.page_views
 GROUP BY event_date
+

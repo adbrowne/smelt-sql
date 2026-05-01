@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, category, referrer
-    FROM smelt.ref('orders')
+    FROM smelt.models.orders
     WHERE category IS NOT NULL
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.category
 FROM aggregated a
 INNER JOIN filtered f ON a.amount = f.amount
+

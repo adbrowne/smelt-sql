@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT email_domain, page_path, tier
-    FROM smelt.ref('sql_l1_175')
+    FROM smelt.models.sql_l1_175
     WHERE category IS NOT NULL
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.page_path
 FROM aggregated a
 INNER JOIN filtered f ON a.email_domain = f.email_domain
+

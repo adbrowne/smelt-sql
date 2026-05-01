@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT amount, segment, os_name
-    FROM smelt.ref('sql_l3_4')
+    FROM smelt.models.sql_l3_4
     WHERE platform = 'web'
 )
 SELECT
     b.amount,
     MAX(created_at) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l3_4') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l3_4 j ON b.user_id = j.user_id
 GROUP BY b.amount
+

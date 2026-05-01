@@ -20,4 +20,5 @@ SELECT
     SUM(CASE WHEN o.status_code = 'RT' THEN o.line_revenue ELSE 0.0 END)
         AS qualified_returned_revenue,
     SUM(COALESCE(o.line_revenue, 0.0)) AS qualified_coalesced_revenue
-FROM smelt.ref('stg_orders') AS o
+FROM smelt.models.stg_orders AS o
+

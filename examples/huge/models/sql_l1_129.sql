@@ -6,6 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT referrer, channel, profit, 'source_0' AS source_tag FROM smelt.ref('orders')
+SELECT referrer, channel, profit, 'source_0' AS source_tag FROM smelt.models.orders
 UNION ALL
-SELECT referrer, channel, profit, 'source_1' AS source_tag FROM smelt.ref('orders')
+SELECT referrer, channel, profit, 'source_1' AS source_tag FROM smelt.models.orders
+

@@ -13,5 +13,6 @@ SELECT
     AVG(price) AS agg_2,
     MAX(created_at) AS agg_3,
     COUNT(DISTINCT user_id) AS agg_4
-FROM smelt.ref('payments')
+FROM smelt.models.payments
 GROUP BY referrer
+

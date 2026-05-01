@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT ip_address, cohort_date, email_domain
-    FROM smelt.ref('sql_l1_179')
+    FROM smelt.models.sql_l1_179
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.cohort_date
 FROM aggregated a
 INNER JOIN filtered f ON a.ip_address = f.ip_address
+

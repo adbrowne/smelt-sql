@@ -11,5 +11,6 @@ SELECT
     email_domain,
     event_date,
     channel
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 WHERE category IS NOT NULL
+

@@ -11,4 +11,5 @@ SELECT
         WHEN store_size = 'Small' THEN 'S'
         ELSE 'Unknown'
     END AS store_size_code
-FROM smelt.source('raw.stores')
+FROM smelt.sources.raw.stores
+

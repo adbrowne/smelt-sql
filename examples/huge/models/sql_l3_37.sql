@@ -10,6 +10,7 @@ SELECT
     status,
     AVG(price) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.ref('sql_l2_158')
+FROM smelt.models.sql_l2_158
 GROUP BY status
 HAVING COUNT(*) > 10
+

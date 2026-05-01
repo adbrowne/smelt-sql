@@ -10,7 +10,8 @@ SELECT
     email_domain,
     amount,
     is_verified
-FROM smelt.ref('sql_l2_0')
+FROM smelt.models.sql_l2_0
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_29') WHERE platform = 'web'
+    SELECT user_id FROM smelt.models.sql_l2_29 WHERE platform = 'web'
 )
+

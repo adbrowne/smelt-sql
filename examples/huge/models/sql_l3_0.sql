@@ -10,7 +10,8 @@ SELECT
     country,
     price,
     is_active
-FROM smelt.ref('sql_l2_109')
+FROM smelt.models.sql_l2_109
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_225') WHERE platform = 'web'
+    SELECT user_id FROM smelt.models.sql_l2_225 WHERE platform = 'web'
 )
+

@@ -11,6 +11,7 @@ SELECT
     b.is_verified,
     c.campaign_id,
     c.plan_type
-FROM smelt.ref('reviews') a
-INNER JOIN smelt.ref('reviews') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('reviews') c ON a.user_id = c.user_id
+FROM smelt.models.reviews a
+INNER JOIN smelt.models.reviews b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.reviews c ON a.user_id = c.user_id
+

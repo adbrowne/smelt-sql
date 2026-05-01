@@ -6,7 +6,7 @@ SELECT
     user_id,
     COUNT(*) AS order_count,
     SUM(amount) AS lifetime_value
-FROM smelt.ref('cleaned_orders')
+FROM smelt.models.cleaned_orders
 GROUP BY user_id
 
 --- name: test_user_totals ---
@@ -37,3 +37,4 @@ test:
     - {user_id: 1, order_count: 2, lifetime_value: 300.0}
     - {user_id: 2, order_count: 1, lifetime_value: 50.0}
 ---
+
