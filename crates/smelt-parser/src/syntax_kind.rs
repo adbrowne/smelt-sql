@@ -220,6 +220,20 @@ pub enum SyntaxKind {
     SMELT_FN_CALL, // smelt.fn.namespace.name(args)
     CALL_PATH,     // The dotted call path inside a SMELT_FN_CALL (incl. `smelt.fn.` prefix)
 
+    // Unified `smelt.<path>` value reference and call form (smelt.<path> migration, Phase 1)
+    //
+    // SMELT_PATH_REF: `smelt.<seg>(.<seg>)*` with no trailing `(`. Used in
+    //   FROM/argument position to refer to any project-defined entity by its
+    //   workspace-relative path (model, function, seed, source, test).
+    // SMELT_PATH_CALL: same path followed by `(args)` and optional PASSING
+    //   clauses. Used to call parameterised entities (functions, parameterised
+    //   models). Coexists with `SMELT_FN_CALL` in Phase 1 — Phase 4 removes
+    //   the legacy node.
+    SMELT_PATH_REF,
+    SMELT_PATH_CALL,
+    SMELT_PATH, // Dotted path inside a SMELT_PATH_REF / SMELT_PATH_CALL — the
+    // tokens AFTER the leading `smelt.` prefix (which is also captured here).
+
     // PASSING clauses (Phase 28)
     PASSING_CLAUSE, // One clause: PASSING <name> AS ( <body> )
     PASSING_NAME,   // The identifier after PASSING

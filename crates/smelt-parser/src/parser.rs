@@ -453,6 +453,82 @@ impl<'a> Parser<'a> {
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is
+    /// the start of a unified `smelt.<path>` form (smelt.<path> migration,
+    /// Phase 1). Does not consume any tokens.
+    ///
+    /// The trigger is `IDENT("smelt") DOT IDENT(<seg>)` where `<seg>` is NOT
+    /// one of the existing legacy / built-in second segments:
+    /// `fn`, `define`, `extern`, `as_struct`, `ref`, `source`, `metric`. Those
+    /// keep their existing parser paths in Phase 1 and are removed only in
+    /// Phase 4.
+    ///
+    /// We do NOT look at what follows the second segment — the parser
+    /// disambiguates value form from call form (`SMELT_PATH_REF` vs.
+    /// `SMELT_PATH_CALL`) at parse time on the trailing `(`.
+    fn at_smelt_path_trigger(&self) -> bool {
+        // First non-trivia token must be IDENT "smelt".
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+
+        // Find the next non-trivia token: must be DOT.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead) {
+            Some(t) if t.kind == DOT => {}
+            _ => return false,
+        }
+
+        // Find the next non-trivia token: must be IDENT.
+        lookahead += 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + lookahead) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+
+        // Read the segment text without consuming.
+        let mut offset = self.offset;
+        for prior in 0..lookahead {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let seg = &self.input[offset..offset + tok.len];
+
+        // The unified path form does NOT steal from the existing legacy
+        // grammar. These second segments stay on their current paths in
+        // Phase 1.
+        const LEGACY: &[&str] = &[
+            "fn",
+            "define",
+            "extern",
+            "as_struct",
+            "ref",
+            "source",
+            "metric",
+        ];
+        for legacy in LEGACY {
+            if seg.eq_ignore_ascii_case(legacy) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
     /// the start of a `smelt.as_struct(...)` call. Does not consume any tokens.
     /// The trigger is exactly three non-trivia tokens:
     ///   IDENT("smelt")  DOT  IDENT("as_struct")
@@ -1572,6 +1648,106 @@ impl<'a> Parser<'a> {
         self.finish_node();
     }
 
+    /// Parse a unified `smelt.<seg>(.<seg>)*` value-form or
+    /// `smelt.<seg>(.<seg>)*(args) [PASSING ...]` call-form path
+    /// (smelt.<path> migration, Phase 1).
+    ///
+    /// Caller must have verified `at_smelt_path_trigger()` first. The minimal
+    /// valid form is `smelt.<seg>` with at least one segment after the
+    /// `smelt.` prefix. The parser disambiguates value vs. call by whether
+    /// `(` follows the final segment:
+    ///
+    /// * No trailing `(` → emits `SMELT_PATH_REF` containing one `SMELT_PATH`.
+    /// * Trailing `(` → emits `SMELT_PATH_CALL` containing one `SMELT_PATH`,
+    ///   one `ARG_LIST`, and zero or more trailing `PASSING_CLAUSE`s.
+    fn parse_smelt_path_form(&mut self) {
+        let outer_checkpoint = self.builder.checkpoint();
+
+        // Build the SMELT_PATH child first; we'll wrap with the right outer
+        // node (REF vs CALL) once we know whether `(` follows.
+        let path_checkpoint = self.builder.checkpoint();
+
+        // Consume `smelt . <seg>` — the trigger guarantees this shape.
+        self.skip_trivia();
+        self.advance(); // IDENT "smelt"
+        self.skip_trivia();
+        self.advance(); // DOT
+        self.skip_trivia();
+        self.advance(); // IDENT (first segment)
+
+        // Continue consuming `.<IDENT>` segments while present.
+        loop {
+            // Peek past trivia to the next non-trivia token.
+            let mut lookahead = 0;
+            while let Some(t) = self.tokens.get(self.pos + lookahead) {
+                if t.kind.is_trivia() {
+                    lookahead += 1;
+                } else {
+                    break;
+                }
+            }
+            let next_kind = self
+                .tokens
+                .get(self.pos + lookahead)
+                .map(|t| t.kind)
+                .unwrap_or(EOF);
+            if next_kind != DOT {
+                break;
+            }
+            // Peek past the DOT to require an IDENT after it.
+            let mut lookahead2 = lookahead + 1;
+            while let Some(t) = self.tokens.get(self.pos + lookahead2) {
+                if t.kind.is_trivia() {
+                    lookahead2 += 1;
+                } else {
+                    break;
+                }
+            }
+            let after_dot = self
+                .tokens
+                .get(self.pos + lookahead2)
+                .map(|t| t.kind)
+                .unwrap_or(EOF);
+            if after_dot != IDENT {
+                break;
+            }
+            self.skip_trivia();
+            self.advance(); // DOT
+            self.skip_trivia();
+            self.advance(); // IDENT
+        }
+
+        // Close the SMELT_PATH child node now that all segments are captured.
+        self.start_node_at(path_checkpoint, SMELT_PATH);
+        self.finish_node(); // SMELT_PATH
+
+        // Determine whether this is a call or a value form by peeking past
+        // any trivia for `(`.
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            // Call form. Wrap everything from the outer checkpoint in
+            // SMELT_PATH_CALL, parse the arg list, then any trailing PASSING
+            // clauses.
+            self.start_node_at(outer_checkpoint, SMELT_PATH_CALL);
+            self.parse_arg_list();
+
+            // Zero or more `PASSING <name> AS (<body>)` clauses (parity with
+            // smelt.fn.* — Phase 28 keeps this contextual keyword behaviour).
+            loop {
+                self.skip_trivia();
+                if !self.at_contextual_keyword("PASSING") {
+                    break;
+                }
+                self.parse_passing_clause();
+            }
+            self.finish_node(); // SMELT_PATH_CALL
+        } else {
+            // Value form. Wrap the path in SMELT_PATH_REF.
+            self.start_node_at(outer_checkpoint, SMELT_PATH_REF);
+            self.finish_node(); // SMELT_PATH_REF
+        }
+    }
+
     /// Parse a `smelt.fn.<segment>(.<segment>)*(args)` call as a `SMELT_FN_CALL`.
     ///
     /// The caller must have verified `at_smelt_fn_trigger()` first. The minimal
@@ -2006,6 +2182,24 @@ impl<'a> Parser<'a> {
             // Fall through to the shared trailing-shape handling below
             // (TABLESAMPLE, PIVOT/UNPIVOT, AS-alias) so a call in FROM
             // reads as `smelt.fn.f(args) [AS alias]`, etc.
+            self.skip_trivia();
+            if self.at(AS_KW) {
+                self.advance();
+                self.skip_trivia();
+                self.expect(IDENT);
+            } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
+                self.advance();
+            }
+            self.finish_node(); // TABLE_REF
+            return;
+        }
+
+        // smelt.<path> migration, Phase 1: unified value/call form. The
+        // trigger excludes the legacy second-segments (`fn`, `define`,
+        // `extern`, `as_struct`, `ref`, `source`, `metric`) so the existing
+        // grammar paths above and the FUNCTION_CALL path below stay intact.
+        if self.at(IDENT) && self.at_smelt_path_trigger() {
+            self.parse_smelt_path_form();
             self.skip_trivia();
             if self.at(AS_KW) {
                 self.advance();
@@ -2829,6 +3023,14 @@ impl<'a> Parser<'a> {
             // FUNCTION_CALL path because the trigger requires the second
             // segment to be exactly `fn`.
             self.parse_smelt_fn_call();
+        } else if self.at(IDENT) && self.at_smelt_path_trigger() {
+            // smelt.<path> value/call form (smelt.<path> migration, Phase 1).
+            // Must be checked BEFORE the generic IDENT branch — the generic
+            // namespaced-call path would consume only `smelt.<seg>` and leave
+            // any further segments dangling. The trigger excludes the legacy
+            // second-segments (`fn`, `define`, `extern`, `as_struct`, `ref`,
+            // `source`, `metric`) so existing grammar paths stay intact.
+            self.parse_smelt_path_form();
         } else if self.at(IDENT) {
             // Could be column reference, qualified name, or function call
             let checkpoint = self.builder.checkpoint();
@@ -3897,6 +4099,15 @@ impl<'a> Parser<'a> {
             // PASSING clauses. Wrap in SUBQUERY so `Cte::query()` returns Some.
             self.start_node(SUBQUERY);
             self.parse_smelt_fn_call();
+            self.finish_node();
+        } else if self.at_smelt_path_trigger() {
+            // smelt.<path> migration, Phase 1: a CTE body is a bare
+            // `smelt.<path>(args)` call (parity with the smelt.fn.* CTE body
+            // grammar above). The value form is also accepted here even
+            // though parameterless table-shaped paths are unusual — the
+            // resolver in Phase 2a decides the kind.
+            self.start_node(SUBQUERY);
+            self.parse_smelt_path_form();
             self.finish_node();
         } else {
             self.error("Expected SELECT, WITH, or VALUES in CTE".to_string());
@@ -7575,5 +7786,222 @@ LIMIT 100
             "Expected no parse errors, got: {:?}",
             result.errors
         );
+    }
+
+    // ===== smelt.<path> migration, Phase 1: unified value-form / call-form
+    // grammar (additive, coexists with legacy smelt.fn.* / smelt.ref / etc.).
+    // =====
+
+    use crate::ast::{SmeltPathCall, SmeltPathRef};
+
+    /// Helper: collect every `SmeltPathRef` descendant of a syntax node.
+    fn smelt_path_refs(root: &SyntaxNode) -> Vec<SmeltPathRef> {
+        root.descendants().filter_map(SmeltPathRef::cast).collect()
+    }
+
+    /// Helper: collect every `SmeltPathCall` descendant of a syntax node.
+    fn smelt_path_calls(root: &SyntaxNode) -> Vec<SmeltPathCall> {
+        root.descendants().filter_map(SmeltPathCall::cast).collect()
+    }
+
+    #[test]
+    fn parses_smelt_path_value_in_from() {
+        // `SELECT * FROM smelt.models.users` produces a single SmeltPathRef
+        // AST node with segments ["models", "users"] in the FROM position.
+        let input = "SELECT * FROM smelt.models.users";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let refs = smelt_path_refs(file.syntax());
+        assert_eq!(refs.len(), 1, "expected exactly one SMELT_PATH_REF");
+        assert_eq!(refs[0].segments(), vec!["models", "users"]);
+
+        // The path reference must sit under a FROM_CLAUSE ancestor.
+        let in_from = refs[0]
+            .syntax()
+            .ancestors()
+            .any(|n| n.kind() == FROM_CLAUSE);
+        assert!(in_from, "SMELT_PATH_REF must live under FROM_CLAUSE");
+
+        // No SMELT_PATH_CALL should be emitted for the value form.
+        assert!(
+            smelt_path_calls(file.syntax()).is_empty(),
+            "value-form smelt.<path> must not produce SMELT_PATH_CALL"
+        );
+    }
+
+    #[test]
+    fn parses_smelt_path_value_in_argument_position() {
+        // `f(smelt.models.users)` produces a SmeltPathRef arg, distinct from a
+        // function call. The outer `f(...)` is a FUNCTION_CALL whose argument
+        // list contains exactly one SMELT_PATH_REF.
+        let input = "SELECT f(smelt.models.users) FROM t";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let refs = smelt_path_refs(file.syntax());
+        assert_eq!(refs.len(), 1, "expected exactly one SMELT_PATH_REF");
+        assert_eq!(refs[0].segments(), vec!["models", "users"]);
+
+        // The SMELT_PATH_REF must NOT be a SMELT_PATH_CALL — distinct nodes.
+        assert!(
+            smelt_path_calls(file.syntax()).is_empty(),
+            "argument-position value form must not produce SMELT_PATH_CALL"
+        );
+
+        // The path reference sits inside an ARG_LIST under a FUNCTION_CALL.
+        let inside_arg_list = refs[0].syntax().ancestors().any(|n| n.kind() == ARG_LIST);
+        assert!(
+            inside_arg_list,
+            "SMELT_PATH_REF should sit inside an ARG_LIST"
+        );
+    }
+
+    #[test]
+    fn parses_smelt_path_call_with_positional_args() {
+        // `smelt.functions.patterns.session_rollup(events, 30)` parses as a
+        // SmeltPathCall with two positional args.
+        let input = "SELECT * FROM smelt.functions.patterns.session_rollup(events, 30)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_path_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected exactly one SMELT_PATH_CALL");
+        assert_eq!(
+            calls[0].segments(),
+            vec!["functions", "patterns", "session_rollup"]
+        );
+
+        let arg_list = calls[0].arg_list().expect("call must have ARG_LIST");
+        let positional = arg_list.positional_args();
+        assert_eq!(
+            positional.len(),
+            2,
+            "expected two positional arguments, got {}",
+            positional.len()
+        );
+
+        // Phase 1 must emit no value-form SMELT_PATH_REF for a call.
+        assert!(
+            smelt_path_refs(file.syntax()).is_empty(),
+            "call form must not also produce a SMELT_PATH_REF"
+        );
+    }
+
+    #[test]
+    fn parses_smelt_path_call_with_named_args() {
+        // `smelt.models.margins(product_summary => smelt.models.product_summary)`
+        // parses with a named-arg `=>` binding whose value is itself a
+        // SMELT_PATH_REF.
+        let input =
+            "SELECT * FROM smelt.models.margins(product_summary => smelt.models.product_summary)";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let calls = smelt_path_calls(file.syntax());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].segments(), vec!["models", "margins"]);
+
+        let arg_list = calls[0].arg_list().expect("must have arg list");
+        let named: Vec<_> = arg_list.named_params().collect();
+        assert_eq!(named.len(), 1, "expected one named param");
+        assert_eq!(named[0].name().as_deref(), Some("product_summary"));
+
+        // The value of the named parameter is a SMELT_PATH_REF.
+        let refs = smelt_path_refs(file.syntax());
+        assert_eq!(refs.len(), 1, "expected one nested SMELT_PATH_REF");
+        assert_eq!(refs[0].segments(), vec!["models", "product_summary"]);
+    }
+
+    #[test]
+    fn smelt_path_call_supports_passing_clause() {
+        // `smelt.<path>(args) PASSING name AS (body)` — parity with current
+        // `smelt.fn.*` PASSING grammar.
+        let input = "WITH base AS (\n    smelt.functions.session_rollup(source, 30)\n    PASSING metrics AS (COUNT(*))\n)\nSELECT * FROM base";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        let file = File::cast(parse.syntax()).unwrap();
+        let calls = smelt_path_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected exactly one SMELT_PATH_CALL");
+        let passing: Vec<_> = calls[0].passing_clauses().collect();
+        assert_eq!(passing.len(), 1, "expected exactly one PASSING_CLAUSE");
+        assert_eq!(passing[0].name().as_deref(), Some("metrics"));
+    }
+
+    #[test]
+    fn legacy_smelt_ref_still_parses() {
+        // Phase 1 keeps legacy compat: `smelt.ref('users')` continues to parse
+        // as a FUNCTION_CALL (no SMELT_PATH_REF / SMELT_PATH_CALL emitted).
+        let input = "SELECT * FROM smelt.ref('users')";
+        let (parse, file) = parse_file_text(input);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+
+        assert!(
+            smelt_path_refs(file.syntax()).is_empty(),
+            "smelt.ref(...) must NOT be parsed as SMELT_PATH_REF in Phase 1"
+        );
+        assert!(
+            smelt_path_calls(file.syntax()).is_empty(),
+            "smelt.ref(...) must NOT be parsed as SMELT_PATH_CALL in Phase 1"
+        );
+
+        let fcalls = function_calls(file.syntax());
+        let has_ref = fcalls.iter().any(|f| {
+            f.namespace()
+                .map(|ns| ns.eq_ignore_ascii_case("smelt"))
+                .unwrap_or(false)
+                && f.name()
+                    .map(|n| n.eq_ignore_ascii_case("ref"))
+                    .unwrap_or(false)
+        });
+        assert!(
+            has_ref,
+            "expected legacy smelt.ref(...) to still parse as FUNCTION_CALL"
+        );
+    }
+
+    #[test]
+    fn smelt_path_partial_forms_do_not_panic() {
+        // Architectural invariant: error-recovery must produce a CST without
+        // panics on partial / malformed path forms. Inputs like `smelt.`,
+        // `smelt.models.`, and `smelt.models.foo(` must each yield a Parse
+        // result; we don't care about the exact errors here.
+        for input in [
+            "SELECT * FROM smelt.",
+            "SELECT * FROM smelt.models.",
+            "SELECT * FROM smelt.models.foo(",
+            "SELECT smelt. FROM t",
+        ] {
+            // This call must not panic.
+            let parse = parse(input);
+            // We expect at least one parse error, but the parser must still
+            // produce a usable green tree.
+            let _ = File::cast(parse.syntax()).expect("parser must yield FILE");
+        }
     }
 }

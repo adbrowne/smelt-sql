@@ -106,7 +106,73 @@ pub fn has_smelt_extensions(sql: &str) -> bool {
     sql_lower.contains("smelt.ref(")
         || sql_lower.contains("smelt.source(")
         || sql_lower.contains("smelt.metric(")
+        || sql_lower.contains("smelt.fn.")
+        || has_smelt_path_form(&sql_lower)
         || sql.contains("=>") // Named parameters
+}
+
+/// Detect the unified `smelt.<path>` value-form / call-form prefix
+/// (smelt.<path> migration, Phase 1). Returns `true` when the SQL contains
+/// `smelt.<seg>` where `<seg>` is NOT one of the legacy second-segments
+/// (`ref`, `source`, `metric`, `fn`, `define`, `extern`, `as_struct`).
+///
+/// `sql_lower` is expected to already be ASCII-lowercased.
+fn has_smelt_path_form(sql_lower: &str) -> bool {
+    // `smelt.fn.` is handled by its own check in `has_smelt_extensions`; the
+    // explicit list here keeps the bare-segment forms out of the path bucket
+    // so existing classifications don't shift.
+    const LEGACY: &[&str] = &[
+        "smelt.ref(",
+        "smelt.source(",
+        "smelt.metric(",
+        "smelt.fn.",
+        "smelt.define ",
+        "smelt.define(",
+        "smelt.extern ",
+        "smelt.extern(",
+        "smelt.as_struct(",
+    ];
+
+    let bytes = sql_lower.as_bytes();
+    let mut i = 0;
+    while i + 6 < bytes.len() {
+        if let Some(start) = sql_lower[i..].find("smelt.") {
+            let abs = i + start;
+            // `smelt.` must not be preceded by an identifier char (avoid
+            // matching `xsmelt.foo`).
+            if abs > 0 {
+                let prev = bytes[abs - 1] as char;
+                if prev.is_ascii_alphanumeric() || prev == '_' {
+                    i = abs + 6;
+                    continue;
+                }
+            }
+
+            // Skip if this is one of the legacy second-segments.
+            let tail = &sql_lower[abs..];
+            if LEGACY.iter().any(|legacy| tail.starts_with(legacy)) {
+                i = abs + 6;
+                continue;
+            }
+
+            // `smelt.` followed by an identifier-start character is the
+            // unified path form. Anything else (operators, EOF) is not a
+            // valid path and we keep scanning.
+            let after = &sql_lower[abs + 6..];
+            if after
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic() || c == '_')
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            i = abs + 6;
+        } else {
+            break;
+        }
+    }
+    false
 }
 
 /// Compare parsing results between smelt and pg_query

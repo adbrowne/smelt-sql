@@ -3,7 +3,7 @@
 **Date**: 2026-05-01
 **Spec**: [`docs/specs/architecture.md`](../specs/architecture.md)
 **Spec diff**: `24f9891` (architecture unified) + `a2a150b` (downstream specs aligned) + working-tree edit removing the "pre-implementation" Known Divergence
-**Tracking PR / branch**: TBD (currently on `worktree-spec`; new tracking branch + PR opened before Phase 1)
+**Tracking PR / branch**: [#111](https://github.com/adbrowne/smelt-sql/pull/111) on `worktree-spec`
 **Docs**: code+docs
 
 ---
@@ -59,7 +59,7 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-05-01 |
 | 2a    | pending  |        |      |
 | 2b    | pending  |        |      |
 | 2c    | pending  |        |      |

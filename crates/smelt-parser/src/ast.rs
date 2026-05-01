@@ -712,6 +712,136 @@ impl SmeltAsStructCall {
     }
 }
 
+// ===== Unified `smelt.<path>` value-ref and call form (Phase 1 of the
+// smelt.<path> migration). Coexists with the legacy `SMELT_FN_CALL` /
+// `FUNCTION_CALL` paths until Phase 4. =====
+
+/// `smelt.<path>` value-form reference (no trailing `(args)`).
+///
+/// Produced by the parser for any `smelt.` prefix followed by a dotted path
+/// when no call-list follows. Used in FROM/argument position to address any
+/// project-defined entity (model, seed, source, function, test) by its
+/// workspace-relative path.
+///
+/// Phase 1 produces this node uniformly; kind dispatch (model vs. function
+/// vs. seed vs. source vs. test) is the data plane's job in Phase 2a.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltPathRef(SyntaxNode);
+
+impl SmeltPathRef {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_PATH_REF {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `SMELT_PATH` child holding the dotted path tokens (including the
+    /// leading `smelt` IDENT). Returns `None` only on error-recovery paths.
+    pub fn path(&self) -> Option<SmeltPath> {
+        self.0.children().find_map(SmeltPath::cast)
+    }
+
+    /// Path segments AFTER the leading `smelt` token. For `smelt.models.users`
+    /// this returns `["models", "users"]`. Empty if the path is malformed.
+    pub fn segments(&self) -> Vec<String> {
+        self.path().map(|p| p.segments()).unwrap_or_default()
+    }
+
+    /// Text range of the entire `SMELT_PATH_REF` node.
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
+}
+
+/// `smelt.<path>(<args>)` call form, with optional trailing `PASSING` clauses.
+///
+/// Produced by the parser for any `smelt.` prefix followed by a dotted path
+/// terminated by `(`. Used to call parameterised entities (functions,
+/// parameterised models). Coexists with the legacy `SMELT_FN_CALL` until
+/// Phase 4.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltPathCall(SyntaxNode);
+
+impl SmeltPathCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_PATH_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `SMELT_PATH` child holding the dotted path tokens (including the
+    /// leading `smelt` IDENT). Returns `None` only on error-recovery paths.
+    pub fn path(&self) -> Option<SmeltPath> {
+        self.0.children().find_map(SmeltPath::cast)
+    }
+
+    /// Path segments AFTER the leading `smelt` token.
+    pub fn segments(&self) -> Vec<String> {
+        self.path().map(|p| p.segments()).unwrap_or_default()
+    }
+
+    /// The argument list (`(args)`), if present.
+    pub fn arg_list(&self) -> Option<ArgList> {
+        self.0.children().find_map(ArgList::cast)
+    }
+
+    /// Iterate over the trailing `PASSING_CLAUSE` children, in source order.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
+
+    /// Text range of the entire `SMELT_PATH_CALL` node.
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
+}
+
+/// The dotted path inside a `SMELT_PATH_REF` or `SMELT_PATH_CALL`. Includes
+/// the leading `smelt` IDENT token as well as all subsequent dotted segments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltPath(SyntaxNode);
+
+impl SmeltPath {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_PATH {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The path segments AFTER the leading `smelt` IDENT — e.g. for
+    /// `smelt.models.users` returns `["models", "users"]`.
+    pub fn segments(&self) -> Vec<String> {
+        let idents: Vec<String> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .collect();
+        // Drop the leading `smelt` token. Error-recovery paths may produce a
+        // shorter token list — return whatever remains.
+        idents.into_iter().skip(1).collect()
+    }
+}
+
 /// The dotted path inside a `SMELT_FN_CALL` — includes the literal
 /// `smelt.fn.` prefix tokens as well as all subsequent namespace / name
 /// segments.
@@ -1319,6 +1449,18 @@ impl TableRef {
         self.0.children().find_map(SmeltFnCall::cast)
     }
 
+    /// Get the unified `smelt.<path>` value-form reference if this table ref
+    /// is one (smelt.<path> migration, Phase 1).
+    pub fn smelt_path_ref(&self) -> Option<SmeltPathRef> {
+        self.0.children().find_map(SmeltPathRef::cast)
+    }
+
+    /// Get the unified `smelt.<path>(args)` call if this table ref is one
+    /// (smelt.<path> migration, Phase 1).
+    pub fn smelt_path_call(&self) -> Option<SmeltPathCall> {
+        self.0.children().find_map(SmeltPathCall::cast)
+    }
+
     pub fn identifier(&self) -> Option<String> {
         self.0
             .children_with_tokens()
@@ -1475,9 +1617,8 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL | SMELT_AS_STRUCT_CALL => {
-                Some(Self(node))
-            }
+            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL | SMELT_AS_STRUCT_CALL
+            | SMELT_PATH_REF | SMELT_PATH_CALL => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1494,6 +1635,8 @@ impl Expr {
                             | IN_EXPR
                             | EXISTS_EXPR
                             | SMELT_FN_CALL
+                            | SMELT_PATH_REF
+                            | SMELT_PATH_CALL
                     )
                 }) {
                     Some(Self(node))
