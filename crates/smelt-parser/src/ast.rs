@@ -24,22 +24,6 @@ impl File {
         self.0.children().find_map(SelectStmt::cast)
     }
 
-    /// Find all ref('model') function calls in the file
-    pub fn refs(&self) -> impl Iterator<Item = RefCall> + '_ {
-        self.0
-            .descendants()
-            .filter_map(FunctionCall::cast)
-            .filter_map(RefCall::from_function_call)
-    }
-
-    /// Find all source('source.table') function calls in the file
-    pub fn sources(&self) -> impl Iterator<Item = SourceCall> + '_ {
-        self.0
-            .descendants()
-            .filter_map(FunctionCall::cast)
-            .filter_map(SourceCall::from_function_call)
-    }
-
     /// Iterate over top-level `smelt.define` declarations in this file.
     pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
         self.0.children().filter_map(SmeltDefine::cast)
@@ -1498,13 +1482,13 @@ impl TableRef {
         }
 
         // If we have more than one IDENT and no AS keyword, the last IDENT is an implicit alias
-        // But we need to be careful: for function calls like smelt.source('raw.users'),
+        // But we need to be careful: for function calls like smelt.sources.raw.users,
         // we don't want to return 'smelt' or 'source' as aliases
         if !found_as && ident_count > 1 && !self.is_function_call() {
             return last_ident;
         }
 
-        // For function calls with implicit alias (smelt.source('raw.users') t),
+        // For function calls with implicit alias (smelt.sources.raw.users t),
         // check if the last token is an IDENT that's not part of the function call
         if self.is_function_call() {
             // Get the function call's text range
@@ -1519,6 +1503,31 @@ impl TableRef {
                         }
                         break;
                     }
+                }
+            }
+        }
+
+        // For smelt.<path> value-form refs with implicit alias
+        // (smelt.models.users u), the SMELT_PATH_REF child is a node whose
+        // tokens don't appear in `children_with_tokens()` above. The alias
+        // IDENT IS a direct child token. If we have exactly one direct IDENT
+        // token (the alias) and a SMELT_PATH_REF child, return that token.
+        if let Some(path_ref) = self.smelt_path_ref() {
+            let path_range = path_ref.syntax().text_range();
+            if let Some(tok) = tokens.iter().rfind(|t| t.kind() == IDENT) {
+                if tok.text_range().start() >= path_range.end() {
+                    return Some(tok.text().to_string());
+                }
+            }
+        }
+
+        // For smelt.<path> call-form refs with implicit alias
+        // (smelt.models.f(x) u), same logic.
+        if let Some(path_call) = self.smelt_path_call() {
+            let call_range = path_call.syntax().text_range();
+            if let Some(tok) = tokens.iter().rfind(|t| t.kind() == IDENT) {
+                if tok.text_range().start() >= call_range.end() {
+                    return Some(tok.text().to_string());
                 }
             }
         }
@@ -2391,188 +2400,6 @@ impl NamedParam {
     /// Full text range of this NAMED_PARAM node (name + `=>` + value).
     pub fn text_range(&self) -> TextRange {
         self.0.text_range()
-    }
-}
-
-/// ref('model_name') function call wrapper
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RefCall(FunctionCall);
-
-impl RefCall {
-    /// Create a RefCall from a FunctionCall if it's a smelt.ref() call
-    pub fn from_function_call(func: FunctionCall) -> Option<Self> {
-        let name = func.name()?.to_lowercase();
-        let namespace = func.namespace()?; // Require namespace
-
-        // Only accept smelt.ref() - namespace is required
-        if name == "ref" && namespace.to_lowercase() == "smelt" {
-            Some(Self(func))
-        } else {
-            None
-        }
-    }
-
-    /// Get the underlying FunctionCall
-    pub fn function_call(&self) -> &FunctionCall {
-        &self.0
-    }
-
-    /// Get the model name from the ref call (first argument)
-    pub fn model_name(&self) -> Option<String> {
-        // Look for the first STRING token in the function call arguments
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| {
-                let text = t.text();
-                // Strip quotes
-                text.trim_start_matches('\'')
-                    .trim_start_matches('"')
-                    .trim_end_matches('\'')
-                    .trim_end_matches('"')
-                    .to_string()
-            })
-    }
-
-    /// Get the text range of the entire ref call
-    pub fn range(&self) -> TextRange {
-        self.0 .0.text_range()
-    }
-
-    /// Get the text range of just the model name string (inside quotes)
-    pub fn name_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| t.text_range())
-    }
-
-    /// Get the text range of the string content inside quotes (excluding the quote characters)
-    pub fn content_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| {
-                let range = t.text_range();
-                let text = t.text();
-                // STRING tokens include quotes — trim them
-                if text.len() >= 2 && (text.starts_with('\'') || text.starts_with('"')) {
-                    TextRange::new(
-                        range.start() + rowan::TextSize::from(1),
-                        range.end() - rowan::TextSize::from(1),
-                    )
-                } else {
-                    range
-                }
-            })
-    }
-
-    /// Get all named parameters from this ref call
-    pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
-        self.0.named_params()
-    }
-}
-
-/// source('source.table') function call wrapper
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SourceCall(FunctionCall);
-
-impl SourceCall {
-    /// Create a SourceCall from a FunctionCall if it's a smelt.source() call
-    pub fn from_function_call(func: FunctionCall) -> Option<Self> {
-        let name = func.name()?.to_lowercase();
-        let namespace = func.namespace()?;
-
-        if name == "source" && namespace.to_lowercase() == "smelt" {
-            Some(Self(func))
-        } else {
-            None
-        }
-    }
-
-    /// Get the qualified name from the source call (e.g., "raw.users")
-    pub fn qualified_name(&self) -> Option<String> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| {
-                let text = t.text();
-                text.trim_start_matches('\'')
-                    .trim_start_matches('"')
-                    .trim_end_matches('\'')
-                    .trim_end_matches('"')
-                    .to_string()
-            })
-    }
-
-    /// Get the source name (first part before the dot)
-    pub fn source_name(&self) -> Option<String> {
-        let qualified = self.qualified_name()?;
-        qualified.split('.').next().map(|s| s.to_string())
-    }
-
-    /// Get the table name (second part after the dot)
-    pub fn table_name(&self) -> Option<String> {
-        let qualified = self.qualified_name()?;
-        qualified.split('.').nth(1).map(|s| s.to_string())
-    }
-
-    /// Get the text range of the entire source call
-    pub fn range(&self) -> TextRange {
-        self.0 .0.text_range()
-    }
-
-    /// Get the text range of just the qualified name string (including quotes)
-    pub fn name_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| t.text_range())
-    }
-
-    /// Get the text range of just the table name portion inside the quoted string
-    /// For `source('raw.users')`, returns the range covering `users`
-    pub fn table_name_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .and_then(|t| {
-                let range = t.text_range();
-                let text = t.text();
-                // Strip outer quotes to get the qualified name
-                let inner = text
-                    .trim_start_matches('\'')
-                    .trim_start_matches('"')
-                    .trim_end_matches('\'')
-                    .trim_end_matches('"');
-                // Find the dot position in the inner text
-                if let Some(dot_pos) = inner.find('.') {
-                    // Table name starts after the dot, plus 1 for the opening quote
-                    let quote_offset = if text.starts_with('\'') || text.starts_with('"') {
-                        1u32
-                    } else {
-                        0
-                    };
-                    let table_start =
-                        range.start() + rowan::TextSize::from(quote_offset + dot_pos as u32 + 1);
-                    let table_end = range.end() - rowan::TextSize::from(quote_offset);
-                    Some(TextRange::new(table_start, table_end))
-                } else {
-                    None
-                }
-            })
     }
 }
 

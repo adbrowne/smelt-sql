@@ -13,5 +13,5 @@ smelt.define add_margin_local(source: TableExpr) -> TableExpr AS (
 
 SELECT *
 FROM smelt.fn.add_margin_local(
-  smelt.ref('fn_tableexpr_missing_col_other')
+  smelt.models.fn_tableexpr_missing_col_other
 ) AS m

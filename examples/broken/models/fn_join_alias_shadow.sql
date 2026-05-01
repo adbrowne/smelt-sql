@@ -11,12 +11,12 @@
 smelt.define shadow_join_local(name: Expr<Text>, orders: TableExpr<{order_id: BigInt}>) -> TableExpr AS (
   SELECT orders.order_id, name AS computed_name
   FROM orders
-  LEFT JOIN smelt.ref('fn_join_alias_shadow_other') AS y
+  LEFT JOIN smelt.models.fn_join_alias_shadow_other AS y
     ON orders.order_id = y.id
 )
 
 SELECT *
 FROM smelt.fn.shadow_join_local(
   'hi',
-  smelt.ref('fn_join_alias_shadow_other')
+  smelt.models.fn_join_alias_shadow_other
 ) AS m

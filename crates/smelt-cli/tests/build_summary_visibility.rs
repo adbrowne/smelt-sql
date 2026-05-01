@@ -55,7 +55,7 @@ fn build_emits_run_summary_to_stderr_on_success() {
         "build_summary_ws",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.ref('base')\n"),
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
         ],
     );
 
@@ -87,7 +87,7 @@ fn build_emits_run_summary_to_stderr_on_success() {
 // ---------------------------------------------------------------------------
 
 /// Phase 2c: `smelt build` on a workspace that uses path syntax
-/// (`smelt.models.base` instead of `smelt.ref('base')`) must exit 0 and
+/// (`smelt.models.base` instead of `smelt.models.base`) must exit 0 and
 /// report the correct model count in stderr.
 #[test]
 fn path_form_models_appear_in_build_summary() {

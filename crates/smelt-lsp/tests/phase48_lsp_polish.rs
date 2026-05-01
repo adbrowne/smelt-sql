@@ -181,7 +181,7 @@ fn lsp_hover_on_passing_clause_param_shows_param_signature() {
         )",
     );
     let model_sql =
-        "SELECT * FROM smelt.fn.session_rollup(smelt.ref('upstream')) PASSING metrics AS (COUNT(*)) AS sr";
+        "SELECT * FROM smelt.fn.session_rollup(smelt.models.upstream) PASSING metrics AS (COUNT(*)) AS sr";
     ws.add_model("upstream", "SELECT 1 AS x");
     let model_path = ws.add_model("caller", model_sql);
 

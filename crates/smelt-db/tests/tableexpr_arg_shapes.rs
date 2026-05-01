@@ -84,8 +84,9 @@ fn tableexpr_arg_from_derived_table() {
     let upstream_src = "SELECT \
         CAST(NULL AS DECIMAL(18, 2)) AS revenue, \
         CAST(NULL AS DECIMAL(18, 2)) AS cost\n";
+    // Phase 4: use path form (smelt.ref() is removed).
     let model_src = "SELECT margin FROM smelt.fn.add_margin(\
-        (SELECT revenue, cost FROM smelt.ref('rev_cost'))\
+        (SELECT revenue, cost FROM smelt.models.rev_cost)\
     )\n";
 
     let (db, ws, files) = build_db(
@@ -181,7 +182,7 @@ fn tableexpr_arg_unrecognised_shape_errors_clearly() {
 
 #[test]
 fn tableexpr_arg_from_smelt_ref_still_works() {
-    // Regression: Phase 15 baseline. Caller passes `smelt.ref('orders')`.
+    // Regression: Phase 15 baseline. Caller passes `smelt.models.orders`.
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
@@ -189,7 +190,8 @@ fn tableexpr_arg_from_smelt_ref_still_works() {
     let orders_src = "SELECT \
         CAST(NULL AS DECIMAL(18, 2)) AS revenue, \
         CAST(NULL AS DECIMAL(18, 2)) AS cost\n";
-    let model_src = "SELECT margin FROM smelt.fn.add_margin(smelt.ref('orders'))\n";
+    // Phase 4: use path form (smelt.ref() is removed).
+    let model_src = "SELECT margin FROM smelt.fn.add_margin(smelt.models.orders)\n";
 
     let (db, ws, files) = build_db(
         root,

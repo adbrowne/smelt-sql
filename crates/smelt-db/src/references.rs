@@ -14,7 +14,7 @@ use crate::{RefLocation, SourceLocation};
 
 /// Find all files that reference a given model name.
 ///
-/// Returns (file_path, range) pairs for each `smelt.ref('model_name')` call
+/// Returns (file_path, range) pairs for each `smelt.models.model_name` call
 /// that matches the given name.
 pub fn find_model_references(
     model_name: &str,
@@ -33,7 +33,7 @@ pub fn find_model_references(
 
 /// Find all files that reference a given source by qualified name (e.g., "raw.users").
 ///
-/// Returns (file_path, range) pairs for each `smelt.source('source.table')` call
+/// Returns (file_path, range) pairs for each `smelt.sources.source.table` call
 /// that matches the given qualified name.
 pub fn find_source_references(
     qualified_name: &str,

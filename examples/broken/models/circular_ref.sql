@@ -1,4 +1,4 @@
 -- Intentional circular dependency: references itself
 SELECT *
-FROM smelt.ref('circular_ref')
+FROM smelt.models.circular_ref
 LIMIT 10

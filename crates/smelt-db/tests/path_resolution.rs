@@ -170,11 +170,10 @@ SELECT * FROM smelt.fn.path_sub(
 }
 
 #[test]
-fn legacy_smelt_ref_still_resolves() {
-    // Phase 2a keeps the legacy `smelt.ref('users')` working through the
-    // adapter. The unified pipeline normalises the legacy node into a
-    // path tuple at the AST-walk boundary; the resolver then dispatches
-    // to the same model file. Phase 4 deletes this code path.
+fn legacy_smelt_ref_is_parse_error() {
+    // Phase 4: `smelt.ref('users')` is now a parse error. The parser must
+    // reject it and emit a ParseError diagnostic. No UndefinedModelRef
+    // should appear because the ref node is never constructed.
     let root = PathBuf::from("/fake/project");
     let users_path = root.join("models").join("users.sql");
     let users_src = "SELECT 1 AS id\n";
@@ -187,14 +186,14 @@ fn legacy_smelt_ref_still_resolves() {
     );
     let caller_file = files[1];
 
-    // Legacy-form: file_diagnostics must not emit UndefinedModelRef.
+    // Phase 4: smelt.ref() must emit a parse error diagnostic.
     let diags = file_diagnostics(&db, ws, caller_file);
-    let undef: Vec<_> = diags
+    let parse_errors: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::UndefinedModelRef))
+        .filter(|d| d.code == Some(DiagnosticCode::ParseError))
         .collect();
     assert!(
-        undef.is_empty(),
-        "legacy smelt.ref('users') must continue to resolve; got {diags:#?}"
+        !parse_errors.is_empty(),
+        "smelt.ref('users') must produce a ParseError diagnostic in Phase 4; got {diags:#?}"
     );
 }

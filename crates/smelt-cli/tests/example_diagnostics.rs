@@ -164,6 +164,30 @@ fn all_examples_use_path_syntax() {
     );
 }
 
+/// Phase 4 TDD: After legacy `smelt.ref()` and `smelt.source()` deletion, all
+/// known-good example workspaces must still produce zero diagnostics.  This is
+/// the named TDD gate for Phase 4 of the smelt-path migration plan.
+///
+/// This test will pass only when:
+///   1. All example SQL has been migrated from `smelt.ref()`/`smelt.source()` to
+///      `smelt.<path>` form (covered by `all_examples_use_path_syntax`), AND
+///   2. The parser correctly handles the new path form without introducing
+///      spurious parse errors.
+#[test]
+fn all_examples_clean_after_legacy_removal() {
+    for workspace in &[
+        "examples/timeseries",
+        "examples/retail_analytics",
+        "examples/test_workspace",
+        "examples/ephemeral_demo",
+        "examples/multi_engine",
+        "examples/ecommerce",
+        "examples/functions_demo",
+    ] {
+        check_workspace_no_diagnostics(workspace);
+    }
+}
+
 /// Test 5 (TDD): All known-good example workspaces must produce zero LSP
 /// diagnostics after migration.  This re-runs every non-broken workspace in
 /// one sweep so a migration regression is caught quickly.

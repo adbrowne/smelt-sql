@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::discovery::ModelFile;
-use crate::refs::PathLocator;
 use crate::selector::{SelectionMethod, Selector};
 use crate::SourcesConfig;
 use anyhow::{anyhow, Result};
@@ -73,16 +72,24 @@ impl DependencyGraph {
             }
         }
 
-        // Build dependency map. Only `LegacyRef` (smelt.ref('name')) entries
-        // are model-to-model deps in the string-keyed graph; LegacyFn / Path
-        // entries (functions, seeds, sources, path-form refs) are resolved by
-        // the path-tuple graph in `build_from_workspace`.
+        // Build dependency map from path-form refs. The string-keyed graph
+        // extracts model deps from `SmeltRef::Path` entries whose first
+        // segment is "models" (e.g. `["models", "users"]` -> dep "users").
+        // `smelt.models.name` was removed in Phase 4, so only path-form
+        // refs are present. Path-tuple resolution is also available via
+        // `build_from_workspace`.
         for model in models {
             let deps: Vec<String> = model
                 .refs
                 .iter()
-                .filter(|r| matches!(r.smelt_ref, crate::refs::SmeltRef::LegacyRef(_)))
-                .map(|r| r.model_name.clone())
+                .filter_map(|r| match &r.smelt_ref {
+                    crate::refs::SmeltRef::Path(segs)
+                        if segs.first().map(|s| s == "models").unwrap_or(false) =>
+                    {
+                        segs.last().cloned()
+                    }
+                    _ => None,
+                })
                 .collect();
 
             if let Some(existing) = models_map.get(&model.name) {
@@ -107,49 +114,21 @@ impl DependencyGraph {
 
     /// Build a path-tuple keyed dependency graph from a workspace.
     ///
-    /// Phase 2a of the smelt-`<path>` migration: every `smelt.<path>`
-    /// reference (path-form *or* legacy form, adapted via
-    /// [`SmeltRef::to_path`]) is keyed by the workspace-relative path
-    /// tuple of its referent. The result preserves the legacy
-    /// string-keyed dependency view (so existing callers keep working)
-    /// and additionally exposes [`path_dependencies`] for callers that
-    /// want the unified key.
-    ///
-    /// The path tuple is derived from each model's location relative to
-    /// the workspace root: `models/users.sql` becomes
-    /// `["models", "users"]`. Legacy `smelt.ref('name')` calls are
-    /// resolved through a [`PathLocator`] backed by the discovered
-    /// model set.
+    /// Every `smelt.<path>` reference is keyed by the workspace-relative
+    /// path tuple of its referent. The path tuple is derived from each
+    /// model's location relative to the workspace root:
+    /// `models/users.sql` becomes `["models", "users"]`.
     pub fn build_from_workspace(
         models: Vec<ModelFile>,
         sources: Option<&SourcesConfig>,
         workspace_root: &Path,
     ) -> Result<Self> {
-        // Build a name -> path-tuple locator from the discovered model set.
-        let name_to_path: HashMap<String, Vec<String>> = models
-            .iter()
-            .map(|m| {
-                let tuple = path_tuple_for_model(workspace_root, m);
-                (m.name.clone(), tuple)
-            })
-            .collect();
-        struct WorkspaceLocator<'a>(&'a HashMap<String, Vec<String>>);
-        impl<'a> PathLocator for WorkspaceLocator<'a> {
-            fn locate_model(&self, name: &str) -> Option<Vec<String>> {
-                self.0.get(name).cloned()
-            }
-        }
-        let locator = WorkspaceLocator(&name_to_path);
-
         // First, compute path-tuple edges per model.
         let mut path_dependencies: HashMap<Vec<String>, Vec<Vec<String>>> = HashMap::new();
         for model in &models {
             let model_tuple = path_tuple_for_model(workspace_root, model);
-            let edges: Vec<Vec<String>> = model
-                .refs
-                .iter()
-                .map(|r| r.smelt_ref.to_path(&locator))
-                .collect();
+            let edges: Vec<Vec<String>> =
+                model.refs.iter().map(|r| r.smelt_ref.to_path()).collect();
             path_dependencies.insert(model_tuple, edges);
         }
 
@@ -514,7 +493,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
-                smelt_ref: crate::refs::SmeltRef::LegacyRef(dep.to_string()),
+                smelt_ref: crate::refs::SmeltRef::Path(vec!["models".to_string(), dep.to_string()]),
             })
             .collect();
 
@@ -640,7 +619,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
-                smelt_ref: crate::refs::SmeltRef::LegacyRef(dep.to_string()),
+                smelt_ref: crate::refs::SmeltRef::Path(vec!["models".to_string(), dep.to_string()]),
             })
             .collect();
 

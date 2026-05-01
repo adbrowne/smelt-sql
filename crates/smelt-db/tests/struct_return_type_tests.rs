@@ -59,7 +59,7 @@ fn with_hour_types_clean() {
     let fn_path = root.join("functions").join("with_hour.sql");
     let model_path = root.join("models").join("event_with_hour.sql");
     let model_src = "SELECT smelt.fn.with_hour(e) AS ev \
-                     FROM smelt.source('source.events') AS e\n";
+                     FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -107,7 +107,7 @@ fn return_row_var_binds_to_param_row_var() {
     let fn_path = root.join("functions").join("with_hour.sql");
     let model_path = root.join("models").join("event_with_hour.sql");
     let model_src = "SELECT smelt.fn.with_hour(e) AS ev \
-                     FROM smelt.source('source.events') AS e\n";
+                     FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -181,7 +181,7 @@ fn caller_sees_fully_resolved_return_type() {
     let fn_path = root.join("functions").join("with_hour.sql");
     let model_path = root.join("models").join("event_with_hour.sql");
     let model_src = "SELECT smelt.fn.with_hour(e) AS ev \
-                     FROM smelt.source('source.events') AS e\n";
+                     FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
         root,

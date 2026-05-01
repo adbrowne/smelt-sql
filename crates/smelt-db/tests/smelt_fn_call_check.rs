@@ -587,7 +587,7 @@ fn passing_clause_binds_to_named_parameter() {
     let model_path = root.join("models").join("filtered.sql");
     // Call with a TableExpr positional arg and PASSING for pred.
     let model_src =
-        "SELECT * FROM smelt.fn.with_filter(smelt.ref('orders')) PASSING pred AS (TRUE)\n";
+        "SELECT * FROM smelt.fn.with_filter(smelt.models.orders) PASSING pred AS (TRUE)\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -622,7 +622,7 @@ fn passing_clause_name_mismatch_errors() {
     let fn_path = root.join("functions").join("with_filter.sql");
     let model_path = root.join("models").join("bad_passing_name.sql");
     let model_src =
-        "SELECT * FROM smelt.fn.with_filter(smelt.ref('orders')) PASSING wrong_name AS (TRUE)\n";
+        "SELECT * FROM smelt.fn.with_filter(smelt.models.orders) PASSING wrong_name AS (TRUE)\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, WITH_FILTER_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -666,7 +666,7 @@ fn passing_clause_type_checked_same_as_inline() {
     let fn_path = root.join("functions").join("with_filter.sql");
     let model_path = root.join("models").join("bad_passing_type.sql");
     let model_src =
-        "SELECT * FROM smelt.fn.with_filter(smelt.ref('orders')) PASSING pred AS (123)\n";
+        "SELECT * FROM smelt.fn.with_filter(smelt.models.orders) PASSING pred AS (123)\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, WITH_FILTER_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -699,7 +699,7 @@ fn default_fills_omitted_passing() {
          )\n";
     let model_path = root.join("models").join("uses_default_filter.sql");
     // No PASSING clause — `pred` should be filled by its default.
-    let model_src = "SELECT * FROM smelt.fn.with_default_filter(smelt.ref('orders'))\n";
+    let model_src = "SELECT * FROM smelt.fn.with_default_filter(smelt.models.orders)\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
     let model_file = files[1];
@@ -858,12 +858,12 @@ fn non_param_column_in_fragment_body_still_validated() {
     //
     // Scenario:
     //   - `col_agg_fn` has `src: TableExpr` and `metrics: SelectItems<Agg, src>`.
-    //   - A model calls `col_agg_fn(smelt.ref('orders'))` with
+    //   - A model calls `col_agg_fn(smelt.models.orders)` with
     //     `PASSING metrics AS (COUNT(nonexistent_col))`.
     //   - `nonexistent_col` is NOT a fragment param in `body_ctx`, so
     //     `is_bare_fragment_param_ref` returns false.
     //   - `COUNT(...)` is Agg-kind — the kind check passes.
-    //   - `smelt.ref('orders')` has no defined schema in this test, so the
+    //   - `smelt.models.orders` has no defined schema in this test, so the
     //     inferred splice context for `src` is empty.
     //   - `nonexistent_col` is not in the empty inferred set →
     //     `FragmentColumnMissing` must fire.
@@ -879,7 +879,7 @@ fn non_param_column_in_fragment_body_still_validated() {
 
     // `col_agg_fn` uses `SelectItems<Agg, src>` so the splice context
     // is the schema of `src`. At call time `src` has no known columns
-    // (smelt.ref('orders') is not defined in this test workspace) →
+    // (smelt.models.orders is not defined in this test workspace) →
     // inferred_set is empty → any column ref in the PASSING body that is
     // not a fragment param will emit FragmentColumnMissing.
     let fn_src = "\
@@ -891,7 +891,7 @@ smelt.define col_agg_fn(\
 )\n";
     // COUNT is Agg-kind so the kind check passes. `nonexistent_col` is not
     // a fragment param → column walk runs → FragmentColumnMissing fires.
-    let model_src = "SELECT * FROM smelt.fn.col_agg_fn(smelt.ref('orders')) \
+    let model_src = "SELECT * FROM smelt.fn.col_agg_fn(smelt.models.orders) \
          PASSING metrics AS (COUNT(nonexistent_col))\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);

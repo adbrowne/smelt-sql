@@ -112,7 +112,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT order_id, smelt.fn.safe_divide(revenue, cost) AS margin
-FROM smelt.ref('raw_orders')
+FROM smelt.models.raw_orders
 ORDER BY order_id
 ";
 
@@ -199,7 +199,7 @@ default_materialization: view
     );
 
     // CSV seed so smelt-core's `discover_seed_infos` produces typed columns
-    // (order_id, customer_id, total, tax) for `smelt.ref('raw_orders')`.
+    // (order_id, customer_id, total, tax) for `smelt.seeds.raw_orders`.
     // A literal-VALUES model body would NOT populate UpstreamSchemas because
     // `resolved_model_schema` doesn't infer types through VALUES clauses, so
     // the as_struct emitter would fall back to pass-through.
@@ -213,7 +213,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT smelt.as_struct(o EXCEPT customer_id) AS order_record
-FROM smelt.ref('raw_orders') o
+FROM smelt.seeds.raw_orders o
 ";
 
     write_workspace(
@@ -335,7 +335,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT order_id, smelt.fn.safe_divide(revenue, cost) AS margin
-FROM smelt.ref('raw_orders')
+FROM smelt.models.raw_orders
 ORDER BY order_id
 ";
 

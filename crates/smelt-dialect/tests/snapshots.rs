@@ -83,7 +83,7 @@ fn duckdb_identity_with_cte() {
 
 #[test]
 fn ref_resolution_duckdb() {
-    let sql = "SELECT * FROM smelt.ref('users')";
+    let sql = "SELECT * FROM smelt.models.users";
     let result = print_with(
         sql,
         &SqlDialect::DuckDB,
@@ -95,7 +95,7 @@ fn ref_resolution_duckdb() {
 
 #[test]
 fn ref_resolution_custom_schema() {
-    let sql = "SELECT * FROM smelt.ref('users')";
+    let sql = "SELECT * FROM smelt.models.users";
     let result = print_with(
         sql,
         &SqlDialect::DuckDB,
@@ -108,7 +108,7 @@ fn ref_resolution_custom_schema() {
 #[test]
 fn ref_resolution_multiple() {
     let sql =
-        "SELECT a.id, b.id FROM smelt.ref('model_a') a JOIN smelt.ref('model_b') b ON a.id = b.id";
+        "SELECT a.id, b.id FROM smelt.models.model_a a JOIN smelt.models.model_b b ON a.id = b.id";
     let result = print_with(
         sql,
         &SqlDialect::DuckDB,
@@ -120,7 +120,7 @@ fn ref_resolution_multiple() {
 
 #[test]
 fn ref_resolution_ephemeral() {
-    let sql = "SELECT * FROM smelt.ref('staging')";
+    let sql = "SELECT * FROM smelt.models.staging";
     let result = print_with_ephemerals(
         sql,
         &SqlDialect::DuckDB,
@@ -135,7 +135,7 @@ fn ref_resolution_ephemeral() {
 
 #[test]
 fn source_resolution() {
-    let sql = "SELECT * FROM smelt.source('raw.events')";
+    let sql = "SELECT * FROM smelt.sources.raw.events";
     let result = print_with(
         sql,
         &SqlDialect::DuckDB,
@@ -413,7 +413,7 @@ fn every_unchanged_postgresql() {
 
 #[test]
 fn spark_combined_rewrites() {
-    let sql = "SELECT x::INTEGER, ARRAY[1, 2], UNNEST(arr), FROM smelt.ref('users') WHERE d = DATE '2024-01-01'";
+    let sql = "SELECT x::INTEGER, ARRAY[1, 2], UNNEST(arr), FROM smelt.models.users WHERE d = DATE '2024-01-01'";
     let result = print_with(
         sql,
         &SqlDialect::SparkSQL,

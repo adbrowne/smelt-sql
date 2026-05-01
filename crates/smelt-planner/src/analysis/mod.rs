@@ -358,9 +358,9 @@ mod tests {
 
     #[test]
     fn test_from_text_preserved() {
-        let sql = "SELECT a FROM smelt.ref('events') e GROUP BY 1";
+        let sql = "SELECT a FROM smelt.models.events e GROUP BY 1";
         let analysis = analyze_select(sql).unwrap();
-        assert!(analysis.from_text.contains("smelt.ref('events')"));
+        assert!(analysis.from_text.contains("smelt.models.events"));
     }
 
     #[test]

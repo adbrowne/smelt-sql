@@ -1,30 +1,19 @@
-//! Reference extraction for `smelt.<path>` and the legacy `smelt.ref` /
-//! `smelt.source` / `smelt.fn.<path>` forms.
+//! Reference extraction for `smelt.<path>` and the legacy `smelt.fn.<path>`
+//! form.
 //!
-//! Phase 2a of the smelt-`<path>` migration moves the data plane onto a
-//! single internal key — the workspace-relative path tuple
-//! (`Vec<String>`). Legacy AST nodes still produced by Phase 1 are
-//! adapted into the same key here so downstream code (`DependencyGraph`,
-//! `smelt-db` resolvers) sees one shape regardless of which source
-//! syntax the user wrote.
+//! Phase 4 of the smelt-`<path>` migration removes the `smelt.ref` and
+//! `smelt.source` legacy syntax entirely. The parser now rejects those forms.
+//! Only `smelt.fn.*` legacy calls remain (deferred until function diagnostics
+//! are ported to `SmeltPathCall`).
 //!
 //! The unifying enum is [`SmeltRef`]:
 //! - [`SmeltRef::Path`] — the unified `smelt.<path>` form. Already a
 //!   path tuple; resolution dispatches on file format/content.
-//! - [`SmeltRef::LegacyRef`] — `smelt.ref('name')`. Adapted to a path
-//!   tuple by [`SmeltRef::to_path`] using a [`PathLocator`] hint
-//!   (typically the workspace's discovered models).
-//! - [`SmeltRef::LegacySource`] — `smelt.source('schema.table')`.
-//!   Adapted to `["sources", "<schema>", "<table>"]` (matching the
-//!   recommended layout under `sources/<schema>/<table>.yml`).
 //! - [`SmeltRef::LegacyFn`] — `smelt.fn.<seg>(.<seg>)*`. Adapted to
 //!   `["functions", <segments>...]`.
 
 use rowan::TextRange;
-use smelt_parser::ast::{
-    File as AstFile, FunctionCall, RefCall, SmeltFnCall, SmeltPathCall, SmeltPathRef, SourceCall,
-    TableRef,
-};
+use smelt_parser::ast::{File as AstFile, SmeltFnCall, SmeltPathCall, SmeltPathRef, TableRef};
 
 /// A unified ref carrier. Every legacy AST node is adapted into one of
 /// these at the boundary; downstream code is keyed on path tuples.
@@ -32,53 +21,20 @@ use smelt_parser::ast::{
 pub enum SmeltRef {
     /// Path-form: `smelt.<seg>(.<seg>)*`. Already in the unified shape.
     Path(Vec<String>),
-    /// Legacy `smelt.ref('name')`.
-    LegacyRef(String),
-    /// Legacy `smelt.source('schema.table')`.
-    LegacySource(String),
     /// Legacy `smelt.fn.<seg>(.<seg>)*` call. Segments after the
-    /// `smelt.fn.` prefix.
+    /// `smelt.fn.` prefix. Kept until function diagnostics are ported
+    /// to `SmeltPathCall`.
     LegacyFn(Vec<String>),
-}
-
-/// Maps a bare model name to a workspace-relative path tuple. Used by
-/// [`SmeltRef::to_path`] to adapt legacy `smelt.ref('name')` into the
-/// unified key. Implementations typically wrap a `Vec<ModelFile>`.
-pub trait PathLocator {
-    fn locate_model(&self, name: &str) -> Option<Vec<String>>;
-}
-
-/// `PathLocator` that always returns `None`. Used in tests / shape-only
-/// extraction paths where no workspace context is available.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoLocator;
-
-impl PathLocator for NoLocator {
-    fn locate_model(&self, _name: &str) -> Option<Vec<String>> {
-        None
-    }
 }
 
 impl SmeltRef {
     /// Adapt this ref to the unified path tuple.
     ///
     /// - [`SmeltRef::Path`] returns its segments unchanged.
-    /// - [`SmeltRef::LegacyRef`] consults `locator` to find the model;
-    ///   falls back to `["models", <name>]` if the locator has no
-    ///   answer (preserves the old "look in models/" default).
-    /// - [`SmeltRef::LegacySource`] returns `["sources", parts...]`.
     /// - [`SmeltRef::LegacyFn`] returns `["functions", segments...]`.
-    pub fn to_path<L: PathLocator + ?Sized>(&self, locator: &L) -> Vec<String> {
+    pub fn to_path(&self) -> Vec<String> {
         match self {
             SmeltRef::Path(segs) => segs.clone(),
-            SmeltRef::LegacyRef(name) => locator
-                .locate_model(name)
-                .unwrap_or_else(|| vec!["models".to_string(), name.clone()]),
-            SmeltRef::LegacySource(qualified) => {
-                let mut out = vec!["sources".to_string()];
-                out.extend(qualified.split('.').map(|s| s.to_string()));
-                out
-            }
             SmeltRef::LegacyFn(segs) => {
                 let mut out = vec!["functions".to_string()];
                 out.extend(segs.iter().cloned());
@@ -88,13 +44,10 @@ impl SmeltRef {
     }
 
     /// Display-friendly leaf name for diagnostics. For path forms the
-    /// last segment; for legacy refs the model/source name; for legacy
-    /// fn calls the last segment.
+    /// last segment; for legacy fn calls the last segment.
     pub fn leaf_name(&self) -> String {
         match self {
             SmeltRef::Path(segs) => segs.last().cloned().unwrap_or_default(),
-            SmeltRef::LegacyRef(name) => name.clone(),
-            SmeltRef::LegacySource(qual) => qual.clone(),
             SmeltRef::LegacyFn(segs) => segs.last().cloned().unwrap_or_default(),
         }
     }
@@ -113,15 +66,12 @@ pub struct RefInfo {
 }
 
 /// Extract every smelt-extension ref appearing in a parsed file —
-/// unified path forms and legacy `smelt.ref` / `smelt.source` /
-/// `smelt.fn.*` forms. Path-form callsites are also detected (path
-/// calls with arg lists), but only the value-form refs (no `(`) and
-/// legacy refs are surfaced as model dependencies. Legacy
-/// `smelt.source` callsites are intentionally **not** included here so
-/// the existing string-keyed dependency graph (which only tracks model
-/// dependencies, with sources looked up separately via `sources.yml`)
-/// keeps its current shape — Phase 2a's path-tuple graph adds them
-/// uniformly.
+/// unified path forms and legacy `smelt.fn.*` calls. Path-form call
+/// sites are also detected (path calls with arg lists), but only the
+/// value-form refs (no `(`) are surfaced as model dependencies.
+///
+/// Note: `smelt.ref()` and `smelt.source()` are parse errors in Phase 4
+/// and will not appear in a valid CST.
 pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
     let mut out = Vec::new();
     for node in file.syntax().descendants() {
@@ -168,31 +118,8 @@ pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
             continue;
         }
 
-        // Legacy `smelt.ref('name')`.
-        if let Some(func) = FunctionCall::cast(node.clone()) {
-            if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-                if let Some(name) = ref_call.model_name() {
-                    let has_params = ref_call.named_params().count() > 0;
-                    out.push(RefInfo {
-                        model_name: name.clone(),
-                        has_named_params: has_params,
-                        range: ref_call.range(),
-                        smelt_ref: SmeltRef::LegacyRef(name),
-                    });
-                    continue;
-                }
-            }
-            // We do NOT register `smelt.source(...)` as a model ref —
-            // sources are looked up via the project's `sources.yml`.
-            // The path-tuple builder consumes them separately.
-            let _ = SourceCall::from_function_call(func);
-            continue;
-        }
-
         // Legacy `smelt.fn.<path>(...)` calls. We register them so
-        // path-tuple consumers (Phase 2a graph) can see function
-        // dependencies. The string-keyed legacy graph filters them out
-        // because legacy fn calls are not models.
+        // path-tuple consumers can see function dependencies.
         if let Some(fn_call) = SmeltFnCall::cast(node.clone()) {
             let segments = fn_call
                 .call_path()
@@ -222,14 +149,6 @@ pub fn ref_from_table_ref(table_ref: &TableRef) -> Option<SmeltRef> {
     if let Some(path_call) = table_ref.smelt_path_call() {
         return Some(SmeltRef::Path(path_call.segments()));
     }
-    if let Some(func) = table_ref.function_call() {
-        if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-            return Some(SmeltRef::LegacyRef(ref_call.model_name()?));
-        }
-        if let Some(src_call) = SourceCall::from_function_call(func) {
-            return Some(SmeltRef::LegacySource(src_call.qualified_name()?));
-        }
-    }
     if let Some(fn_call) = table_ref.smelt_fn_call() {
         let segments = fn_call
             .call_path()
@@ -245,12 +164,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_refs_legacy() {
+    fn test_extract_refs_path_form() {
         let sql = r#"
 SELECT
     user_id,
     COUNT(*) as session_count
-FROM smelt.ref('raw_events')
+FROM smelt.models.raw_events
 GROUP BY user_id
 "#;
 
@@ -261,33 +180,17 @@ GROUP BY user_id
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].model_name, "raw_events");
         assert!(!refs[0].has_named_params);
-        assert!(matches!(refs[0].smelt_ref, SmeltRef::LegacyRef(_)));
+        assert!(matches!(refs[0].smelt_ref, SmeltRef::Path(_)));
     }
 
     #[test]
-    fn test_extract_refs_with_named_params() {
-        let sql = r#"
-SELECT user_id
-FROM smelt.ref('raw_events', filter => event_type = 'page_view')
-"#;
-
-        let parse = smelt_parser::parse(sql);
-        let file = AstFile::cast(parse.syntax()).unwrap();
-        let refs = extract_refs(&file);
-
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "raw_events");
-        assert!(refs[0].has_named_params);
-    }
-
-    #[test]
-    fn test_multiple_legacy_refs() {
+    fn test_extract_refs_path_form_multiple() {
         let sql = r#"
 SELECT
     a.user_id,
     b.session_id
-FROM smelt.ref('model_a') a
-INNER JOIN smelt.ref('model_b') b ON a.id = b.id
+FROM smelt.models.model_a a
+INNER JOIN smelt.models.model_b b ON a.id = b.id
 "#;
 
         let parse = smelt_parser::parse(sql);
@@ -300,38 +203,20 @@ INNER JOIN smelt.ref('model_b') b ON a.id = b.id
     }
 
     #[test]
-    fn legacy_ref_to_path_uses_locator() {
-        struct LocateTo<'a>(&'a [(&'a str, Vec<&'a str>)]);
-        impl<'a> PathLocator for LocateTo<'a> {
-            fn locate_model(&self, name: &str) -> Option<Vec<String>> {
-                self.0.iter().find_map(|(n, segs)| {
-                    if *n == name {
-                        Some(segs.iter().map(|s| s.to_string()).collect())
-                    } else {
-                        None
-                    }
-                })
-            }
-        }
-        let locator = LocateTo(&[("foo", vec!["models", "marts", "foo"])]);
-        let path = SmeltRef::LegacyRef("foo".to_string()).to_path(&locator);
+    fn path_to_path_returns_segments() {
+        let path = SmeltRef::Path(vec![
+            "models".to_string(),
+            "marts".to_string(),
+            "foo".to_string(),
+        ])
+        .to_path();
         assert_eq!(path, vec!["models", "marts", "foo"]);
-
-        // Fallback: if locator has no answer, default to ["models", name].
-        let path = SmeltRef::LegacyRef("bar".to_string()).to_path(&NoLocator);
-        assert_eq!(path, vec!["models", "bar"]);
-    }
-
-    #[test]
-    fn legacy_source_to_path() {
-        let path = SmeltRef::LegacySource("raw.events".to_string()).to_path(&NoLocator);
-        assert_eq!(path, vec!["sources", "raw", "events"]);
     }
 
     #[test]
     fn legacy_fn_to_path() {
-        let path = SmeltRef::LegacyFn(vec!["core".to_string(), "safe_divide".to_string()])
-            .to_path(&NoLocator);
+        let path =
+            SmeltRef::LegacyFn(vec!["core".to_string(), "safe_divide".to_string()]).to_path();
         assert_eq!(path, vec!["functions", "core", "safe_divide"]);
     }
 }

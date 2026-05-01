@@ -67,7 +67,7 @@ fn all_diagnostics(db: &Database, ws: Workspace, file: SourceFile) -> Vec<smelt_
 
 #[test]
 fn cte_schema_inferred_from_smelt_fn_call() {
-    // The CTE body has shape `SELECT * FROM smelt.fn.add_one(smelt.ref('events'))`.
+    // The CTE body has shape `SELECT * FROM smelt.fn.add_one(smelt.models.events)`.
     // The inferred schema for `x` is `add_one`'s return schema. The outer
     // SELECT projects `id` from `x` — must resolve cleanly.
     let root = PathBuf::from("/fake/project");
@@ -79,8 +79,9 @@ fn cte_schema_inferred_from_smelt_fn_call() {
     let fn_src = "smelt.define add_one(t: TableExpr) -> TableExpr AS (\
         SELECT t.id FROM t\
     )\n";
+    // Phase 4: use path form (smelt.ref() is removed).
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.add_one(smelt.ref('events'))\
+        SELECT * FROM smelt.fn.add_one(smelt.models.events)\
     ) SELECT id FROM x\n";
 
     let (db, ws, files) = build_db(
@@ -120,8 +121,9 @@ fn cte_schema_typo_inside_caller_caught() {
     let fn_src = "smelt.define add_one(t: TableExpr) -> TableExpr AS (\
         SELECT t.id FROM t\
     )\n";
+    // Phase 4: use path form (smelt.ref() is removed).
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.add_one(smelt.ref('events'))\
+        SELECT * FROM smelt.fn.add_one(smelt.models.events)\
     ) SELECT does_not_exist FROM x\n";
 
     let (db, ws, files) = build_db(
@@ -173,8 +175,9 @@ fn cte_schema_inference_handles_chained_smelt_fn_calls() {
     let margin_src = "smelt.define add_margin(src: TableExpr) -> TableExpr AS (\
         SELECT src.*, src.revenue - src.cost AS margin FROM src\
     )\n";
+    // Phase 4: use path form (smelt.ref() is removed).
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.add_margin(smelt.fn.add_one(smelt.ref('orders')))\
+        SELECT * FROM smelt.fn.add_margin(smelt.fn.add_one(smelt.models.orders))\
     ) SELECT margin FROM x\n";
 
     let (db, ws, files) = build_db(

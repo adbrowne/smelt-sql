@@ -17,7 +17,7 @@ pub struct SeedInfo {
 /// Seeds are CSV files in the configured seed directories. Top-level CSVs are
 /// "target seeds" (schema = target schema). Subdirectory CSVs are "source seeds"
 /// (schema = subdirectory name). This function discovers only top-level seeds
-/// since those are the ones referenced as `smelt.ref('seed_name')`.
+/// since those are the ones referenced as `smelt.models.seed_name`.
 pub fn discover_seed_infos(project_dir: &Path, seed_paths: &[String]) -> Vec<SeedInfo> {
     let mut seeds = Vec::new();
 

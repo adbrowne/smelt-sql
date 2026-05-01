@@ -762,7 +762,7 @@ pub fn check_smelt_fn_call(
     // Phase 45: resolve a `TableRef` inside a function body's FROM /
     // JOIN clauses to its column schema. Called once per JOIN clause
     // (and once per non-param FROM-clause table-ref) when the body is
-    // a SELECT shape, so that `JOIN smelt.ref('Y') AS y` registers
+    // a SELECT shape, so that `JOIN smelt.models.Y AS y` registers
     // `y`'s columns into the body's bare-column resolver. Returns
     // `None` for unsupported shapes (subqueries, derived tables,
     // CTEs) — those are deferred to Phase 46. Bare-identifier table
@@ -1002,8 +1002,8 @@ pub fn check_smelt_fn_call(
                 // Resolve the argument to a concrete column set.
                 //
                 // Primary path: `tableexpr_schema_lookup` handles the case
-                // where the argument is `smelt.ref('model')` or
-                // `smelt.source('src.tbl')` directly. This covers the
+                // where the argument is `smelt.models.model` or
+                // `smelt.sources.src.tbl` directly. This covers the
                 // TableExpr-style usage.
                 //
                 // Fallback path: the argument is a bare alias (`e`) for a
@@ -1614,7 +1614,7 @@ pub fn register_join_alias_schemas(
         }
 
         // Otherwise, ask the closure to resolve a schema. Supported
-        // shapes today: `smelt.ref('X')`, `smelt.source('a.b')`, and
+        // shapes today: `smelt.models.X`, `smelt.sources.a.b`, and
         // `smelt.fn.<name>(...)` returning TableExpr. Unsupported
         // shapes (subqueries, CTE refs, derived tables) return None
         // and are deferred to Phase 46.

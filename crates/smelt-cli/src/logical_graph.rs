@@ -64,21 +64,20 @@ impl LogicalGraph {
             }
         }
 
-        // Build seed name set so `smelt.ref('<seed>')` validates without a
+        // Build seed name set so `smelt.models.<seed>` validates without a
         // sources.yml workaround. Mirrors `smelt-db::resolve_ref` (Phase 6),
         // which the CLI dependency validator was previously missing.
         let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
         for model in models {
-            // Use the unified path adapter so both LegacyRef and Path-form
-            // model refs resolve to the same model-to-model dep. Non-model
+            // Extract model-to-model deps from Path-form refs. Non-model
             // paths (seeds, sources, functions) produce first segment ≠
             // "models" and are skipped.
             let deps: Vec<String> = model
                 .refs
                 .iter()
                 .filter_map(|r| {
-                    let path = r.smelt_ref.to_path(&smelt_core::refs::NoLocator);
+                    let path = r.smelt_ref.to_path();
                     if path.first().map(|s| s.as_str()) == Some("models") && path.len() >= 2 {
                         path.last().cloned()
                     } else {
@@ -469,7 +468,10 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
-                smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(dep.to_string()),
+                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
+                    "models".to_string(),
+                    dep.to_string(),
+                ]),
             })
             .collect();
 
@@ -493,7 +495,10 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
-                smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(dep.to_string()),
+                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
+                    "models".to_string(),
+                    dep.to_string(),
+                ]),
             })
             .collect();
 

@@ -9,13 +9,6 @@ use crate::syntax_kind::SyntaxKind;
 /// The kind of symbol found at a cursor position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolAtCursor {
-    /// Cursor is inside a `smelt.ref('model_name')` call
-    RefCall { name: String },
-    /// Cursor is inside a `smelt.source('source.table')` call
-    SourceCall {
-        source_name: String,
-        table_name: String,
-    },
     /// Cursor is on a `smelt.<path>` path ref (e.g., `smelt.models.users`).
     /// `segments` holds the path components after the leading `smelt` token.
     PathRef { segments: Vec<String> },
@@ -50,39 +43,6 @@ pub fn symbol_at_cursor(file: &AstFile, _text: &str, offset: usize) -> Option<Sy
                     return None;
                 }
             }
-        }
-    }
-
-    // Check RefCall at cursor position
-    for ref_call in file.refs() {
-        let range = ref_call.range();
-        let start: usize = range.start().into();
-        let end: usize = range.end().into();
-
-        if offset >= start && offset <= end {
-            if let Some(name) = ref_call.model_name() {
-                return Some(SymbolAtCursor::RefCall { name });
-            }
-            return None;
-        }
-    }
-
-    // Check SourceCall at cursor position
-    for source_call in file.sources() {
-        let range = source_call.range();
-        let start: usize = range.start().into();
-        let end: usize = range.end().into();
-
-        if offset >= start && offset <= end {
-            if let (Some(source_name), Some(table_name)) =
-                (source_call.source_name(), source_call.table_name())
-            {
-                return Some(SymbolAtCursor::SourceCall {
-                    source_name,
-                    table_name,
-                });
-            }
-            return None;
         }
     }
 

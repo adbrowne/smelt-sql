@@ -100,7 +100,7 @@ fn as_struct_emits_duckdb_struct_literal() {
 
     // A model that uses smelt.as_struct on the alias `o`.
     // Note: avoid `row` as an alias name — it's a SQL reserved word that confuses the parser.
-    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.ref('orders') o";
+    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.models.orders o";
     let model = model_file("test_as_struct", sql);
     let result = compiler
         .compile(&model, "main")
@@ -139,7 +139,7 @@ fn as_struct_except_excludes_columns() {
     );
     compiler.set_upstream_schemas(schemas);
 
-    let sql = "SELECT smelt.as_struct(o EXCEPT tax) AS order_row FROM smelt.ref('orders') o";
+    let sql = "SELECT smelt.as_struct(o EXCEPT tax) AS order_row FROM smelt.models.orders o";
     let model = model_file("test_as_struct_except", sql);
     let result = compiler
         .compile(&model, "main")
@@ -225,7 +225,7 @@ fn type_context_builds_alias_for_as_struct() {
     use smelt_parser::ast::File;
 
     // Use `order_row` not `row` (SQL reserved word confuses parser)
-    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.ref('orders') o";
+    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.models.orders o";
     let clean = smelt_parser::strip_frontmatter(sql);
     let parse = smelt_parser::parse(&clean);
 

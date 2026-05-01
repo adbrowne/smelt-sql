@@ -546,7 +546,7 @@ impl TypeContext {
     /// Used by Phase 36 struct-parameter resolution to enumerate the
     /// concrete columns reachable through a table alias passed as a
     /// struct argument (e.g. `smelt.fn.event_hour(e)` where `e` is an
-    /// alias for `smelt.source('source.events') AS e`).
+    /// alias for `smelt.sources.source.events AS e`).
     ///
     /// Alias resolution is applied first so `e` maps to `events` (or
     /// whatever the underlying table name is). Returns an empty `Vec`

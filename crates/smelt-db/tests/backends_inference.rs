@@ -180,8 +180,9 @@ fn old_file_level_frontmatter_on_lone_model_still_works() {
     // property: with zero `smelt.define`s in the file, frontmatter
     // attachment yields no signatures and no widening diagnostics.
     let root = PathBuf::from("/fake/project");
+    // Phase 4: use path form (smelt.source() is removed).
     let src = "---\nmaterialization: table\nincremental:\n  partition_column: event_date\n---\n\
-        SELECT event_id FROM smelt.source('raw.events')\n";
+        SELECT event_id FROM smelt.sources.raw.events\n";
     let path = root.join("models").join("daily_events.sql");
     let (db, ws, files) = build_db(root, &[(path, src)]);
 

@@ -286,7 +286,7 @@ pub fn compile_cte_test(
 
 /// Compile a test for a whole model by mocking smelt.ref() calls.
 ///
-/// Replaces each `smelt.ref('name')` with the bare CTE name and prepends
+/// Replaces each `smelt.models.name` with the bare CTE name and prepends
 /// mock CTE definitions as a WITH clause.
 pub fn compile_whole_model_test(
     model_sql: &str,
@@ -297,21 +297,28 @@ pub fn compile_whole_model_test(
     let parse = smelt_parser::parse(&clean);
     let file = AstFile::cast(parse.syntax()).ok_or("Failed to parse model SQL")?;
 
-    // Collect all ref names and their text ranges (in reverse order for replacement)
+    // Collect all smelt.models.<name> path refs and their text ranges (in reverse order for replacement)
     let mut ref_replacements: Vec<(usize, usize, String)> = Vec::new();
-    for ref_call in file.refs() {
-        if let Some(name) = ref_call.model_name() {
-            let range = ref_call.range();
-            let start: usize = range.start().into();
-            let end: usize = range.end().into();
-            ref_replacements.push((start, end, name));
+    for path_ref in file
+        .syntax()
+        .descendants()
+        .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+    {
+        let segments = path_ref.segments();
+        if segments.first().map(|s| s.as_str()) == Some("models") {
+            if let Some(name) = segments.get(1).cloned() {
+                let range = path_ref.text_range();
+                let start: usize = range.start().into();
+                let end: usize = range.end().into();
+                ref_replacements.push((start, end, name));
+            }
         }
     }
 
     // Sort by start position descending so replacements don't shift offsets
     ref_replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
 
-    // Replace smelt.ref('name') with bare name in the SQL
+    // Replace smelt.models.<name> with bare name in the SQL
     let mut result_sql = clean.clone();
     let mut ref_names: Vec<String> = Vec::new();
     for (start, end, name) in &ref_replacements {
@@ -621,7 +628,7 @@ SELECT * FROM b
     fn test_compile_whole_model_test() {
         let model_sql = r#"
 SELECT order_date, COUNT(*) AS order_count
-FROM smelt.ref('raw_orders')
+FROM smelt.models.raw_orders
 GROUP BY order_date
 "#;
         let mut inputs = BTreeMap::new();
@@ -639,8 +646,8 @@ GROUP BY order_date
         let result = compile_whole_model_test(model_sql, &inputs, None).unwrap();
         assert!(result.contains("raw_orders AS"));
         assert!(result.contains("order_count"));
-        // smelt.ref should be replaced
-        assert!(!result.contains("smelt.ref"));
+        // smelt.models path refs should be replaced with bare model names
+        assert!(!result.contains("smelt.models"));
     }
 
     #[test]

@@ -15,5 +15,5 @@ smelt.define add_margin_p17(source: TableExpr) -> TableExpr AS (
 
 SELECT missing_col
 FROM smelt.fn.add_margin_p17(
-  smelt.ref('fn_tableexpr_return_bare_col_missing_other')
+  smelt.models.fn_tableexpr_return_bare_col_missing_other
 ) AS m

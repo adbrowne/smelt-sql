@@ -155,7 +155,7 @@ async fn test_incremental_delete_and_insert() -> anyhow::Result<()> {
 async fn test_inject_time_filter() -> anyhow::Result<()> {
     use smelt_cli::{inject_time_filter, TimeRange};
 
-    let sql = "SELECT * FROM smelt.ref('transactions')";
+    let sql = "SELECT * FROM smelt.models.transactions";
     let range = TimeRange {
         start: "2024-12-25".into(),
         end: "2024-12-26".into(),
@@ -173,7 +173,7 @@ async fn test_inject_time_filter() -> anyhow::Result<()> {
 async fn test_inject_time_filter_with_existing_where() -> anyhow::Result<()> {
     use smelt_cli::{inject_time_filter, TimeRange};
 
-    let sql = "SELECT * FROM smelt.ref('transactions') WHERE user_id = 1";
+    let sql = "SELECT * FROM smelt.models.transactions WHERE user_id = 1";
     let range = TimeRange {
         start: "2024-12-25".into(),
         end: "2024-12-26".into(),

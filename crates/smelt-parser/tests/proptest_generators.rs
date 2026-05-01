@@ -106,7 +106,7 @@ pub fn arb_function_call() -> impl Strategy<Value = String> {
 
 /// Generate smelt.ref() calls
 pub fn arb_ref_call() -> impl Strategy<Value = String> {
-    arb_identifier().prop_map(|model| format!("smelt.ref('{}')", model))
+    arb_identifier().prop_map(|model| format!("smelt.models.{}", model))
 }
 
 // ===== SELECT list =====

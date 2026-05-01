@@ -529,6 +529,64 @@ impl<'a> Parser<'a> {
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is
+    /// a **rejected** legacy call: `smelt.ref(` or `smelt.source(`.
+    ///
+    /// Phase 4 removes these forms from the language. The parser emits an error
+    /// but still produces a FUNCTION_CALL node (error recovery) so downstream
+    /// code that walks the CST doesn't crash.
+    fn at_smelt_legacy_ref_or_source_trigger(&self) -> bool {
+        if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
+            return false;
+        }
+        // Skip trivia to DOT.
+        let mut la = 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        if !matches!(self.tokens.get(self.pos + la), Some(t) if t.kind == DOT) {
+            return false;
+        }
+        // Skip trivia to the second IDENT.
+        la += 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(tok) = self.tokens.get(self.pos + la) else {
+            return false;
+        };
+        if tok.kind != IDENT {
+            return false;
+        }
+        // Compute the text of the second segment.
+        let mut offset = self.offset;
+        for prior in 0..la {
+            offset += self.tokens[self.pos + prior].len;
+        }
+        let seg = &self.input[offset..offset + tok.len];
+        if !seg.eq_ignore_ascii_case("ref") && !seg.eq_ignore_ascii_case("source") {
+            return false;
+        }
+        // The segment after must be `(` to confirm it's a call form.
+        let mut la2 = la + 1;
+        while let Some(t) = self.tokens.get(self.pos + la2) {
+            if t.kind.is_trivia() {
+                la2 += 1;
+            } else {
+                break;
+            }
+        }
+        matches!(self.tokens.get(self.pos + la2), Some(t) if t.kind == LPAREN)
+    }
+
+    /// Peek forward (skipping trivia) to check whether the current position is
     /// the start of a `smelt.as_struct(...)` call. Does not consume any tokens.
     /// The trigger is exactly three non-trivia tokens:
     ///   IDENT("smelt")  DOT  IDENT("as_struct")
@@ -2194,6 +2252,19 @@ impl<'a> Parser<'a> {
             return;
         }
 
+        // Phase 4: reject legacy smelt.ref() and smelt.source() call forms.
+        // Emit an error pointing the user to the unified smelt.<path> form,
+        // then parse the call as a generic FUNCTION_CALL for error recovery.
+        if self.at(IDENT) && self.at_smelt_legacy_ref_or_source_trigger() {
+            self.error(
+                "smelt.ref() and smelt.source() are removed; \
+                 use smelt.models.<name> or smelt.sources.<schema>.<table> instead"
+                    .to_string(),
+            );
+            // Fall through — the generic IDENT path below will still consume
+            // and produce a FUNCTION_CALL node so the rest of the parse continues.
+        }
+
         // smelt.<path> migration, Phase 1: unified value/call form. The
         // trigger excludes the legacy second-segments (`fn`, `define`,
         // `extern`, `as_struct`, `ref`, `source`, `metric`) so the existing
@@ -3023,6 +3094,28 @@ impl<'a> Parser<'a> {
             // FUNCTION_CALL path because the trigger requires the second
             // segment to be exactly `fn`.
             self.parse_smelt_fn_call();
+        } else if self.at(IDENT) && self.at_smelt_legacy_ref_or_source_trigger() {
+            // Phase 4: reject legacy smelt.ref() and smelt.source() in
+            // expression position. Emit the error and fall through to the
+            // generic IDENT → FUNCTION_CALL path for error recovery.
+            self.error(
+                "smelt.ref() and smelt.source() are removed; \
+                 use smelt.models.<name> or smelt.sources.<schema>.<table> instead"
+                    .to_string(),
+            );
+            // The IDENT path below will consume the tokens and produce a
+            // FUNCTION_CALL node so parsing continues without a hard stop.
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // consume "smelt"
+            self.skip_trivia();
+            self.advance(); // consume DOT
+            self.skip_trivia();
+            self.advance(); // consume "ref" or "source"
+            self.skip_trivia();
+            // Now parse the argument list as part of the FUNCTION_CALL.
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            self.parse_arg_list();
+            self.finish_node();
         } else if self.at(IDENT) && self.at_smelt_path_trigger() {
             // smelt.<path> value/call form (smelt.<path> migration, Phase 1).
             // Must be checked BEFORE the generic IDENT branch — the generic
@@ -5005,17 +5098,17 @@ mod tests {
 
     #[test]
     fn test_smelt_ref_with_cte() {
-        // Test that smelt.ref() works correctly within CTEs
+        // Phase 4: smelt.ref() is removed; updated to use smelt.<path> form.
         let input = r#"
 WITH recent_activity AS (
   SELECT user_id, COUNT(*) as event_count
-  FROM smelt.ref('raw_events', filter => date >= '2024-01-01')
+  FROM smelt.models.raw_events
   GROUP BY user_id
   HAVING COUNT(*) > 10
 )
 SELECT u.name, ra.event_count,
        RANK() OVER (ORDER BY ra.event_count DESC) as activity_rank
-FROM smelt.ref('users') u
+FROM smelt.models.users u
 INNER JOIN recent_activity ra ON u.id = ra.user_id
 WHERE ra.event_count > 100
 ORDER BY ra.event_count DESC
@@ -5027,15 +5120,18 @@ LIMIT 50
         }
         assert_eq!(parse.errors.len(), 0);
 
-        // Verify that we can find the ref calls
-        use crate::ast::File;
+        // Verify that we can find the path refs.
+        use crate::ast::{File, SmeltPathRef};
         let file = File::cast(parse.syntax()).unwrap();
-        let refs: Vec<_> = file.refs().collect();
-        assert_eq!(refs.len(), 2);
-
-        let ref_names: Vec<_> = refs.iter().filter_map(|r| r.model_name()).collect();
-        assert!(ref_names.contains(&"raw_events".to_string()));
-        assert!(ref_names.contains(&"users".to_string()));
+        let path_refs: Vec<_> = file
+            .syntax()
+            .descendants()
+            .filter_map(SmeltPathRef::cast)
+            .collect();
+        assert_eq!(path_refs.len(), 2);
+        let segments_list: Vec<Vec<String>> = path_refs.iter().map(|r| r.segments()).collect();
+        assert!(segments_list.contains(&vec!["models".to_string(), "raw_events".to_string()]));
+        assert!(segments_list.contains(&vec!["models".to_string(), "users".to_string()]));
     }
 
     #[test]
@@ -5247,9 +5343,10 @@ LIMIT 100
 
     #[test]
     fn test_table_ref_explicit_as_alias() {
+        // Phase 4: updated from smelt.source() to smelt.sources.* path form.
         use crate::ast::File;
 
-        let input = "SELECT * FROM smelt.source('raw.users') AS u";
+        let input = "SELECT * FROM smelt.sources.raw.users AS u";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
 
@@ -5263,9 +5360,10 @@ LIMIT 100
 
     #[test]
     fn test_table_ref_implicit_alias() {
+        // Phase 4: updated from smelt.source() to smelt.sources.* path form.
         use crate::ast::File;
 
-        let input = "SELECT * FROM smelt.source('raw.users') u";
+        let input = "SELECT * FROM smelt.sources.raw.users u";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
 
@@ -5279,9 +5377,10 @@ LIMIT 100
 
     #[test]
     fn test_table_ref_no_alias() {
+        // Phase 4: updated from smelt.source() to smelt.sources.* path form.
         use crate::ast::File;
 
-        let input = "SELECT * FROM smelt.source('raw.users')";
+        let input = "SELECT * FROM smelt.sources.raw.users";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
 
@@ -5295,9 +5394,10 @@ LIMIT 100
 
     #[test]
     fn test_table_ref_alias_with_ref_call() {
+        // Phase 4: updated from smelt.ref() to smelt.models.* path form.
         use crate::ast::File;
 
-        let input = "SELECT * FROM smelt.ref('users') AS t";
+        let input = "SELECT * FROM smelt.models.users AS t";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
 
@@ -5311,10 +5411,11 @@ LIMIT 100
 
     #[test]
     fn test_join_table_ref_alias() {
+        // Phase 4: updated from smelt.source() to smelt.sources.* path form.
         use crate::ast::File;
 
         let input =
-            "SELECT * FROM smelt.source('raw.users') u JOIN smelt.source('raw.orders') AS o ON u.id = o.user_id";
+            "SELECT * FROM smelt.sources.raw.users u JOIN smelt.sources.raw.orders AS o ON u.id = o.user_id";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
 
@@ -5415,8 +5516,8 @@ LIMIT 100
 
     #[test]
     fn test_expr_in_function_with_named_param() {
-        // Mix of expressions and named parameters
-        let input = "SELECT smelt.ref('table', filter => a + b > 10) FROM t";
+        // Phase 4: smelt.ref() is removed. Test generic named-param syntax instead.
+        let input = "SELECT my_func(x, filter => a + b > 10) FROM t";
         let parse = parse(input);
         assert_eq!(parse.errors.len(), 0);
     }
@@ -6176,7 +6277,9 @@ LIMIT 100
 
     #[test]
     fn test_named_param_in_ref() {
-        let input = "SELECT * FROM smelt.ref('model', key => 'value')";
+        // Phase 4: smelt.ref() is removed. Named param syntax still works
+        // via path-call form: smelt.models.model(key => 'value').
+        let input = "SELECT * FROM smelt.models.model(key => 'value')";
         let parse = parse(input);
         assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
 
@@ -6209,7 +6312,8 @@ LIMIT 100
 
     #[test]
     fn test_function_call_namespace() {
-        let input = "SELECT * FROM smelt.ref('model')";
+        // Phase 4: smelt.ref() is removed. Test a generic namespaced function call.
+        let input = "SELECT * FROM myns.myfunc('model')";
         let parse = parse(input);
         assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
 
@@ -6218,8 +6322,8 @@ LIMIT 100
             .descendants()
             .find_map(FunctionCall::cast)
             .expect("should have a FunctionCall");
-        assert_eq!(func.namespace().as_deref(), Some("smelt"));
-        assert_eq!(func.name().as_deref(), Some("ref"));
+        assert_eq!(func.namespace().as_deref(), Some("myns"));
+        assert_eq!(func.name().as_deref(), Some("myfunc"));
     }
 
     // Phase 8: Parser Depth Limit (Stack Safety)
@@ -7053,39 +7157,29 @@ LIMIT 100
 
     #[test]
     fn smelt_ref_still_parses_as_function_call() {
-        // Regression: smelt.ref() must continue to parse as FUNCTION_CALL,
-        // not as SMELT_FN_CALL. The Phase 2 trigger requires the second
-        // segment to be exactly `fn`, so `smelt.ref` is unaffected.
+        // Phase 4 update: smelt.ref() is rejected with an error. The test
+        // is retained to verify that error recovery still produces a
+        // FUNCTION_CALL (not SMELT_FN_CALL) so downstream CST walkers
+        // don't panic.
         let input = "SELECT * FROM smelt.ref('model')";
         let (parse, file) = parse_file_text(input);
+        // Phase 4: must have at least one parse error.
         assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
+            !parse.errors.is_empty(),
+            "Phase 4: smelt.ref() must produce a parse error"
         );
 
+        // Even with the error, the recovered CST must NOT produce SMELT_FN_CALL.
         assert!(
             smelt_fn_calls(file.syntax()).is_empty(),
-            "smelt.ref should NOT be parsed as SMELT_FN_CALL"
+            "smelt.ref should NOT be parsed as SMELT_FN_CALL even in error recovery"
         );
 
+        // Error recovery produces a FUNCTION_CALL node.
         let fcalls = function_calls(file.syntax());
         assert!(
             !fcalls.is_empty(),
-            "smelt.ref should parse as FUNCTION_CALL"
-        );
-        // At least one FunctionCall has namespace == smelt and name == ref.
-        let has_ref = fcalls.iter().any(|f| {
-            f.namespace()
-                .map(|ns| ns.eq_ignore_ascii_case("smelt"))
-                .unwrap_or(false)
-                && f.name()
-                    .map(|n| n.eq_ignore_ascii_case("ref"))
-                    .unwrap_or(false)
-        });
-        assert!(
-            has_ref,
-            "expected a FUNCTION_CALL for smelt.ref(...), none found"
+            "error recovery must still produce a FUNCTION_CALL node for smelt.ref()"
         );
     }
 
@@ -7951,37 +8045,22 @@ LIMIT 100
 
     #[test]
     fn legacy_smelt_ref_still_parses() {
-        // Phase 1 keeps legacy compat: `smelt.ref('users')` continues to parse
-        // as a FUNCTION_CALL (no SMELT_PATH_REF / SMELT_PATH_CALL emitted).
+        // Phase 4 update: `smelt.ref('users')` now produces a parse error
+        // (the form is rejected), but error recovery still produces a
+        // FUNCTION_CALL node so the CST is usable. The test is retained but
+        // updated to reflect the Phase 4 behavior.
         let input = "SELECT * FROM smelt.ref('users')";
-        let (parse, file) = parse_file_text(input);
+        let (parse, _file) = parse_file_text(input);
+        // Phase 4: must have at least one parse error.
         assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
+            !parse.errors.is_empty(),
+            "Phase 4: smelt.ref() must produce a parse error; use smelt.models.<name>"
         );
-
+        // The error message should mention the replacement.
+        let err_msg = &parse.errors[0].message;
         assert!(
-            smelt_path_refs(file.syntax()).is_empty(),
-            "smelt.ref(...) must NOT be parsed as SMELT_PATH_REF in Phase 1"
-        );
-        assert!(
-            smelt_path_calls(file.syntax()).is_empty(),
-            "smelt.ref(...) must NOT be parsed as SMELT_PATH_CALL in Phase 1"
-        );
-
-        let fcalls = function_calls(file.syntax());
-        let has_ref = fcalls.iter().any(|f| {
-            f.namespace()
-                .map(|ns| ns.eq_ignore_ascii_case("smelt"))
-                .unwrap_or(false)
-                && f.name()
-                    .map(|n| n.eq_ignore_ascii_case("ref"))
-                    .unwrap_or(false)
-        });
-        assert!(
-            has_ref,
-            "expected legacy smelt.ref(...) to still parse as FUNCTION_CALL"
+            err_msg.contains("smelt.models") || err_msg.contains("removed"),
+            "error message should mention smelt.models or 'removed'; got: {err_msg}"
         );
     }
 
@@ -8003,5 +8082,38 @@ LIMIT 100
             // produce a usable green tree.
             let _ = File::cast(parse.syntax()).expect("parser must yield FILE");
         }
+    }
+
+    // ===== Phase 4: Legacy smelt.ref() and smelt.source() rejection tests =====
+
+    #[test]
+    fn legacy_smelt_ref_now_rejected() {
+        // Phase 4: `smelt.ref('users')` must produce at least one parse error
+        // pointing the user toward the unified `smelt.<path>` form.
+        // The parser should still produce a usable CST (error recovery), but
+        // the error set must be non-empty.
+        let input = "SELECT * FROM smelt.ref('users')";
+        let parse = parse(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "smelt.ref('users') must produce a parse error in Phase 4; \
+             use smelt.models.users instead"
+        );
+        // The parser must still produce a usable green tree (no panic).
+        let _ = File::cast(parse.syntax()).expect("parser must yield FILE even on legacy ref");
+    }
+
+    #[test]
+    fn legacy_smelt_source_now_rejected() {
+        // Phase 4: `smelt.source('raw.events')` must produce at least one
+        // parse error pointing the user toward `smelt.sources.raw.events`.
+        let input = "SELECT * FROM smelt.source('raw.events')";
+        let parse = parse(input);
+        assert!(
+            !parse.errors.is_empty(),
+            "smelt.source('raw.events') must produce a parse error in Phase 4; \
+             use smelt.sources.raw.events instead"
+        );
+        let _ = File::cast(parse.syntax()).expect("parser must yield FILE even on legacy source");
     }
 }
