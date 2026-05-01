@@ -70,7 +70,15 @@ impl LogicalGraph {
         let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
         for model in models {
-            let deps: Vec<String> = model.refs.iter().map(|r| r.model_name.clone()).collect();
+            // Only LegacyRef (smelt.ref) entries are model-to-model deps in
+            // the string-keyed graph; LegacyFn / Path entries are handled by
+            // the path-tuple graph.
+            let deps: Vec<String> = model
+                .refs
+                .iter()
+                .filter(|r| matches!(r.smelt_ref, smelt_core::refs::SmeltRef::LegacyRef(_)))
+                .map(|r| r.model_name.clone())
+                .collect();
             let metadata = model.metadata.as_ref().map(|b| b.as_ref());
 
             let materialization = config.get_materialization_with_metadata(&model.name, metadata);
@@ -454,6 +462,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(dep.to_string()),
             })
             .collect();
 
@@ -477,6 +486,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(dep.to_string()),
             })
             .collect();
 

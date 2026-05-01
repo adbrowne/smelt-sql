@@ -1,10 +1,40 @@
 use crate::config::Config;
 use crate::discovery::ModelFile;
+use crate::refs::PathLocator;
 use crate::selector::{SelectionMethod, Selector};
 use crate::SourcesConfig;
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use thiserror::Error;
+
+/// Compute the workspace-relative path tuple for a model file.
+///
+/// `examples/test_workspace/models/users.sql` with workspace root
+/// `examples/test_workspace/` becomes `["models", "users"]`. The leaf
+/// segment is the model's `name` (which already accounts for
+/// multi-model files where the leaf is taken from frontmatter rather
+/// than the filename); intermediate segments are the parent directory
+/// components from the workspace root down to the file's parent.
+fn path_tuple_for_model(workspace_root: &Path, model: &ModelFile) -> Vec<String> {
+    let source_path = model.model_id.source_path();
+    let parent = source_path.parent().unwrap_or(Path::new(""));
+    // Try to strip the workspace root from the parent to get a workspace-
+    // relative directory. If `parent` is not a descendant of `workspace_root`
+    // (e.g. the model came from a tempdir or virtual path) fall back to the
+    // parent's components verbatim — the resulting tuple is still unique
+    // because the leaf model name is appended.
+    let rel_dir = parent.strip_prefix(workspace_root).unwrap_or(parent);
+    let mut tuple: Vec<String> = rel_dir
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    tuple.push(model.name.clone());
+    tuple
+}
 
 #[derive(Debug, Error)]
 pub enum GraphError {
@@ -22,6 +52,10 @@ pub struct DependencyGraph {
     models: HashMap<String, ModelFile>,
     /// External sources (from sources.yml)
     sources: HashSet<String>,
+    /// Path-tuple keyed dependency edges (Phase 2a). Empty when the
+    /// graph was built via the legacy `build` constructor; populated
+    /// by [`DependencyGraph::build_from_workspace`].
+    path_dependencies: HashMap<Vec<String>, Vec<Vec<String>>>,
 }
 
 impl DependencyGraph {
@@ -39,9 +73,17 @@ impl DependencyGraph {
             }
         }
 
-        // Build dependency map
+        // Build dependency map. Only `LegacyRef` (smelt.ref('name')) entries
+        // are model-to-model deps in the string-keyed graph; LegacyFn / Path
+        // entries (functions, seeds, sources, path-form refs) are resolved by
+        // the path-tuple graph in `build_from_workspace`.
         for model in models {
-            let deps: Vec<String> = model.refs.iter().map(|r| r.model_name.clone()).collect();
+            let deps: Vec<String> = model
+                .refs
+                .iter()
+                .filter(|r| matches!(r.smelt_ref, crate::refs::SmeltRef::LegacyRef(_)))
+                .map(|r| r.model_name.clone())
+                .collect();
 
             if let Some(existing) = models_map.get(&model.name) {
                 eprintln!(
@@ -59,7 +101,76 @@ impl DependencyGraph {
             dependencies,
             models: models_map,
             sources: source_set,
+            path_dependencies: HashMap::new(),
         })
+    }
+
+    /// Build a path-tuple keyed dependency graph from a workspace.
+    ///
+    /// Phase 2a of the smelt-`<path>` migration: every `smelt.<path>`
+    /// reference (path-form *or* legacy form, adapted via
+    /// [`SmeltRef::to_path`]) is keyed by the workspace-relative path
+    /// tuple of its referent. The result preserves the legacy
+    /// string-keyed dependency view (so existing callers keep working)
+    /// and additionally exposes [`path_dependencies`] for callers that
+    /// want the unified key.
+    ///
+    /// The path tuple is derived from each model's location relative to
+    /// the workspace root: `models/users.sql` becomes
+    /// `["models", "users"]`. Legacy `smelt.ref('name')` calls are
+    /// resolved through a [`PathLocator`] backed by the discovered
+    /// model set.
+    pub fn build_from_workspace(
+        models: Vec<ModelFile>,
+        sources: Option<&SourcesConfig>,
+        workspace_root: &Path,
+    ) -> Result<Self> {
+        // Build a name -> path-tuple locator from the discovered model set.
+        let name_to_path: HashMap<String, Vec<String>> = models
+            .iter()
+            .map(|m| {
+                let tuple = path_tuple_for_model(workspace_root, m);
+                (m.name.clone(), tuple)
+            })
+            .collect();
+        struct WorkspaceLocator<'a>(&'a HashMap<String, Vec<String>>);
+        impl<'a> PathLocator for WorkspaceLocator<'a> {
+            fn locate_model(&self, name: &str) -> Option<Vec<String>> {
+                self.0.get(name).cloned()
+            }
+        }
+        let locator = WorkspaceLocator(&name_to_path);
+
+        // First, compute path-tuple edges per model.
+        let mut path_dependencies: HashMap<Vec<String>, Vec<Vec<String>>> = HashMap::new();
+        for model in &models {
+            let model_tuple = path_tuple_for_model(workspace_root, model);
+            let edges: Vec<Vec<String>> = model
+                .refs
+                .iter()
+                .map(|r| r.smelt_ref.to_path(&locator))
+                .collect();
+            path_dependencies.insert(model_tuple, edges);
+        }
+
+        // Then construct the legacy string-keyed graph for compatibility.
+        let mut graph = Self::build(models, sources)?;
+        graph.path_dependencies = path_dependencies;
+        Ok(graph)
+    }
+
+    /// Returns the path-tuple keyed dependencies for a model, if the
+    /// graph was built via [`build_from_workspace`].
+    pub fn path_dependencies(&self, key: &[String]) -> Option<&[Vec<String>]> {
+        self.path_dependencies.get(key).map(|v| v.as_slice())
+    }
+
+    /// Iterate over the path-tuple keyed dependency map. Empty if the
+    /// graph was built via [`build`] rather than [`build_from_workspace`].
+    pub fn iter_path_dependencies(&self) -> impl Iterator<Item = (&[String], &[Vec<String>])> {
+        self.path_dependencies
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
     }
 
     /// Validate all references exist (either as models or sources)
@@ -403,6 +514,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: crate::refs::SmeltRef::LegacyRef(dep.to_string()),
             })
             .collect();
 
@@ -528,6 +640,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: crate::refs::SmeltRef::LegacyRef(dep.to_string()),
             })
             .collect();
 

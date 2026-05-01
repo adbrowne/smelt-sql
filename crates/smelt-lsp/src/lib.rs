@@ -1078,6 +1078,7 @@ impl Backend {
                 DbCode::DeclaredCardinalityUnverifiable => "declared-cardinality-unverifiable",
                 DbCode::MissingProvenancePushdownAdvisory => "missing-provenance-pushdown-advisory",
                 DbCode::ExternFragmentParamUnsupported => "extern-fragment-param-unsupported",
+                DbCode::KindMismatch => "kind-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });

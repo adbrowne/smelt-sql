@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use rowan::TextRange;
 use salsa::{Accumulator, Setter};
 use serde::Deserialize;
-use smelt_parser::{self, File as AstFile, RefCall, TableRef};
+use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, RefCall, TableRef};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
 pub use smelt_types::TypedColumn;
 use smelt_types::{parse_type, DataType};
@@ -45,7 +45,7 @@ pub use function_body_check::{
 };
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
-    ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
+    ModelFunctionType, ModelSchema, RefKind, ResolvedSchema, RowExtension, TypedField,
 };
 pub use type_inference::{
     check_window_in_scalar_contexts, infer_cte_columns, infer_expression_kind,
@@ -429,6 +429,12 @@ pub enum DiagnosticCode {
     /// are only meaningful with PASSING clauses, which `smelt.extern` does
     /// not support (§16 #18). Introduced in Phase 52.
     ExternFragmentParamUnsupported,
+    /// Emitted when a `smelt.<path>` reference resolves to an entity whose
+    /// kind is not valid in the surrounding position — for example,
+    /// `FROM smelt.tests.foo` (test in a `TableExpr` position). Anchored
+    /// at the path-form ref's text range. Introduced in Phase 2a of the
+    /// smelt-`<path>` migration (architecture Surface §"Resolution").
+    KindMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -557,6 +563,67 @@ pub fn model_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<RefLoca
     } else {
         Arc::new(Vec::new())
     }
+}
+
+/// Path-form refs (`smelt.<path>` in value position) extracted with
+/// their resolution metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathRefLocation {
+    pub path: Vec<String>,
+    pub range: Range,
+    /// True when this ref appears in a `TableExpr` (FROM/JOIN) position.
+    /// Phase 2a uses this to gate kind-mismatch diagnostics: a path
+    /// resolving to a `Test` is invalid in `TableExpr` positions.
+    pub in_table_expr_position: bool,
+}
+
+/// Extract every unified `smelt.<path>` value-form ref from a file.
+///
+/// Phase 2a — Salsa-tracked sister of [`model_refs`] for the new path
+/// surface. The legacy `model_refs` query still surfaces
+/// `smelt.ref('name')` callsites; this query surfaces the unified
+/// path-form value refs (no `(`) so the diagnostic pass can validate
+/// them through [`resolve_ref_path`]. Call-form path refs are not
+/// included here — they're consumed by the function-call pipeline.
+#[salsa::tracked]
+pub fn model_path_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<PathRefLocation>> {
+    let parse = parse_file(db, file);
+    let text = file.text(db);
+    let syntax = parse.syntax();
+
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Arc::new(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for path_ref in ast.syntax().descendants().filter_map(SmeltPathRef::cast) {
+        // Skip nested path refs that are part of a SmeltPathCall.
+        if path_ref
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .any(|a| smelt_parser::ast::SmeltPathCall::cast(a).is_some())
+        {
+            continue;
+        }
+        let in_table_expr_position = is_in_table_expr_position(path_ref.syntax());
+        let path = path_ref.segments();
+        let range = smelt_parser::ast::text_range_to_range(text, path_ref.text_range());
+        out.push(PathRefLocation {
+            path,
+            range,
+            in_table_expr_position,
+        });
+    }
+    Arc::new(out)
+}
+
+/// True when this `SMELT_PATH_REF` node sits in a `TableExpr` position
+/// — i.e. it's the body of a TableRef under a FROM/JOIN clause.
+fn is_in_table_expr_position(node: &smelt_parser::syntax_kind::SyntaxNode) -> bool {
+    use smelt_parser::syntax_kind::SyntaxKind as Sk;
+    node.ancestors()
+        .any(|a| matches!(a.kind(), Sk::TABLE_REF | Sk::FROM_CLAUSE | Sk::JOIN_CLAUSE))
 }
 
 #[salsa::tracked]
@@ -1962,6 +2029,98 @@ pub fn smelt_fn_call_diagnostics_for_file(
         use smelt_parser::ast::{FunctionCall, RefCall, SourceCall, Subquery};
         use smelt_parser::syntax_kind::SyntaxKind as Sk;
 
+        // Phase 2a: unified `smelt.<path>` value form. Walks the
+        // expression for any `SMELT_PATH_REF`; resolves through the
+        // path-tuple resolver and dispatches on the resolved kind.
+        for node in arg_expr.syntax().descendants() {
+            if node.kind() == Sk::SMELT_PATH_REF {
+                let path_ref = match SmeltPathRef::cast(node) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let path = path_ref.segments();
+                if let Some(resolved) = resolve_ref_path(db, workspace, path.clone()) {
+                    match resolved.kind {
+                        RefKind::Model => {
+                            if let Some(sf) = resolved.source_file {
+                                let schema = resolved_model_schema(db, workspace, sf);
+                                let cols: Vec<(String, TypedColumn)> = schema
+                                    .columns
+                                    .iter()
+                                    .map(|c| {
+                                        let tc = c.data_type.clone().unwrap_or(TypedColumn {
+                                            data_type: DataType::Unknown,
+                                            nullable: true,
+                                        });
+                                        (c.name.clone(), tc)
+                                    })
+                                    .collect();
+                                if !cols.is_empty() {
+                                    return Some(cols);
+                                }
+                            }
+                        }
+                        RefKind::Seed => {
+                            // Seed columns come from `discover_seed_infos`;
+                            // reuse the legacy provider helper.
+                            let leaf = path.last().cloned().unwrap_or_default();
+                            let provider = SalsaRefSchemaProvider::new(db, workspace);
+                            if let Some(cols) = provider.seed_columns(&leaf) {
+                                return Some(cols);
+                            }
+                        }
+                        RefKind::Source => {
+                            // Path tuple shape: ["sources", <src>, <tbl>].
+                            if path.len() >= 3 {
+                                let source_name = path[path.len() - 2].clone();
+                                let table_name = path[path.len() - 1].clone();
+                                let sources = sources_config(
+                                    db,
+                                    *workspace
+                                        .projects(db)
+                                        .first()
+                                        .expect("at least one project"),
+                                );
+                                for s in &sources.sources {
+                                    if s.name != source_name {
+                                        continue;
+                                    }
+                                    for t in &s.tables {
+                                        if t.name == table_name {
+                                            let cols: Vec<(String, TypedColumn)> = t
+                                                .columns
+                                                .iter()
+                                                .map(|c| {
+                                                    (
+                                                        c.name.clone(),
+                                                        TypedColumn {
+                                                            data_type: c
+                                                                .data_type
+                                                                .clone()
+                                                                .unwrap_or(DataType::Unknown),
+                                                            nullable: true,
+                                                        },
+                                                    )
+                                                })
+                                                .collect();
+                                            return Some(cols);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        RefKind::Function | RefKind::Test => {
+                            // A function or test in `TableExpr` arg
+                            // position is a kind mismatch; surface the
+                            // failure to downstream UnknownIdentifier
+                            // diagnostics — no schema is provided.
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+
         for node in arg_expr.syntax().descendants() {
             if node.kind() == Sk::FUNCTION_CALL {
                 let func = FunctionCall::cast(node)?;
@@ -2486,6 +2645,191 @@ pub fn resolve_ref(
     None
 }
 
+/// Result of resolving a `smelt.<path>` ref against the workspace.
+///
+/// Phase 2a unifies model / seed / source / function / test resolution
+/// behind a single entry point — [`resolve_ref_path`]. Callers dispatch
+/// on `kind` to decide what to do; `source_file` is populated for
+/// `Model`, `Function`, and `Test` kinds (the entity lives in a
+/// `.sql` file tracked by Salsa).
+#[derive(Clone)]
+pub struct ResolvedRef {
+    pub kind: RefKind,
+    /// The Salsa-tracked file backing the entity. Populated for
+    /// `Model` / `Function` / `Test`. `None` for seeds and sources
+    /// (which live outside the SQL file index).
+    pub source_file: Option<SourceFile>,
+    /// The path tuple used to perform the lookup, for round-tripping
+    /// into diagnostics.
+    pub path: Vec<String>,
+}
+
+impl std::fmt::Debug for ResolvedRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRef")
+            .field("kind", &self.kind)
+            .field("source_file", &self.source_file.is_some())
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// Resolve a path tuple (`["models", "users"]`,
+/// `["seeds", "raw", "users"]`, …) against the workspace.
+///
+/// Per architecture Surface §"Resolution: smelt.<path> is the universal
+/// addressing scheme":
+/// - `.sql` file with a bare SELECT → `Model`
+/// - `.sql` file declaring `smelt.define` → `Function`
+/// - `.sql` file with `materialization: test` (Phase 2a stand-in for
+///   the future `smelt.test` declaration kind) → `Test`
+/// - `.csv` under a project's `seed_paths` → `Seed`
+/// - `.yml` declaring an external table → `Source`
+///
+/// The tuple is matched against each workspace `SourceFile`'s path,
+/// falling back to seed/source registries for non-SQL kinds. Kind
+/// dispatch is by file format/content, never by directory name.
+pub fn resolve_ref_path(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    path: Vec<String>,
+) -> Option<ResolvedRef> {
+    if path.is_empty() {
+        return None;
+    }
+
+    // Try every project root in the workspace; the first match wins.
+    for project in workspace.projects(db).iter().copied() {
+        let project_root = project.root(db).clone();
+
+        // Seeds: project-configured seed_paths under <root>. We compare
+        // the leaf segment to the seed name (top-level CSVs only, per
+        // current `discover_seed_infos`).
+        if path.len() >= 2 && path[0] == "seeds" {
+            let leaf = path.last().expect("path non-empty").clone();
+            for seed in project_seeds(db, project).iter() {
+                if seed.name == leaf {
+                    return Some(ResolvedRef {
+                        kind: RefKind::Seed,
+                        source_file: None,
+                        path,
+                    });
+                }
+            }
+        }
+
+        // Sources: project-level `sources.yml`. Path tuple shape is
+        // `["sources", <source_name>, <table_name>]` *or* an arbitrary
+        // path under a `sources/` directory followed by the source +
+        // table; today we accept the canonical shape.
+        if path.len() >= 3 && path[0] == "sources" {
+            let source_name = &path[path.len() - 2];
+            let table_name = &path[path.len() - 1];
+            if resolve_source(db, project, source_name.clone(), table_name.clone()).is_some() {
+                return Some(ResolvedRef {
+                    kind: RefKind::Source,
+                    source_file: None,
+                    path,
+                });
+            }
+        }
+
+        // SQL files: walk every workspace file, compute its
+        // workspace-relative path tuple, and compare.
+        for file in workspace.files(db).iter().copied() {
+            let file_path = file.path(db);
+            // Only consider SQL files for path resolution.
+            if file_path.extension().and_then(|e| e.to_str()) != Some("sql") {
+                continue;
+            }
+            // Match if file_path lives under project_root.
+            let file_tuple = match file_path_tuple(&project_root, file_path, file, db) {
+                Some(t) => t,
+                None => continue,
+            };
+            if file_tuple == path {
+                let kind = sql_file_kind(db, file);
+                return Some(ResolvedRef {
+                    kind,
+                    source_file: Some(file),
+                    path,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Compute the path tuple for a SQL file relative to its project root.
+/// Returns `None` if the file is not a descendant of the project root.
+fn file_path_tuple(
+    project_root: &Path,
+    file_path: &Path,
+    file: SourceFile,
+    db: &dyn salsa::Database,
+) -> Option<Vec<String>> {
+    let rel = file_path.strip_prefix(project_root).ok()?;
+    let parent = rel.parent()?;
+    let mut tuple: Vec<String> = parent
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    // Leaf segment: prefer the parsed model name (so multi-model files
+    // expose their declared `name:` rather than the filename), falling
+    // back to the file stem for non-model SQL files (functions, tests).
+    let leaf = parse_model(db, file).map(|m| m.name.clone()).or_else(|| {
+        file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    })?;
+    tuple.push(leaf);
+    Some(tuple)
+}
+
+/// Determine the kind of a SQL file by its content. Model, function,
+/// and test all live in `.sql` files; the dispatch is on
+/// content/frontmatter, not filename.
+fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
+    let raw_text = file.text(db);
+    // 1. `smelt.define` → Function. Inspect the parsed AST; this is
+    //    cheap because the parse is already cached via Salsa.
+    let parse = parse_file(db, file);
+    if let Some(ast) = AstFile::cast(parse.syntax()) {
+        if ast.defines().next().is_some() {
+            return RefKind::Function;
+        }
+    }
+    // 2. `materialization: test` frontmatter (Phase 2a stand-in for the
+    //    forthcoming `smelt.test` declaration). Use `extract_file_metadata`
+    //    so multi-model files with mixed materializations are handled.
+    if let Ok(meta) = smelt_core::extract_file_metadata(raw_text) {
+        match meta {
+            smelt_core::FileMetadata::Single { metadata, .. } => {
+                if metadata.materialization == Some(smelt_core::Materialization::Test) {
+                    return RefKind::Test;
+                }
+            }
+            smelt_core::FileMetadata::Multi { models } => {
+                if models
+                    .iter()
+                    .all(|s| s.metadata.materialization == Some(smelt_core::Materialization::Test))
+                    && !models.is_empty()
+                {
+                    return RefKind::Test;
+                }
+            }
+            smelt_core::FileMetadata::Empty => {}
+        }
+    }
+    // 3. Default: Model.
+    RefKind::Model
+}
+
 #[salsa::tracked]
 pub fn resolve_source(
     db: &dyn salsa::Database,
@@ -2658,7 +3002,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         return;
     }
 
-    // Undefined refs
+    // Undefined refs (legacy `smelt.ref('name')` form)
     let refs = model_refs(db, file);
     for ref_loc in refs.iter() {
         if resolve_ref(db, workspace, ref_loc.name.clone()).is_none()
@@ -2674,6 +3018,45 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }),
             })
             .accumulate(db);
+        }
+    }
+
+    // Phase 2a: unified path-form refs. Resolve through the path-tuple
+    // resolver and either (a) flag undefined paths or (b) flag a
+    // kind-mismatch when a `smelt.tests.*` path appears in a FROM
+    // position (architecture Surface §"Resolution").
+    let path_refs = model_path_refs(db, file);
+    for path_ref_loc in path_refs.iter() {
+        match resolve_ref_path(db, workspace, path_ref_loc.path.clone()) {
+            Some(resolved) => {
+                if resolved.kind == RefKind::Test && path_ref_loc.in_table_expr_position {
+                    let leaf = path_ref_loc.path.last().cloned().unwrap_or_default();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Cannot reference test '{leaf}' in a FROM position — \
+                             smelt.tests.* paths are not valid as TableExpr values"
+                        ),
+                        range: path_ref_loc.range,
+                        code: Some(DiagnosticCode::KindMismatch),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+            None => {
+                let path_str = format!("smelt.{}", path_ref_loc.path.join("."));
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!("Undefined ref: {path_str}"),
+                    range: path_ref_loc.range,
+                    code: Some(DiagnosticCode::UndefinedModelRef),
+                    data: Some(DiagnosticData::UndefinedRef {
+                        model_name: path_ref_loc.path.last().cloned().unwrap_or_default(),
+                    }),
+                })
+                .accumulate(db);
+            }
         }
     }
 

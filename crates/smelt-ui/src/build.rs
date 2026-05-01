@@ -532,6 +532,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(dep.to_string()),
             })
             .collect();
 

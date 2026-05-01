@@ -61,10 +61,12 @@ fn extract_refs_from_sql(sql: &str) -> Vec<RefInfo> {
     if let Some(file) = smelt_parser::File::cast(parse.syntax()) {
         file.refs()
             .filter_map(|ref_call| {
+                let name = ref_call.model_name()?;
                 Some(RefInfo {
-                    model_name: ref_call.model_name()?,
                     has_named_params: ref_call.named_params().count() > 0,
                     range: ref_call.range(),
+                    smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(name.clone()),
+                    model_name: name,
                 })
             })
             .collect()

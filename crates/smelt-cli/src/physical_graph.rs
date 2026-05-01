@@ -404,6 +404,7 @@ impl<'a> PhysicalGraphBuilder<'a> {
                         model_name: dep.clone(),
                         has_named_params: false,
                         range: rowan::TextRange::default(),
+                        smelt_ref: smelt_core::SmeltRef::LegacyRef(dep.clone()),
                     })
                     .collect(),
                 parse_errors: Vec::new(),
@@ -609,6 +610,7 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: smelt_core::refs::SmeltRef::LegacyRef(dep.to_string()),
             })
             .collect();
 
