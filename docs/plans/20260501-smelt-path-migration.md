@@ -60,7 +60,7 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 6e1963f | 2026-05-01 |
-| 2a    | done     |        | 2026-05-01 |
+| 2a    | done     | 38628cf | 2026-05-01 |
 | 2b    | pending  |        |      |
 | 2c    | pending  |        |      |
 | 3     | pending  |        |      |
