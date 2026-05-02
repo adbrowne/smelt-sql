@@ -705,6 +705,13 @@ pub fn check_smelt_path_call(
     default_type_lookup: &dyn Fn(&FunctionSig, &str) -> Option<DataType>,
     table_ref_schema_lookup: &dyn Fn(&TableRef) -> Option<Vec<(String, TypedColumn)>>,
     smelt_path_schema_lookup: &dyn Fn(&SmeltPathCall) -> Option<Vec<(String, TypedColumn)>>,
+    // TB-5: validates that the call's directory-segment prefix matches the
+    // workspace-relative directory of the file declaring `name`. Returns
+    // `true` iff a function with that name exists in the file at exactly
+    // that workspace-relative directory. Used to emit `UnknownSmeltFn` when
+    // the leaf name resolves but the path prefix is wrong (e.g. includes
+    // the file stem, or names a directory the function does not live in).
+    path_prefix_validator: &dyn Fn(&[String], &str) -> bool,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -838,6 +845,30 @@ pub fn check_smelt_path_call(
         }
         return diagnostics;
     };
+
+    // TB-5: enforce the call-path prefix. The leaf-name lookup succeeded,
+    // but the directory segments (everything before the leaf) must equal
+    // the workspace-relative directory of the declaring file. Without this
+    // check, paths like `smelt.functions.status.is_shipped` (file stem in
+    // the path) and `smelt.functions.nonexistent.is_shipped` would resolve
+    // because we only matched on the leaf name. Builtins are not subject
+    // to this rule (they have no declaring file); they were already
+    // dispatched through the `builtin_lookup` branch above.
+    let dir_segments: Vec<String> = if segments.is_empty() {
+        Vec::new()
+    } else {
+        segments[..segments.len() - 1].to_vec()
+    };
+    if !path_prefix_validator(&dir_segments, &name) {
+        diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!("Unknown function `{}`", display_path),
+            range: path_range,
+            code: Some(DiagnosticCode::UnknownSmeltFn),
+            data: None,
+        });
+        return diagnostics;
+    }
 
     // 2. Bind arguments to parameters.
     let arg_list = call.arg_list();
@@ -1195,6 +1226,7 @@ pub fn check_smelt_path_call(
             default_type_lookup,
             table_ref_schema_lookup,
             smelt_path_schema_lookup,
+            path_prefix_validator,
         )
     };
 

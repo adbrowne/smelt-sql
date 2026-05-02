@@ -31,8 +31,8 @@ Phase 1 is documentation-only. Phases 2–5 are code fixes, each preceded by TDD
 
 | Phase | Topic | Status | Date | Commit |
 |-------|-------|--------|------|--------|
-| 1 | Spec stubs + corrections | done | 2026-05-03 | (this commit) |
-| 2 | TB-5: path-prefix enforcement | pending | | |
+| 1 | Spec stubs + corrections | done | 2026-05-03 | 87b00cc |
+| 2 | TB-5: path-prefix enforcement | done | 2026-05-03 | (this commit) |
 | 3 | TB-2: seed DATE→TEXT | pending | | |
 | 4 | TB-1: --verbose wiring | pending | | |
 | 5 | TB-4: --version flag | pending | | |

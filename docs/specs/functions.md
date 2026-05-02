@@ -79,7 +79,13 @@ FROM smelt.models.orders
 WHERE smelt.functions.is_shipped(status)
 ```
 
-A future revision will add the file-location → call-path mapping table here once path-prefix enforcement (`UnknownSmeltFn` on mismatch) lands; see `docs/plans/20260502-smelt-loop-findings.md` Phase 2.
+File-location → call-path mapping (path-prefix enforcement is normative; a wrong-prefix call emits `UnknownSmeltFn`):
+
+| Filesystem location | Declared name | Call path |
+|---|---|---|
+| `functions/status.sql` | `is_shipped` | `smelt.functions.is_shipped(...)` |
+| `functions/patterns/x.sql` | `session_rollup` | `smelt.functions.patterns.session_rollup(...)` |
+| `utils/math.sql` | `safe_divide` | `smelt.utils.safe_divide(...)` |
 
 ### `PASSING` clauses
 
