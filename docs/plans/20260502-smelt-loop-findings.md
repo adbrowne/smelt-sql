@@ -65,6 +65,28 @@ error: unexpected argument '--version' found
 
 **Proposed direction**: add a top-level `--version` flag (or surface the canonical version subcommand in `smelt --help`). Trivial clap-level change.
 
+### TB-5: `smelt.functions.*` path prefix not enforced — any prefix resolves if the function name exists
+**Source**: medium-tier iteration 1 (2026-05-03).
+
+Function resolution uses the function name alone; path prefix components are silently ignored. `UnknownSmeltFn` is never emitted for a wrong path. Calling `smelt.functions.nonexistent.is_shipped(status)` succeeds identically to the spec-correct `smelt.functions.is_shipped(status)`. A truly unknown function name is only rejected at DuckDB execution time (passed through verbatim, DuckDB rejects the 4-part qualification).
+
+```bash
+# functions/status.sql declares is_shipped
+# spec-correct call: smelt.functions.is_shipped()  (directory only, no file stem)
+# All three forms succeed:
+#   smelt.functions.status.is_shipped(status)     ← file stem in path (wrong per spec)
+#   smelt.functions.is_shipped(status)             ← spec-correct
+#   smelt.functions.nonexistent.is_shipped(status) ← completely wrong path
+# Only fails at DuckDB level when function name itself is unknown:
+#   smelt.functions.status.totally_made_up(status) → Parser Error: TransformFuncCall - Expected 1, 2 or 3 qualifications
+```
+
+**Expected:** `UnknownSmeltFn` diagnostic for any `smelt.<path>(...)` call where the path does not resolve to a declared function (per `architecture.md` §"Resolution" and `functions.md` diagnostic table).
+
+**Spec ref:** `architecture.md` line 82 — `functions/patterns/x.sql` declaring `session_rollup` → `smelt.functions.patterns.session_rollup`; the filename stem `x` is not a path component. The correct call path for `functions/status.sql` declaring `is_shipped` is `smelt.functions.is_shipped()`.
+
+**Proposed direction:** Wire path-based resolution in the function-call type-checker so it validates each path segment against the workspace directory tree before looking up the declared name. Emit `UnknownSmeltFn` on mismatch. Likely lives in the `smelt-db` function-resolution query.
+
 ## DOCS_GAP candidates
 
 ### DG-1: Seed physical type vs. smelt inferred type
@@ -119,6 +141,16 @@ Add an explicit "`seeds/raw_orders.csv` is referenced as `smelt.models.raw_order
 
 Add a "type inference for aggregates" subsection covering `COUNT(*)` → `BIGINT`, `SUM(DOUBLE)` → `DOUBLE`, `SUM(INTEGER)` widening behaviour, and when `COALESCE(agg, literal)` produces a non-nullable column. The skill currently carries this as a workflow gotcha; the canonical reference should own it so the skill can shrink to a pointer once the docs page exists.
 
+### DG-10: `guide/functions` — function call-path mapping table missing; WHERE/HAVING/CASE WHEN placement undocumented
+**Source**: medium-tier iteration 1 (2026-05-03).
+**Page**: `guide/functions`.
+
+Two related gaps in the same page:
+
+1. **Call-path mapping.** The text states the rule ("workspace-relative directory joined with function name") but shows only a top-level example (`smelt.functions.safe_divide(...)`). A side-by-side table mapping file location to call path would close the inference gap — especially for subdirectory-placed functions. Note: this doc PR should wait until TB-5 is resolved so the table documents the confirmed-correct convention (directory only, no file stem).
+
+2. **Expression placement.** All examples in the page show `Expr<T>`-returning functions in `SELECT` lists only. The page should explicitly state that `Expr<Boolean>`-returning functions work in `WHERE`, `HAVING`, `CASE WHEN`, and `JOIN ON` conditions — and add at least one `WHERE smelt.functions.is_shipped(status)` example. Users (and build agents) who see only `SELECT`-list examples have to guess whether other positions are valid.
+
 ### DG-9: Document the default materialization
 **Source**: iteration 4.
 **Page**: `reference/smelt-yml` and/or `guide/materializations`.
@@ -134,19 +166,22 @@ If `materialization:` is omitted from a model's frontmatter, the model is built 
 | 3 | small | 10/10 | weak (1 TB, 3 DG, 0 SG) | none |
 | 4 | small | 10/10 | weak (0 TB, 1 DG new, 2 SG) | applied |
 | 5 | small | 10/10 | none (0 TB, 0 DG new, 0 SG actionable) | none |
+| 6 | medium | 14/14 | yes (1 TB, 1 DG, 2 SG deferred) | rejected (path-resolution bug) |
 
 ## Loop convergence
 
-Five iterations on the small fixture. Iterations 4 and 5 effectively converged — clean 10/10 builds with marginal retro signal that resolved to placement nits or duplicates. Future loop runs should switch to a larger / different-shape fixture (medium tier) to surface new failure modes; the small fixture has been exhausted.
+Five iterations on the small fixture converged — iterations 4 and 5 were clean with marginal retro signal. The medium-tier run (iteration 6) immediately surfaced a new class of bug (TB-5, path-prefix enforcement) invisible at the small tier because small-tier functions are not required. Future loop runs on the medium fixture will be more useful once TB-5 is fixed; until then the medium tier passes despite the bug (build agents discover that any path prefix works and inadvertently work around it).
 
 ## Triage shortlist
 
 Highest leverage findings, in rough order:
 
-1. **TB-2** (passthrough DATE → TEXT type narrowing) — surfaces in the very first iteration on the very first staging model. High user-pain, possibly easy bug. Pair with **DG-1 / DG-5** (consolidate into a single seed-type-inference doc section).
-2. **TB-1** (`--verbose` produces no output) — `smelt build --help` over-promises. Either wire it up or correct the help text.
-3. **TB-4** (`--version` flag missing) — trivial clap fix, high discoverability win.
-4. **DG-2 / DG-6** (CLI flag truth-table) — folds in the surface-area mismatches behind TB-1/3/4 once those are decided. Single docs PR.
-5. **TB-3** (no project-wide compile-only flag) — feature-shaped; decide if `--show-plan` should accept "no positional means whole project" or add a `--dry-run`.
-6. **DG-9** (default materialization is `table`) — one-line addition to `reference/smelt-yml`. Easy win.
-7. Lower priority / lower frequency: **DG-7** (seed filename → ref mapping), **DG-8** (aggregate type-inference subsection).
+1. **TB-5** (path-prefix not enforced for function calls) — correctness bug; wrong paths silently succeed, `UnknownSmeltFn` never fires. Blocks the DG-10 call-path docs PR (can't document the correct convention until the implementation enforces it). Medium-tier loops will keep passing despite the bug until fixed.
+2. **TB-2** (passthrough DATE → TEXT type narrowing) — surfaces in the very first iteration on the very first staging model. High user-pain, possibly easy bug. Pair with **DG-1 / DG-5** (consolidate into a single seed-type-inference doc section).
+3. **TB-1** (`--verbose` produces no output) — `smelt build --help` over-promises. Either wire it up or correct the help text.
+4. **TB-4** (`--version` flag missing) — trivial clap fix, high discoverability win.
+5. **DG-10** (functions: call-path mapping + WHERE/HAVING placement) — wait for TB-5 for the call-path half; WHERE/HAVING half is independent and can ship now.
+6. **DG-2 / DG-6** (CLI flag truth-table) — folds in the surface-area mismatches behind TB-1/3/4 once those are decided. Single docs PR.
+7. **TB-3** (no project-wide compile-only flag) — feature-shaped; decide if `--show-plan` should accept "no positional means whole project" or add a `--dry-run`.
+8. **DG-9** (default materialization is `table`) — one-line addition to `reference/smelt-yml`. Easy win.
+9. Lower priority / lower frequency: **DG-7** (seed filename → ref mapping), **DG-8** (aggregate type-inference subsection).

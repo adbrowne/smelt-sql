@@ -1,0 +1,35 @@
+--- a/.claude/skills/smelt-app-builder/SKILL.md	2026-05-02 18:25:59.829230154 +1000
++++ b/.claude/skills/smelt-app-builder/SKILL.md	2026-05-02 21:13:21.057406288 +1000
+@@ -134,6 +134,32 @@
+ 
+ …then `smelt build` reads from those tables happily. Trying to use `read_parquet` *inside* a smelt model will fail at runtime.
+ 
++## smelt functions (only if the spec requires `smelt.define`)
++
++Functions live in a `functions/` directory under the project root — no `smelt.yml` change needed.
++The call path mirrors the file path (without `.sql`):
++
++| File | Call path |
++|------|-----------|
++| `functions/util.sql` → `fn my_fn` | `smelt.functions.util.my_fn(arg)` |
++| `functions/revenue.sql` → `fn safe_revenue` | `smelt.functions.revenue.safe_revenue(arg)` |
++
++Minimal function definition (parameters are `Expr<T>`; return type required):
++
++```sql
++smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
++    status = 'shipped'
++)
++```
++
++**Expression placement:** `Expr<T>`-returning functions are ordinary SQL expressions — they work
++in `SELECT`, `WHERE`, `HAVING`, `CASE WHEN`, and `JOIN ON` conditions, not only in `SELECT` lists.
++Arguments are **positional** (named `param => value` is not yet wired end-to-end). A single
++`.sql` file may contain multiple `smelt.define` declarations.
++
++After defining a function, use `smelt build --show-plan models/<model>.sql` to confirm the call
++expands correctly before doing a full build.
++
+ ## Stuck-points checklist
+ 
+ If `smelt build` fails, work through these before changing approach:
