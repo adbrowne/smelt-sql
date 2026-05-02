@@ -127,6 +127,20 @@ smelt backbuild +daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partiti
 
 Seed the database with CSV files and then run all models. This is a convenience command that combines `smelt seed` followed by `smelt run`.
 
+**Lifecycle.** A single `smelt build` performs these steps in order:
+
+1. **Load `smelt.yml`** and validate the requested `--target` exists.
+2. **Discover** seed CSVs (under `seed_paths`), sources (`sources.yml`, optional), SQL models, Python models, and `smelt.define` function files.
+3. **Seed** — for each CSV, drop any existing table/view of the same qualified name, then `CREATE TABLE … AS SELECT * FROM read_csv_auto(...)`. Seeds are loaded sequentially in deterministic (sorted) order. Schemas are auto-created.
+4. **Plan** — build the logical graph from discovered models, apply planner rules, and produce the physical execution graph. Models are executed in topological order so each model's upstreams are materialised first.
+5. **Run** — for each model, materialise according to its `materialization` (`table`, `view`, `materialized_view`, or inlined for `ephemeral`). Backends that support it use `CREATE OR REPLACE TABLE` / `CREATE OR REPLACE VIEW` for atomic replacement.
+
+**Idempotency.** `smelt build` is safe to re-run on the same database. Seeds and non-incremental models replace their existing tables/views each run; incremental models advance their interval state and append new partitions. Re-running with the same inputs converges on the same final state.
+
+**`--show-results`.** When set, prints a small Arrow-formatted preview after each materialised model finishes (the same renderer used by DuckDB's CLI). Use it for quick correctness spot-checks during development; it is not a substitute for `smelt test`.
+
+**`--verbose`.** Logs the compiled SQL for each model immediately before execution. Pair with `--dry-run` on `smelt run` if you want to see compiled SQL without touching the database.
+
 **Usage:**
 
 ```

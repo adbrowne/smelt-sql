@@ -36,6 +36,47 @@ user_id,user_name,signup_date
 
 smelt infers column types from the data. The table is created (or replaced) each time you run the seed command.
 
+## Type inference
+
+Two type-inference passes operate on every seed CSV — and they don't always agree.
+
+### At runtime (DuckDB)
+
+Seeds are loaded with DuckDB's `read_csv_auto()`. DuckDB samples the file and assigns a type per column:
+
+| Column shape | DuckDB type |
+|---|---|
+| `1`, `42`, `-7` | `INTEGER` (or `BIGINT` if values exceed INT range) |
+| `1.5`, `100.00` | `DOUBLE` |
+| `true` / `false` (case-insensitive) | `BOOLEAN` |
+| `2025-01-01` | `DATE` |
+| `2025-01-01 12:00:00` | `TIMESTAMP` |
+| Anything else | `VARCHAR` |
+
+`DECIMAL` is **not** auto-inferred — numeric columns with decimal points always become `DOUBLE`. If you need `DECIMAL` precision, cast in a staging model (`CAST(amount AS DECIMAL(10, 2))`).
+
+### At compile time (smelt LSP / `smelt table`)
+
+smelt's own inferencer (used for diagnostics, completions, and `smelt table`) is simpler and only recognises four types: `BOOLEAN`, `INTEGER`, `DOUBLE`, and `TEXT`. It samples the first 10 rows. Date- and timestamp-shaped columns that DuckDB recognises as `DATE`/`TIMESTAMP` show up as `TEXT` in `smelt table` output.
+
+This divergence means a seed column may **load as `DATE`** at runtime but **show as `TEXT`** in your editor. The conservative fix is to cast explicitly in the first staging model that consumes the seed:
+
+```sql
+SELECT
+  CAST(order_date AS DATE) AS order_date,
+  CAST(amount AS DECIMAL(10, 2)) AS amount,
+  ...
+FROM smelt.models.raw_orders
+```
+
+To see what DuckDB actually inferred for a seed after `smelt seed` or `smelt build`:
+
+```bash
+duckdb my-project.duckdb -c 'DESCRIBE raw_orders'
+```
+
+There is currently no `seeds.yml` or per-seed frontmatter for overriding types — explicit casts in downstream models are the supported escape hatch.
+
 ## Commands
 
 ### Load all seeds

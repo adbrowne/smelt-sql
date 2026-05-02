@@ -226,6 +226,35 @@ EXTRACT(WEEK FROM date_col)          -- returns BIGINT
 
 `EXTRACT(EPOCH FROM ...)` returns a `DOUBLE` (floating-point Unix timestamp). All other fields return `BIGINT`.
 
+## Aggregate result types
+
+smelt's type inferencer assigns the following return types to aggregates. Knowing the exact widening rules matters when a downstream column or test expects a specific type — `COUNT(*)` is a frequent surprise because it returns `BIGINT` rather than `INTEGER`.
+
+| Aggregate | Argument type | Result type | Nullable |
+|---|---|---|---|
+| `COUNT(*)`, `COUNT(expr)` | any | `BIGINT` | no |
+| `SUM(x)` | `SMALLINT`, `INTEGER`, `BIGINT` | `BIGINT` | yes |
+| `SUM(x)` | `FLOAT`, `DOUBLE` | `DOUBLE` | yes |
+| `SUM(x)` | `DECIMAL(p, s)` | `DECIMAL(38, s)` | yes |
+| `AVG(x)` | any numeric | `DOUBLE` | yes |
+| `MIN(x)`, `MAX(x)` | any | same as `x` | yes |
+
+### Notes
+
+- **`SUM(DECIMAL)` widens precision to 38.** Real pipelines that accumulate ~1e6 rows of `DECIMAL(10, 2)` overflow precision 10 quickly; smelt mirrors DuckDB's widen-to-38 to avoid silent corruption. Scale is preserved.
+- **`COUNT` is non-null; everything else is nullable.** Other aggregates can return `NULL` when the input group is empty (common with `LEFT JOIN`-fed `GROUP BY`). To substitute a default, wrap in `COALESCE`:
+
+    ```sql
+    SELECT
+      c.customer_id,
+      COALESCE(SUM(o.amount), 0) AS lifetime_spend
+    FROM smelt.models.customers AS c
+    LEFT JOIN smelt.models.orders AS o USING (customer_id)
+    GROUP BY c.customer_id
+    ```
+
+- **Cast `COUNT` if a downstream column expects `INTEGER`.** `CAST(COUNT(*) AS INTEGER)` is safe up to `2^31 - 1` rows; above that, leave it as `BIGINT`.
+
 ## Multi-dialect features
 
 These features are parsed in smelt SQL and rewritten to target-specific syntax:
