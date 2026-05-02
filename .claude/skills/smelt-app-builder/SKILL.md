@@ -59,16 +59,17 @@ LEFT JOIN smelt.models.seed_order_statuses s ON o.status_code = s.status_code
 
 - Reference seeds and other models with `smelt.models.<name>` (seeds are first-class ref targets — name = filename minus `.csv`).
 - Reference declared sources with `smelt.sources.<schema>.<table>`.
-- Materializations: `table` (default for marts), `view`, `incremental` — see `smelt docs show guide/materializations`.
+- Materializations: `table`, `view`, `incremental` — see `smelt docs show guide/materializations`. **If you omit `materialization:` from frontmatter the model is built as a `table`** (so most marts and staging models can leave it off).
 
 ## Build loop
 
 ```bash
 smelt build              # seed + run, idempotent — re-running is safe and won't error
-smelt build --verbose    # show compiled SQL per model (great for debugging)
-smelt build --dry-run --verbose   # parse + compile, no execution
+smelt build --verbose    # extra detail when models actually run; a no-op rebuild prints nothing extra
+smelt build --show-plan path/to/model.sql   # compile a single model without executing (positional arg required)
 ```
 
+`smelt build` does **not** accept `--dry-run`; do not pass it. There is currently no project-wide "compile only" flag — `--show-plan` works per-model.
 `smelt build` is idempotent on DuckDB targets — it will not error if tables already exist. You do *not* need to delete the `.duckdb` file between iterations.
 
 To rebuild a subset:
@@ -89,6 +90,17 @@ uv pip install --only-binary=smelt-sql smelt-sql
 ```
 
 The `--only-binary=smelt-sql` is required: the source distribution on PyPI is broken (it tries to `cargo metadata` against missing workspace members). If you skip the flag and pip falls back to sdist, expect `failed to load manifest for dependency 'smelt-backend-spark'`.
+
+The bundled venv's `python` ships DuckDB but **not** `numpy`/`pandas`, so `con.execute(...).fetchdf()` raises `ModuleNotFoundError: numpy`. Use `.fetchall()` (or `.arrow()` if you really need a dataframe and install pyarrow yourself) when scripting validation queries. Copy-pasteable validation shape:
+
+```python
+import duckdb
+con = duckdb.connect("my-project.duckdb")
+rows = con.execute("SELECT customer_id, revenue FROM mart_top_customers ORDER BY revenue DESC").fetchall()
+for r in rows:
+    print(r)
+# tuple-of-tuples; no pandas required
+```
 
 `smelt-datagen` is bundled inside the `smelt-sql` wheel — do not try to `pip install smelt-datagen` separately.
 
@@ -128,16 +140,18 @@ If `smelt build` fails, work through these before changing approach:
 
 - **"Unknown ref / source"** → run `smelt docs show concepts/project-structure`. Confirm seed CSV is under `seeds/` and the model frontmatter `name:` matches what other models call via `smelt.models.<name>`. Seed names = seed filename minus `.csv`.
 - **YAML frontmatter parse error** → the `---` fences must be on their own lines, with valid YAML between. No tabs.
-- **Type errors on aggregates** → `SUM`/`COUNT` infer as non-null. If your downstream model assumes nullable for `LEFT JOIN`-fed sums, wrap in `COALESCE(SUM(x), 0)`.
+- **Type errors on aggregates** → `SUM`/`COUNT` infer as non-null, and `COUNT(*)` lands as `BIGINT` (not `INTEGER`). For `LEFT JOIN`-fed sums where the right side may be empty, wrap in `COALESCE(SUM(...), 0)`; if a downstream column or test expects `INTEGER`, add an outer `CAST(... AS INTEGER)`. A worked mart pattern: `SELECT c.customer_id, COALESCE(SUM(CASE WHEN o.status = 'shipped' THEN o.amount END), 0) AS revenue FROM smelt.models.raw_customers c LEFT JOIN smelt.models.stg_orders o USING (customer_id) GROUP BY c.customer_id` — ensures every customer appears with `0` revenue instead of `NULL`.
 - **`smelt diff` reports phantom nullability changes after a clean build** → known issue; safe to ignore for app correctness, but don't use `smelt diff` as a CI gate yet.
 - **Stale model cache after deleting a `.sql` file** → `rm .smelt/schemas/<deleted_model>.json` manually.
 
 ## Iteration discipline
 
 - Build a *minimum* model first (one seed → one staging model → `smelt build`) before adding the rest. Verify output with `duckdb my-project.duckdb` + `SELECT * FROM stg_orders LIMIT 5`.
+- After the first `smelt build` (which materializes seeds), run `duckdb my-project.duckdb -c 'DESCRIBE raw_<seed>'` to see physical types, **and** `smelt table <staging_model>` after building each staging model to see smelt's *inferred* types. The two can disagree even on a passthrough `SELECT col` — e.g. DuckDB may store a column as `DATE` while smelt infers `TEXT`, and smelt's inferred types govern downstream type-checking and the materialized column types. When the spec dictates a target type, `CAST` explicitly in staging rather than trusting the seed's type to flow through. Date-shaped strings landing as `VARCHAR`, and numeric CSVs landing as `DOUBLE` rather than `DECIMAL`, want the same fix.
 - Add models in dependency order: seeds → staging → intermediate → marts.
 - After every 1-2 new models, `smelt build` again. Don't write the whole project blind.
-- When debugging compiled SQL, `smelt build --verbose` is your friend; for plan inspection without execution, `smelt build --dry-run --verbose`.
+- For plan inspection without execution, use `smelt build --show-plan <model.sql>` (one model at a time). `smelt build --verbose` only emits extra detail when models actually run.
+- **Validate schema, not just rows.** Before declaring done, `DESCRIBE` each output table (or `smelt table <model>`) and compare column types against the spec. Harness validators often check row counts and value sums but not column types, so a `VARCHAR`-vs-`DATE` mismatch will silently pass row-level checks.
 
 ## When you finish (or get stuck)
 
