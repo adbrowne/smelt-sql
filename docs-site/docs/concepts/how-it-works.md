@@ -2,7 +2,9 @@
 
 ## What is smelt
 
-smelt is a SQL-to-SQL compiler and orchestrator for data transformation pipelines. You write SQL models that reference each other using `smelt.models.<name>`, and smelt takes care of the rest: resolving dependencies, compiling to target-specific SQL, and executing against your database.
+smelt is a SQL-to-SQL compiler and orchestrator for data transformation pipelines. You write SQL models that reference each other using `smelt.<path>`, and smelt takes care of the rest: resolving dependencies, compiling to target-specific SQL, and executing against your database.
+
+`smelt.<path>` is the universal addressing scheme: the path is the workspace-relative directory joined with the entity's name, so a model at `models/staging/user_logins.sql` is referenced as `smelt.models.staging.user_logins`. Every project entity — model, source, seed, function, or test — is addressed the same way.
 
 ```sql
 -- models/marts/active_users.sql
@@ -25,7 +27,7 @@ The core architectural insight behind smelt is the separation of **what to compu
 
 **Logical layer (what you write):**
 
-- SQL models with `smelt.models.<name>` calls
+- SQL models with `smelt.<path>` calls (e.g., `smelt.models.staging.users`)
 - YAML frontmatter for configuration
 - Pure data transformation logic
 
@@ -56,7 +58,7 @@ SQL Files --> Parse --> Analyze --> Plan --> Generate --> Execute
 :   The error-recovery parser produces a complete syntax tree even from incomplete or invalid SQL. This powers both the CLI and the LSP -- you get diagnostics and autocompletion while typing, not just at build time.
 
 **Analyze**
-:   Resolve `smelt.models.<name>` and `smelt.sources.<name>` calls to their targets. Infer column types. Validate schemas and detect mismatches. Build the dependency graph.
+:   Resolve `smelt.<path>` calls to their targets — models, sources, seeds, and functions all follow the same scheme. Infer column types. Validate schemas and detect mismatches. Build the dependency graph.
 
 **Plan**
 :   Determine execution order from the dependency graph. Detect optimization opportunities (predicate pushdown, model fusion). Choose materialization strategies. For incremental models, generate the appropriate merge logic.
@@ -108,7 +110,7 @@ You declare *intent* (enable incremental with a partition column), and smelt han
 
 The smelt LSP catches errors before you run anything:
 
-- Undefined `smelt.models.<name>` targets
+- Undefined `smelt.<path>` targets
 - Column type mismatches between models
 - Schema validation against source definitions
 - Parse errors with precise line/column positions
@@ -130,10 +132,10 @@ Model
 :   A SQL file in `models/` that defines a data transformation. Each model produces one table or view.
 
 Ref
-:   `smelt.models.model_name` creates a dependency on another model. smelt resolves these to actual table names and ensures correct execution order.
+:   `smelt.<path>` addresses any project entity — model, source, seed, function, or test. The path maps to the entity's filesystem location relative to the workspace root (e.g., `smelt.models.marts.customers` for `models/marts/customers.sql`). smelt resolves these to actual table names and ensures correct execution order.
 
 Source
-:   `smelt.sources.schema.table` references an external table defined in `sources.yml`. Sources are not managed by smelt but are validated for schema correctness.
+:   A `.yml` file in `sources/` declaring an external table that smelt does not manage. Referenced via `smelt.<path>` like any other entity (e.g., `smelt.sources.raw.events` for `sources/raw/events.yml`). smelt validates schema correctness but does not create or modify source tables.
 
 Materialization
 :   How a model's results are persisted in the database: `table` (full rebuild), `view` (virtual), `ephemeral` (inlined into downstream queries), or `materialized_view`.

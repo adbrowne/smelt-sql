@@ -1,7 +1,7 @@
 ---
 feature: architecture
 status: stable
-last_reviewed: 2026-05-01
+last_reviewed: 2026-05-02
 owners: [andrew]
 ---
 

@@ -43,7 +43,7 @@ Execute  (smelt-backend-*)  -- Send SQL to DuckDB / Spark / etc.
 
 **Plan** -- The planner reads CST structure to detect patterns, then emits `Transformation` instructions and new SQL strings. It does not mutate existing CSTs. Planning is optional; models run correctly without it.
 
-**Generate** -- The dialect-aware printer walks the CST in a single forward pass and emits target-specific SQL. Each construct that needs translation is a match arm in the recursive walk. For the native dialect (DuckDB), the printer emits SQL identical to the input modulo `smelt.models.<name>` resolution.
+**Generate** -- The dialect-aware printer walks the CST in a single forward pass and emits target-specific SQL. Each construct that needs translation is a match arm in the recursive walk. For the native dialect (DuckDB), the printer emits SQL identical to the input modulo `smelt.<path>` resolution.
 
 **Execute** -- Each backend implementation handles DDL (CREATE TABLE AS, views, incremental inserts) and returns `ExecutionResult` with duration, row count, and optional data preview as Arrow `RecordBatch`.
 
@@ -128,7 +128,7 @@ Execute  (smelt-backend-*)  -- Send SQL to DuckDB / Spark / etc.
 There is no intermediate IR like DataFusion LogicalPlan. The concrete syntax tree from parsing flows through the entire pipeline. This preserves:
 
 - **Comments and whitespace** -- important for readable generated SQL
-- **smelt extensions** -- `smelt.models.<name>`, `smelt.metric()`, named parameters
+- **smelt extensions** -- `smelt.<path>` refs and calls, named parameters
 - **Original formatting** -- the printer's default arm emits tokens verbatim
 - **Error nodes** -- the LSP works with incomplete/invalid code
 
@@ -223,7 +223,7 @@ Rules can be written in Python via PyO3. Python rules implement the same detect/
 
 The printer in `smelt-dialect` walks the CST in a single forward pass. Each construct that needs dialect translation is a match arm in the recursive walk:
 
-- `smelt.models.<name>` calls are resolved to `schema.model_name`
+- `smelt.<path>` calls are resolved to backend-resolvable identifiers (`<schema>.<emitted_name>` for models and seeds, source-declared name for sources)
 - `QUALIFY` is rewritten to a subquery wrapper for backends that lack native support
 - Array literal syntax is adapted per dialect
 - DATE literals, JSON functions, and other constructs are remapped as needed
@@ -239,11 +239,11 @@ The default arm emits tokens verbatim, preserving whitespace and comments. Addin
 The LSP (`smelt-lsp`) is a thin async shell (tower-lsp) over sync Salsa queries. It provides:
 
 - **Parse error diagnostics** with accurate positions
-- **Undefined ref diagnostics** for `smelt.models.<name>` and `smelt.sources.<name>`
-- **Undeclared column diagnostics** for references to columns not in upstream schemas or `sources.yml`
-- **Go-to-definition** for `smelt.models.<name>`, `smelt.sources.<name>`, CTE names, table aliases, and column references (traces through `SELECT *` wildcards)
+- **Undefined `smelt.<path>` ref diagnostics** for any project entity (model, source, seed, function, or test)
+- **Undeclared column diagnostics** for references to columns not in upstream schemas or source declarations
+- **Go-to-definition** for `smelt.<path>` refs, CTE names, table aliases, and column references (traces through `SELECT *` wildcards)
 - **Hover** with type information
 - **Column completions** including table alias completions
-- **Model name completions** in `smelt.models.<name>`
+- **Entity completions** in `smelt.<path>` expressions
 
 The LSP depends on `smelt-dialect` for dialect-specific informational hints (e.g., "QUALIFY will be rewritten to a subquery for PostgreSQL") without linking to any backend binary.
