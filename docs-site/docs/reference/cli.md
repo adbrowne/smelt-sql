@@ -2,9 +2,20 @@
 
 The `smelt` command-line interface provides commands for running models, inspecting schemas, managing incremental state, and more.
 
+## Top-Level Flags
+
+These flags are accepted at the root command and work without a project (no `smelt.yml` required):
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--help` | `-h` | Print usage and exit. Per-subcommand `--help` prints that subcommand's flag table. |
+| `--version` | `-V` | Print the installed package version (`smelt 0.x.y`) and exit. |
+
+`smelt --version` and `smelt --help` are the only invocations that succeed without a subcommand.
+
 ## Common Flags
 
-The following flags appear on most commands:
+The following flags appear on most subcommands:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -139,7 +150,20 @@ Seed the database with CSV files and then run all models. This is a convenience 
 
 **`--show-results`.** When set, prints a small Arrow-formatted preview after each materialised model finishes (the same renderer used by DuckDB's CLI). Use it for quick correctness spot-checks during development; it is not a substitute for `smelt test`.
 
-**`--verbose`.** Logs the compiled SQL for each model immediately before execution. Pair with `--dry-run` on `smelt run` if you want to see compiled SQL without touching the database.
+**`--verbose`.** For each model that the run actually executes, prints a `-- <model_name>` comment line followed by the compiled SQL string to **stdout** immediately before the backend executes it. Output is per executed model — models skipped because they are already up-to-date produce no extra `--verbose` output. The standard `smelt: built N model(s) in T s` summary line is still printed; `--verbose` adds output, it does not replace it. Pair with `--dry-run` on `smelt run` if you want to see compiled SQL without touching the database.
+
+### `smelt build` flag truth-table
+
+The flags below have surprised users in practice; the table records what each one actually does on `smelt build`.
+
+| Flag | Status | Behaviour |
+|------|--------|-----------|
+| `--verbose` / `-v` | implemented | Prints `-- <model_name>` + the compiled SQL to stdout immediately before each executed model. No extra output when all models are up-to-date and skipped. |
+| `--show-plan` | per-model only | Requires a positional argument naming a model file path (e.g. `smelt build --show-plan models/marts/customers.sql`). There is no project-wide `--show-plan` mode — a bare `smelt build --show-plan` errors. |
+| `--select` / `-s` | repeatable | Supply each selector as its own `--select <value>`. Space-separated values inside a single `--select` are taken as one literal selector and will not match anything; use repetition. |
+| `--exclude` / `-e` | repeatable | Same selector grammar and repetition rule as `--select`. |
+| `--dry-run` | **not on `smelt build`** | Use `smelt run --dry-run` for parse-and-validate-without-executing. There is no project-wide compile-only flag on `build` today. |
+| `--event-time-start` / `--event-time-end` | implemented | ISO-8601 (`2026-03-20` or `2026-03-20T00:00:00Z`). End is exclusive. Both required together for incremental execution. |
 
 **Usage:**
 

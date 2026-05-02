@@ -20,6 +20,19 @@ targets:
     schema: main
 ```
 
+!!! note "Supported `smelt.yml` keys at a glance"
+    | Key | Required | Default |
+    |---|---|---|
+    | `name` | yes | — |
+    | `version` | no | `1` |
+    | `targets` | yes | — |
+    | `model_paths` | no | `["models"]` |
+    | `seed_paths` | no | `["seeds"]` |
+    | `default_materialization` | no | `"view"` |
+    | `unstable_schema` | no | `false` |
+
+    Unknown keys produce a warning, not an error. See the [smelt.yml reference](../reference/smelt-yml.md) for the full per-key contract.
+
 ## 2. Add seed data
 
 Create a `seeds/` directory with a CSV file:

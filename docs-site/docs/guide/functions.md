@@ -73,10 +73,33 @@ SELECT
 FROM smelt.models.orders
 ```
 
-For namespace-qualified names (e.g. if the function file uses a subdirectory):
+A function's call path is derived from the workspace-relative directory of the file it is declared in, joined with the declared name. The filename stem itself is **not** part of the call path. The mapping is enforced — calling a function under the wrong path is an `UnknownSmeltFn` diagnostic.
+
+| Filesystem location | Declared name | Call path |
+|---|---|---|
+| `functions/safe_divide.sql` | `safe_divide` | `smelt.functions.safe_divide(...)` |
+| `functions/status.sql` | `is_shipped` | `smelt.functions.is_shipped(...)` |
+| `functions/patterns/x.sql` | `session_rollup` | `smelt.functions.patterns.session_rollup(...)` |
+| `utils/math.sql` | `safe_divide` | `smelt.utils.safe_divide(...)` |
+
+Renaming a function or moving its file changes the call path, the same way moving a model does.
+
+### Calling in boolean positions
+
+A function whose declared return type is `Expr<Boolean>` can be used in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression.
 
 ```sql
-SELECT smelt.functions.analytics.safe_divide(a, b)
+-- functions/status.sql
+smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
+  status = 'shipped' OR status = 'delivered'
+)
+```
+
+```sql
+-- models/shipped_orders.sql
+SELECT *
+FROM smelt.models.orders
+WHERE smelt.functions.is_shipped(status)
 ```
 
 ### Named arguments
