@@ -30,15 +30,11 @@ fn extracts_path_refs_from_unified_ast() {
     let refs = extract_refs(&file);
 
     assert_eq!(refs.len(), 1, "one path-form ref expected");
-    match &refs[0].smelt_ref {
-        SmeltRef::Path(segments) => {
-            assert_eq!(
-                segments,
-                &vec!["models".to_string(), "upstream".to_string()]
-            );
-        }
-        other => panic!("expected SmeltRef::Path, got {other:?}"),
-    }
+    let SmeltRef::Path(segments) = &refs[0].smelt_ref;
+    assert_eq!(
+        segments,
+        &vec!["models".to_string(), "upstream".to_string()]
+    );
 }
 
 #[test]
@@ -57,9 +53,9 @@ JOIN smelt.sources.raw.events e ON s.id = e.user_id
 
     let paths: Vec<Vec<String>> = refs
         .iter()
-        .map(|r| match &r.smelt_ref {
-            SmeltRef::Path(segs) => segs.clone(),
-            other => panic!("expected SmeltRef::Path, got {other:?}"),
+        .map(|r| {
+            let SmeltRef::Path(segs) = &r.smelt_ref;
+            segs.clone()
         })
         .collect();
 

@@ -1772,12 +1772,27 @@ impl<'a> Parser<'a> {
         self.finish_node(); // SMELT_PATH
 
         // Determine whether this is a call or a value form by peeking past
-        // any trivia for `(`.
-        self.skip_trivia();
-        if self.at(LPAREN) {
+        // any trivia for `(`. Do NOT consume trivia here — trivia before `(`
+        // belongs inside SMELT_PATH_CALL (consumed by parse_arg_list), and
+        // trivia after a value-form ref belongs to the following token, not
+        // to the SMELT_PATH_REF node.
+        let mut la = 0;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        let next_is_lparen = self
+            .tokens
+            .get(self.pos + la)
+            .map(|t| t.kind == LPAREN)
+            .unwrap_or(false);
+        if next_is_lparen {
             // Call form. Wrap everything from the outer checkpoint in
-            // SMELT_PATH_CALL, parse the arg list, then any trailing PASSING
-            // clauses.
+            // SMELT_PATH_CALL, parse the arg list (which consumes the trivia
+            // before `(`), then any trailing PASSING clauses.
             self.start_node_at(outer_checkpoint, SMELT_PATH_CALL);
             self.parse_arg_list();
 
@@ -7713,6 +7728,28 @@ LIMIT 100
         assert!(
             inside_arg_list,
             "SMELT_PATH_REF should sit inside an ARG_LIST"
+        );
+    }
+
+    #[test]
+    fn smelt_path_ref_text_range_excludes_trailing_alias_whitespace() {
+        // Regression: `FROM smelt.models.users u` was producing text_range that
+        // included the space before the alias `u`, causing the test compiler to
+        // replace `smelt.models.users ` (with space) with `users` → `usersu`.
+        let input = "SELECT * FROM smelt.models.users u";
+        let (parse, _file) = parse_file_text(input);
+        assert!(parse.errors.is_empty(), "unexpected errors: {:?}", parse.errors);
+
+        let refs = smelt_path_refs(_file.syntax());
+        assert_eq!(refs.len(), 1);
+
+        let range = refs[0].text_range();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        let text = &input[start..end];
+        assert_eq!(
+            text, "smelt.models.users",
+            "text_range must not include trailing whitespace before alias; got {text:?}"
         );
     }
 
