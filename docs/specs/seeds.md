@@ -1,7 +1,7 @@
 ---
 feature: seeds
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -31,9 +31,9 @@ Seeds live under directories listed in `smelt.yml::seed_paths` (default `["seeds
 Seed schemas are inferred twice and the two inferencers can disagree.
 
 - **Runtime (DuckDB `read_csv_auto`).** Recognises `INTEGER`, `BIGINT`, `DOUBLE`, `BOOLEAN`, `DATE`, `TIMESTAMP`, `VARCHAR`. The materialised table on disk uses these types.
-- **Compile-time (`smelt-db` schema extraction; consumed by the LSP and `smelt table`).** A simpler inferencer that recognises only `BOOLEAN`, `INTEGER`, `DOUBLE`, `Text`. Date- and timestamp-shaped columns are reported as `Text`. Columns the inferencer cannot classify default to `Text`.
+- **Compile-time (`smelt-core::seeds::infer_type_from_csv_values`; surfaced through the `smelt-db` schema queries consumed by the LSP and `smelt table`).** A simpler inferencer that samples the first 10 data rows and recognises `BOOLEAN`, `DATE` (`YYYY-MM-DD`-shaped values), `TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`-shaped values, optionally with fractional seconds), `INTEGER`, `DOUBLE`, and `Text`. Columns the inferencer cannot classify default to `Text`.
 
-`smelt table <model>` reports the **compile-time** schema (what type-checking sees), not DuckDB's runtime schema (what `DESCRIBE` would print). The two are intentionally aligned for the runtime types the compile-time inferencer recognises (`BOOLEAN`, `INTEGER`, `DOUBLE`); they diverge for `DATE` and `TIMESTAMP`, which the compile-time inferencer does not yet detect.
+`smelt table <model>` reports the **compile-time** schema (what type-checking sees), not DuckDB's runtime schema (what `DESCRIBE` would print). The two are aligned for the runtime types the compile-time inferencer recognises (`BOOLEAN`, `DATE`, `TIMESTAMP`, `INTEGER`, `DOUBLE`).
 
 ### `smelt seed` lifecycle
 
@@ -50,16 +50,16 @@ Seeds are loaded sequentially in deterministic (sorted-by-qualified-name) order.
 1. **Filesystem path is identity.** A seed's qualified table name and `smelt.<path>` reference are derived from its location under `seed_paths` — no manifest, no per-seed YAML. A rename or move changes the call surface (same as for models).
 2. **Subdirectory = schema.** Exactly one subdirectory level under a `seed_paths` entry is taken as a schema name; deeper nesting is not yet supported (Known Divergences). Top-level CSVs land in the target's schema.
 3. **Idempotence.** Re-running `smelt seed` reloads each table from its CSV — old contents are replaced, not appended. The runtime schema may change between runs (e.g., a new column appears in the CSV); this is the normal seed-development workflow.
-4. **Compile-time inference may understate runtime types.** If `smelt table <staging>` shows `Text` for a column DuckDB's `read_csv_auto` types as `DATE`, the model's compile-time schema is the narrower view. Downstream models that consume this column inherit the compile-time `Text` typing, and an `ORDER BY` or `BETWEEN` against another `Date` value will diagnose `TypeMismatch` until an explicit `CAST` bridges the families. This is the user-visible failure mode of TB-2.
-5. **Workaround until TB-2 is fixed.** In the first staging model that reads a temporal seed column, emit an explicit `CAST(col AS DATE)` (or `CAST(col AS TIMESTAMP)`). Downstream models then see the temporal type and the type checker is happy. The `CAST` is a no-op at runtime because the underlying DuckDB column is already `DATE`/`TIMESTAMP`.
+4. **Compile-time and runtime inference agree on the recognised types.** For `BOOLEAN`, `DATE`, `TIMESTAMP`, `INTEGER`, and `DOUBLE`, the compile-time inferencer (which samples the first 10 data rows of the CSV) emits the same `DataType` that DuckDB's `read_csv_auto` materialises at runtime. Columns the compile-time inferencer cannot classify default to `Text`; downstream models that consume them therefore see `Text`, and an explicit `CAST` is required to bridge into a temporal or numeric family.
+5. **Detection is shape-based, not calendar-validating.** The compile-time inferencer accepts a column as `DATE` when every sampled value matches `YYYY-MM-DD` (4-digit year, 1-12 month, 1-31 day) and as `TIMESTAMP` when every sampled value matches `YYYY-MM-DD HH:MM:SS` (optionally with a fractional-seconds tail). Out-of-range fields (`2025-13-01`) or wrong shapes (`2025/01/01`, `not-a-date`) fall back to `Text`, matching the conservative behaviour users expect from a static inferencer. The compile-time inferencer never emits `TIMESTAMP WITH TIME ZONE`; columns containing zone information will fall back to `Text` and require an explicit `CAST`.
 
 ## Design
 
 **Seeds are addressed by path, like every other project entity.** The universal addressing scheme (`smelt.<path>`, `architecture.md` §"Resolution") is the rule; seeds are not an exception. A seed promoted to a SQL model (or a model demoted to a CSV) is a rename, not a callsite-rewriting refactor. The current implementation's mapping into `smelt.models.*` and `smelt.sources.*` predates the unification and is being walked back; the spec describes the intended steady state, with the discrepancy logged in Known Divergences.
 
-**Two inferencers exist deliberately.** The compile-time inferencer is in `smelt-db` (a sync, pure module that the LSP and CLI both consume); pulling in DuckDB at compile time would tie the compile-time stack to a heavyweight runtime dependency and is out of scope for the LSP. Keeping a simpler inferencer compile-side and DuckDB's `read_csv_auto` runtime-side is the correct factoring, but the two must agree on the types they both claim to support. TB-2 is a coverage gap (compile-time inferencer does not recognise `DATE`/`TIMESTAMP` shapes), not a deliberate choice — the fix in `docs/plans/20260502-smelt-loop-findings.md` Phase 3 closes the gap.
+**Two inferencers exist deliberately.** The compile-time inferencer is in `smelt-core` (a sync, pure module that the LSP and CLI both consume); pulling in DuckDB at compile time would tie the compile-time stack to a heavyweight runtime dependency and is out of scope for the LSP. Keeping a simpler inferencer compile-side and DuckDB's `read_csv_auto` runtime-side is the correct factoring, but the two must agree on the types they both claim to support. The historical TB-2 gap (compile-time inferencer missing `DATE`/`TIMESTAMP` shape recognition) was closed by `docs/plans/20260502-smelt-loop-findings.md` Phase 3; the inferencer now matches DuckDB on `BOOLEAN`, `DATE`, `TIMESTAMP`, `INTEGER`, and `DOUBLE`.
 
-**`smelt table` reflects the compile-time schema.** A user inspecting "what does smelt think the columns of this model are?" wants the compile-time view, because that is what type-checks every downstream model. Showing the runtime schema would mask the type-checker's view and make TB-2-class divergences invisible. When the compile-time inferencer is correct, the two views agree.
+**`smelt table` reflects the compile-time schema.** A user inspecting "what does smelt think the columns of this model are?" wants the compile-time view, because that is what type-checks every downstream model. Showing the runtime schema would mask the type-checker's view and make coverage-gap divergences (the historical TB-2 class) invisible. When the compile-time inferencer is correct, the two views agree.
 
 **No per-seed YAML.** Seeds inherit smelt's "configuration falls out of structure" doctrine: the path determines schema and table name, the CSV's content determines the columns, `read_csv_auto` determines runtime types. A future `seeds.yml` could pin types or describe relationships, but is not in scope today and would be additive (not breaking).
 
@@ -68,14 +68,14 @@ Seeds are loaded sequentially in deterministic (sorted-by-qualified-name) order.
 1. A seed CSV's qualified table name (`<schema>.<name>`) is derived purely from its path; no per-seed metadata can override it.
 2. Seed loading is idempotent: re-running `smelt seed` brings the database to the same state for the same set of CSV inputs.
 3. Top-level CSVs go to the active target's `schema:`; subdirectory CSVs go to a schema named after the immediate parent directory.
-4. Compile-time and runtime type inference must agree on the types the compile-time inferencer recognises (`BOOLEAN`, `INTEGER`, `DOUBLE`, `Text`); the divergence is exclusively in the compile-time inferencer's narrower coverage of temporal types.
+4. Compile-time and runtime type inference must agree on the types the compile-time inferencer recognises (`BOOLEAN`, `DATE`, `TIMESTAMP`, `INTEGER`, `DOUBLE`); columns the compile-time inferencer cannot classify fall back to `Text`.
 5. The compile-time-inferred schema is the canonical schema for type-checking and `smelt table`; the runtime schema is opaque to type analysis.
 
 ## Known Divergences / Open Questions
 
 - **Addressing inconsistency.** The architecture spec specifies path-derived `smelt.seeds.<path>` for every seed (consistent with the universal addressing scheme). The implementation today maps top-level seeds onto `smelt.models.<name>` (because they share the target schema with executed models) and subdirectory seeds onto `smelt.sources.<schema>.<name>` (because they pre-date the unified resolver). Existing user docs (`guide/seeds`) and example workspaces (`examples/timeseries/`) follow the implementation surface, not the architecture spec. The spec author chose the architecture-spec form here because it is the documented design; closing the divergence is a follow-up plan and the user docs will move once the resolver does. Cross-reference: `architecture.md` §"Resolution".
-- **TB-2 — Passthrough `DATE` / `TIMESTAMP` seed columns infer as `Text` at compile time.** A seed CSV with a column of `2025-01-01` values is typed `DATE` by `read_csv_auto` at runtime, but the compile-time inferencer types it `Text`. A staging model `SELECT order_date FROM smelt.seeds.raw_orders` therefore emits a `Text` column at compile time and materialises as `VARCHAR` in DuckDB (because the cast wraps `Text`). Tracked in `docs/plans/20260502-smelt-loop-findings.md` Phase 3. Fix: extend the compile-time inferencer to recognise `YYYY-MM-DD` (`DATE`) and `YYYY-MM-DD HH:MM:SS` (`TIMESTAMP`) shapes (and verify `DECIMAL`-shaped columns map to `Double` at both layers). Once landed, this divergence moves into Semantics §4 ("compile-time and runtime inference agree for `BOOLEAN`, `INTEGER`, `DOUBLE`, `DATE`, `TIMESTAMP`; longer-form `DECIMAL` columns infer as `Double`").
 - **No nested-subdirectory seed layout.** `seeds/<sub1>/<sub2>/foo.csv` is not specified; the discovery loop only descends one level. Whether deeper paths should produce dotted schema names (`<sub1>.<sub2>.foo`) or be rejected is open.
+- **DECIMAL-shaped seed columns surface as `Double`.** DuckDB's `read_csv_auto` may type a numeric column with a fractional component as `DECIMAL(p,s)` (when values look bounded) or `DOUBLE` (when they don't); smelt's compile-time inferencer always classifies parseable-as-`f64` columns as `Double`. This is an intentional simplification — `Double` is a superset of the value space DuckDB would store, so type-checking with `Double` is conservatively correct, and the compile-time inferencer avoids guessing precision/scale from a 10-row sample. Users who need `DECIMAL` typing must materialise a downstream model with an explicit `CAST(col AS DECIMAL(p,s))`.
 - **Seed type pinning.** Users have asked for a way to override the inferred runtime type of a seed column (e.g., force `DECIMAL(10,2)` instead of `DOUBLE`). The current loader has no override; a future `seeds.yml` could add it. Not in scope here.
 
 ## References
