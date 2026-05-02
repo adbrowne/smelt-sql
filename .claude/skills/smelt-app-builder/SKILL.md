@@ -9,7 +9,7 @@ You are starting from an empty directory and need to deliver a working smelt pro
 
 ## First moves (do these before reading the spec deeply)
 
-1. `smelt docs list` — see what topics exist. Bookmark `getting-started/quickstart`, `reference/smelt-yml`, `reference/sources-yml`, `reference/cli`, `guide/sql-models`, `guide/seeds`, `guide/sources`.
+1. `smelt docs list` — see what topics exist. Bookmark `getting-started/quickstart`, `reference/smelt-yml`, `reference/sources-yml`, `reference/cli`, `guide/sql-models`, `guide/seeds`, `guide/sources`, `guide/functions`.
 2. `smelt --help` and `smelt build --help` — understand the CLI surface.
 3. `smelt docs show getting-started/quickstart` — minimum viable project. Build this first, even if the spec is bigger.
 
@@ -133,6 +133,38 @@ con.execute("CREATE OR REPLACE TABLE raw.orders AS SELECT * FROM read_parquet('o
 ```
 
 …then `smelt build` reads from those tables happily. Trying to use `read_parquet` *inside* a smelt model will fail at runtime.
+
+## smelt.define functions (required by some specs)
+
+If the spec asks you to use `smelt.define` typed functions, read `smelt docs show guide/functions` first. Key points:
+
+- Functions live in a `functions/` directory at the project root (auto-discovered, no smelt.yml change needed).
+- One `.sql` file may contain multiple `smelt.define` declarations.
+- Syntax: `smelt.define <name>(<params>) -> <ReturnType> AS (<body>)`
+- Typed parameter syntax: `name: Expr<T>` where `T` is a concrete type (`Double`, `Text`, `Integer`, `Boolean`, `Date`, …) or a constraint (`Numeric`, `Any`).
+- A function declared in `functions/revenue.sql` as `smelt.define safe_revenue(...)` is called as `smelt.functions.revenue.safe_revenue(...)` — the path mirrors the file's directory and name relative to `functions/`.
+- Arguments are **positional** in v1 — `param => value` named syntax is not yet wired end-to-end.
+- Use `smelt build --show-plan models/your_model.sql` to confirm the function call expands before a full build.
+
+Minimal working example:
+
+```sql
+-- functions/revenue.sql
+smelt.define safe_revenue(amount: Expr<Double>) -> Expr<Double> AS (
+    COALESCE(amount, 0.0)
+)
+```
+
+```sql
+-- models/stg_orders.sql
+---
+materialization: table
+---
+SELECT
+    order_id,
+    smelt.functions.revenue.safe_revenue(amount) AS amount
+FROM smelt.models.raw_orders
+```
 
 ## Stuck-points checklist
 
