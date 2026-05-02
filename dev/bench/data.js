@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777711216837,
+  "lastUpdate": 1777720181039,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14381,6 +14381,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.233127,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c6a63ae5b49dd861713d252105a7f41556591410",
+          "message": "agent-loop: medium-tier fixture (smelt.define + typed params)\n\nAdds the medium fixture for /smelt-loop --tier medium. Same orders-pipeline\noutputs as small, but validate.py hard-enforces structural requirements:\nfunctions/ directory must exist, at least one smelt.define with Expr<T> typed\nparams, and at least one model must call smelt.functions.*. Also adds a\nsmelt.define section to the app-builder skill so agents know the call-path\nconvention and positional-args-only constraint before they read the docs.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-02T21:07:25+10:00",
+          "tree_id": "513d71f4d8586f6749ef58d6a2a994f2952e697e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c6a63ae5b49dd861713d252105a7f41556591410"
+        },
+        "date": 1777720180078,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.146416,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.841631,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6267199999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.354291,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.005830999999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 844.915081,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 1.078483,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.851649,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.83583,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.826963,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 920.998311,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.339930000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.909449999999996,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.081136,
             "unit": "ms"
           }
         ]
