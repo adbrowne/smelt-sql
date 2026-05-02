@@ -30,7 +30,7 @@ TB-B and TB-C (function return type not flowing into `smelt table`) are independ
 |-------|-------|--------|------|--------|
 | 1 | TB-A: build-path path-prefix enforcement + fixture | done | 2026-05-03 | b207d41 |
 | 2 | TB-B/C: function return type propagation into schema | done | 2026-05-03 | b31a0ff |
-| 3 | Docs, harness, skill cleanup | done | 2026-05-03 | (pending sha) |
+| 3 | Docs, harness, skill cleanup | done | 2026-05-03 | 428feeb |
 
 ---
 
