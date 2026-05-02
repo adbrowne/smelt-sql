@@ -412,6 +412,68 @@ smelt docs generate --output docs/catalog
 
 ---
 
+## smelt docs list
+
+List the user-facing documentation topics shipped with this binary. Documentation is embedded at build time, so it works offline and is pinned to the installed version of smelt.
+
+**Usage:**
+
+```
+smelt docs list
+```
+
+Each line is a topic path you can pass to `smelt docs show`.
+
+**Example:**
+
+```bash
+smelt docs list
+# concepts/how-it-works
+# concepts/project-structure
+# getting-started/installation
+# getting-started/quickstart
+# guide/incremental-models
+# ...
+```
+
+---
+
+## smelt docs show
+
+Print the markdown contents of a documentation topic to stdout.
+
+**Usage:**
+
+```
+smelt docs show <topic>
+```
+
+The `<topic>` argument is a path from `smelt docs list`, with or without the `.md` suffix.
+
+**Examples:**
+
+```bash
+smelt docs show getting-started/quickstart
+smelt docs show guide/incremental-models
+smelt docs show reference/smelt-yml | less
+```
+
+If the topic isn't found, the error message lists near matches.
+
+---
+
+## smelt docs path
+
+Explain where the embedded docs live (they are inside the binary itself, not on disk). Useful when you're scripting around the docs and want to know whether to grep through `smelt docs show` output or look for files on the filesystem.
+
+**Usage:**
+
+```
+smelt docs path
+```
+
+---
+
 ## smelt table
 
 Show column names and types for a model. The schema is inferred by the smelt type checker without executing the model.

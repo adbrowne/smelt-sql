@@ -3,6 +3,7 @@ target/
 .claude/*
 !.claude/settings.json
 !.claude/commands/
+!.claude/skills/
 /.vscode/
 datagen.duckdb
 output/
@@ -25,3 +26,6 @@ docs-site/site/
 
 # Maturin wheel data (created in CI)
 smelt_sql.data/
+
+# Local maturin wheel builds (used by the agent-loop harness)
+/dist/

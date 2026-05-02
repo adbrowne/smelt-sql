@@ -58,6 +58,9 @@ tracing-subscriber.workspace = true
 
 # File system
 walkdir = "2.4"
+
+# Embedded user-facing docs (so `smelt docs show` works offline / from the wheel)
+include_dir = "0.7"
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]

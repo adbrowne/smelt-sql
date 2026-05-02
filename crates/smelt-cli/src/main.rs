@@ -50,6 +50,15 @@ enum Commands {
 enum DocsCommands {
     /// Generate a data catalog / data dictionary
     Generate(DocsGenerateArgs),
+    /// List user-facing documentation topics shipped with this binary
+    List,
+    /// Print the markdown contents of a documentation topic to stdout
+    Show {
+        /// Topic path, e.g. "getting-started/quickstart" (with or without .md)
+        topic: String,
+    },
+    /// Explain where the embedded docs live
+    Path,
 }
 
 #[derive(Parser)]
@@ -418,6 +427,9 @@ async fn main() -> Result<()> {
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,
+            DocsCommands::List => commands::docs::list(),
+            DocsCommands::Show { topic } => commands::docs::show(&topic),
+            DocsCommands::Path => commands::docs::path(),
         },
     }
 }
