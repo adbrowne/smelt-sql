@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Seeds
 
-> **Scope.** Normative spec for CSV seed loading: filesystem layout, schema/table mapping, addressing in models, and compile-time vs. runtime type inference. The universal addressing rule (`smelt.<path>` everywhere) is owned by `architecture.md` §"Resolution"; this spec specialises it for `.csv` files. This is a stub — sections may be brief — but every section says something concrete.
+> **Scope.** Normative spec for CSV seed loading: filesystem layout, schema/table mapping, addressing in models, and compile-time vs. runtime type inference. The universal addressing rule (`smelt.<path>` everywhere) is owned by `architecture.md` §"Resolution"; this spec specialises it for `.csv` files.
 
 ## Surface
 
@@ -83,13 +83,20 @@ Seeds are loaded sequentially in deterministic (sorted-by-qualified-name) order.
 - **Code**:
   - `crates/smelt-cli/src/seed.rs` — `discover_seeds`, `execute_seed`, `SeedFile`, `SeedType` (Source vs. Target classification)
   - `crates/smelt-cli/src/commands/seed.rs` — CLI entry point
+  - `crates/smelt-core/src/seeds.rs` — `SeedInfo`, `discover_seed_infos()`, `infer_csv_columns()`, `infer_type_from_csv_values()`
   - `crates/smelt-db/src/schema.rs` — compile-time schema extraction for seed-backed models
   - `crates/smelt-core/src/config.rs` — `seed_paths` (`default_seed_paths()`)
-- **Tests**: unit tests in `crates/smelt-cli/src/seed.rs::tests`; integration coverage via `examples/timeseries/seeds/` and the example-diagnostics test (`cargo test -p smelt-cli --test example_diagnostics`).
-- **User docs**: `docs-site/docs/guide/seeds.md` — to be reconciled against this spec via Phase 6 of `docs/plans/20260502-smelt-loop-findings.md`.
-- **Plans (history)**: `docs/plans/20260502-smelt-loop-findings.md` — the spec-authoring plan and the TB-2 fix.
+- **Tests**:
+  - `crates/smelt-core/src/seeds.rs` (inline `#[cfg(test)]`) — type inference, discovery, missing dir
+  - Integration coverage via `examples/timeseries/seeds/` and `cargo test -p smelt-cli --test example_diagnostics`
+- **User docs**:
+  - `docs-site/docs/guide/seeds.md` — to be reconciled against this spec
+- **Plans (history)**:
+  - `docs/plans/20260502-smelt-loop-findings.md` — TB-2 fix (compile-time DATE/TIMESTAMP recognition)
 - **Related specs**:
-  - `architecture.md` §"Resolution" — universal `smelt.<path>` addressing.
-  - `types.md` — compile-time `DataType` vocabulary the inferencer produces.
-  - `smelt_yml.md` — `seed_paths`, `targets[*].schema` keys consumed here.
-  - `cli.md` — `smelt seed` and `smelt build` lifecycle.
+  - `architecture.md` §"Resolution" — universal `smelt.<path>` addressing
+  - `types.md` — compile-time `DataType` vocabulary the inferencer produces
+  - `sources.md` — external sources share the `smelt.sources` namespace with subdirectory seeds
+  - `models.md` — top-level seeds share the `smelt.models` namespace with SQL models
+  - `project_config.md` — `seed_paths`, `targets[*].schema` keys
+  - `cli.md` — `smelt seed` and `smelt build` lifecycle
