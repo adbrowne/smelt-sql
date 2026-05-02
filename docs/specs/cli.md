@@ -85,7 +85,6 @@ This is a stub spec; the CLI surface is large and the deep design rationale will
   1. Extend `--show-plan` to accept "no positional argument means whole project," emitting a graph + per-node plan.
   2. Add a fresh `smelt build --dry-run` that mirrors `smelt run --dry-run` semantics but spans the seed→run lifecycle.
   Tracked in the smelt-loop findings plan as deferred until the direction is chosen.
-- **TB-4 — `smelt --version` is not a recognised flag.** The clap root command does not declare `--version`, so `smelt --version` errors with `unexpected argument`. Trivial fix tracked in `docs/plans/20260502-smelt-loop-findings.md` Phase 5.
 - **`--select` whitespace handling is unspecified.** When a user writes `--select "a b"`, the literal `"a b"` becomes one selector that will not match any model — the call silently produces an empty selection. Whether this should be a hard error or a warning is open; the implementation today is silent. Recorded so a future plan can choose deliberately.
 
 ## References
