@@ -8,7 +8,7 @@ smelt models are SQL files in the `models/` directory with optional YAML frontma
 SELECT
   user_id,
   COUNT(*) as event_count
-FROM smelt.ref('events')
+FROM smelt.models.events
 GROUP BY 1
 ```
 
@@ -33,36 +33,36 @@ SELECT
   DATE(event_time) as event_date,
   user_id,
   COUNT(*) as event_count
-FROM smelt.ref('events')
+FROM smelt.models.events
 GROUP BY 1, 2
 ```
 
 ## References
 
-Use `smelt.ref()` to reference other models and seeds:
+Use `smelt.models.<name>` to reference other models and seeds:
 
 ```sql
-SELECT * FROM smelt.ref('upstream_model')
-SELECT * FROM smelt.ref('my_seed')  -- seeds are first-class ref targets
+SELECT * FROM smelt.models.upstream_model
+SELECT * FROM smelt.models.my_seed  -- seeds are first-class ref targets
 ```
 
 The parser supports named parameters using `=>` syntax:
 
 ```sql
-SELECT * FROM smelt.ref('events', filter => date > '2024-01-01')
+SELECT * FROM smelt.models.events(filter => date > '2024-01-01')
 ```
 
 !!! note
-    Named parameter support in `smelt.ref()` is parsed but not yet used at runtime. The primary use case is `smelt.ref('model_name')`.
+    Named parameter support in `smelt.models.<name>` is parsed but not yet used at runtime. The primary use case is `smelt.models.model_name`.
 
 For more on defining external sources, see [Sources](sources.md).
 
 ## Sources
 
-Use `smelt.source()` for external tables defined in `sources.yml`:
+Use `smelt.sources.<name>` for external tables defined in `sources.yml`:
 
 ```sql
-SELECT * FROM smelt.source('raw.users')
+SELECT * FROM smelt.sources.raw.users
 ```
 
 ## Supported SQL features
@@ -74,7 +74,7 @@ smelt's type inference and LSP diagnostics understand the following SQL patterns
 ```sql
 WITH
   filtered AS (
-    SELECT * FROM smelt.ref('events') WHERE event_type = 'purchase'
+    SELECT * FROM smelt.models.events WHERE event_type = 'purchase'
   ),
   summary AS (
     SELECT user_id, COUNT(*) AS purchase_count FROM filtered GROUP BY 1
@@ -92,7 +92,7 @@ SELECT
     WHEN total_spent > 100  THEN 'medium_value'
     ELSE 'low_value'
   END AS value_segment
-FROM smelt.ref('user_totals')
+FROM smelt.models.user_totals
 ```
 
 ### EXTRACT
@@ -101,7 +101,7 @@ FROM smelt.ref('user_totals')
 SELECT
   EXTRACT(YEAR FROM event_timestamp) AS event_year,
   EXTRACT(EPOCH FROM event_timestamp) AS unix_ts
-FROM smelt.ref('events')
+FROM smelt.models.events
 ```
 
 ### Subqueries
@@ -110,7 +110,7 @@ FROM smelt.ref('events')
 SELECT *
 FROM (
   SELECT user_id, SUM(amount) AS total
-  FROM smelt.ref('transactions')
+  FROM smelt.models.transactions
   GROUP BY 1
 ) AS sub
 WHERE sub.total > 100

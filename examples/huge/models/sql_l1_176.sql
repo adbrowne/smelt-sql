@@ -10,5 +10,6 @@ SELECT
     a.duration_seconds,
     a.referrer,
     b.page_path
-FROM smelt.ref('clicks') a
-LEFT JOIN smelt.ref('clicks') b ON a.user_id = b.user_id
+FROM smelt.models.clicks a
+LEFT JOIN smelt.models.clicks b ON a.user_id = b.user_id
+

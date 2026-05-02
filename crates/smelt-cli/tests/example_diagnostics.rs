@@ -113,3 +113,202 @@ fn ecommerce_no_diagnostics() {
 fn functions_demo_no_diagnostics() {
     check_workspace_no_diagnostics("examples/functions_demo");
 }
+
+/// Test 4 (TDD): All example SQL files must use the unified `smelt.<path>`
+/// syntax.  This test FAILS until the migration tool has been run on all
+/// example workspaces.
+#[test]
+fn all_examples_use_path_syntax() {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples");
+    let mut legacy_usages: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(&examples_dir) {
+        let entry = entry.unwrap();
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("sql") {
+            continue;
+        }
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        for (line_no, line) in content.lines().enumerate() {
+            // Skip comment lines
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("--") {
+                continue;
+            }
+            for pattern in &["smelt.ref(", "smelt.source(", "smelt.fn."] {
+                if line.contains(pattern) {
+                    legacy_usages.push(format!(
+                        "{}:{}: {}",
+                        entry.path().display(),
+                        line_no + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        legacy_usages.is_empty(),
+        "Found legacy smelt syntax in examples (must be migrated to smelt.<path>):\n{}",
+        legacy_usages.join("\n")
+    );
+}
+
+/// Phase 4 TDD: After legacy `smelt.ref()` and `smelt.source()` deletion, all
+/// known-good example workspaces must still produce zero diagnostics.  This is
+/// the named TDD gate for Phase 4 of the smelt-path migration plan.
+///
+/// This test will pass only when:
+///   1. All example SQL has been migrated from `smelt.ref()`/`smelt.source()` to
+///      `smelt.<path>` form (covered by `all_examples_use_path_syntax`), AND
+///   2. The parser correctly handles the new path form without introducing
+///      spurious parse errors.
+#[test]
+fn all_examples_clean_after_legacy_removal() {
+    for workspace in &[
+        "examples/timeseries",
+        "examples/retail_analytics",
+        "examples/test_workspace",
+        "examples/ephemeral_demo",
+        "examples/multi_engine",
+        "examples/ecommerce",
+        "examples/functions_demo",
+    ] {
+        check_workspace_no_diagnostics(workspace);
+    }
+}
+
+/// Test 5 (TDD): All known-good example workspaces must produce zero LSP
+/// diagnostics after migration.  This re-runs every non-broken workspace in
+/// one sweep so a migration regression is caught quickly.
+///
+/// The per-workspace `*_no_diagnostics` tests above also cover this — this
+/// test is a belt-and-suspenders sweep that makes the intent explicit.
+#[test]
+fn all_examples_have_zero_lsp_diagnostics_after_migration() {
+    // This serves as a combined check; the individual per-workspace tests
+    // above cover the same workspaces individually for better error messages.
+    for workspace in &[
+        "examples/timeseries",
+        "examples/retail_analytics",
+        "examples/test_workspace",
+        "examples/ephemeral_demo",
+        "examples/multi_engine",
+        "examples/ecommerce",
+        "examples/functions_demo",
+    ] {
+        check_workspace_no_diagnostics(workspace);
+    }
+}
+
+// ===== Phase 5b TDD tests =====
+
+/// Phase 5b TDD Test 3: After broken/ fixtures are migrated to `smelt.functions.*`,
+/// the `all_examples_use_path_syntax` scan must include broken/ with no violations.
+/// This test FAILS before migration because broken/ still contains `smelt.fn.*`.
+#[test]
+fn all_examples_use_path_syntax_including_broken() {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples");
+    let mut legacy_usages: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(&examples_dir) {
+        let entry = entry.unwrap();
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("sql") {
+            continue;
+        }
+        // No skip for broken/ — this test covers ALL examples including broken/
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        for (line_no, line) in content.lines().enumerate() {
+            // Skip comment lines
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("--") {
+                continue;
+            }
+            for pattern in &["smelt.ref(", "smelt.source(", "smelt.fn."] {
+                if line.contains(pattern) {
+                    legacy_usages.push(format!(
+                        "{}:{}: {}",
+                        entry.path().display(),
+                        line_no + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        legacy_usages.is_empty(),
+        "Found legacy smelt syntax in examples (including broken/; must be migrated to smelt.<path>):\n{}",
+        legacy_usages.join("\n")
+    );
+}
+
+/// Phase 5b TDD Test 4: Guard that key diagnostic codes still fire after
+/// broken/ is migrated to `smelt.functions.*`. This is a regression guard —
+/// it should pass both before and after migration.
+#[test]
+fn broken_workspace_diagnostics_still_fire() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::collections::HashSet;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.model_paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut codes: HashSet<String> = HashSet::new();
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if let Some(code) = &d.code {
+                codes.insert(format!("{:?}", code));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if let Some(code) = &d.0.code {
+                codes.insert(format!("{:?}", code));
+            }
+        }
+    }
+
+    // These diagnostic codes must still fire after migration to smelt.functions.*
+    for required_code in &[
+        "ArgTypeMismatch",
+        "MissingArgument",
+        "FunctionCallCycle",
+        "UnknownSmeltFn",
+        "UnknownIdentifier",
+    ] {
+        assert!(
+            codes.contains(*required_code),
+            "Expected diagnostic code {:?} to fire in broken workspace, but it was absent.\n\
+             Codes present: {:?}",
+            required_code,
+            codes
+        );
+    }
+}

@@ -11,5 +11,6 @@ SELECT
     user_id,
     ip_address,
     session_id
-FROM smelt.ref('sql_l2_99')
+FROM smelt.models.sql_l2_99
 WHERE status = 'active'
+

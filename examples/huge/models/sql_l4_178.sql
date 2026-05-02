@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT user_id, category, plan_type
-    FROM smelt.ref('sql_l3_12')
+    FROM smelt.models.sql_l3_12
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.category
 FROM aggregated a
 INNER JOIN filtered f ON a.user_id = f.user_id
+

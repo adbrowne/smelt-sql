@@ -6,6 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT duration_seconds, os_name, category, 'source_0' AS source_tag FROM smelt.ref('sql_l2_246')
+SELECT duration_seconds, os_name, category, 'source_0' AS source_tag FROM smelt.models.sql_l2_246
 UNION ALL
-SELECT duration_seconds, os_name, category, 'source_1' AS source_tag FROM smelt.ref('sql_l2_237')
+SELECT duration_seconds, os_name, category, 'source_1' AS source_tag FROM smelt.models.sql_l2_237
+

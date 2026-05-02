@@ -10,4 +10,5 @@ SELECT
     region,
     browser,
     ROW_NUMBER() OVER (PARTITION BY region ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_191')
+FROM smelt.models.sql_l3_191
+

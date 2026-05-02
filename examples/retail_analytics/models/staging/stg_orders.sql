@@ -14,4 +14,5 @@ SELECT
     COALESCE(payment_method, 'unknown') AS payment_method,
     COALESCE(shipping_method, 'standard') AS shipping_method,
     CAST(discount_pct AS FLOAT) / 100.0 AS discount_rate
-FROM smelt.source('raw.orders')
+FROM smelt.sources.raw.orders
+

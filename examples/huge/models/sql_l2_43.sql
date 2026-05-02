@@ -10,7 +10,8 @@ SELECT
     status,
     cost,
     product_id
-FROM smelt.ref('sql_l1_26')
+FROM smelt.models.sql_l1_26
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_26') WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.models.sql_l1_26 WHERE event_type = 'purchase'
 )
+

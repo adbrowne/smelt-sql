@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT rating, referrer, ip_address
-    FROM smelt.ref('notifications')
+    FROM smelt.models.notifications
     WHERE score >= 50
 )
 SELECT
     b.rating,
     AVG(price) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('notifications') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.notifications j ON b.user_id = j.user_id
 GROUP BY b.rating
+

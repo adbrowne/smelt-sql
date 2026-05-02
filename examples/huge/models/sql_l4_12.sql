@@ -10,5 +10,6 @@ SELECT
     plan_type,
     MAX(created_at) AS agg_0,
     MIN(created_at) AS agg_1
-FROM smelt.ref('sql_l3_182')
+FROM smelt.models.sql_l3_182
 GROUP BY plan_type
+

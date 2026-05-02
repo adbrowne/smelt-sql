@@ -55,7 +55,7 @@ fn build_emits_run_summary_to_stderr_on_success() {
         "build_summary_ws",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.ref('base')\n"),
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
         ],
     );
 
@@ -79,5 +79,43 @@ fn build_emits_run_summary_to_stderr_on_success() {
         stderr.contains("smelt: built 2 model(s)"),
         "stderr must include 'smelt: built 2 model(s)' summary on success; \
          got stderr:\n{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: path_form_models_appear_in_build_summary
+// ---------------------------------------------------------------------------
+
+/// Phase 2c: `smelt build` on a workspace that uses path syntax
+/// (`smelt.models.base` instead of `smelt.models.base`) must exit 0 and
+/// report the correct model count in stderr.
+#[test]
+fn path_form_models_appear_in_build_summary() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = stage_workspace(
+        &tmp,
+        "path_form_summary_ws",
+        &[
+            ("base.sql", "SELECT 1 AS x\n"),
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
+        ],
+    );
+
+    let output = run_build(&workspace);
+
+    assert!(
+        output.status.success(),
+        "smelt build on path-form workspace must exit 0 (got {:?}); \
+         stderr:\n{}\nstdout:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("smelt: built 2 model(s)"),
+        "stderr must include 'smelt: built 2 model(s)' summary on success \
+         (path-form workspace); got stderr:\n{stderr}"
     );
 }

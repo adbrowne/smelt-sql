@@ -10,6 +10,7 @@ SELECT
     device_type,
     MIN(created_at) AS val_1,
     MAX(created_at) AS val_2
-FROM smelt.ref('sql_l2_90')
+FROM smelt.models.sql_l2_90
 GROUP BY device_type
 HAVING COUNT(*) > 10
+

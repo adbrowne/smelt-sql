@@ -10,5 +10,6 @@ SELECT
     a.updated_at,
     a.status,
     b.region
-FROM smelt.ref('sql_l3_77') a
-INNER JOIN smelt.ref('sql_l3_208') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_77 a
+INNER JOIN smelt.models.sql_l3_208 b ON a.user_id = b.user_id
+

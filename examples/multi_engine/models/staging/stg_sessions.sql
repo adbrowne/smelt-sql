@@ -13,5 +13,6 @@ SELECT
     traffic_source,
     device_type,
     is_converted
-FROM smelt.source('raw.sessions')
+FROM smelt.sources.raw.sessions
 WHERE visitor_id IS NOT NULL
+

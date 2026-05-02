@@ -11,4 +11,5 @@
 SELECT
     order_id,
     total
-FROM smelt.fn.enriched_order(smelt.ref('orders'))
+FROM smelt.functions.enriched_order(smelt.models.orders)
+

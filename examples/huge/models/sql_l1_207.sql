@@ -10,7 +10,8 @@ SELECT
     transaction_id,
     event_time,
     created_at
-FROM smelt.ref('shipments')
+FROM smelt.models.shipments
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('shipments') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.models.shipments WHERE category IS NOT NULL
 )
+

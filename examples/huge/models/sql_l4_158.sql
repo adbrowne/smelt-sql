@@ -11,5 +11,6 @@ SELECT
     event_type,
     region,
     is_active
-FROM smelt.ref('sql_l3_28')
+FROM smelt.models.sql_l3_28
 WHERE status = 'active'
+

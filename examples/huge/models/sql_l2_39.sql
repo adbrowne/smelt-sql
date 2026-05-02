@@ -11,5 +11,6 @@ SELECT
     rating,
     cohort_date,
     profit
-FROM smelt.ref('sql_l1_161')
+FROM smelt.models.sql_l1_161
 WHERE created_at >= '2024-01-01'
+

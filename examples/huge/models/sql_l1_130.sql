@@ -11,5 +11,6 @@ SELECT
     score,
     tier,
     quantity
-FROM smelt.ref('clicks')
+FROM smelt.models.clicks
 WHERE platform = 'web'
+

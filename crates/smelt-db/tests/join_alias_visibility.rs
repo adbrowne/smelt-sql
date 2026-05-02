@@ -1,7 +1,7 @@
 //! Phase 45 (smelt-functions) — JOIN-alias schema visibility in
 //! `TableExpr` parameter bodies.
 //!
-//! A function whose body LEFT JOINs `smelt.ref('Y') AS y` must see
+//! A function whose body LEFT JOINs `smelt.models.Y AS y` must see
 //! `y`'s columns through the body's bare-column resolver. Closes
 //! review findings #10 and #21.
 //!
@@ -57,7 +57,7 @@ fn orders_model_sql(columns: &[(&str, &str)]) -> String {
 #[test]
 fn joined_alias_columns_visible_in_body() {
     // TDD test 1: a function with a TableExpr `orders` parameter
-    // LEFT JOINs `smelt.ref('dim_customer') AS dim_customer`. The
+    // LEFT JOINs `smelt.models.dim_customer AS dim_customer`. The
     // body reference `dim_customer.customer_name` must resolve via
     // the JOIN-aliased schema.
     let root = PathBuf::from("/fake/project");
@@ -65,13 +65,14 @@ fn joined_alias_columns_visible_in_body() {
     let orders_path = root.join("models").join("orders.sql");
     let dim_path = root.join("models").join("dim_customer.sql");
     let model_path = root.join("models").join("uses_enrich.sql");
+    // Phase 4: use path form (smelt.ref() is removed).
     let fn_src = "smelt.define enrich(orders: TableExpr) -> TableExpr AS (\
         SELECT orders.order_id, dim_customer.customer_name \
         FROM orders \
-        LEFT JOIN smelt.ref('dim_customer') AS dim_customer \
+        LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT * FROM smelt.fn.enrich(smelt.ref('orders'))\n";
+    let model_src = "SELECT * FROM smelt.functions.enrich(smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[
         ("order_id", "BIGINT"),
@@ -114,14 +115,15 @@ fn joined_alias_shadow_warning() {
     let orders_path = root.join("models").join("orders.sql");
     let dim_path = root.join("models").join("dim_customer.sql");
     let model_path = root.join("models").join("uses_shadow_join.sql");
+    // Phase 4: use path form (smelt.ref() is removed).
     let fn_src =
         "smelt.define shadow_join(customer_name: Expr<Text>, orders: TableExpr) -> TableExpr AS (\
         SELECT orders.order_id, customer_name AS computed_name \
         FROM orders \
-        LEFT JOIN smelt.ref('dim_customer') AS dim_customer \
+        LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT * FROM smelt.fn.shadow_join('hi', smelt.ref('orders'))\n";
+    let model_src = "SELECT * FROM smelt.functions.shadow_join('hi', smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("customer_id", "BIGINT")]);
     let dim_sql = orders_model_sql(&[("customer_id", "BIGINT"), ("customer_name", "VARCHAR")]);
@@ -165,13 +167,14 @@ fn joined_alias_missing_column_errors() {
     let orders_path = root.join("models").join("orders.sql");
     let dim_path = root.join("models").join("dim_customer.sql");
     let model_path = root.join("models").join("uses_missing.sql");
+    // Phase 4: use path form (smelt.ref() is removed).
     let fn_src = "smelt.define missing(orders: TableExpr) -> TableExpr AS (\
         SELECT orders.order_id, dim_customer.does_not_exist \
         FROM orders \
-        LEFT JOIN smelt.ref('dim_customer') AS dim_customer \
+        LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT * FROM smelt.fn.missing(smelt.ref('orders'))\n";
+    let model_src = "SELECT * FROM smelt.functions.missing(smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("customer_id", "BIGINT")]);
     let dim_sql = orders_model_sql(&[("customer_id", "BIGINT"), ("customer_name", "VARCHAR")]);
@@ -212,13 +215,14 @@ fn joined_alias_in_select_star_expansion() {
     let orders_path = root.join("models").join("orders.sql");
     let dim_path = root.join("models").join("dim_customer.sql");
     let model_path = root.join("models").join("uses_g.sql");
+    // Phase 4: use path form (smelt.ref() is removed).
     let fn_src = "smelt.define g(orders: TableExpr) -> TableExpr AS (\
         SELECT orders.*, dim_customer.* \
         FROM orders \
-        LEFT JOIN smelt.ref('dim_customer') AS dim_customer \
+        LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT customer_name FROM smelt.fn.g(smelt.ref('orders'))\n";
+    let model_src = "SELECT customer_name FROM smelt.functions.g(smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("customer_id", "BIGINT")]);
     let dim_sql = orders_model_sql(&[("customer_id", "BIGINT"), ("customer_name", "VARCHAR")]);

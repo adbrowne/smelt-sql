@@ -7,4 +7,5 @@ SELECT
     amount,
     transaction_timestamp,
     transaction_type
-FROM smelt.source('raw.transactions')
+FROM smelt.sources.raw.transactions
+

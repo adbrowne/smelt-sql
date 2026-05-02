@@ -9,5 +9,6 @@ SELECT
     os.is_successful,
     o.payment_method,
     o.discount_pct / 100.0 AS discount_rate
-FROM smelt.source('raw.orders') AS o
-LEFT JOIN smelt.ref('order_statuses') AS os ON o.status = os.status_code
+FROM smelt.sources.raw.orders AS o
+LEFT JOIN smelt.seeds.order_statuses AS os ON o.status = os.status_code
+

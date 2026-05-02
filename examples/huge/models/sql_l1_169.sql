@@ -10,7 +10,8 @@ SELECT
     product_id,
     score,
     page_path
-FROM smelt.ref('subscriptions')
+FROM smelt.models.subscriptions
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('subscriptions') WHERE country = 'US'
+    SELECT user_id FROM smelt.models.subscriptions WHERE country = 'US'
 )
+

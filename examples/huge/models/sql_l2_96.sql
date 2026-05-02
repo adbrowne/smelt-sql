@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT platform, ip_address, category
-    FROM smelt.ref('sql_l1_76')
+    FROM smelt.models.sql_l1_76
     WHERE created_at >= '2024-01-01'
 )
 SELECT
     b.platform,
     SUM(revenue) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l1_128') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l1_128 j ON b.user_id = j.user_id
 GROUP BY b.platform
+

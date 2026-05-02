@@ -10,4 +10,5 @@ SELECT
     browser,
     product_id,
     RANK() OVER (PARTITION BY browser ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l1_121')
+FROM smelt.models.sql_l1_121
+

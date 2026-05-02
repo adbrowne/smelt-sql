@@ -259,7 +259,7 @@ mod tests {
 SELECT
     user_id,
     COUNT(*) as session_count
-FROM smelt.ref('raw_events')
+FROM smelt.models.raw_events
 GROUP BY user_id
 "#;
 
@@ -274,9 +274,11 @@ GROUP BY user_id
 
     #[test]
     fn test_extract_refs_with_named_params() {
+        // Named params come from SmeltPathCall nodes (path-form function calls).
+        // smelt.functions.my_fn(param => value) — has_named_params=true.
         let sql = r#"
-SELECT user_id
-FROM smelt.ref('raw_events', filter => event_type = 'page_view')
+SELECT smelt.functions.format_date(d => event_date, fmt => 'YYYY-MM-DD') AS formatted
+FROM raw_events
 "#;
 
         let parse = smelt_parser::parse(sql);
@@ -284,7 +286,7 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
         let refs = extract_refs(&file);
 
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "raw_events");
+        assert_eq!(refs[0].model_name, "format_date");
         assert!(refs[0].has_named_params);
     }
 
@@ -294,8 +296,8 @@ FROM smelt.ref('raw_events', filter => event_type = 'page_view')
 SELECT
     a.user_id,
     b.session_id
-FROM smelt.ref('model_a') a
-INNER JOIN smelt.ref('model_b') b ON a.id = b.id
+FROM smelt.models.model_a a
+INNER JOIN smelt.models.model_b b ON a.id = b.id
 "#;
 
         let parse = smelt_parser::parse(sql);

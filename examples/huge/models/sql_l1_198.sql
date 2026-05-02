@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT os_name, region, session_id
-    FROM smelt.ref('clicks')
+    FROM smelt.models.clicks
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.region
 FROM aggregated a
 INNER JOIN filtered f ON a.os_name = f.os_name
+

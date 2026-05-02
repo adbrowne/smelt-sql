@@ -11,5 +11,6 @@ SELECT
     discount,
     segment,
     cost
-FROM smelt.ref('sql_l2_49')
+FROM smelt.models.sql_l2_49
 WHERE platform = 'web'
+

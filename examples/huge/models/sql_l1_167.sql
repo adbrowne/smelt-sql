@@ -10,4 +10,5 @@ SELECT
     updated_at,
     device_type,
     ROW_NUMBER() OVER (PARTITION BY updated_at ORDER BY created_at) AS win_val
-FROM smelt.ref('logs')
+FROM smelt.models.logs
+

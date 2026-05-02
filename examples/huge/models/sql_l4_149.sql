@@ -11,5 +11,6 @@ SELECT
     status,
     revenue,
     campaign_id
-FROM smelt.ref('sql_l3_160')
+FROM smelt.models.sql_l3_160
 WHERE amount > 0
+

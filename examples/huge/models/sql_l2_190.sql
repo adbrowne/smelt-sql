@@ -11,5 +11,6 @@ SELECT
     is_verified,
     price,
     rating
-FROM smelt.ref('sql_l1_78')
+FROM smelt.models.sql_l1_78
 WHERE status = 'active'
+

@@ -10,4 +10,5 @@ SELECT
     updated_at,
     transaction_id,
     RANK() OVER (PARTITION BY updated_at ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_33')
+FROM smelt.models.sql_l3_33
+

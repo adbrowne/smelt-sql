@@ -21,12 +21,12 @@ pub struct ParserMetrics {
 
 /// A simple SQL model for single-parse timing.
 const SIMPLE_SQL: &str =
-    "SELECT user_id, event_time, amount FROM smelt.ref('events') WHERE status = 'active'\n";
+    "SELECT user_id, event_time, amount FROM smelt.models.events WHERE status = 'active'\n";
 
 /// A complex SQL model for single-parse timing.
 const COMPLEX_SQL: &str = r#"WITH filtered AS (
     SELECT user_id, event_time, amount, category
-    FROM smelt.ref('events')
+    FROM smelt.models.events
     WHERE status = 'active'
       AND event_time >= '2024-01-01'
 ),
@@ -51,7 +51,7 @@ SELECT
     a.avg_amount,
     ROW_NUMBER() OVER (PARTITION BY a.category ORDER BY a.total_amount DESC) AS rank_in_category
 FROM aggregated a
-INNER JOIN smelt.ref('users') u ON a.user_id = u.user_id
+INNER JOIN smelt.models.users u ON a.user_id = u.user_id
 WHERE u.is_active = true
 ORDER BY a.total_amount DESC
 LIMIT 1000

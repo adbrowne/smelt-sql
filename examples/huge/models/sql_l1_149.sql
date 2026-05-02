@@ -10,7 +10,8 @@ SELECT
     product_id,
     channel,
     platform
-FROM smelt.ref('orders')
+FROM smelt.models.orders
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('orders') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.orders WHERE status = 'active'
 )
+

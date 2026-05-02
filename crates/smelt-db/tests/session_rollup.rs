@@ -103,7 +103,7 @@ smelt.define session_rollup(
     filters: Expr<Boolean> = TRUE
 ) -> TableExpr AS (
     WITH sessionized AS (
-        SELECT * FROM smelt.fn.sessionize(source, user_col, ts_col, gap)
+        SELECT * FROM smelt.functions.sessionize(source, user_col, ts_col, gap)
     )
     SELECT
         user_col, session_id,

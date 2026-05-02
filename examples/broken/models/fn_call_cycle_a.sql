@@ -1,1 +1,1 @@
-smelt.define cycle_a(x) AS (smelt.fn.cycle_b(x))
+smelt.define cycle_a(x) AS (smelt.functions.cycle_b(x))

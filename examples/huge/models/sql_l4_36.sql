@@ -11,6 +11,7 @@ SELECT
     b.transaction_id,
     c.cohort_date,
     c.cost
-FROM smelt.ref('sql_l3_220') a
-INNER JOIN smelt.ref('sql_l3_220') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sql_l3_220') c ON a.user_id = c.user_id
+FROM smelt.models.sql_l3_220 a
+INNER JOIN smelt.models.sql_l3_220 b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.sql_l3_220 c ON a.user_id = c.user_id
+

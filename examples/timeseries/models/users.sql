@@ -3,4 +3,5 @@ SELECT
     user_id,
     user_name,
     signup_date
-FROM smelt.source('raw.users')
+FROM smelt.sources.raw.users
+

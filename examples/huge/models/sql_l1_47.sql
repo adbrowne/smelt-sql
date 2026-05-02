@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     MAX(created_at) AS metric_1,
     COUNT(*) AS metric_2
-FROM smelt.ref('orders')
+FROM smelt.models.orders
 GROUP BY DATE_TRUNC('month', event_time)
+

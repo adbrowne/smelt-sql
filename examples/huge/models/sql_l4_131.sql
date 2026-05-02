@@ -10,7 +10,8 @@ SELECT
     status,
     duration_seconds,
     channel
-FROM smelt.ref('sql_l3_25')
+FROM smelt.models.sql_l3_25
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_189') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.models.sql_l3_189 WHERE category IS NOT NULL
 )
+

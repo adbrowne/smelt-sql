@@ -6,3 +6,4 @@ SELECT
   CAST(NULL AS VARCHAR) AS customer_id,
   CAST(NULL AS VARCHAR) AS customer_name,
   CAST(NULL AS VARCHAR) AS customer_tier
+

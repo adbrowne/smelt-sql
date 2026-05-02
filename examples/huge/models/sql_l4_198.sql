@@ -10,6 +10,7 @@ SELECT
     event_time,
     AVG(duration_seconds) AS val_1,
     SUM(quantity) AS val_2
-FROM smelt.ref('sql_l3_91')
+FROM smelt.models.sql_l3_91
 GROUP BY event_time
 HAVING COUNT(*) > 10
+

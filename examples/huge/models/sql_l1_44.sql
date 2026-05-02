@@ -12,5 +12,6 @@ SELECT
     AVG(duration_seconds) AS agg_1,
     SUM(amount) AS agg_2,
     COUNT(*) AS agg_3
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 GROUP BY is_verified
+

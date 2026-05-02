@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT platform, region, status
-    FROM smelt.ref('notifications')
+    FROM smelt.models.notifications
     WHERE category IS NOT NULL
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.region
 FROM aggregated a
 INNER JOIN filtered f ON a.platform = f.platform
+

@@ -10,7 +10,8 @@ SELECT
     channel,
     status,
     browser
-FROM smelt.ref('sql_l2_60')
+FROM smelt.models.sql_l2_60
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_203') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.sql_l2_203 WHERE status = 'active'
 )
+

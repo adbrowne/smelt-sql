@@ -11,5 +11,6 @@ SELECT
     created_at,
     quantity,
     score
-FROM smelt.ref('sql_l3_40')
+FROM smelt.models.sql_l3_40
 WHERE status = 'active'
+

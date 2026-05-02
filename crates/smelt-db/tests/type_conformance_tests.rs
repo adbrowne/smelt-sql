@@ -85,6 +85,8 @@ fn translate_for_backend(sql: &str, backend: &str) -> String {
         cross_engine_refs: std::collections::HashMap::new(),
         smelt_as_struct: None,
         smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }

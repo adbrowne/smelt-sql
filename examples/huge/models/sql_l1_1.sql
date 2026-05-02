@@ -10,4 +10,5 @@ SELECT
     is_verified,
     status,
     RANK() OVER (PARTITION BY is_verified ORDER BY created_at) AS win_val
-FROM smelt.ref('reviews')
+FROM smelt.models.reviews
+

@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT ip_address, updated_at, email_domain
-    FROM smelt.ref('sql_l3_199')
+    FROM smelt.models.sql_l3_199
     WHERE status = 'active'
 )
 SELECT
     b.ip_address,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l3_199') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l3_199 j ON b.user_id = j.user_id
 GROUP BY b.ip_address
+

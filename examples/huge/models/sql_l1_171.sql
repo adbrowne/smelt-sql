@@ -11,5 +11,6 @@ SELECT
     country,
     event_type,
     plan_type
-FROM smelt.ref('sessions')
+FROM smelt.models.sessions
 WHERE score >= 50
+

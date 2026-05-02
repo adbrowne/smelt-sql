@@ -15,7 +15,7 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall, TableRef};
+use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltPathCall, TableRef};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
@@ -33,7 +33,7 @@ use crate::type_inference::{
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
 /// Discriminates the three type-checking tiers (§8) inside
-/// `check_function_body` and `check_smelt_fn_call`.
+/// `check_function_body` and `check_smelt_path_call`.
 ///
 /// - `Tier1Expansion`: call-site expansion; `arg_types` holds the
 ///   concrete argument types bound from the caller. Used in Phase 26.
@@ -79,16 +79,10 @@ pub enum BodyShape {
     Select(SelectStmt),
 }
 
-/// Callback type for dispatching nested `smelt.fn.*` calls encountered
-/// during body-recursion (Phase 12).
-///
-/// When `check_smelt_fn_call` re-walks a body with the call-site-derived
-/// bindings, the walker encounters further nested `smelt.fn.*` calls.
-/// This closure lets us recursively invoke the same checker so frames
-/// stack up across arbitrary expansion depth. In unit tests and the
-/// legacy `check_function_body` entrypoint this is `None` — body walks
-/// that never expand further work exactly as they did in Phase 6.
-pub type NestedCallHandler<'a> = dyn Fn(&SmeltFnCall, &TypeContext, &str) -> Vec<Diagnostic> + 'a;
+/// Callback type for dispatching nested `smelt.functions.*` path-form calls
+/// encountered during body-recursion (Phase 5a).
+pub type NestedPathCallHandler<'a> =
+    dyn Fn(&SmeltPathCall, &TypeContext, &str) -> Vec<Diagnostic> + 'a;
 
 /// Check a single `smelt.define` body, producing Phase-5 diagnostics.
 ///
@@ -108,10 +102,10 @@ pub fn check_function_body(sig: &FunctionSig, body: &Expr, text: &str) -> Vec<Di
 }
 
 /// Phase-12 variant of [`check_function_body`] that dispatches nested
-/// `smelt.fn.*` calls through `nested` so frames stack up across
-/// arbitrary expansion depth.
+/// `smelt.functions.*` path-form calls through `nested` so frames stack up
+/// across arbitrary expansion depth.
 ///
-/// Callers pass a closure that invokes [`check_smelt_fn_call`] on each
+/// Callers pass a closure that invokes [`check_smelt_path_call`] on each
 /// nested call with the re-bound context. The plain
 /// [`check_function_body`] entrypoint delegates here with `None` and
 /// therefore matches its pre-Phase-12 behaviour exactly.
@@ -119,7 +113,7 @@ pub fn check_function_body_with_expansion(
     sig: &FunctionSig,
     body: &Expr,
     text: &str,
-    nested: &NestedCallHandler<'_>,
+    nested: &NestedPathCallHandler<'_>,
 ) -> Vec<Diagnostic> {
     check_function_body_inner(sig, body, text, Some(nested))
 }
@@ -127,7 +121,7 @@ pub fn check_function_body_with_expansion(
 /// Phase-26 variant: walk a function body using a *caller-supplied* `TypeContext`
 /// rather than re-building one from the signature's parameter annotations.
 ///
-/// Used by [`check_smelt_fn_call`] when expanding a Tier 1 body at a call site —
+/// Used by [`check_smelt_path_call`] when expanding a body at a call site —
 /// the call-site-bound `body_ctx` already has concrete argument types, so we skip
 /// `seed_param_context` and use it directly. Duplicate-parameter checks are also
 /// skipped (they already ran at definition time via `function_body_diagnostics_for_file`).
@@ -135,7 +129,7 @@ pub fn walk_body_with_ctx(
     body: &Expr,
     ctx: &TypeContext,
     text: &str,
-    nested: &NestedCallHandler<'_>,
+    nested: &NestedPathCallHandler<'_>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     walk_body(body, ctx, text, &mut diagnostics, Some(nested));
@@ -146,7 +140,7 @@ fn check_function_body_inner(
     sig: &FunctionSig,
     body: &Expr,
     text: &str,
-    nested: Option<&NestedCallHandler<'_>>,
+    nested: Option<&NestedPathCallHandler<'_>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -407,7 +401,7 @@ fn row_requirement_diagnostic(
 ) -> Diagnostic {
     let message = match mismatch {
         SchemaMismatch::MissingColumn { column, required } => format!(
-            "Argument for parameter `{}` of `smelt.fn.{}` is missing required column `{}: {}`",
+            "Argument for parameter `{}` of `smelt.functions.{}` is missing required column `{}: {}`",
             param_name,
             fn_name,
             column,
@@ -418,7 +412,7 @@ fn row_requirement_diagnostic(
             required,
             actual,
         } => format!(
-            "Column `{}` in argument for parameter `{}` of `smelt.fn.{}` has type `{}`, expected `{}`",
+            "Column `{}` in argument for parameter `{}` of `smelt.functions.{}` has type `{}`, expected `{}`",
             column,
             param_name,
             fn_name,
@@ -449,7 +443,7 @@ fn struct_field_diagnostic(
 ) -> Diagnostic {
     let message = match mismatch {
         SchemaMismatch::MissingColumn { column, required } => format!(
-            "Struct argument for `{}` of `smelt.fn.{}` is missing field `{}: {}`",
+            "Struct argument for `{}` of `smelt.functions.{}` is missing field `{}: {}`",
             param_name,
             fn_name,
             column,
@@ -460,7 +454,7 @@ fn struct_field_diagnostic(
             required,
             actual,
         } => format!(
-            "Field `{}` in struct argument for `{}` of `smelt.fn.{}` has type `{}`, expected `{}`",
+            "Field `{}` in struct argument for `{}` of `smelt.functions.{}` has type `{}`, expected `{}`",
             column,
             param_name,
             fn_name,
@@ -491,24 +485,24 @@ fn to_range(tr: TextRange, text: &str) -> Range {
 /// could be inferred.
 ///
 /// `nested` is the Phase-12 hook for recursively dispatching nested
-/// `smelt.fn.*` calls through [`check_smelt_fn_call`]. When `Some`, every
-/// nested `SMELT_FN_CALL` encountered in the body is checked via the
-/// closure so frames stack up across arbitrary expansion depth. When
-/// `None` the walker matches its pre-Phase-12 behaviour — useful for
-/// unit tests and the [`check_function_body`] legacy entry.
+/// `smelt.functions.*` path-form calls through [`check_smelt_path_call`].
+/// When `Some`, every nested `SMELT_PATH_CALL` encountered in the body is
+/// checked via the closure so frames stack up across arbitrary expansion
+/// depth. When `None` the walker matches its pre-Phase-12 behaviour —
+/// useful for unit tests and the [`check_function_body`] legacy entry.
 fn walk_body(
     expr: &Expr,
     ctx: &TypeContext,
     text: &str,
     out: &mut Vec<Diagnostic>,
-    nested: Option<&NestedCallHandler<'_>>,
+    nested: Option<&NestedPathCallHandler<'_>>,
 ) -> Option<TypedColumn> {
-    // Phase 12: nested `smelt.fn.*` call — dispatch through the handler so
-    // the call-site checker recurses with the caller's bindings visible.
-    // The handler emits any call-site diagnostics (and body-cascade
-    // diagnostics with `ExpansionFrames`). We still fall through to
-    // generic inference for the return type below.
-    if let (Some(call), Some(nested)) = (expr.as_smelt_fn_call(), nested) {
+    // Phase 12: nested `smelt.functions.*` path-form call — dispatch through
+    // the handler so the call-site checker recurses with the caller's
+    // bindings visible. The handler emits any call-site diagnostics (and
+    // body-cascade diagnostics with `ExpansionFrames`). We still fall
+    // through to generic inference for the return type below.
+    if let (Some(call), Some(nested)) = (expr.as_smelt_path_call(), nested) {
         let nested_diags = nested(&call, ctx, text);
         out.extend(nested_diags);
         // Still compute a return type via the inference engine — when the
@@ -588,7 +582,7 @@ fn walk_binary(
     ctx: &TypeContext,
     text: &str,
     out: &mut Vec<Diagnostic>,
-    nested: Option<&NestedCallHandler<'_>>,
+    nested: Option<&NestedPathCallHandler<'_>>,
 ) -> Option<TypedColumn> {
     let before_len = out.len();
 
@@ -687,58 +681,19 @@ fn has_expr_children(expr: &Expr) -> bool {
     expr.syntax().children().any(|c| Expr::cast(c).is_some())
 }
 
-/// Check a single `smelt.fn.<path>(args)` call site.
+/// Check a single `smelt.functions.*` (path-form) call site.
 ///
-/// Arguments:
-/// - `call`: the parsed `SMELT_FN_CALL` node.
-/// - `ctx`: the call-site [`TypeContext`] — used to infer the types of
-///   positional / named argument expressions. Must not be a body-context
-///   (the caller composes this during expansion).
-/// - `text`: the stripped source text of the *file containing the call*,
-///   needed for span → line/column conversion.
-/// - `sig_lookup`: resolves a bare function name to its
-///   [`FunctionSig`]. Pure dependency — in Salsa it is a thin closure over
-///   `resolve_function`; in unit tests it is an in-memory `HashMap` lookup.
-///   Covers user-declared `smelt.define` and `smelt.extern` functions.
-/// - `builtin_lookup`: resolves a bare function name to its
-///   [`Signature`] in the built-in registry. Pure dependency — in Salsa
-///   it is a thin closure over `smelt_types::BuiltinRegistry::resolve`.
-///   Consulted when `sig_lookup` misses so the checker dispatches through
-///   `unify_call` for built-ins (Phase 10 unified-resolver path).
-/// - `lub`: numeric least-upper-bound adapter for `unify_call` (§16 #14);
-///   shaped to match the signature of `smelt_types::signatures::unify_call`.
-///   Only used on the built-in branch.
-/// - `body_lookup`: given a resolved function, produces the stripped source
-///   text and the body [`Expr`] so the checker can re-walk the body with
-///   the call-site-derived bindings. Pure — the closure owns any I/O.
-///   Returns `None` for externs (no body) and for any signature without a
-///   define body — the checker skips body re-walk in that case.
+/// Produces diagnostics:  `ArgTypeMismatch`, `MissingArgument`, `UnknownSmeltFn`,
+/// body-type errors, and `RowRequirementUnsatisfied`.
 ///
-/// Returns a list of diagnostics:
-///   - [`DiagnosticCode::UnknownSmeltFn`] at the call-path span.
-///   - [`DiagnosticCode::MissingArgument`] at the call-path span.
-///   - [`DiagnosticCode::ArgTypeMismatch`] at the offending argument's span.
-///   - Any [`DiagnosticCode::FunctionBodyTypeMismatch`] /
-///     [`DiagnosticCode::UnknownIdentifier`] surfaced by re-walking the
-///     callee's body with the call-site bindings; these carry
-///     `DiagnosticData::ExpansionFrames(Vec<FrameInfo>)` with the outermost
-///     entry describing this call site's bindings.
-///
-/// Diagnostics from deeply nested calls already carry a frame stack — this
-/// function appends its frame to the *end* so callers rendering innermost-only
-/// (Phase 6) or full-stack (Phase 12) get a deterministic ordering.
-///
-/// Pure: no Salsa access. Callers in `smelt-db/src/lib.rs` build the closures.
-///
-/// `decl_lookup` resolves the file path that declares the given
-/// [`FunctionSig`] — used to populate `FrameInfo::decl_path` so LSP
-/// clients can render each frame's related-information link against
-/// the correct file (Phase 12, §16 #16). Returns `None` on lookup-miss;
-/// the frame then carries `decl_path: None` and the LSP falls back to
-/// inline-only rendering for that frame.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
-pub fn check_smelt_fn_call(
-    call: &SmeltFnCall,
+/// Pure-function-rule: no Salsa calls; all Salsa boundary closures are passed in.
+#[allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::only_used_in_recursion
+)]
+pub fn check_smelt_path_call(
+    call: &SmeltPathCall,
     ctx: &TypeContext,
     text: &str,
     sig_lookup: &dyn Fn(&str) -> Option<FunctionSig>,
@@ -746,70 +701,145 @@ pub fn check_smelt_fn_call(
     lub: &dyn Fn(&DataType, &DataType) -> DataType,
     body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, BodyShape)>,
     decl_lookup: &dyn Fn(&FunctionSig) -> Option<PathBuf>,
-    // Phase 15: resolve a `TableExpr`-argument expression to its
-    // caller-supplied schema. Called once per `TableExpr` parameter at
-    // call-site expansion. Returns `None` when the arg shape is not
-    // resolvable (e.g. a nested expression whose schema can't be
-    // inferred here) — the body check then proceeds with no seeded
-    // schema for that parameter, which surfaces as `UnknownIdentifier`
-    // on bare column references inside the body.
     tableexpr_schema_lookup: &dyn Fn(&Expr, &TypeContext) -> Option<Vec<(String, TypedColumn)>>,
-    // Phase 17: resolve the default value of a parameter. Called when
-    // the caller omits an argument for a parameter with `has_default`.
-    // Returns the inferred type of the default expression, or `None`
-    // if the default cannot be located / inferred.
     default_type_lookup: &dyn Fn(&FunctionSig, &str) -> Option<DataType>,
-    // Phase 45: resolve a `TableRef` inside a function body's FROM /
-    // JOIN clauses to its column schema. Called once per JOIN clause
-    // (and once per non-param FROM-clause table-ref) when the body is
-    // a SELECT shape, so that `JOIN smelt.ref('Y') AS y` registers
-    // `y`'s columns into the body's bare-column resolver. Returns
-    // `None` for unsupported shapes (subqueries, derived tables,
-    // CTEs) — those are deferred to Phase 46. Bare-identifier table
-    // refs that match a TableExpr param name are not passed in (they
-    // are already seeded as `add_tableexpr_param`).
     table_ref_schema_lookup: &dyn Fn(&TableRef) -> Option<Vec<(String, TypedColumn)>>,
-    // Phase 47: resolve a `smelt.fn.<name>(<args>)` call appearing as
-    // the source of a wildcard CTE body (`WITH x AS (SELECT * FROM
-    // smelt.fn.foo(...))`) to the callee's inferred return schema. In
-    // production this wraps `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`;
-    // returns `None` to fall back to the opaque-CTE marker.
-    smelt_fn_schema_lookup: &dyn Fn(&SmeltFnCall) -> Option<Vec<(String, TypedColumn)>>,
+    smelt_path_schema_lookup: &dyn Fn(&SmeltPathCall) -> Option<Vec<(String, TypedColumn)>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // 1. Resolve the function. The path segments after `smelt.fn.` join with
-    //    `.`; only the trailing leaf name is what the workspace signature
-    //    index keys on (namespace segments are informational until Step 2's
-    //    backend namespace work).
+    // 1. Resolve the function. Segments after the leading `smelt` are returned
+    //    by `call.segments()` — for `smelt.functions.foo` that is
+    //    `["functions", "foo"]`. The leaf name is used for lookup; the full
+    //    path is used in diagnostic messages.
     let path_range = match call.call_path_range() {
         Some(r) => to_range(r, text),
         None => to_range(call.text_range(), text),
     };
-    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+    let segments = call.segments();
     let Some(name) = segments.last().cloned() else {
-        // Parser already flagged the missing-name error; nothing more to do.
         return diagnostics;
     };
+
+    // Build the display path for messages: "smelt.functions.foo"
+    let display_path = format!("smelt.{}", segments.join("."));
 
     let Some(sig) = sig_lookup(&name) else {
-        // No user-declared function — try the built-in registry.
-        // On a hit, dispatch through `unify_call` which yields
-        // `ArgTypeMismatch` / `MissingArgument` / arity diagnostics.
         if let Some(builtin_sig) = builtin_lookup(&name) {
-            return check_builtin_call(call, &name, path_range, builtin_sig, ctx, text, lub);
+            // Builtin function: collect args and run unify_call.
+            let arg_list_ref = call.arg_list();
+            let positional_exprs: Vec<Expr> = arg_list_ref
+                .as_ref()
+                .map(|al| al.positional_args())
+                .unwrap_or_default();
+            let named_values: Vec<Expr> = arg_list_ref
+                .as_ref()
+                .map(|al| al.named_params().filter_map(|np| np.value_expr()).collect())
+                .unwrap_or_default();
+            let mut arg_exprs: Vec<Expr> =
+                Vec::with_capacity(positional_exprs.len() + named_values.len());
+            arg_exprs.extend(positional_exprs);
+            arg_exprs.extend(named_values);
+
+            let arg_types: Vec<DataType> = arg_exprs
+                .iter()
+                .map(|a| {
+                    infer_expression_type(a, ctx)
+                        .map(|t| t.data_type)
+                        .unwrap_or(DataType::Unknown)
+                })
+                .collect();
+
+            match unify_call(builtin_sig, &arg_types, lub) {
+                Ok(_) => {}
+                Err(UnificationError::MissingArgs { expected, got }) => {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "`{}` expects at least {} argument(s), got {}",
+                            display_path, expected, got
+                        ),
+                        range: path_range,
+                        code: Some(DiagnosticCode::MissingArgument),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::ConstraintViolation {
+                    position,
+                    param_constraint,
+                    actual,
+                }) => {
+                    let arg_range = arg_exprs
+                        .get(position.saturating_sub(1))
+                        .map(|e| to_range(e.text_range(), text))
+                        .unwrap_or(path_range);
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument at position {} has type `{}`, which does not satisfy constraint `{}` of `{}`",
+                            position,
+                            actual,
+                            format_constraint(&param_constraint),
+                            display_path
+                        ),
+                        range: arg_range,
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::InconsistentBinding {
+                    var_name,
+                    positions,
+                    types,
+                }) => {
+                    let anchor_pos = positions.get(1).copied().unwrap_or(1);
+                    let arg_range = arg_exprs
+                        .get(anchor_pos.saturating_sub(1))
+                        .map(|e| to_range(e.text_range(), text))
+                        .unwrap_or(path_range);
+                    let type_list = types
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Type variable `{}` in `{}` inferred inconsistently across positions {:?}: {}",
+                            var_name, display_path, positions, type_list
+                        ),
+                        range: arg_range,
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::EmptyVariadicTypeVar { .. }) => {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "`{}` is variadic and requires at least one argument",
+                            display_path
+                        ),
+                        range: path_range,
+                        code: Some(DiagnosticCode::MissingArgument),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::TooManyArgs { .. }) => {}
+            }
+        } else {
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("Unknown function `{}`", display_path),
+                range: path_range,
+                code: Some(DiagnosticCode::UnknownSmeltFn),
+                data: None,
+            });
         }
-        diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Error,
-            message: format!("Unknown function `smelt.fn.{}`", name),
-            range: path_range,
-            code: Some(DiagnosticCode::UnknownSmeltFn),
-            data: None,
-        });
         return diagnostics;
     };
 
-    // 2. Bind arguments to parameters. Positional first, then named.
+    // 2. Bind arguments to parameters.
     let arg_list = call.arg_list();
     let positional: Vec<Expr> = arg_list
         .as_ref()
@@ -820,8 +850,6 @@ pub fn check_smelt_fn_call(
         .map(|al| al.named_params().collect())
         .unwrap_or_default();
 
-    // Build the name → (arg Expr, span TextRange) map. A positional slot
-    // populates `sig.params[i]`; a named slot looks up `sig.params` by name.
     let mut bindings: std::collections::HashMap<String, (Expr, TextRange)> =
         std::collections::HashMap::new();
 
@@ -829,34 +857,21 @@ pub fn check_smelt_fn_call(
         if let Some(p) = sig.params.get(i) {
             bindings.insert(p.name.clone(), (arg.clone(), arg.text_range()));
         }
-        // Extra positional args beyond declared params — Phase 6 silently
-        // ignores (Step 2+ will emit an arity diagnostic).
     }
 
     for np in &named {
         let Some(nm) = np.name() else { continue };
-        // If there's no parseable expression on the RHS we leave the binding
-        // absent — the missing-arg check will fire below. Otherwise use the
-        // span of the value expression for arg-type-mismatch diagnostics so
-        // the squiggle lands on the bad value, not the whole `name => value`
-        // pair.
         if let Some(value_expr) = np.value_expr() {
             bindings.insert(nm.clone(), (value_expr.clone(), value_expr.text_range()));
         }
     }
 
-    // Phase 29: PASSING clauses. Each `PASSING name AS (body)` provides an
-    // alternative binding for a fragment-sort parameter. Unknown names emit
-    // `UnknownPassingParameter`; known names contribute to `bindings` like any
-    // other argument, augmenting or overriding positional/named bindings for
-    // the same parameter (last writer wins — positional args should not supply
-    // the same param as a PASSING clause, but we don't error on that here).
+    // PASSING clauses.
     let passing_clauses: Vec<smelt_parser::ast::PassingClause> = call.passing_clauses().collect();
     for clause in &passing_clauses {
         let Some(clause_name) = clause.name() else {
             continue;
         };
-        // Check if this name matches a declared parameter in the signature.
         let param_exists = sig.params.iter().any(|p| p.name == clause_name);
         if !param_exists {
             let clause_range = clause
@@ -866,8 +881,8 @@ pub fn check_smelt_fn_call(
             diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!(
-                    "PASSING clause names `{}` which is not a parameter of `smelt.fn.{}`",
-                    clause_name, sig.name
+                    "PASSING clause names `{}` which is not a parameter of `{}`",
+                    clause_name, display_path
                 ),
                 range: clause_range,
                 code: Some(DiagnosticCode::UnknownPassingParameter),
@@ -883,45 +898,24 @@ pub fn check_smelt_fn_call(
 
     // 3. Build call-site binding types + detect missing / type-mismatched args.
     let mut body_ctx = TypeContext::new();
-    let mut frame_bindings: Vec<(String, String)> = Vec::new(); // (param, bound_type_str)
+    let mut frame_bindings: Vec<(String, String)> = Vec::new();
 
     for param in &sig.params {
         if param.name.is_empty() {
             continue;
         }
 
-        // Phase 15/16: `TableExpr` parameters contribute the
-        // caller-supplied schema as a FROM-scope entry. For
-        // `TableExpr<{…}>` (Phase 16) we first run the structured
-        // row-requirement check; on failure we emit
-        // `RowRequirementUnsatisfied` at the argument span, skip
-        // seeding the parameter's FROM-scope, and *short-circuit the
-        // body check below* (cleared by the presence of at least one
-        // error-severity diagnostic on `diagnostics`). On success we
-        // seed the body ctx and record any named row-variable
-        // binding into the per-call `row_var_env`.
         if is_tableexpr_param(param) {
             if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
                 let cols = tableexpr_schema_lookup(arg_expr, ctx).unwrap_or_default();
 
-                // Phase 46: when the lookup yields no schema *and* the
-                // argument is clearly not a table expression (a bare
-                // literal — number, string, NULL), surface an
-                // `ArgTypeMismatch` at the argument span instead of
-                // letting the body re-walk emit confusing
-                // `UnknownIdentifier` diagnostics anchored inside the
-                // body. The detector is conservative on purpose: any
-                // expression that *might* be a table reference (bare
-                // identifier, function call, …) takes the existing
-                // empty-schema path so Phase 47's CTE-body widening
-                // can later succeed without clashing.
                 if cols.is_empty() && is_clearly_non_table(arg_expr) {
                     diagnostics.push(Diagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!(
-                            "Argument for TableExpr parameter `{}` of `smelt.fn.{}` must be a table reference, CTE, or subquery — got `{}`",
+                            "Argument for TableExpr parameter `{}` of `{}` must be a table reference, CTE, or subquery — got `{}`",
                             param.name,
-                            sig.name,
+                            display_path,
                             arg_expr.text().to_string().trim()
                         ),
                         range: to_range(*arg_range, text),
@@ -933,16 +927,12 @@ pub fn check_smelt_fn_call(
                 }
 
                 if let Some(req) = tableexpr_schema_requirement(param) {
-                    // Convert the columns to the (name, DataType)
-                    // shape expected by the pure checker.
                     let arg_schema: Vec<(String, DataType)> = cols
                         .iter()
                         .map(|(n, tc)| (n.clone(), tc.data_type.clone()))
                         .collect();
                     match check_schema_requirement(req, &arg_schema) {
                         Ok(binding) => {
-                            // Success: bind the FROM-scope and record
-                            // any named row-variable binding.
                             body_ctx.add_tableexpr_param(&param.name, &cols);
                             if let Some(b) = binding {
                                 body_ctx.set_row_var_binding(&b.name, b.extras);
@@ -950,10 +940,6 @@ pub fn check_smelt_fn_call(
                             frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
                         }
                         Err(mismatch) => {
-                            // Failure: emit a RowRequirementUnsatisfied
-                            // diagnostic at the argument span. The
-                            // non-empty `diagnostics` then short-
-                            // circuits the body re-walk below.
                             diagnostics.push(row_requirement_diagnostic(
                                 &mismatch,
                                 &sig.name,
@@ -965,7 +951,6 @@ pub fn check_smelt_fn_call(
                         }
                     }
                 } else {
-                    // Bare `TableExpr` — no row requirement to run.
                     body_ctx.add_tableexpr_param(&param.name, &cols);
                     frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
                 }
@@ -973,8 +958,8 @@ pub fn check_smelt_fn_call(
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!(
-                        "Missing required argument `{}` for `smelt.fn.{}`",
-                        param.name, sig.name
+                        "Missing required argument `{}` for `{}`",
+                        param.name, display_path
                     ),
                     range: path_range,
                     code: Some(DiagnosticCode::MissingArgument),
@@ -987,33 +972,10 @@ pub fn check_smelt_fn_call(
             continue;
         }
 
-        // Phase 36: `Expr<Struct<{…}>>` parameters — look up the caller's
-        // schema for the argument expression (same path as TableExpr), then
-        // unify the declared struct fields against the concrete columns.
-        //
-        // On success, the parameter is bound as a scalar `DataType::Unknown`
-        // in `body_ctx` (the body references `event.ts` which is a qualified
-        // column, not a bare struct access). The named row-variable binding is
-        // also recorded so the body and return-type phases (37+) can reference
-        // the extras. On failure, emit `RowRequirementUnsatisfied` and
-        // short-circuit body re-walk.
         if is_struct_param(param) {
             if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
-                // Resolve the argument to a concrete column set.
-                //
-                // Primary path: `tableexpr_schema_lookup` handles the case
-                // where the argument is `smelt.ref('model')` or
-                // `smelt.source('src.tbl')` directly. This covers the
-                // TableExpr-style usage.
-                //
-                // Fallback path: the argument is a bare alias (`e`) for a
-                // FROM-clause item. Look up all columns whose qualifier
-                // matches the argument text in `ctx`.
                 let cols = tableexpr_schema_lookup(arg_expr, ctx)
                     .or_else(|| {
-                        // Get the argument expression text and treat it as a
-                        // qualifier, collecting all source/model columns under
-                        // that qualifier from `ctx`.
                         let qualifier = arg_expr.text().trim().to_string();
                         if qualifier.is_empty() {
                             return None;
@@ -1037,11 +999,6 @@ pub fn check_smelt_fn_call(
 
                 if let Some((declared_fields, tail)) = struct_param_fields(param) {
                     if concrete_fields.is_empty() {
-                        // Could not resolve argument schema — skip field
-                        // checking and bind the param to Unknown. The body
-                        // will still be walked (since Struct params are
-                        // Tier-1 call-site expansion targets) but without
-                        // concrete type information.
                         body_ctx.add_function_param(
                             &param.name,
                             TypedColumn::nullable(DataType::Unknown),
@@ -1051,15 +1008,10 @@ pub fn check_smelt_fn_call(
                         match check_struct_row_var_binding(declared_fields, &concrete_fields, tail)
                         {
                             Ok(extras_opt) => {
-                                // Bind the param as Unknown scalar (qualified
-                                // references like `event.ts` resolve through the
-                                // source columns already in `ctx`, not through this
-                                // function-param binding).
                                 body_ctx.add_function_param(
                                     &param.name,
                                     TypedColumn::nullable(DataType::Unknown),
                                 );
-                                // Record named row-variable binding when present.
                                 if let (StructRowTail::Named(var_name), Some(extras)) =
                                     (tail, extras_opt)
                                 {
@@ -1083,7 +1035,6 @@ pub fn check_smelt_fn_call(
                         }
                     }
                 } else {
-                    // Malformed Struct annotation — fall back to Unknown.
                     body_ctx
                         .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
                     frame_bindings.push((param.name.clone(), "Struct<?>".to_string()));
@@ -1092,8 +1043,8 @@ pub fn check_smelt_fn_call(
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!(
-                        "Missing required argument `{}` for `smelt.fn.{}`",
-                        param.name, sig.name
+                        "Missing required argument `{}` for `{}`",
+                        param.name, display_path
                     ),
                     range: path_range,
                     code: Some(DiagnosticCode::MissingArgument),
@@ -1108,14 +1059,10 @@ pub fn check_smelt_fn_call(
 
         match bindings.get(&param.name) {
             Some((arg_expr, arg_range)) => {
-                // Infer the argument's type in the *call-site* context.
                 let arg_type = infer_expression_type(arg_expr, ctx)
                     .map(|t| t.data_type)
                     .unwrap_or(DataType::Unknown);
 
-                // Type-check against the parameter's declared constraint (if
-                // any). Unknown / malformed annotations skip the check —
-                // Phase 4's `InvalidFunctionTypeRef` already fired.
                 let constraint_violation = match &param.type_ref {
                     Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(expected)))) => {
                         !matches!(arg_type, DataType::Unknown | DataType::Null)
@@ -1149,8 +1096,6 @@ pub fn check_smelt_fn_call(
                         code: Some(DiagnosticCode::ArgTypeMismatch),
                         data: None,
                     });
-                    // Still bind the param to Unknown so downstream body walks
-                    // don't cascade into spurious errors from the bad arg.
                     body_ctx
                         .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
                     frame_bindings.push((param.name.clone(), arg_type.to_string()));
@@ -1165,44 +1110,26 @@ pub fn check_smelt_fn_call(
                     diagnostics.push(Diagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!(
-                            "Missing required argument `{}` for `smelt.fn.{}`",
-                            param.name, sig.name
+                            "Missing required argument `{}` for `{}`",
+                            param.name, display_path
                         ),
                         range: path_range,
                         code: Some(DiagnosticCode::MissingArgument),
                         data: None,
                     });
-                    // Bind Unknown so the body walk doesn't cascade.
                     body_ctx
                         .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
                     frame_bindings.push((param.name.clone(), "<missing>".to_string()));
                 } else {
-                    // Phase 17: default value expansion runs end-to-
-                    // end. Ask the default-type lookup for the
-                    // expression's inferred type; if the lookup hits,
-                    // bind with that type (so the body typechecks as
-                    // if the user had passed the default literally).
-                    // Fallback stays `Unknown` when inference fails.
                     let dt = default_type_lookup(&sig, &param.name).unwrap_or(DataType::Unknown);
                     body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt.clone()));
-                    // Provenance: mark the binding as synthesized so a
-                    // future frame renderer can display "default
-                    // applied". Reuse the frame_bindings slot —
-                    // attaching a dedicated provenance field would
-                    // require touching FrameInfo across Phase 12's LSP
-                    // surface; Phase 17 keeps the signal in the
-                    // bound-type string for now.
                     frame_bindings.push((param.name.clone(), format!("{} (default)", dt)));
                 }
             }
         }
     }
 
-    // Phase 44b: after all parameters are bound, register
-    // `SelectItems<Kind>` parameters as fragment-param kinds in `body_ctx`.
-    // This allows bare references to these params inside nested PASSING
-    // bodies (which see `body_ctx` as their "caller_ctx") to inherit the
-    // correct kind via `infer_expression_kind`.
+    // Register SelectItems fragment-param kinds.
     for p in &sig.params {
         if p.name.is_empty() {
             continue;
@@ -1212,31 +1139,14 @@ pub fn check_smelt_fn_call(
         }
     }
 
-    // Phase 45: pre-resolve the body so JOIN-aliased schemas are
-    // visible to the shadow-warning check below — a parameter
-    // colliding with a column on a JOIN-aliased schema must still
-    // shadow-warn. This re-uses the body shape we'd resolve later for
-    // the body re-walk; we just lift the lookup and seeding earlier.
-    // Tier 2 expressions and bodies without a SELECT shape skip this
-    // (no JOIN clauses to inspect).
+    // Pre-resolve JOIN-aliased schemas for shadow-warning check.
     let preview_body_for_joins = body_lookup(&sig);
-    if let Some((preview_text, BodyShape::Select(preview_select))) = &preview_body_for_joins {
-        // CTE seeding doesn't affect TableExpr-param column membership,
-        // so we can skip it here and only seed the JOIN aliases.
-        let _ = preview_text; // text only needed for diagnostics, none here
+    if let Some((_, BodyShape::Select(preview_select))) = &preview_body_for_joins {
         register_join_alias_schemas(&mut body_ctx, preview_select, &sig, table_ref_schema_lookup);
     }
 
-    // Phase 15 shadow warnings: flag every `Expr<T>`-kinded parameter whose
-    // name collides with a column in any `TableExpr`-kinded parameter's
-    // caller-supplied schema (§16 #1). The warning anchors at the
-    // parameter's declaration span inside the signature. Body still
-    // typechecks because `function_params` resolve before FROM-scope
-    // columns in `lookup_identifier`.
     diagnostics.extend(compute_shadow_warnings(&sig, &body_ctx));
 
-    // Phase 15: shadow warnings are not cascade-causing errors. Partition
-    // them out so they don't suppress the body re-walk below.
     let shadow_warnings: Vec<Diagnostic> = diagnostics
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::ParameterShadowsColumn))
@@ -1244,24 +1154,11 @@ pub fn check_smelt_fn_call(
         .collect();
     diagnostics.retain(|d| d.code != Some(DiagnosticCode::ParameterShadowsColumn));
 
-    // If there were any non-warning call-site diagnostics
-    // (unknown/missing/type-mismatch), stop here — re-walking the body
-    // would cascade errors that are already subsumed by the call-site
-    // issue. Shadow warnings are re-appended at the tail so they survive.
     if !diagnostics.is_empty() {
         diagnostics.extend(shadow_warnings);
         return diagnostics;
     }
 
-    // Phase 25: Tier 2/3 *pure-scalar* bodies are checked at definition time —
-    // skip expansion at call sites. Argument type-checking (step 3 above)
-    // already ran. Re-walking the body here would only re-report errors that
-    // were already surfaced at definition time (Phases 23/24).
-    //
-    // Exception: functions with `TableExpr`, `SelectItems`, or `Struct`
-    // parameters still need call-site expansion because their bodies
-    // reference caller-supplied column schemas that are only known at the
-    // call site. Phase 36 adds `Struct` to this set.
     let has_schema_param = sig.params.iter().any(|p| {
         matches!(
             &p.type_ref,
@@ -1275,27 +1172,17 @@ pub fn check_smelt_fn_call(
         return diagnostics;
     }
 
-    // 4. Re-walk the body with the call-site-bound context. Errors surfaced
-    //    here are re-anchored to the call site so the user sees the issue
-    //    where they wrote the call, not inside the function they imported.
-    //    The original span is preserved on the diagnostic — only the message
-    //    range is rewritten — and a FrameInfo is attached.
-    //
-    //    Phase 12: the re-walk dispatches nested `smelt.fn.*` calls
-    //    recursively through `check_smelt_fn_call`, so frames stack up
-    //    across arbitrary expansion depth. Each level appends its frame
-    //    after the inner-merged stack, yielding the canonical
-    //    innermost-first → outermost-last ordering.
     let Some((body_text, body_shape)) = body_lookup(&sig) else {
         diagnostics.extend(shadow_warnings);
         return diagnostics;
     };
 
-    let nested_handler = |nested_call: &SmeltFnCall,
-                          nested_ctx: &TypeContext,
-                          nested_text: &str|
+    // Nested handler for SMELT_PATH_CALL nodes inside the body (recursive).
+    let nested_path_handler = |nested_call: &SmeltPathCall,
+                               nested_ctx: &TypeContext,
+                               nested_text: &str|
      -> Vec<Diagnostic> {
-        check_smelt_fn_call(
+        check_smelt_path_call(
             nested_call,
             nested_ctx,
             nested_text,
@@ -1307,72 +1194,31 @@ pub fn check_smelt_fn_call(
             tableexpr_schema_lookup,
             default_type_lookup,
             table_ref_schema_lookup,
-            smelt_fn_schema_lookup,
+            smelt_path_schema_lookup,
         )
     };
 
     let inner = match &body_shape {
         BodyShape::Expression(body_expr) => {
-            // Phase 26: Use the call-site-bound `body_ctx` (which has concrete arg
-            // types from the caller) rather than re-seeding from the callee's
-            // signature. For Tier 1 functions all params are unannotated → seeding
-            // from the sig gives Unknown for every param, which suppresses type errors.
-            // Using `body_ctx` directly gives each param its actual caller-supplied type.
-            walk_body_with_ctx(body_expr, &body_ctx, &body_text, &nested_handler)
+            walk_body_with_ctx(body_expr, &body_ctx, &body_text, &nested_path_handler)
         }
         BodyShape::Select(select_stmt) => {
-            // Phase 22: propagate the caller's workspace function signatures
-            // into `body_ctx` so that `infer_cte_columns` can resolve nested
-            // `smelt.fn.*` calls in CTE bodies (e.g. the `sessionize(...)` call
-            // inside `session_rollup`'s `WITH sessionized AS (SELECT * FROM
-            // smelt.fn.sessionize(...))`).  Without this, wildcard expansion
-            // from a `smelt.fn.*` FROM source inside a CTE produces an empty
-            // column list and downstream column references in the outer SELECT
-            // emit false `UnknownIdentifier` errors.
-            for (name, sig) in ctx.function_signatures_iter() {
-                body_ctx.add_function_signature(name, sig.clone());
+            for (name, sig_entry) in ctx.function_signatures_iter() {
+                body_ctx.add_function_signature(name, sig_entry.clone());
             }
 
-            // Phase 22: seed CTE schemas from the function body's WITH
-            // clause so that context-annotated `SelectItems<Kind, cte>`
-            // parameters can resolve their column sets via `is_cte` /
-            // `cte_columns`. CTE cycle diagnostics from this extraction
-            // are discarded here — `cte_cycle_diagnostics_for_file`
-            // handles them at definition time.
-            //
-            // Phase 45: JOIN-aliased schemas were already seeded above
-            // (before the shadow-warning check) so they're visible to
-            // both `compute_shadow_warnings` and the body re-walk.
-            let (body_ctx_with_ctes, _cycle_diags) = extract_function_body_cte_schemas(
-                select_stmt,
-                &body_ctx,
-                &body_text,
-                smelt_fn_schema_lookup,
-            );
+            let (body_ctx_with_ctes, _cycle_diags) =
+                extract_function_body_cte_schemas(select_stmt, &body_ctx, &body_text);
             let body_ctx = body_ctx_with_ctes;
 
-            // Phase 15: a SELECT-shaped body (e.g. `add_margin`'s
-            // `(SELECT source.*, revenue - cost AS margin FROM source)`)
-            // is checked with the TableExpr params' caller schemas
-            // already seeded into `body_ctx`. We emit
-            // `UnknownIdentifier` for any bare column / alias that
-            // doesn't resolve; Phase 6+ nested-call traversal fires via
-            // `walk_select_columns_with_visitor` so `smelt.fn.*` calls
-            // inside the body still get checked recursively.
             let mut body_diags = check_function_select_body(
                 &sig,
                 select_stmt,
                 &body_text,
                 &body_ctx,
-                &nested_handler,
+                &nested_path_handler,
+                None,
             );
-            // Phase 21: validate caller-provided Expr<T>/SelectItems<Kind>
-            // fragment arguments against the inferred splice contexts.
-            // Phase 22: `body_ctx` now includes CTE schemas so that
-            // `SelectItems<Kind, cte_name>` parameters can validate
-            // caller fragments against the CTE's column set.
-            // Phase 44b: pass `ctx` (caller's context) so that kind inference
-            // for argument expressions is performed in the caller's scope.
             body_diags.extend(check_fragment_context_bindings(
                 &sig,
                 select_stmt,
@@ -1385,40 +1231,27 @@ pub fn check_smelt_fn_call(
         }
     };
 
-    // Resolve this frame's decl-site info once — reused for every
-    // cascading diagnostic. LSP clients use these fields to render a
-    // `DiagnosticRelatedInformation` link per frame (§16 #16).
     let decl_path = decl_lookup(&sig);
     let decl_range = Some(sig.name_range);
     let call_site_range = Some(path_range);
 
-    // Build the frames list. For each *inner* diagnostic we push:
-    //   - any frames it already carried (from nested calls), unchanged
-    //   - plus one new frame for `this` call site, appended to the end so
-    //     the last element is the outermost (current) call — matching the
-    //     renderer contract in `smelt-lsp::to_lsp_diagnostic`.
     for mut d in inner {
-        // Re-anchor the range to the call-site call-path span so the
-        // editor squiggle lands where the user wrote the call. The
-        // original inner anchor is preserved on the corresponding frame
-        // via `call_site_range` for LSP related-info (Phase 12).
         d.range = path_range;
 
-        // Merge any pre-existing ExpansionFrames with this call's frame.
         let mut frames: Vec<FrameInfo> = match d.data.take() {
             Some(DiagnosticData::ExpansionFrames(existing)) => existing,
             _ => Vec::new(),
         };
-        // Phase 6 packs all this call's (param, bound_type) pairs into a
-        // single frame keyed on the function name. The renderer only shows
-        // one binding per frame — pick the first parameter (innermost-bound)
-        // for determinism. Future phases can extend FrameInfo with a full
-        // binding list.
-        if let Some((param_name, bound_type)) = frame_bindings.first().cloned() {
+
+        if !frame_bindings.is_empty() {
             frames.push(FrameInfo {
                 function: sig.name.clone(),
-                param: param_name,
-                bound_type,
+                param: frame_bindings
+                    .iter()
+                    .map(|(p, t)| format!("{}: {}", p, t))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                bound_type: String::new(),
                 decl_path: decl_path.clone(),
                 decl_range,
                 call_site_range,
@@ -1437,9 +1270,6 @@ pub fn check_smelt_fn_call(
         diagnostics.push(d);
     }
 
-    // Phase 15: re-append the shadow warnings we set aside above —
-    // they're not cascade errors so they must survive even when inner
-    // body-check diagnostics are empty.
     diagnostics.extend(shadow_warnings);
 
     diagnostics
@@ -1614,7 +1444,7 @@ pub fn register_join_alias_schemas(
         }
 
         // Otherwise, ask the closure to resolve a schema. Supported
-        // shapes today: `smelt.ref('X')`, `smelt.source('a.b')`, and
+        // shapes today: `smelt.models.X`, `smelt.sources.a.b`, and
         // `smelt.fn.<name>(...)` returning TableExpr. Unsupported
         // shapes (subqueries, CTE refs, derived tables) return None
         // and are deferred to Phase 46.
@@ -1643,15 +1473,16 @@ pub fn register_join_alias_schemas(
 ///   - bare-column resolution through the param-first/FROM-scope chain;
 ///   - unresolved identifiers surface as `UnknownIdentifier` anchored at
 ///     the usage site (Phase 15 §16 #7);
-///   - nested `smelt.fn.*` calls inside the SELECT-list expressions
-///     dispatch through `nested_handler` so frames stack across
+///   - nested `smelt.functions.*` path-form calls inside the SELECT-list
+///     expressions dispatch through `nested_handler` so frames stack across
 ///     expansion depth (Phase 12 contract).
 fn check_function_select_body(
     _sig: &FunctionSig,
     select_stmt: &SelectStmt,
     text: &str,
     body_ctx: &TypeContext,
-    nested_handler: &NestedCallHandler<'_>,
+    nested_handler: &NestedPathCallHandler<'_>,
+    _nested_path_handler: Option<&NestedPathCallHandler<'_>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -1672,26 +1503,26 @@ fn check_function_select_body(
         });
     }
 
-    // 2. Dispatch nested `smelt.fn.*` calls so frames stack up across
-    //    expansion depth. We walk every expression in the SELECT and
-    //    hand any SMELT_FN_CALL node to `nested_handler`.
+    // 2. Dispatch nested `smelt.functions.*` path-form calls so frames stack
+    //    up across expansion depth. We walk every expression in the SELECT and
+    //    hand any SMELT_PATH_CALL node to `nested_handler`.
     walk_select_columns_with_visitor(
         select_stmt,
         body_ctx,
         None,
         &mut |_qualifier, _name, _expr_type, _range| {
             // `walk_select_columns_with_visitor` hits leaf column refs,
-            // not nested function calls. We walk SMELT_FN_CALL nodes
+            // not nested function calls. We walk SMELT_PATH_CALL nodes
             // separately below.
         },
     );
 
-    // Walk every `SMELT_FN_CALL` in the SELECT statement and let the
+    // Walk every `SMELT_PATH_CALL` in the SELECT statement and let the
     // nested handler produce diagnostics with merged frame stacks.
     use smelt_parser::syntax_kind::SyntaxKind;
     for node in select_stmt.syntax().descendants() {
-        if node.kind() == SyntaxKind::SMELT_FN_CALL {
-            if let Some(call) = SmeltFnCall::cast(node) {
+        if node.kind() == SyntaxKind::SMELT_PATH_CALL {
+            if let Some(call) = SmeltPathCall::cast(node) {
                 diagnostics.extend(nested_handler(&call, body_ctx, text));
             }
         }
@@ -1750,158 +1581,6 @@ fn compute_shadow_warnings(sig: &FunctionSig, body_ctx: &TypeContext) -> Vec<Dia
         });
     }
     out
-}
-
-/// Dispatch a `smelt.fn.<name>(...)` call against a built-in registry
-/// [`Signature`] via [`unify_call`] (Phase 10 unified-resolver path).
-///
-/// This is reached when `sig_lookup` misses but `builtin_lookup` hits —
-/// i.e. the user is calling a built-in like `COALESCE`/`GREATEST` through
-/// the `smelt.fn.*` syntax.
-///
-/// Mapped diagnostics (all pinned to the smallest useful span):
-///   - [`UnificationError::ConstraintViolation`] →
-///     [`DiagnosticCode::ArgTypeMismatch`] at the offending positional arg.
-///   - [`UnificationError::MissingArgs`] →
-///     [`DiagnosticCode::MissingArgument`] at the call-path span.
-///   - [`UnificationError::TooManyArgs`] → ignored in Phase 10 (no
-///     too-many diagnostic code today); silently accepted.
-///   - [`UnificationError::InconsistentBinding`] →
-///     [`DiagnosticCode::ArgTypeMismatch`] at the first conflicting arg.
-///   - [`UnificationError::EmptyVariadicTypeVar`] → ignored (cannot bind
-///     without surrounding context; Phase 12+).
-///
-/// Named arguments are not modelled on built-ins (the registry is
-/// positional-only), so any `name => value` pairs are ignored for
-/// unification and named-value spans fall back to positional order.
-fn check_builtin_call(
-    call: &SmeltFnCall,
-    name: &str,
-    path_range: Range,
-    sig: &Signature,
-    ctx: &TypeContext,
-    text: &str,
-    lub: &dyn Fn(&DataType, &DataType) -> DataType,
-) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
-    // Collect positional arg expressions + their inferred DataTypes.
-    // Named args on built-ins have no declared parameter names in the
-    // registry, so they contribute positionally if present but are rare —
-    // callers use `smelt.fn.COALESCE(a, b)` style. We treat named-arg
-    // value exprs as trailing positional args, keeping order stable.
-    let arg_list = call.arg_list();
-    let positional_exprs: Vec<Expr> = arg_list
-        .as_ref()
-        .map(|al| al.positional_args())
-        .unwrap_or_default();
-    let named_values: Vec<Expr> = arg_list
-        .as_ref()
-        .map(|al| al.named_params().filter_map(|np| np.value_expr()).collect())
-        .unwrap_or_default();
-
-    let mut arg_exprs: Vec<Expr> = Vec::with_capacity(positional_exprs.len() + named_values.len());
-    arg_exprs.extend(positional_exprs);
-    arg_exprs.extend(named_values);
-
-    let mut arg_types: Vec<DataType> = Vec::with_capacity(arg_exprs.len());
-    for arg in &arg_exprs {
-        let dt = infer_expression_type(arg, ctx)
-            .map(|t| t.data_type)
-            .unwrap_or(DataType::Unknown);
-        arg_types.push(dt);
-    }
-
-    match unify_call(sig, &arg_types, lub) {
-        Ok(_) => {} // no diagnostics to emit — type is already inferred elsewhere
-        Err(UnificationError::MissingArgs { expected, got }) => {
-            diagnostics.push(Diagnostic {
-                severity: DiagnosticSeverity::Error,
-                message: format!(
-                    "`smelt.fn.{}` expects at least {} argument(s), got {}",
-                    name, expected, got
-                ),
-                range: path_range,
-                code: Some(DiagnosticCode::MissingArgument),
-                data: None,
-            });
-        }
-        Err(UnificationError::ConstraintViolation {
-            position,
-            param_constraint,
-            actual,
-        }) => {
-            // `position` is 1-based — index into our flat positional list.
-            let arg_range = arg_exprs
-                .get(position.saturating_sub(1))
-                .map(|e| to_range(e.text_range(), text))
-                .unwrap_or(path_range);
-            diagnostics.push(Diagnostic {
-                severity: DiagnosticSeverity::Error,
-                message: format!(
-                    "Argument at position {} has type `{}`, which does not satisfy constraint `{}` of `smelt.fn.{}`",
-                    position,
-                    actual,
-                    format_constraint(&param_constraint),
-                    name
-                ),
-                range: arg_range,
-                code: Some(DiagnosticCode::ArgTypeMismatch),
-                data: None,
-            });
-        }
-        Err(UnificationError::InconsistentBinding {
-            var_name,
-            positions,
-            types,
-        }) => {
-            // Anchor at the second inconsistent position if possible — the
-            // first one set the binding, the second one violated it.
-            let anchor_pos = positions.get(1).copied().unwrap_or(1);
-            let arg_range = arg_exprs
-                .get(anchor_pos.saturating_sub(1))
-                .map(|e| to_range(e.text_range(), text))
-                .unwrap_or(path_range);
-            let type_list = types
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            diagnostics.push(Diagnostic {
-                severity: DiagnosticSeverity::Error,
-                message: format!(
-                    "Type variable `{}` in `smelt.fn.{}` inferred inconsistently across positions {:?}: {}",
-                    var_name, name, positions, type_list
-                ),
-                range: arg_range,
-                code: Some(DiagnosticCode::ArgTypeMismatch),
-                data: None,
-            });
-        }
-        Err(UnificationError::EmptyVariadicTypeVar { .. }) => {
-            // A variadic built-in (`GREATEST`, `LEAST`, `COALESCE`) with no
-            // arguments leaves its type variable unbound. Surface this as a
-            // `MissingArgument` anchored at the call-path — the most
-            // actionable interpretation since the fix is "supply at least
-            // one arg".
-            diagnostics.push(Diagnostic {
-                severity: DiagnosticSeverity::Error,
-                message: format!(
-                    "`smelt.fn.{}` is variadic and requires at least one argument",
-                    name
-                ),
-                range: path_range,
-                code: Some(DiagnosticCode::MissingArgument),
-                data: None,
-            });
-        }
-        Err(UnificationError::TooManyArgs { .. }) => {
-            // Phase 10 does not emit a too-many-args diagnostic; callers
-            // see no diagnostic and fall through to legacy inference.
-        }
-    }
-
-    diagnostics
 }
 
 /// Render a [`TypeConstraint`] in a user-facing form for diagnostic
@@ -2049,7 +1728,7 @@ fn find_cte_table_deps(cte: &Cte, all_names: &std::collections::HashSet<String>)
     for node in select.syntax().descendants() {
         if node.kind() == smelt_parser::SyntaxKind::TABLE_REF {
             if let Some(tr) = smelt_parser::ast::TableRef::cast(node) {
-                if !tr.is_function_call() && tr.smelt_fn_call().is_none() {
+                if !tr.is_function_call() && tr.smelt_path_call().is_none() {
                     if let Some(id) = tr.identifier() {
                         if all_names.contains(&id) && !deps.contains(&id) {
                             deps.push(id);
@@ -2072,20 +1751,14 @@ fn find_cte_table_deps(cte: &Cte, all_names: &std::collections::HashSet<String>)
 /// When no WITH clause is present the seed context is returned unchanged.
 /// Pure — does not touch Salsa.
 ///
-/// Phase 47: when a CTE body has the shape
-/// `SELECT * FROM smelt.fn.<name>(<args>)`, the CTE's column schema is
-/// resolved by the caller-supplied `smelt_fn_schema_lookup` closure
-/// (which in production wraps `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`).
-/// If the closure returns `None` (e.g. function not yet defined,
-/// recursion cycle, or the callee's body lacks a TableExpr return),
-/// the CTE is marked opaque (the Phase 22 fallback) so that outer
-/// column references don't emit false `UnknownIdentifier` cascades.
-#[allow(clippy::type_complexity)]
+/// When a CTE body has the shape `SELECT * FROM smelt.functions.<name>(<args>)`,
+/// the CTE is marked opaque so outer bare-column references don't fire
+/// spurious `UnknownIdentifier` diagnostics. Full schema resolution for
+/// path-call CTE sources is deferred to a follow-on phase.
 pub fn extract_function_body_cte_schemas(
     select: &SelectStmt,
     seed_ctx: &TypeContext,
     text: &str,
-    smelt_fn_schema_lookup: &dyn Fn(&SmeltFnCall) -> Option<Vec<(String, TypedColumn)>>,
 ) -> (TypeContext, Vec<Diagnostic>) {
     let Some(with_clause) = select.with_clause() else {
         return (seed_ctx.clone(), vec![]);
@@ -2125,23 +1798,18 @@ pub fn extract_function_body_cte_schemas(
         }
         ctx.add_alias(cte_name, cte_name);
 
-        // Phase 47: when this CTE has the shape
-        // `SELECT * FROM smelt.fn.<name>(<args>)`, try to resolve the
-        // callee's return schema via the caller-supplied lookup
-        // closure. If resolution succeeds, register each column on
-        // the CTE so outer references are real-typed (and typos
-        // surface as `UnknownIdentifier`). If resolution fails (e.g.
-        // function not yet defined, recursion cycle, or the callee
-        // body lacks a TableExpr return), fall back to the Phase 22
-        // `mark_cte_opaque` shortcut to keep outer references quiet.
+        // If the CTE source is a `smelt.functions.*` path call
+        // (SMELT_PATH_CALL), mark the CTE opaque so outer bare-column
+        // references don't fire spurious `UnknownIdentifier` diagnostics.
+        // Full schema resolution for path-call CTE sources is deferred to a
+        // follow-on phase.
         {
-            let inner_smelt_fn = dfs
+            let has_path_call_source = dfs
                 .ctes
                 .get(cte_name)
                 .and_then(|c| c.query())
                 .and_then(|q| q.select_stmt())
                 .and_then(|s| {
-                    // SELECT list must contain a wildcard
                     let has_wildcard = s
                         .select_list()
                         .map(|sl| sl.items().any(|item| item.is_wildcard()))
@@ -2149,32 +1817,32 @@ pub fn extract_function_body_cte_schemas(
                     if !has_wildcard {
                         return None;
                     }
-                    // FROM clause must have a smelt.fn.* source — return it.
                     s.from_clause()
-                        .and_then(|fc| fc.table_refs().find_map(|tr| tr.smelt_fn_call()))
-                });
+                        .and_then(|fc| fc.table_refs().find_map(|tr| tr.smelt_path_call()))
+                })
+                .is_some();
 
-            // Phase 44b: bare `smelt.fn.*` CTE body (produced when the
-            // CTE body is a `smelt.fn.foo(...) PASSING ...` call rather
-            // than a SELECT * FROM smelt.fn.foo(...) query).
-            let inner_smelt_fn_direct = if inner_smelt_fn.is_none() {
-                dfs.ctes.get(cte_name).and_then(|c| c.smelt_fn_call_body())
-            } else {
-                None
+            // Bare `smelt.functions.*(...) PASSING ...` CTE body shape:
+            // no SELECT_STMT child in the CTE, but a SMELT_PATH_CALL exists.
+            let has_path_call_direct = {
+                use smelt_parser::syntax_kind::SyntaxKind;
+                dfs.ctes
+                    .get(cte_name)
+                    .map(|c| {
+                        let cte_node = c.syntax();
+                        let has_select = cte_node
+                            .descendants()
+                            .any(|d| d.kind() == SyntaxKind::SELECT_STMT);
+                        let has_path = cte_node
+                            .descendants()
+                            .any(|d| d.kind() == SyntaxKind::SMELT_PATH_CALL);
+                        !has_select && has_path
+                    })
+                    .unwrap_or(false)
             };
 
-            let fn_call_to_resolve = inner_smelt_fn.or(inner_smelt_fn_direct);
-            if let Some(call) = fn_call_to_resolve {
-                match smelt_fn_schema_lookup(&call) {
-                    Some(cols) => {
-                        for (col_name, typed_col) in &cols {
-                            ctx.add_cte_column(cte_name, col_name, typed_col.clone());
-                        }
-                    }
-                    None => {
-                        ctx.mark_cte_opaque(cte_name);
-                    }
-                }
+            if has_path_call_source || has_path_call_direct {
+                ctx.mark_cte_opaque(cte_name);
             }
         }
     }
@@ -2213,7 +1881,7 @@ fn from_scope_columns(select: &SelectStmt, body_ctx: &TypeContext) -> Vec<(Strin
     };
     let mut cols: Vec<(String, TypedColumn)> = vec![];
     for table_ref in from_clause.table_refs() {
-        if table_ref.is_function_call() || table_ref.smelt_fn_call().is_some() {
+        if table_ref.is_function_call() || table_ref.smelt_path_call().is_some() {
             continue;
         }
         let Some(id) = table_ref.identifier() else {
@@ -2372,7 +2040,7 @@ pub fn context_mismatch_diagnostics_for_fn(
 
         select.from_clause().and_then(|fc| {
             fc.table_refs()
-                .filter(|tr| !tr.is_function_call() && tr.smelt_fn_call().is_none())
+                .filter(|tr| !tr.is_function_call() && tr.smelt_path_call().is_none())
                 .find_map(|tr| {
                     tr.identifier()
                         .filter(|id| tableexpr_names.contains(id.as_str()))
@@ -2463,7 +2131,7 @@ fn is_bare_fragment_param_ref(expr: &Expr, ctx: &TypeContext) -> bool {
 }
 
 /// `body_ctx` must already be seeded with the call-site [`TableExpr`] schemas
-/// (as `check_smelt_fn_call` does before calling this function).
+/// (as `check_smelt_path_call` does before calling this function).
 /// `caller_ctx` is the context at the call site — used for kind inference of
 /// argument expressions, which live in the caller's scope (Phase 44b).
 /// `text` is the call-site source text used to convert [`TextRange`]s to

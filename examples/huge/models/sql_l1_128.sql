@@ -10,7 +10,8 @@ SELECT
     event_date,
     product_id,
     referrer
-FROM smelt.ref('clicks')
+FROM smelt.models.clicks
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('clicks') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.clicks WHERE status = 'active'
 )
+

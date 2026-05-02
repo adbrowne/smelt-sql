@@ -10,7 +10,8 @@ SELECT
     duration_seconds,
     plan_type,
     profit
-FROM smelt.ref('sql_l2_65')
+FROM smelt.models.sql_l2_65
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_63') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.sql_l2_63 WHERE status = 'active'
 )
+

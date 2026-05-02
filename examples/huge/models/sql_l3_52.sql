@@ -10,5 +10,6 @@ SELECT
     a.product_id,
     a.amount,
     b.quantity
-FROM smelt.ref('sql_l2_219') a
-LEFT JOIN smelt.ref('sql_l2_7') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l2_219 a
+LEFT JOIN smelt.models.sql_l2_7 b ON a.user_id = b.user_id
+

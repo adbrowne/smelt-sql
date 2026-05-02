@@ -10,7 +10,8 @@ SELECT
     status,
     cost,
     campaign_id
-FROM smelt.ref('sql_l1_27')
+FROM smelt.models.sql_l1_27
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_65') WHERE country = 'US'
+    SELECT user_id FROM smelt.models.sql_l1_65 WHERE country = 'US'
 )
+

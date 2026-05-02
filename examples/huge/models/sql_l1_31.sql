@@ -11,6 +11,7 @@ SELECT
     b.updated_at,
     c.cohort_date,
     c.order_id
-FROM smelt.ref('sessions') a
-INNER JOIN smelt.ref('sessions') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sessions') c ON a.user_id = c.user_id
+FROM smelt.models.sessions a
+INNER JOIN smelt.models.sessions b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.sessions c ON a.user_id = c.user_id
+

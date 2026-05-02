@@ -11,6 +11,7 @@ SELECT
     b.email_domain,
     c.device_type,
     c.category
-FROM smelt.ref('sql_l2_218') a
-INNER JOIN smelt.ref('sql_l2_138') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sql_l2_218') c ON a.user_id = c.user_id
+FROM smelt.models.sql_l2_218 a
+INNER JOIN smelt.models.sql_l2_138 b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.sql_l2_218 c ON a.user_id = c.user_id
+

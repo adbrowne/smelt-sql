@@ -10,5 +10,6 @@ SELECT
     a.tier,
     a.ip_address,
     b.amount
-FROM smelt.ref('sql_l3_207') a
-LEFT JOIN smelt.ref('sql_l3_129') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_207 a
+LEFT JOIN smelt.models.sql_l3_129 b ON a.user_id = b.user_id
+

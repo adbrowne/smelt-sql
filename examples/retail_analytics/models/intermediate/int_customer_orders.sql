@@ -12,6 +12,7 @@ SELECT
         PARTITION BY customer_country
         ORDER BY SUM(gross_revenue) DESC
     ) AS country_revenue_rank
-FROM smelt.ref('int_order_enriched')
+FROM smelt.models.intermediate.int_order_enriched
 GROUP BY customer_id, customer_segment, customer_country
 HAVING COUNT(*) >= 1
+

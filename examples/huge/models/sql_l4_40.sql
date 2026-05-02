@@ -11,5 +11,6 @@ SELECT
     status,
     rating,
     tier
-FROM smelt.ref('sql_l3_176')
+FROM smelt.models.sql_l3_176
 WHERE event_type = 'purchase'
+

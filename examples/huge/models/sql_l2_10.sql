@@ -10,6 +10,7 @@ SELECT
     discount,
     AVG(duration_seconds) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.ref('sql_l1_204')
+FROM smelt.models.sql_l1_204
 GROUP BY discount
 HAVING COUNT(*) > 10
+

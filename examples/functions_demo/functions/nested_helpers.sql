@@ -16,12 +16,12 @@ smelt.define inner_unary(x) AS (x + 1)
 ---
 backends: [duckdb]
 ---
-smelt.define middle(z) AS (smelt.fn.inner_unary(z))
+smelt.define middle(z) AS (smelt.functions.inner_unary(z))
 
 ---
 backends: [duckdb]
 ---
-smelt.define outer_call(y) AS (smelt.fn.middle(y))
+smelt.define outer_call(y) AS (smelt.functions.middle(y))
 
 -- Phase 14 (§16 #24): a window-function call in scalar position. The
 -- SELECT-list splice point accepts every kind, so a `ROW_NUMBER() OVER
@@ -33,3 +33,4 @@ smelt.define outer_call(y) AS (smelt.fn.middle(y))
 backends: [duckdb]
 ---
 smelt.define ranked_row() AS (ROW_NUMBER() OVER (ORDER BY 1))
+

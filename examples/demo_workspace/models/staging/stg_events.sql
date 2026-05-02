@@ -5,4 +5,5 @@ SELECT
     event_type,
     event_time,
     revenue_cents
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
+

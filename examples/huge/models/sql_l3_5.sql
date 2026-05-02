@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT region, status, country
-    FROM smelt.ref('sql_l2_202')
+    FROM smelt.models.sql_l2_202
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.status
 FROM aggregated a
 INNER JOIN filtered f ON a.region = f.region
+

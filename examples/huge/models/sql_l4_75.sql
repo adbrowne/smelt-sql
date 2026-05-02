@@ -11,5 +11,6 @@ SELECT
     SUM(amount) AS agg_0,
     AVG(amount) AS agg_1,
     COUNT(*) AS agg_2
-FROM smelt.ref('sql_l3_108')
+FROM smelt.models.sql_l3_108
 GROUP BY platform
+

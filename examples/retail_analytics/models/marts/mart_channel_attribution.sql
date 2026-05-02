@@ -19,7 +19,7 @@ FROM (
         SUM(f.page_views) AS page_views,
         SUM(f.cart_adds) AS cart_adds,
         SUM(f.checkouts) AS checkouts
-    FROM smelt.ref('int_funnel_analysis') AS f
+    FROM smelt.models.intermediate.int_funnel_analysis AS f
     GROUP BY f.referrer_source, f.device_type
 ) AS channel_stats
 LEFT JOIN (
@@ -27,8 +27,8 @@ LEFT JOIN (
         w.referrer_source,
         w.device_type,
         SUM(o.net_revenue) AS revenue_attributed
-    FROM smelt.ref('stg_web_events') AS w
-    INNER JOIN smelt.ref('int_order_enriched') AS o
+    FROM smelt.models.staging.stg_web_events AS w
+    INNER JOIN smelt.models.intermediate.int_order_enriched AS o
         ON w.customer_id = o.customer_id
         AND w.event_date = o.order_date
     WHERE w.event_type = 'purchase'
@@ -36,3 +36,4 @@ LEFT JOIN (
 ) AS revenue_stats
     ON channel_stats.referrer_source = revenue_stats.referrer_source
     AND channel_stats.device_type = revenue_stats.device_type
+

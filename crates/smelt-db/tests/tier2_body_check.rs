@@ -325,7 +325,7 @@ fn tier3_row_variable_in_return_abstract_checked() {
 // ============================================================================
 
 /// Build a two-file workspace: a function-definition file and a caller file.
-/// The caller file contains a SELECT statement so `smelt.fn.*` calls are
+/// The caller file contains a SELECT statement so `smelt.functions.*` calls are
 /// dispatched with a resolvable expression context.
 fn build_two_file_db(
     fn_src: &str,
@@ -349,7 +349,7 @@ fn tier2_call_arg_checked_against_declared_param() {
     // Expect: ArgTypeMismatch on the caller file, mentioning "x" and/or "Integer".
     let fn_src = "smelt.define mul_typed(x: Expr<Integer>, y: Expr<Integer>) AS (x * y)\n";
     // Use a literal so the arg type is concrete (Text), not Unknown.
-    let caller_src = "SELECT smelt.fn.mul_typed('hello', 1) AS r\n";
+    let caller_src = "SELECT smelt.functions.mul_typed('hello', 1) AS r\n";
 
     let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
     let diags = file_diagnostics(&db, ws, caller_file);
@@ -377,7 +377,7 @@ fn tier3_call_arg_checked_same_as_tier2() {
     // Caller passes a Text literal — type mismatch.
     // Expect: ArgTypeMismatch on the caller file.
     let fn_src = "smelt.define clamp_tier3(x: Expr<Integer>) -> Expr<Integer> AS (x)\n";
-    let caller_src = "SELECT smelt.fn.clamp_tier3('hello') AS r\n";
+    let caller_src = "SELECT smelt.functions.clamp_tier3('hello') AS r\n";
 
     let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
     let diags = file_diagnostics(&db, ws, caller_file);
@@ -399,7 +399,7 @@ fn tier1_call_still_uses_expansion() {
     // an undefined identifier `undefined_var`. Expansion cascades the
     // UnknownIdentifier error to the call site with an ExpansionFrames payload.
     let fn_src = "smelt.define broken_raw(x) AS (x + undefined_var)\n";
-    let caller_src = "SELECT smelt.fn.broken_raw(42) AS r\n";
+    let caller_src = "SELECT smelt.functions.broken_raw(42) AS r\n";
 
     let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
     let diags = file_diagnostics(&db, ws, caller_file);
@@ -429,7 +429,7 @@ fn checking_mode_no_expansion_performed() {
     // FunctionBodyTypeMismatch from `x + 'text'` would cascade to the caller file.
     // Asserting it is absent confirms the Tier 2 call-site skips expansion entirely.
     let fn_src = "smelt.define broken_tier2(x: Expr<Integer>) AS (x + 'text')\n";
-    let caller_src = "SELECT smelt.fn.broken_tier2(42) AS r\n";
+    let caller_src = "SELECT smelt.functions.broken_tier2(42) AS r\n";
 
     let (db, ws, _fn_file, caller_file) = build_two_file_db(fn_src, caller_src);
     let diags = file_diagnostics(&db, ws, caller_file);

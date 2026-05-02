@@ -290,16 +290,14 @@ fn test_smelt_extensions_valid_pg_syntax() {
     // These tests verify that smelt extensions happen to be valid PostgreSQL syntax
     // (function calls with schema prefix and named parameters)
 
-    // smelt.ref() is valid PostgreSQL function call syntax
+    // Phase 4: smelt.ref() and smelt.source() have been removed from smelt.
+    // They are no longer valid smelt syntax — use smelt.models.<name> or
+    // smelt.sources.<schema>.<table> instead.
+    // smelt.models.users is a three-part qualified table name (catalog.schema.table)
+    // which is valid in both smelt and PostgreSQL.
     assert_both_succeed(
-        "SELECT * FROM smelt.ref('users')",
-        "smelt.ref() is valid pg function syntax",
-    );
-
-    // smelt.source() is valid PostgreSQL function call syntax
-    assert_both_succeed(
-        "SELECT * FROM smelt.source('raw.users')",
-        "smelt.source() is valid pg function syntax",
+        "SELECT * FROM smelt.models.users",
+        "smelt.models path form is valid pg qualified table syntax",
     );
 
     // Named parameters with => are valid PostgreSQL function syntax

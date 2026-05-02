@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT price, session_id, channel
-    FROM smelt.ref('payments')
+    FROM smelt.models.payments
     WHERE platform = 'web'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.session_id
 FROM aggregated a
 INNER JOIN filtered f ON a.price = f.price
+

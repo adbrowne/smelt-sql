@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT email_domain, updated_at, score
-    FROM smelt.ref('sql_l2_23')
+    FROM smelt.models.sql_l2_23
     WHERE event_type = 'purchase'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.updated_at
 FROM aggregated a
 INNER JOIN filtered f ON a.email_domain = f.email_domain
+

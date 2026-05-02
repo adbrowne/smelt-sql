@@ -11,5 +11,6 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_0,
     SUM(quantity) AS agg_1,
     MAX(created_at) AS agg_2
-FROM smelt.ref('logs')
+FROM smelt.models.logs
 GROUP BY category
+

@@ -10,4 +10,5 @@ SELECT
     segment,
     duration_seconds,
     LAG(amount, 1) OVER (PARTITION BY segment ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_7')
+FROM smelt.models.sql_l3_7
+

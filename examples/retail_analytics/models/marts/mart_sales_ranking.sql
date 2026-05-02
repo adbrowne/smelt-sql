@@ -22,4 +22,5 @@ SELECT
         ORDER BY order_date
         ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
     ) AS rolling_7day_revenue
-FROM smelt.ref('int_daily_store_metrics')
+FROM smelt.models.intermediate.int_daily_store_metrics
+

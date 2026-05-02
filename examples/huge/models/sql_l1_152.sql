@@ -11,5 +11,6 @@ SELECT
     transaction_id,
     score,
     rating
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 WHERE status = 'active'
+

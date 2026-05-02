@@ -10,5 +10,6 @@ SELECT
     a.cohort_date,
     a.is_verified,
     b.plan_type
-FROM smelt.ref('sql_l3_52') a
-LEFT JOIN smelt.ref('sql_l3_66') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_52 a
+LEFT JOIN smelt.models.sql_l3_66 b ON a.user_id = b.user_id
+

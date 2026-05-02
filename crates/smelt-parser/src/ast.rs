@@ -24,22 +24,6 @@ impl File {
         self.0.children().find_map(SelectStmt::cast)
     }
 
-    /// Find all ref('model') function calls in the file
-    pub fn refs(&self) -> impl Iterator<Item = RefCall> + '_ {
-        self.0
-            .descendants()
-            .filter_map(FunctionCall::cast)
-            .filter_map(RefCall::from_function_call)
-    }
-
-    /// Find all source('source.table') function calls in the file
-    pub fn sources(&self) -> impl Iterator<Item = SourceCall> + '_ {
-        self.0
-            .descendants()
-            .filter_map(FunctionCall::cast)
-            .filter_map(SourceCall::from_function_call)
-    }
-
     /// Iterate over top-level `smelt.define` declarations in this file.
     pub fn defines(&self) -> impl Iterator<Item = SmeltDefine> + '_ {
         self.0.children().filter_map(SmeltDefine::cast)
@@ -593,70 +577,6 @@ impl DefineBody {
 
 /// `smelt.fn.<path>(args)` call node. Distinct from `FUNCTION_CALL` — this
 /// node is only produced for calls that start with the literal `smelt.fn.`
-/// prefix, which names user-declared functions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SmeltFnCall(SyntaxNode);
-
-impl SmeltFnCall {
-    pub fn cast(node: SyntaxNode) -> Option<Self> {
-        if node.kind() == SMELT_FN_CALL {
-            Some(Self(node))
-        } else {
-            None
-        }
-    }
-
-    pub fn syntax(&self) -> &SyntaxNode {
-        &self.0
-    }
-
-    /// The dotted call path node (`smelt.fn.<...>.name`), if present.
-    pub fn call_path(&self) -> Option<CallPath> {
-        self.0.children().find_map(CallPath::cast)
-    }
-
-    /// The argument list node (`(args)`), if present.
-    pub fn arg_list(&self) -> Option<ArgList> {
-        self.0.children().find_map(ArgList::cast)
-    }
-
-    /// The full dotted path text including the `smelt.fn.` prefix, joined
-    /// with `.` and with whitespace/trivia stripped — e.g.
-    /// `smelt.fn.core.safe_divide`.
-    pub fn path_text(&self) -> String {
-        match self.call_path() {
-            Some(p) => {
-                p.0.children_with_tokens()
-                    .filter_map(|e| e.into_token())
-                    .filter(|t| t.kind() == IDENT)
-                    .map(|t| t.text().to_string())
-                    .collect::<Vec<_>>()
-                    .join(".")
-            }
-            None => String::new(),
-        }
-    }
-
-    /// The text range of the `CALL_PATH` node (the dotted path including the
-    /// `smelt.fn.` prefix). Phase 6 anchors `UnknownSmeltFn` diagnostics here.
-    pub fn call_path_range(&self) -> Option<TextRange> {
-        self.call_path().map(|p| p.0.text_range())
-    }
-
-    /// Text range of the whole SMELT_FN_CALL node (path + args). Used as a
-    /// fallback anchor when the call path is missing.
-    pub fn text_range(&self) -> TextRange {
-        self.0.text_range()
-    }
-
-    /// Iterate over the `PASSING_CLAUSE` children of this `SMELT_FN_CALL`, in
-    /// source order. Phase 28 attaches zero or more of these after the closing
-    /// `)` of the argument list.
-    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
-        self.0.children().filter_map(PassingClause::cast)
-    }
-}
-
 /// A `smelt.as_struct(alias [EXCEPT col1, col2, ...])` expression (Phase 38).
 ///
 /// The alias is the table/parameter qualifier whose columns are collected
@@ -712,15 +632,25 @@ impl SmeltAsStructCall {
     }
 }
 
-/// The dotted path inside a `SMELT_FN_CALL` — includes the literal
-/// `smelt.fn.` prefix tokens as well as all subsequent namespace / name
-/// segments.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CallPath(SyntaxNode);
+// ===== Unified `smelt.<path>` value-ref and call form (Phase 1 of the
+// smelt.<path> migration). Coexists with the legacy `SMELT_FN_CALL` /
+// `FUNCTION_CALL` paths until Phase 4. =====
 
-impl CallPath {
+/// `smelt.<path>` value-form reference (no trailing `(args)`).
+///
+/// Produced by the parser for any `smelt.` prefix followed by a dotted path
+/// when no call-list follows. Used in FROM/argument position to address any
+/// project-defined entity (model, seed, source, function, test) by its
+/// workspace-relative path.
+///
+/// Phase 1 produces this node uniformly; kind dispatch (model vs. function
+/// vs. seed vs. source vs. test) is the data plane's job in Phase 2a.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltPathRef(SyntaxNode);
+
+impl SmeltPathRef {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
-        if node.kind() == CALL_PATH {
+        if node.kind() == SMELT_PATH_REF {
             Some(Self(node))
         } else {
             None
@@ -731,9 +661,99 @@ impl CallPath {
         &self.0
     }
 
-    /// The logical path segments AFTER the `smelt.fn.` prefix. For
-    /// `smelt.fn.core.math.safe_divide` this returns
-    /// `["core", "math", "safe_divide"]`.
+    /// The `SMELT_PATH` child holding the dotted path tokens (including the
+    /// leading `smelt` IDENT). Returns `None` only on error-recovery paths.
+    pub fn path(&self) -> Option<SmeltPath> {
+        self.0.children().find_map(SmeltPath::cast)
+    }
+
+    /// Path segments AFTER the leading `smelt` token. For `smelt.models.users`
+    /// this returns `["models", "users"]`. Empty if the path is malformed.
+    pub fn segments(&self) -> Vec<String> {
+        self.path().map(|p| p.segments()).unwrap_or_default()
+    }
+
+    /// Text range of the entire `SMELT_PATH_REF` node.
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
+}
+
+/// `smelt.<path>(<args>)` call form, with optional trailing `PASSING` clauses.
+///
+/// Produced by the parser for any `smelt.` prefix followed by a dotted path
+/// terminated by `(`. Used to call parameterised entities (functions,
+/// parameterised models). Coexists with the legacy `SMELT_FN_CALL` until
+/// Phase 4.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltPathCall(SyntaxNode);
+
+impl SmeltPathCall {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_PATH_CALL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `SMELT_PATH` child holding the dotted path tokens (including the
+    /// leading `smelt` IDENT). Returns `None` only on error-recovery paths.
+    pub fn path(&self) -> Option<SmeltPath> {
+        self.0.children().find_map(SmeltPath::cast)
+    }
+
+    /// Path segments AFTER the leading `smelt` token.
+    pub fn segments(&self) -> Vec<String> {
+        self.path().map(|p| p.segments()).unwrap_or_default()
+    }
+
+    /// The argument list (`(args)`), if present.
+    pub fn arg_list(&self) -> Option<ArgList> {
+        self.0.children().find_map(ArgList::cast)
+    }
+
+    /// Iterate over the trailing `PASSING_CLAUSE` children, in source order.
+    pub fn passing_clauses(&self) -> impl Iterator<Item = PassingClause> + '_ {
+        self.0.children().filter_map(PassingClause::cast)
+    }
+
+    /// Text range of the `SMELT_PATH` child (path only, excluding the args parens).
+    /// Returns `None` on error-recovery paths where the path node is absent.
+    pub fn call_path_range(&self) -> Option<TextRange> {
+        self.path().map(|p| p.syntax().text_range())
+    }
+
+    /// Text range of the entire `SMELT_PATH_CALL` node.
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
+}
+
+/// The dotted path inside a `SMELT_PATH_REF` or `SMELT_PATH_CALL`. Includes
+/// the leading `smelt` IDENT token as well as all subsequent dotted segments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmeltPath(SyntaxNode);
+
+impl SmeltPath {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SMELT_PATH {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The path segments AFTER the leading `smelt` IDENT — e.g. for
+    /// `smelt.models.users` returns `["models", "users"]`.
     pub fn segments(&self) -> Vec<String> {
         let idents: Vec<String> = self
             .0
@@ -742,14 +762,13 @@ impl CallPath {
             .filter(|t| t.kind() == IDENT)
             .map(|t| t.text().to_string())
             .collect();
-        // Drop the leading `smelt` and `fn` tokens (the prefix). If for some
-        // reason the path is shorter than expected (e.g. an error-recovery
-        // case) we just return whatever remains.
-        idents.into_iter().skip(2).collect()
+        // Drop the leading `smelt` token. Error-recovery paths may produce a
+        // shorter token list — return whatever remains.
+        idents.into_iter().skip(1).collect()
     }
 }
 
-/// A single `PASSING <name> AS (<body>)` clause attached to a `SMELT_FN_CALL`.
+/// A single `PASSING <name> AS (<body>)` clause attached to a `SMELT_PATH_CALL`.
 /// Phase 28 introduces these as children of `SMELT_FN_CALL` nodes when the
 /// call is followed by one or more contextual `PASSING` keywords.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1308,15 +1327,16 @@ impl TableRef {
         self.0.children().find_map(FunctionCall::cast)
     }
 
-    /// Get the `smelt.fn.*` call if this table ref is one (Phase 15+).
-    ///
-    /// `SMELT_FN_CALL` nodes are distinct from `FUNCTION_CALL`; the
-    /// parser emits them for calls starting with the `smelt.fn.`
-    /// prefix. Phase 17 uses this accessor to resolve a
-    /// `TableExpr`-returning call in FROM position to its inferred
-    /// output schema.
-    pub fn smelt_fn_call(&self) -> Option<SmeltFnCall> {
-        self.0.children().find_map(SmeltFnCall::cast)
+    /// Get the unified `smelt.<path>` value-form reference if this table ref
+    /// is one (smelt.<path> migration, Phase 1).
+    pub fn smelt_path_ref(&self) -> Option<SmeltPathRef> {
+        self.0.children().find_map(SmeltPathRef::cast)
+    }
+
+    /// Get the unified `smelt.<path>(args)` call if this table ref is one
+    /// (smelt.<path> migration, Phase 1).
+    pub fn smelt_path_call(&self) -> Option<SmeltPathCall> {
+        self.0.children().find_map(SmeltPathCall::cast)
     }
 
     pub fn identifier(&self) -> Option<String> {
@@ -1356,13 +1376,13 @@ impl TableRef {
         }
 
         // If we have more than one IDENT and no AS keyword, the last IDENT is an implicit alias
-        // But we need to be careful: for function calls like smelt.source('raw.users'),
+        // But we need to be careful: for function calls like smelt.sources.raw.users,
         // we don't want to return 'smelt' or 'source' as aliases
         if !found_as && ident_count > 1 && !self.is_function_call() {
             return last_ident;
         }
 
-        // For function calls with implicit alias (smelt.source('raw.users') t),
+        // For function calls with implicit alias (smelt.sources.raw.users t),
         // check if the last token is an IDENT that's not part of the function call
         if self.is_function_call() {
             // Get the function call's text range
@@ -1377,6 +1397,31 @@ impl TableRef {
                         }
                         break;
                     }
+                }
+            }
+        }
+
+        // For smelt.<path> value-form refs with implicit alias
+        // (smelt.models.users u), the SMELT_PATH_REF child is a node whose
+        // tokens don't appear in `children_with_tokens()` above. The alias
+        // IDENT IS a direct child token. If we have exactly one direct IDENT
+        // token (the alias) and a SMELT_PATH_REF child, return that token.
+        if let Some(path_ref) = self.smelt_path_ref() {
+            let path_range = path_ref.syntax().text_range();
+            if let Some(tok) = tokens.iter().rfind(|t| t.kind() == IDENT) {
+                if tok.text_range().start() >= path_range.end() {
+                    return Some(tok.text().to_string());
+                }
+            }
+        }
+
+        // For smelt.<path> call-form refs with implicit alias
+        // (smelt.models.f(x) u), same logic.
+        if let Some(path_call) = self.smelt_path_call() {
+            let call_range = path_call.syntax().text_range();
+            if let Some(tok) = tokens.iter().rfind(|t| t.kind() == IDENT) {
+                if tok.text_range().start() >= call_range.end() {
+                    return Some(tok.text().to_string());
                 }
             }
         }
@@ -1475,9 +1520,8 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
-            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_FN_CALL | SMELT_AS_STRUCT_CALL => {
-                Some(Self(node))
-            }
+            | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL | SMELT_PATH_REF
+            | SMELT_PATH_CALL => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1493,7 +1537,8 @@ impl Expr {
                             | BETWEEN_EXPR
                             | IN_EXPR
                             | EXISTS_EXPR
-                            | SMELT_FN_CALL
+                            | SMELT_PATH_REF
+                            | SMELT_PATH_CALL
                     )
                 }) {
                     Some(Self(node))
@@ -1578,14 +1623,14 @@ impl Expr {
         })
     }
 
-    /// Check if this is a `smelt.fn.*` user-declared function call. Distinct
-    /// from `as_function_call()` — SQL built-in function calls produce a
-    /// `FUNCTION_CALL` node; `smelt.fn.*` calls produce a `SMELT_FN_CALL`.
-    pub fn as_smelt_fn_call(&self) -> Option<SmeltFnCall> {
+    /// Check if this expression wraps a `SMELT_PATH_CALL` node
+    /// (`smelt.functions.*` form). Matches both when this `Expr` node IS the
+    /// `SMELT_PATH_CALL` and when it wraps one as a direct child.
+    pub fn as_smelt_path_call(&self) -> Option<SmeltPathCall> {
         self.0
             .children()
-            .find_map(SmeltFnCall::cast)
-            .or_else(|| SmeltFnCall::cast(self.0.clone()))
+            .find_map(SmeltPathCall::cast)
+            .or_else(|| SmeltPathCall::cast(self.0.clone()))
     }
 
     /// Check if this expression is a `smelt.as_struct(alias [EXCEPT cols])`
@@ -2251,188 +2296,6 @@ impl NamedParam {
     }
 }
 
-/// ref('model_name') function call wrapper
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RefCall(FunctionCall);
-
-impl RefCall {
-    /// Create a RefCall from a FunctionCall if it's a smelt.ref() call
-    pub fn from_function_call(func: FunctionCall) -> Option<Self> {
-        let name = func.name()?.to_lowercase();
-        let namespace = func.namespace()?; // Require namespace
-
-        // Only accept smelt.ref() - namespace is required
-        if name == "ref" && namespace.to_lowercase() == "smelt" {
-            Some(Self(func))
-        } else {
-            None
-        }
-    }
-
-    /// Get the underlying FunctionCall
-    pub fn function_call(&self) -> &FunctionCall {
-        &self.0
-    }
-
-    /// Get the model name from the ref call (first argument)
-    pub fn model_name(&self) -> Option<String> {
-        // Look for the first STRING token in the function call arguments
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| {
-                let text = t.text();
-                // Strip quotes
-                text.trim_start_matches('\'')
-                    .trim_start_matches('"')
-                    .trim_end_matches('\'')
-                    .trim_end_matches('"')
-                    .to_string()
-            })
-    }
-
-    /// Get the text range of the entire ref call
-    pub fn range(&self) -> TextRange {
-        self.0 .0.text_range()
-    }
-
-    /// Get the text range of just the model name string (inside quotes)
-    pub fn name_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| t.text_range())
-    }
-
-    /// Get the text range of the string content inside quotes (excluding the quote characters)
-    pub fn content_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| {
-                let range = t.text_range();
-                let text = t.text();
-                // STRING tokens include quotes — trim them
-                if text.len() >= 2 && (text.starts_with('\'') || text.starts_with('"')) {
-                    TextRange::new(
-                        range.start() + rowan::TextSize::from(1),
-                        range.end() - rowan::TextSize::from(1),
-                    )
-                } else {
-                    range
-                }
-            })
-    }
-
-    /// Get all named parameters from this ref call
-    pub fn named_params(&self) -> impl Iterator<Item = NamedParam> + '_ {
-        self.0.named_params()
-    }
-}
-
-/// source('source.table') function call wrapper
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SourceCall(FunctionCall);
-
-impl SourceCall {
-    /// Create a SourceCall from a FunctionCall if it's a smelt.source() call
-    pub fn from_function_call(func: FunctionCall) -> Option<Self> {
-        let name = func.name()?.to_lowercase();
-        let namespace = func.namespace()?;
-
-        if name == "source" && namespace.to_lowercase() == "smelt" {
-            Some(Self(func))
-        } else {
-            None
-        }
-    }
-
-    /// Get the qualified name from the source call (e.g., "raw.users")
-    pub fn qualified_name(&self) -> Option<String> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| {
-                let text = t.text();
-                text.trim_start_matches('\'')
-                    .trim_start_matches('"')
-                    .trim_end_matches('\'')
-                    .trim_end_matches('"')
-                    .to_string()
-            })
-    }
-
-    /// Get the source name (first part before the dot)
-    pub fn source_name(&self) -> Option<String> {
-        let qualified = self.qualified_name()?;
-        qualified.split('.').next().map(|s| s.to_string())
-    }
-
-    /// Get the table name (second part after the dot)
-    pub fn table_name(&self) -> Option<String> {
-        let qualified = self.qualified_name()?;
-        qualified.split('.').nth(1).map(|s| s.to_string())
-    }
-
-    /// Get the text range of the entire source call
-    pub fn range(&self) -> TextRange {
-        self.0 .0.text_range()
-    }
-
-    /// Get the text range of just the qualified name string (including quotes)
-    pub fn name_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .map(|t| t.text_range())
-    }
-
-    /// Get the text range of just the table name portion inside the quoted string
-    /// For `source('raw.users')`, returns the range covering `users`
-    pub fn table_name_range(&self) -> Option<TextRange> {
-        self.0
-             .0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == STRING)
-            .and_then(|t| {
-                let range = t.text_range();
-                let text = t.text();
-                // Strip outer quotes to get the qualified name
-                let inner = text
-                    .trim_start_matches('\'')
-                    .trim_start_matches('"')
-                    .trim_end_matches('\'')
-                    .trim_end_matches('"');
-                // Find the dot position in the inner text
-                if let Some(dot_pos) = inner.find('.') {
-                    // Table name starts after the dot, plus 1 for the opening quote
-                    let quote_offset = if text.starts_with('\'') || text.starts_with('"') {
-                        1u32
-                    } else {
-                        0
-                    };
-                    let table_start =
-                        range.start() + rowan::TextSize::from(quote_offset + dot_pos as u32 + 1);
-                    let table_end = range.end() - rowan::TextSize::from(quote_offset);
-                    Some(TextRange::new(table_start, table_end))
-                } else {
-                    None
-                }
-            })
-    }
-}
-
 /// Helper to convert TextRange offset to line/column position
 pub fn offset_to_position(text: &str, offset: usize) -> Position {
     let mut line = 0u32;
@@ -2674,13 +2537,6 @@ impl Subquery {
     /// Get the SELECT statement
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
-    }
-
-    /// Phase 44b: if the subquery's body is a bare `smelt.fn.*` call
-    /// (produced when a CTE body is `smelt.fn.foo(...) PASSING ...`),
-    /// return that call. Returns `None` for SELECT-shaped subqueries.
-    pub fn smelt_fn_call_body(&self) -> Option<SmeltFnCall> {
-        self.0.children().find_map(SmeltFnCall::cast)
     }
 }
 
@@ -3147,13 +3003,6 @@ impl Cte {
     /// Get the query (SELECT statement)
     pub fn query(&self) -> Option<Subquery> {
         self.0.children().find_map(Subquery::cast)
-    }
-
-    /// Phase 44b: if this CTE's body is a bare `smelt.fn.*` call
-    /// (produced when a CTE body is `smelt.fn.foo(...) PASSING ...`),
-    /// return that call directly. Returns `None` for SELECT-shaped CTEs.
-    pub fn smelt_fn_call_body(&self) -> Option<SmeltFnCall> {
-        self.query()?.smelt_fn_call_body()
     }
 
     /// Get the column names from the optional column list

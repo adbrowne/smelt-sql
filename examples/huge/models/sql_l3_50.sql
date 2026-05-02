@@ -10,5 +10,6 @@ SELECT
     a.channel,
     a.event_date,
     b.user_id
-FROM smelt.ref('sql_l2_53') a
-LEFT JOIN smelt.ref('sql_l2_89') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l2_53 a
+LEFT JOIN smelt.models.sql_l2_89 b ON a.user_id = b.user_id
+

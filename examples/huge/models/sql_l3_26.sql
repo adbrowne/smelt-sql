@@ -10,5 +10,6 @@ SELECT
     a.region,
     a.platform,
     b.segment
-FROM smelt.ref('sql_l2_140') a
-INNER JOIN smelt.ref('sql_l2_131') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l2_140 a
+INNER JOIN smelt.models.sql_l2_131 b ON a.user_id = b.user_id
+

@@ -76,7 +76,7 @@ fn as_struct_except_filters_columns() {
     let root = PathBuf::from("/fake/project38b");
     let model_path = root.join("models").join("test_except.sql");
     let model_src = "SELECT smelt.as_struct(e EXCEPT ts) AS s \
-                     FROM smelt.source('source.events') AS e\n";
+                     FROM smelt.sources.source.events AS e\n";
     let sources_yaml = "version: 1\nsources:\n  source:\n    tables:\n      events:\n        columns:\n          - name: ts\n            type: TIMESTAMP\n          - name: user_id\n            type: INTEGER\n          - name: amount\n            type: NUMERIC\n";
 
     let (db, ws, files) = build_db(root, sources_yaml, &[(model_path, model_src)]);
@@ -211,8 +211,8 @@ fn as_struct_in_multi_join_context_resolves_without_collision() {
 SELECT \
   smelt.as_struct(o EXCEPT customer_id) AS order_data, \
   smelt.as_struct(c EXCEPT customer_id) AS customer_data \
-FROM smelt.source('source.orders') AS o \
-JOIN smelt.source('source.customers') AS c \
+FROM smelt.sources.source.orders AS o \
+JOIN smelt.sources.source.customers AS c \
   ON o.customer_id = c.customer_id\n";
     let sources_yaml = "version: 1\nsources:\n  source:\n    tables:\n      orders:\n        columns:\n          - name: order_id\n            type: BIGINT\n          - name: customer_id\n            type: VARCHAR\n          - name: total\n            type: NUMERIC\n      customers:\n        columns:\n          - name: customer_id\n            type: VARCHAR\n          - name: name\n            type: VARCHAR\n          - name: tier\n            type: VARCHAR\n";
 

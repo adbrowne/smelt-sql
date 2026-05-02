@@ -434,7 +434,7 @@ def dynamic_model(project):
         // Create a SQL model that refs the Python model
         std::fs::write(
             models_dir.join("downstream.sql"),
-            "SELECT id FROM smelt.ref('dynamic_model')",
+            "SELECT id FROM smelt.models.dynamic_model",
         )
         .unwrap();
 
@@ -512,7 +512,7 @@ def dynamic_model(project):
         let models_dir = project_dir.join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
 
-        // Python model that generates SQL with smelt.ref()
+        // Python model that generates SQL with smelt.models.* path refs
         std::fs::write(
             models_dir.join("union_model.py"),
             r#"
@@ -520,7 +520,7 @@ from smelt import model
 
 @model
 def union_model(project):
-    return "SELECT * FROM smelt.ref('table_a') UNION ALL SELECT * FROM smelt.ref('table_b')"
+    return "SELECT * FROM smelt.models.table_a UNION ALL SELECT * FROM smelt.models.table_b"
 "#,
         )
         .unwrap();
@@ -741,7 +741,7 @@ def combined(project):
     children = project.find_models(tag="event_source")
     if not children:
         return "SELECT 1 as event_id"
-    refs = [f"SELECT * FROM smelt.ref('{m.name}')" for m in children]
+    refs = [f"SELECT * FROM smelt.models.{m.name}" for m in children]
     return " UNION ALL ".join(refs)
 "#,
         )

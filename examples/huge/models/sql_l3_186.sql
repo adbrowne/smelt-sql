@@ -10,4 +10,5 @@ SELECT
     profit,
     created_at,
     LAG(amount, 1) OVER (PARTITION BY profit ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l2_39')
+FROM smelt.models.sql_l2_39
+

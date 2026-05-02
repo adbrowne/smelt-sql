@@ -11,5 +11,6 @@ SELECT
     email_domain,
     segment,
     is_active
-FROM smelt.ref('sql_l2_118')
+FROM smelt.models.sql_l2_118
 WHERE status = 'active'
+

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT discount, event_time, rating
-    FROM smelt.ref('sql_l1_24')
+    FROM smelt.models.sql_l1_24
     WHERE country = 'US'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.event_time
 FROM aggregated a
 INNER JOIN filtered f ON a.discount = f.discount
+

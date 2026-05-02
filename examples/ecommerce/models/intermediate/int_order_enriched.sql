@@ -14,5 +14,6 @@ FROM (
         status_code,
         status_label,
         discount_rate
-    FROM smelt.ref('stg_orders')
+    FROM smelt.models.staging.stg_orders
 ) AS sub
+

@@ -12,5 +12,6 @@ SELECT
     AVG(duration_seconds) AS agg_1,
     SUM(quantity) AS agg_2,
     SUM(amount) AS agg_3
-FROM smelt.ref('sql_l2_62')
+FROM smelt.models.sql_l2_62
 GROUP BY cohort_date
+

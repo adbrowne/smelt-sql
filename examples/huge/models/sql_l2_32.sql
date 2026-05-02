@@ -10,7 +10,8 @@ SELECT
     score,
     region,
     price
-FROM smelt.ref('sql_l1_98')
+FROM smelt.models.sql_l1_98
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_80') WHERE platform = 'web'
+    SELECT user_id FROM smelt.models.sql_l1_80 WHERE platform = 'web'
 )
+

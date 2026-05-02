@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('day', event_time) AS period,
     AVG(duration_seconds) AS metric_1,
     COUNT(*) AS metric_2
-FROM smelt.ref('users')
+FROM smelt.models.users
 GROUP BY DATE_TRUNC('day', event_time)
+

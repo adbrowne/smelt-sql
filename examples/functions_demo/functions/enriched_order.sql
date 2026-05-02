@@ -13,6 +13,7 @@ smelt.define enriched_order(orders: TableExpr<{order_id: BigInt, customer_id: Te
     dim_customer.customer_name AS customer_name,
     dim_customer.customer_tier AS customer_tier
   FROM orders
-  LEFT JOIN smelt.ref('dim_customer') AS dim_customer
+  LEFT JOIN smelt.models.dim_customer AS dim_customer
     ON orders.customer_id = dim_customer.customer_id
 )
+

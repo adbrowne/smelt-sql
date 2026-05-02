@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_inject_filter_no_where_clause() {
-        let sql = "SELECT * FROM smelt.ref('transactions')";
+        let sql = "SELECT * FROM smelt.models.transactions";
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
@@ -111,12 +111,12 @@ mod tests {
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
 
         assert!(result.contains("WHERE event_time >= '2024-01-15' AND event_time < '2024-01-18'"));
-        assert!(result.starts_with("SELECT * FROM smelt.ref('transactions')"));
+        assert!(result.starts_with("SELECT * FROM smelt.models.transactions"));
     }
 
     #[test]
     fn test_inject_filter_with_existing_where() {
-        let sql = "SELECT * FROM smelt.ref('transactions') WHERE status = 'active'";
+        let sql = "SELECT * FROM smelt.models.transactions WHERE status = 'active'";
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
@@ -135,7 +135,7 @@ SELECT
     DATE(transaction_timestamp) as revenue_date,
     user_id,
     SUM(amount) as total_revenue
-FROM smelt.ref('transactions')
+FROM smelt.models.transactions
 WHERE transaction_timestamp IS NOT NULL
 GROUP BY 1, 2
 "#;
@@ -173,7 +173,7 @@ GROUP BY 1, 2
 
     #[test]
     fn test_with_join() {
-        let sql = "SELECT * FROM smelt.ref('orders') INNER JOIN smelt.ref('users') ON orders.user_id = users.id";
+        let sql = "SELECT * FROM smelt.models.orders INNER JOIN smelt.models.users ON orders.user_id = users.id";
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),

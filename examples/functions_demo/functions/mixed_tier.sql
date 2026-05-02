@@ -6,5 +6,6 @@ smelt.define apply_discount(
     price: Expr<Numeric>,
     rate: Expr<Numeric>
 ) AS (
-    smelt.fn.compute_discount(price, rate)
+    smelt.functions.compute_discount(price, rate)
 )
+

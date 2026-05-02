@@ -11,5 +11,6 @@ SELECT
     referrer,
     is_active,
     order_id
-FROM smelt.ref('sql_l1_75')
+FROM smelt.models.sql_l1_75
 WHERE score >= 50
+

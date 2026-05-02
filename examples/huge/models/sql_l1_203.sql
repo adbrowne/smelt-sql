@@ -10,7 +10,8 @@ SELECT
     revenue,
     updated_at,
     discount
-FROM smelt.ref('users')
+FROM smelt.models.users
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('users') WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.models.users WHERE event_type = 'purchase'
 )
+

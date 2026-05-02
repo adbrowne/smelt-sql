@@ -10,7 +10,8 @@ SELECT
     device_type,
     cohort_date,
     created_at
-FROM smelt.ref('sql_l1_120')
+FROM smelt.models.sql_l1_120
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_120') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.sql_l1_120 WHERE status = 'active'
 )
+

@@ -11,5 +11,6 @@ SELECT
     date_trunc('day', event_timestamp) as event_date,
     user_id,
     COUNT(*) as event_count
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
 GROUP BY 1, 2
+

@@ -6,5 +6,6 @@ SELECT
     COUNT(DISTINCT user_id) as unique_users,
     COUNT(DISTINCT event_id) as unique_events,
     COUNT(*) as total_events
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
 GROUP BY 1, 2 -- smelt:cube_split
+

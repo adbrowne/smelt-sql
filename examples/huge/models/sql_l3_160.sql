@@ -10,6 +10,7 @@ SELECT
     platform,
     AVG(duration_seconds) AS val_1,
     SUM(revenue) AS val_2
-FROM smelt.ref('sql_l2_225')
+FROM smelt.models.sql_l2_225
 GROUP BY platform
 HAVING COUNT(*) > 10
+

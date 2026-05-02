@@ -194,12 +194,12 @@ async fn test_cube_split_with_ref_calls() {
     let (backend, _dir) = create_backend().await;
     seed_events(&backend).await;
 
-    // Model uses smelt.ref('events') — planner preserves it, we resolve manually
+    // Model uses smelt.models.events — planner preserves it, we resolve manually
     let annotated_sql = r#"SELECT
         country,
         COUNT(DISTINCT user_id) as unique_users,
         COUNT(DISTINCT session_id) as unique_sessions
-    FROM smelt.ref('events')
+    FROM smelt.models.events
     GROUP BY 1 -- smelt:cube_split"#;
 
     let model = ModelInfo {
@@ -236,7 +236,11 @@ async fn test_cube_split_with_ref_calls() {
     // Verify refs were resolved
     for step in &resolved_steps {
         if let ExecutionStep::CreateTemp { sql, .. } = step {
-            assert!(!sql.contains("smelt.ref"), "Refs not resolved in: {}", sql);
+            assert!(
+                !sql.contains("smelt.models"),
+                "Refs not resolved in: {}",
+                sql
+            );
             assert!(
                 sql.contains("main.events"),
                 "Missing resolved ref in: {}",

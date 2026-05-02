@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT os_name, plan_type, event_time
-    FROM smelt.ref('sql_l3_58')
+    FROM smelt.models.sql_l3_58
     WHERE category IS NOT NULL
 )
 SELECT
     b.os_name,
     COUNT(*) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l3_177') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l3_177 j ON b.user_id = j.user_id
 GROUP BY b.os_name
+

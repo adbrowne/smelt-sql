@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT quantity, ip_address, rating
-    FROM smelt.ref('events')
+    FROM smelt.models.events
     WHERE is_active = true
 )
 SELECT
     b.quantity,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('events') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.events j ON b.user_id = j.user_id
 GROUP BY b.quantity
+

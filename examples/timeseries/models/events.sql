@@ -5,4 +5,5 @@ SELECT
     event_type,
     event_timestamp,
     properties
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
+

@@ -11,5 +11,6 @@ SELECT
     AVG(amount) AS agg_0,
     SUM(quantity) AS agg_1,
     SUM(amount) AS agg_2
-FROM smelt.ref('sql_l3_223')
+FROM smelt.models.sql_l3_223
 GROUP BY amount
+

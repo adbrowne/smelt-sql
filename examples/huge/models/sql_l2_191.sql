@@ -13,5 +13,6 @@ SELECT
     AVG(duration_seconds) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3,
     SUM(revenue) AS agg_4
-FROM smelt.ref('sql_l1_205')
+FROM smelt.models.sql_l1_205
 GROUP BY campaign_id
+

@@ -13,4 +13,5 @@ SELECT
     city,
     CAST(signup_date AS DATE) AS signup_date,
     COALESCE(segment, 'Unknown') AS segment
-FROM smelt.source('raw.customers')
+FROM smelt.sources.raw.customers
+

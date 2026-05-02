@@ -10,5 +10,6 @@ SELECT
     a.segment,
     a.cohort_date,
     b.amount
-FROM smelt.ref('sql_l2_9') a
-INNER JOIN smelt.ref('sql_l2_8') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l2_9 a
+INNER JOIN smelt.models.sql_l2_8 b ON a.user_id = b.user_id
+

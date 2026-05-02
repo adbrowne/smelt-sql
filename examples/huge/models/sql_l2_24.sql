@@ -10,7 +10,8 @@ SELECT
     browser,
     campaign_id,
     amount
-FROM smelt.ref('sql_l1_211')
+FROM smelt.models.sql_l1_211
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_147') WHERE created_at >= '2024-01-01'
+    SELECT user_id FROM smelt.models.sql_l1_147 WHERE created_at >= '2024-01-01'
 )
+

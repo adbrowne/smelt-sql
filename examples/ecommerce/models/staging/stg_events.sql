@@ -6,4 +6,5 @@ SELECT
     event_timestamp,
     page_url,
     EXTRACT(EPOCH FROM event_timestamp) - EXTRACT(EPOCH FROM LAG(event_timestamp) OVER (PARTITION BY visitor_id ORDER BY event_timestamp)) AS gap_seconds
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
+

@@ -13,5 +13,6 @@ SELECT
     MAX(created_at) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3,
     COUNT(*) AS agg_4
-FROM smelt.ref('sql_l2_157')
+FROM smelt.models.sql_l2_157
 GROUP BY rating
+

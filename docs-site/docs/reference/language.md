@@ -20,21 +20,21 @@ FROM table_references
 
 ## smelt extensions
 
-### smelt.ref()
+### smelt.models
 
 Reference another model in the project:
 
 ```sql
-FROM smelt.ref('model_name')
-FROM smelt.ref('model_name', filter => condition, limit => n)
+FROM smelt.models.model_name
+FROM smelt.models.model_name(filter => condition, limit => n)
 ```
 
-### smelt.source()
+### smelt.sources
 
 Reference an external source table defined in `sources.yml`:
 
 ```sql
-FROM smelt.source('source.table')
+FROM smelt.sources.source.table
 ```
 
 ### smelt.define — user-defined functions
@@ -70,22 +70,22 @@ smelt.define safe_divide(
 
 See the [Functions guide](../guide/functions.md) for the full type annotation language, fragment sorts (`TableExpr`, `SelectItems`), and `PASSING` clauses.
 
-### smelt.fn.* — calling user-defined functions
+### smelt.functions.* — calling user-defined functions
 
 ```sql
 -- Positional arguments
-SELECT smelt.fn.safe_divide(revenue, cost) AS margin FROM smelt.ref('orders')
+SELECT smelt.functions.safe_divide(revenue, cost) AS margin FROM smelt.models.orders
 
 -- Named arguments
-SELECT * FROM smelt.fn.sessionize(
-  smelt.ref('events'),
+SELECT * FROM smelt.functions.sessionize(
+  smelt.models.events,
   user_col => user_id,
   ts_col   => event_time
 )
 
 -- PASSING clause for fragment parameters
 SELECT *
-FROM smelt.fn.session_rollup(smelt.ref('events'), user_id, event_time)
+FROM smelt.functions.session_rollup(smelt.models.events, user_id, event_time)
 PASSING metrics AS (COUNT(*) AS events, SUM(amount) AS total)
 ```
 
@@ -170,7 +170,7 @@ SELECT
   CASE WHEN GROUPING(category) = 1 THEN 'ALL' ELSE category END AS category,
   CASE WHEN GROUPING(region)   = 1 THEN 'ALL' ELSE region   END AS region,
   SUM(amount) AS total
-FROM smelt.ref('sales')
+FROM smelt.models.sales
 GROUP BY CUBE(category, region)
 ```
 

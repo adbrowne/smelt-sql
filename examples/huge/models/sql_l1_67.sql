@@ -10,6 +10,7 @@ SELECT
     rating,
     AVG(amount) AS val_1,
     COUNT(DISTINCT user_id) AS val_2
-FROM smelt.ref('products')
+FROM smelt.models.products
 GROUP BY rating
 HAVING COUNT(*) > 10
+

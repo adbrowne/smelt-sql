@@ -8,8 +8,9 @@ SELECT
     sr.session_start,
     sr.session_end,
     sr.event_count
-FROM smelt.fn.session_rollup(
-    smelt.source('source.session_events'),
+FROM smelt.functions.session_rollup(
+    smelt.sources.source.session_events,
     user_col => CAST('u' AS VARCHAR),
     ts_col => CAST('2020-01-01' AS TIMESTAMP)
 ) AS sr
+

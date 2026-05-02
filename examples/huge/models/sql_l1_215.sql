@@ -14,4 +14,5 @@ SELECT
         WHEN amount > 100 THEN 'medium'
         ELSE 'low'
     END AS value_tier
-FROM smelt.ref('payments')
+FROM smelt.models.payments
+

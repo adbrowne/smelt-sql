@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_date, browser, platform
-    FROM smelt.ref('sql_l3_101')
+    FROM smelt.models.sql_l3_101
     WHERE country = 'US'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.browser
 FROM aggregated a
 INNER JOIN filtered f ON a.event_date = f.event_date
+

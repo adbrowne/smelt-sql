@@ -1,28 +1,122 @@
+//! Reference extraction for `smelt.<path>` forms.
+//!
+//! Phase 4 of the smelt-`<path>` migration removes the `smelt.ref` and
+//! `smelt.source` legacy syntax entirely. Phase 5b removes `smelt.fn.*`
+//! entirely; only the unified `smelt.<path>` form remains.
+//!
+//! The unifying enum is [`SmeltRef`]:
+//! - [`SmeltRef::Path`] — the unified `smelt.<path>` form. Already a
+//!   path tuple; resolution dispatches on file format/content.
+
 use rowan::TextRange;
-use smelt_parser::File as AstFile;
+use smelt_parser::ast::{File as AstFile, SmeltPathCall, SmeltPathRef, TableRef};
+
+/// A unified ref carrier. Every AST node is adapted into one of
+/// these at the boundary; downstream code is keyed on path tuples.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SmeltRef {
+    /// Path-form: `smelt.<seg>(.<seg>)*`. Already in the unified shape.
+    Path(Vec<String>),
+}
+
+impl SmeltRef {
+    /// Adapt this ref to the unified path tuple.
+    ///
+    /// - [`SmeltRef::Path`] returns its segments unchanged.
+    pub fn to_path(&self) -> Vec<String> {
+        match self {
+            SmeltRef::Path(segs) => segs.clone(),
+        }
+    }
+
+    /// Display-friendly leaf name for diagnostics. The last segment.
+    pub fn leaf_name(&self) -> String {
+        match self {
+            SmeltRef::Path(segs) => segs.last().cloned().unwrap_or_default(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RefInfo {
+    /// Legacy field — preserved for backwards compatibility with the
+    /// existing string-keyed `DependencyGraph::build` code path. New
+    /// callers should consume [`smelt_ref`](RefInfo::smelt_ref).
     pub model_name: String,
     pub has_named_params: bool,
     pub range: TextRange,
+    /// Unified ref carrier (Phase 2a).
+    pub smelt_ref: SmeltRef,
 }
 
-/// Extract all smelt.ref() calls from a parsed file
+/// Extract every smelt-extension ref appearing in a parsed file —
+/// unified path forms only. Path-form call sites are also detected
+/// (path calls with arg lists), but only the value-form refs (no `(`)
+/// are surfaced as model dependencies.
+///
+/// Note: `smelt.ref()`, `smelt.source()`, and `smelt.fn.*` are parse
+/// errors and will not appear in a valid CST.
 pub fn extract_refs(file: &AstFile) -> Vec<RefInfo> {
-    file.refs()
-        .filter_map(|ref_call| {
-            let model_name = ref_call.model_name()?;
-            let has_params = ref_call.named_params().count() > 0;
-            let range = ref_call.range();
+    let mut out = Vec::new();
+    for node in file.syntax().descendants() {
+        // Unified path-form value refs (FROM smelt.models.foo).
+        if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
+            // Skip path refs nested inside a SMELT_PATH_CALL — those are
+            // not "value form" refs.
+            if node
+                .ancestors()
+                .skip(1)
+                .any(|a| SmeltPathCall::cast(a).is_some())
+            {
+                continue;
+            }
+            let segments = path_ref.segments();
+            let leaf = segments.last().cloned().unwrap_or_default();
+            out.push(RefInfo {
+                model_name: leaf,
+                has_named_params: false,
+                range: path_ref.text_range(),
+                smelt_ref: SmeltRef::Path(segments),
+            });
+            continue;
+        }
 
-            Some(RefInfo {
-                model_name,
-                has_named_params: has_params,
-                range,
-            })
-        })
-        .collect()
+        // Unified path-form call refs (smelt.functions.x.y(args)).
+        if let Some(path_call) = SmeltPathCall::cast(node.clone()) {
+            let segments = path_call.segments();
+            let has_named_params = path_call
+                .arg_list()
+                .map(|al| {
+                    al.syntax()
+                        .descendants()
+                        .any(|n| n.kind() == smelt_parser::SyntaxKind::NAMED_PARAM)
+                })
+                .unwrap_or(false);
+            let leaf = segments.last().cloned().unwrap_or_default();
+            out.push(RefInfo {
+                model_name: leaf,
+                has_named_params,
+                range: path_call.text_range(),
+                smelt_ref: SmeltRef::Path(segments),
+            });
+            continue;
+        }
+    }
+    out
+}
+
+/// Helper used by `lib.rs` re-exports: extract refs from a `TableRef`
+/// (the FROM-clause node), returning a single `SmeltRef` if any is
+/// present. Used by callers that need to peek at one position rather
+/// than walk the whole file.
+pub fn ref_from_table_ref(table_ref: &TableRef) -> Option<SmeltRef> {
+    if let Some(path_ref) = table_ref.smelt_path_ref() {
+        return Some(SmeltRef::Path(path_ref.segments()));
+    }
+    if let Some(path_call) = table_ref.smelt_path_call() {
+        return Some(SmeltRef::Path(path_call.segments()));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -30,12 +124,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_refs() {
+    fn test_extract_refs_path_form() {
         let sql = r#"
 SELECT
     user_id,
     COUNT(*) as session_count
-FROM smelt.ref('raw_events')
+FROM smelt.models.raw_events
 GROUP BY user_id
 "#;
 
@@ -46,32 +140,17 @@ GROUP BY user_id
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].model_name, "raw_events");
         assert!(!refs[0].has_named_params);
+        assert!(matches!(refs[0].smelt_ref, SmeltRef::Path(_)));
     }
 
     #[test]
-    fn test_extract_refs_with_named_params() {
-        let sql = r#"
-SELECT user_id
-FROM smelt.ref('raw_events', filter => event_type = 'page_view')
-"#;
-
-        let parse = smelt_parser::parse(sql);
-        let file = AstFile::cast(parse.syntax()).unwrap();
-        let refs = extract_refs(&file);
-
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].model_name, "raw_events");
-        assert!(refs[0].has_named_params);
-    }
-
-    #[test]
-    fn test_multiple_refs() {
+    fn test_extract_refs_path_form_multiple() {
         let sql = r#"
 SELECT
     a.user_id,
     b.session_id
-FROM smelt.ref('model_a') a
-INNER JOIN smelt.ref('model_b') b ON a.id = b.id
+FROM smelt.models.model_a a
+INNER JOIN smelt.models.model_b b ON a.id = b.id
 "#;
 
         let parse = smelt_parser::parse(sql);
@@ -81,5 +160,16 @@ INNER JOIN smelt.ref('model_b') b ON a.id = b.id
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].model_name, "model_a");
         assert_eq!(refs[1].model_name, "model_b");
+    }
+
+    #[test]
+    fn path_to_path_returns_segments() {
+        let path = SmeltRef::Path(vec![
+            "models".to_string(),
+            "marts".to_string(),
+            "foo".to_string(),
+        ])
+        .to_path();
+        assert_eq!(path, vec!["models", "marts", "foo"]);
     }
 }

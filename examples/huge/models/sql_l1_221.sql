@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT rating, country, updated_at
-    FROM smelt.ref('orders')
+    FROM smelt.models.orders
     WHERE country = 'US'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.country
 FROM aggregated a
 INNER JOIN filtered f ON a.rating = f.rating
+

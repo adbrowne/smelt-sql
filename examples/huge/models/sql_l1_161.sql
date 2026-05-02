@@ -10,4 +10,5 @@ SELECT
     status,
     quantity,
     ROW_NUMBER() OVER (PARTITION BY status ORDER BY created_at) AS win_val
-FROM smelt.ref('sessions')
+FROM smelt.models.sessions
+

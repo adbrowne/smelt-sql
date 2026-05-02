@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, created_at, discount
-    FROM smelt.ref('sql_l2_214')
+    FROM smelt.models.sql_l2_214
     WHERE event_type = 'purchase'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.created_at
 FROM aggregated a
 INNER JOIN filtered f ON a.amount = f.amount
+

@@ -13,5 +13,6 @@ SELECT
     AVG(price) AS agg_2,
     SUM(revenue) AS agg_3,
     SUM(amount) AS agg_4
-FROM smelt.ref('sql_l3_79')
+FROM smelt.models.sql_l3_79
 GROUP BY profit
+

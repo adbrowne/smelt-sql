@@ -10,7 +10,8 @@ SELECT
     status,
     referrer,
     duration_seconds
-FROM smelt.ref('reviews')
+FROM smelt.models.reviews
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('reviews') WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.models.reviews WHERE event_type = 'purchase'
 )
+

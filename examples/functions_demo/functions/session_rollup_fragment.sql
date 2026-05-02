@@ -7,3 +7,4 @@ smelt.define session_rollup_fragment(
 ) -> TableExpr AS (
     SELECT * FROM source WHERE filters
 )
+

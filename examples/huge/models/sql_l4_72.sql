@@ -10,4 +10,5 @@ SELECT
     tier,
     updated_at,
     RANK() OVER (PARTITION BY tier ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_190')
+FROM smelt.models.sql_l3_190
+

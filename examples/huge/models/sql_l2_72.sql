@@ -13,5 +13,6 @@ SELECT
     MIN(created_at) AS agg_2,
     SUM(revenue) AS agg_3,
     MAX(created_at) AS agg_4
-FROM smelt.ref('sql_l1_101')
+FROM smelt.models.sql_l1_101
 GROUP BY transaction_id
+

@@ -11,5 +11,6 @@ SELECT
     cohort_date,
     duration_seconds,
     device_type
-FROM smelt.ref('sql_l3_170')
+FROM smelt.models.sql_l3_170
 WHERE country = 'US'
+

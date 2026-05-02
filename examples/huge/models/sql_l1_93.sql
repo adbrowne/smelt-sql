@@ -10,7 +10,8 @@ SELECT
     referrer,
     page_path,
     os_name
-FROM smelt.ref('invoices')
+FROM smelt.models.invoices
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('invoices') WHERE country = 'US'
+    SELECT user_id FROM smelt.models.invoices WHERE country = 'US'
 )
+

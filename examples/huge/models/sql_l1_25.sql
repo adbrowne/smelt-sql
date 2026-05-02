@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cost, os_name, ip_address
-    FROM smelt.ref('clicks')
+    FROM smelt.models.clicks
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.os_name
 FROM aggregated a
 INNER JOIN filtered f ON a.cost = f.cost
+

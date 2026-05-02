@@ -11,6 +11,7 @@ SELECT
     b.is_verified,
     c.is_active,
     c.plan_type
-FROM smelt.ref('errors') a
-INNER JOIN smelt.ref('errors') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('errors') c ON a.user_id = c.user_id
+FROM smelt.models.errors a
+INNER JOIN smelt.models.errors b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.errors c ON a.user_id = c.user_id
+

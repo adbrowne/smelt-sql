@@ -10,4 +10,5 @@ SELECT
     region,
     product_id,
     RANK() OVER (PARTITION BY region ORDER BY created_at) AS win_val
-FROM smelt.ref('users')
+FROM smelt.models.users
+

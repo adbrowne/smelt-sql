@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT session_id, event_time, region
-    FROM smelt.ref('logs')
+    FROM smelt.models.logs
     WHERE event_type = 'purchase'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.event_time
 FROM aggregated a
 INNER JOIN filtered f ON a.session_id = f.session_id
+

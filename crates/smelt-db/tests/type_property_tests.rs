@@ -476,7 +476,7 @@ proptest! {
 #[test]
 fn smoke_multi_model_integer_passthrough() {
     let upstream_sql = "WITH data AS (SELECT CAST(42 AS INTEGER) AS x) SELECT x FROM data";
-    let downstream_sql = "SELECT x AS expr_0 FROM smelt.ref('upstream')";
+    let downstream_sql = "SELECT x AS expr_0 FROM smelt.models.upstream";
     let duckdb_sql =
         "WITH upstream AS (SELECT CAST(42 AS INTEGER) AS x) SELECT x AS expr_0 FROM upstream";
 
@@ -493,7 +493,7 @@ fn smoke_multi_model_integer_passthrough() {
 #[test]
 fn smoke_multi_model_function_on_ref() {
     let upstream_sql = "WITH data AS (SELECT CAST('hello' AS STRING) AS s) SELECT s FROM data";
-    let downstream_sql = "SELECT LENGTH(s) AS expr_0 FROM smelt.ref('upstream')";
+    let downstream_sql = "SELECT LENGTH(s) AS expr_0 FROM smelt.models.upstream";
     let duckdb_sql = "WITH upstream AS (SELECT CAST('hello' AS STRING) AS s) SELECT LENGTH(s) AS expr_0 FROM upstream";
 
     let oracle = DuckDbOracle::new();
