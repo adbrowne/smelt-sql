@@ -67,5 +67,15 @@ uv pip install --python "$PY" duckdb >&2
 "$run_dir/project/.venv/bin/smelt" --help > /dev/null
 "$run_dir/project/.venv/bin/smelt" docs list > /dev/null
 
-# Print the run_dir so the caller can pipe / capture
+# Update a `latest` symlink under the parent runs dir so the most recent
+# build is easy to find later (e.g. `cd ~/.smelt-test-runs/latest/project`).
+parent_dir="$(dirname "$run_dir")"
+ln -sfn "$run_dir" "$parent_dir/latest"
+
+# Tell the caller where the agent's project code will land — these files
+# persist after the loop finishes, so you can inspect what got built.
+echo "agent project code:  $run_dir/project" >&2
+echo "latest run symlink:  $parent_dir/latest" >&2
+
+# Print the run_dir on stdout so callers can pipe / capture
 echo "$run_dir"

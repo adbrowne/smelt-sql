@@ -153,4 +153,4 @@ Print a final summary:
 - Skill diffs applied vs. rejected
 - Aggregate counts of TOOL_BUG / DOCS_GAP findings (these are follow-up work for the user)
 
-Tell the user where the run dirs live (`~/.smelt-test-runs/`) so they can inspect transcripts and eval output.
+Tell the user where the run dirs live (`~/.smelt-test-runs/`) so they can inspect transcripts and eval output. Each run keeps the agent's full project (smelt.yml, models/, seeds/, the built `.duckdb`) at `<run_dir>/project/` — nothing is auto-deleted, and `~/.smelt-test-runs/latest` symlinks to the most recent setup. To browse the most recent build: `ls ~/.smelt-test-runs/latest/project/`.
