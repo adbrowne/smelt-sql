@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777707022529,
+  "lastUpdate": 1777711214380,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14287,6 +14287,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.110579,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "572ae33455a92cca0fd3f8fdd6105e991a4c633b",
+          "message": "agent-loop: small-tier 5x run findings + skill polish\n\nTwo skill edits applied during the run (loops 1 and 4):\n- correct false `--dry-run --verbose` advice; add `--show-plan` and\n  `smelt table <model>` as the verification-of-inferred-types entrypoint\n- state the default materialization explicitly; promote the no-pandas\n  duckdb validation snippet next to the install gotchas\n\nPlan doc accumulates 4 TOOL_BUG and 9 DOCS_GAP findings (with a triage\nshortlist) for end-of-loop review; small fixture has converged.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-02T18:37:14+10:00",
+          "tree_id": "6b559c08b168262793d96a53c381303bbb30fa8f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/572ae33455a92cca0fd3f8fdd6105e991a4c633b"
+        },
+        "date": 1777711213040,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.712917999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 35.301184,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.695187,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.376548,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0028250000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 845.048771,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 1.070663,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.861209,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.8462310000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.825512,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 913.909395,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.82082,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.301980000000004,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.233127,
             "unit": "ms"
           }
         ]
