@@ -7738,7 +7738,11 @@ LIMIT 100
         // replace `smelt.models.users ` (with space) with `users` → `usersu`.
         let input = "SELECT * FROM smelt.models.users u";
         let (parse, _file) = parse_file_text(input);
-        assert!(parse.errors.is_empty(), "unexpected errors: {:?}", parse.errors);
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
 
         let refs = smelt_path_refs(_file.syntax());
         assert_eq!(refs.len(), 1);
