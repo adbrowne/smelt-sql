@@ -10,6 +10,7 @@ SELECT
     event_time,
     MAX(created_at) AS val_1,
     AVG(duration_seconds) AS val_2
-FROM smelt.ref('sql_l1_58')
+FROM smelt.models.sql_l1_58
 GROUP BY event_time
 HAVING COUNT(*) > 10
+

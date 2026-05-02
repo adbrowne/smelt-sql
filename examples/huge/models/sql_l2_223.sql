@@ -10,6 +10,7 @@ SELECT
     channel,
     SUM(amount) AS val_1,
     AVG(duration_seconds) AS val_2
-FROM smelt.ref('sql_l1_71')
+FROM smelt.models.sql_l1_71
 GROUP BY channel
 HAVING COUNT(*) > 10
+

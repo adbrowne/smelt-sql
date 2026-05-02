@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT segment, page_path, email_domain
-    FROM smelt.ref('sql_l3_92')
+    FROM smelt.models.sql_l3_92
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.page_path
 FROM aggregated a
 INNER JOIN filtered f ON a.segment = f.segment
+

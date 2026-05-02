@@ -139,7 +139,7 @@ impl PhysicalGraph {
 
 /// Apply ref redirects to a model file's SQL content.
 ///
-/// Replaces `smelt.ref('from')` with `smelt.ref('to')` for each redirect,
+/// Replaces `smelt.models.from` with `smelt.models.to` for each redirect,
 /// and updates the refs list accordingly.
 fn apply_ref_redirects(model_file: &ModelFile, redirects: &HashMap<String, String>) -> ModelFile {
     let mut content = model_file.content.clone();
@@ -148,8 +148,8 @@ fn apply_ref_redirects(model_file: &ModelFile, redirects: &HashMap<String, Strin
     for (from, to) in redirects {
         // Replace both single-quoted and double-quoted ref calls
         content = content.replace(
-            &format!("smelt.ref('{}')", from),
-            &format!("smelt.ref('{}')", to),
+            &format!("smelt.models.{}", from),
+            &format!("smelt.models.{}", to),
         );
         content = content.replace(
             &format!("smelt.ref(\"{}\")", from),
@@ -404,6 +404,10 @@ impl<'a> PhysicalGraphBuilder<'a> {
                         model_name: dep.clone(),
                         has_named_params: false,
                         range: rowan::TextRange::default(),
+                        smelt_ref: smelt_core::SmeltRef::Path(vec![
+                            "models".to_string(),
+                            dep.clone(),
+                        ]),
                     })
                     .collect(),
                 parse_errors: Vec::new(),
@@ -609,6 +613,10 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
+                    "models".to_string(),
+                    dep.to_string(),
+                ]),
             })
             .collect();
 
@@ -953,7 +961,7 @@ mod tests {
 
         // Create a model with a ref to "source" in its content
         let mut model_with_ref = make_model("downstream", vec!["source"]);
-        model_with_ref.content = "SELECT * FROM smelt.ref('source') WHERE id > 0".to_string();
+        model_with_ref.content = "SELECT * FROM smelt.models.source WHERE id > 0".to_string();
 
         let all_models = vec![
             make_model("source", vec![]),
@@ -972,8 +980,8 @@ mod tests {
             .unwrap();
 
         let node = pg.get_node("downstream").unwrap();
-        assert!(node.model_file.content.contains("smelt.ref('target')"));
-        assert!(!node.model_file.content.contains("smelt.ref('source')"));
+        assert!(node.model_file.content.contains("smelt.models.target"));
+        assert!(!node.model_file.content.contains("smelt.models.source"));
     }
 
     #[test]

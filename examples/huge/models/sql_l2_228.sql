@@ -10,7 +10,8 @@ SELECT
     cohort_date,
     device_type,
     email_domain
-FROM smelt.ref('sql_l1_121')
+FROM smelt.models.sql_l1_121
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_132') WHERE amount > 0
+    SELECT user_id FROM smelt.models.sql_l1_132 WHERE amount > 0
 )
+

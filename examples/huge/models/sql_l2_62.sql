@@ -11,6 +11,7 @@ SELECT
     b.user_id,
     c.session_id,
     c.referrer
-FROM smelt.ref('sql_l1_15') a
-INNER JOIN smelt.ref('sql_l1_117') b ON a.user_id = b.user_id
-LEFT JOIN smelt.ref('sql_l1_92') c ON a.user_id = c.user_id
+FROM smelt.models.sql_l1_15 a
+INNER JOIN smelt.models.sql_l1_117 b ON a.user_id = b.user_id
+LEFT JOIN smelt.models.sql_l1_92 c ON a.user_id = c.user_id
+

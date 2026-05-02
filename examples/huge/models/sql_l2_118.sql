@@ -10,4 +10,5 @@ SELECT
     event_date,
     created_at,
     RANK() OVER (PARTITION BY event_date ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l1_130')
+FROM smelt.models.sql_l1_130
+

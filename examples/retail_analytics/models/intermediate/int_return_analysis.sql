@@ -10,6 +10,7 @@ SELECT
     COUNT(DISTINCT oi.return_reason) FILTER (WHERE oi.is_returned = true) AS distinct_return_reasons,
     SUM(oi.unit_price * oi.quantity) AS total_revenue,
     SUM(oi.unit_price * oi.quantity) FILTER (WHERE oi.is_returned = true) AS returned_revenue
-FROM smelt.ref('stg_order_items') AS oi
-LEFT JOIN smelt.ref('stg_products') AS p ON oi.product_id = p.product_id
+FROM smelt.models.staging.stg_order_items AS oi
+LEFT JOIN smelt.models.staging.stg_products AS p ON oi.product_id = p.product_id
 GROUP BY p.category, p.subcategory, p.brand_tier
+

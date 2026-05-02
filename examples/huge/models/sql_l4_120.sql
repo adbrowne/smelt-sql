@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT price, ip_address, referrer
-    FROM smelt.ref('sql_l3_232')
+    FROM smelt.models.sql_l3_232
     WHERE is_active = true
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.ip_address
 FROM aggregated a
 INNER JOIN filtered f ON a.price = f.price
+

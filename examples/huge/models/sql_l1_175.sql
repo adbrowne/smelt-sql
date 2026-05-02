@@ -10,7 +10,8 @@ SELECT
     ip_address,
     event_date,
     region
-FROM smelt.ref('transactions')
+FROM smelt.models.transactions
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('transactions') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.transactions WHERE status = 'active'
 )
+

@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     SUM(revenue) AS metric_1,
     SUM(quantity) AS metric_2
-FROM smelt.ref('sql_l3_15')
+FROM smelt.models.sql_l3_15
 GROUP BY DATE_TRUNC('month', event_time)
+

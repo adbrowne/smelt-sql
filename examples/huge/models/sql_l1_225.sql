@@ -10,5 +10,6 @@ SELECT
     a.device_type,
     a.order_id,
     b.quantity
-FROM smelt.ref('errors') a
-INNER JOIN smelt.ref('errors') b ON a.user_id = b.user_id
+FROM smelt.models.errors a
+INNER JOIN smelt.models.errors b ON a.user_id = b.user_id
+

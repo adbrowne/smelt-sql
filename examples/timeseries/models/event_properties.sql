@@ -13,5 +13,6 @@ SELECT
     CAST(e.properties ->> 'duration_ms' AS INTEGER) AS duration_ms,
     e.properties -> 'metadata' AS metadata_json,
     json_array_length(e.properties -> 'tags') AS tag_count
-FROM smelt.ref('events') e
+FROM smelt.models.events e
 WHERE e.properties IS NOT NULL
+

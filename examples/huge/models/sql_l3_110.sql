@@ -11,5 +11,6 @@ SELECT
     score,
     transaction_id,
     updated_at
-FROM smelt.ref('sql_l2_204')
+FROM smelt.models.sql_l2_204
 WHERE category IS NOT NULL
+

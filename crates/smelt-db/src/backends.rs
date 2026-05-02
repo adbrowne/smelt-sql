@@ -8,7 +8,7 @@
 //!
 //!   * A bare SQL function call whose name is `<backend>.<foo>` narrows
 //!     the caller's set to `[<backend>]`.
-//!   * A `smelt.fn.<name>(...)` call intersects the callee's backend
+//!   * A `smelt.functions.<name>(...)` call intersects the callee's backend
 //!     set into the caller's running set.
 //!   * Everything else leaves the set unchanged.
 //!
@@ -20,13 +20,13 @@
 //! Pure-function rule: this module is free of Salsa. Callers in
 //! `smelt-db/src/lib.rs` wire it into a tracked query.
 
-use smelt_parser::ast::{Expr, FunctionCall, SmeltFnCall};
+use smelt_parser::ast::{Expr, FunctionCall, SmeltPathCall};
 use smelt_parser::syntax_kind::SyntaxKind;
 use smelt_types::signatures::{BackendSet, FunctionSig, SigOrigin};
 
 /// Walk a body expression and infer which backends it can target.
 ///
-/// `sig_lookup` resolves a `smelt.fn.<name>` call site to the callee's
+/// `sig_lookup` resolves a `smelt.functions.<name>` call site to the callee's
 /// [`FunctionSig`]. Callees whose own backend set is inferrable via
 /// [`effective_backends`] contribute their set to the intersection; the
 /// caller (`function_backends_query`) resolves circularity by looking
@@ -69,9 +69,9 @@ fn walk_expr_for_backends<F>(
                     }
                 }
             }
-            SyntaxKind::SMELT_FN_CALL => {
-                if let Some(call) = SmeltFnCall::cast(child.clone()) {
-                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+            SyntaxKind::SMELT_PATH_CALL => {
+                if let Some(call) = SmeltPathCall::cast(child.clone()) {
+                    let segments = call.segments();
                     if let Some(name) = segments.last() {
                         if let Some(callee_sig) = sig_lookup(name) {
                             let callee = effective_backends(&callee_sig);

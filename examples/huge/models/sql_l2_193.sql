@@ -10,5 +10,6 @@ SELECT
     a.event_time,
     a.rating,
     b.ip_address
-FROM smelt.ref('sql_l1_200') a
-INNER JOIN smelt.ref('sql_l1_200') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l1_200 a
+INNER JOIN smelt.models.sql_l1_200 b ON a.user_id = b.user_id
+

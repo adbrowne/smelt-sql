@@ -10,7 +10,8 @@ SELECT
     channel,
     status,
     is_verified
-FROM smelt.ref('orders')
+FROM smelt.models.orders
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('orders') WHERE is_active = true
+    SELECT user_id FROM smelt.models.orders WHERE is_active = true
 )
+

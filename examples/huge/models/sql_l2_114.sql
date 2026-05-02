@@ -11,5 +11,6 @@ SELECT
     category,
     quantity,
     segment
-FROM smelt.ref('sql_l1_29')
+FROM smelt.models.sql_l1_29
 WHERE category IS NOT NULL
+

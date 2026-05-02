@@ -12,3 +12,4 @@ test:
     - {cohort_date: '2024-01-01', cohort_size: 2}
     - {cohort_date: '2024-02-01', cohort_size: 1}
 ---
+

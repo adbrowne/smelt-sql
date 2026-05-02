@@ -13,5 +13,6 @@ SELECT
     MAX(created_at) AS agg_2,
     SUM(quantity) AS agg_3,
     COUNT(DISTINCT user_id) AS agg_4
-FROM smelt.ref('sql_l1_81')
+FROM smelt.models.sql_l1_81
 GROUP BY email_domain
+

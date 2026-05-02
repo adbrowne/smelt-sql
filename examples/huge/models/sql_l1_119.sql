@@ -10,5 +10,6 @@ SELECT
     a.tier,
     a.revenue,
     b.channel
-FROM smelt.ref('subscriptions') a
-INNER JOIN smelt.ref('subscriptions') b ON a.user_id = b.user_id
+FROM smelt.models.subscriptions a
+INNER JOIN smelt.models.subscriptions b ON a.user_id = b.user_id
+

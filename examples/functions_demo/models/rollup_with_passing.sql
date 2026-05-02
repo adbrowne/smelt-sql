@@ -12,8 +12,9 @@
 -- Phase 29 binds the PASSING body to the `metrics: SelectItems<Agg, sessionized>`
 -- parameter by name and type-checks it identically to an inline argument.
 SELECT *
-FROM smelt.fn.session_rollup(
-    smelt.source('source.session_events'),
+FROM smelt.functions.session_rollup(
+    smelt.sources.source.session_events,
     user_col => CAST('u' AS VARCHAR),
     ts_col   => CAST('2020-01-01' AS TIMESTAMP)
 ) PASSING metrics AS (COUNT(*)) AS sr
+

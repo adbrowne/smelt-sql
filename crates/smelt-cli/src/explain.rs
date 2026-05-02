@@ -212,6 +212,10 @@ mod tests {
                 model_name: dep.to_string(),
                 has_named_params: false,
                 range: TextRange::default(),
+                smelt_ref: smelt_core::refs::SmeltRef::Path(vec![
+                    "models".to_string(),
+                    dep.to_string(),
+                ]),
             })
             .collect();
 
@@ -267,7 +271,7 @@ mod tests {
             make_model(
                 "daily_revenue",
                 vec!["orders"],
-                "SELECT date, SUM(amount) FROM smelt.ref('orders') GROUP BY date",
+                "SELECT date, SUM(amount) FROM smelt.models.orders GROUP BY date",
             ),
         ];
         let config = make_config(vec![]);
@@ -298,7 +302,7 @@ mod tests {
             make_model(
                 "daily_revenue",
                 vec!["orders"],
-                "SELECT date, SUM(amount) FROM smelt.ref('orders') GROUP BY date",
+                "SELECT date, SUM(amount) FROM smelt.models.orders GROUP BY date",
             ),
         ];
         let config = make_config(vec![(
@@ -354,7 +358,7 @@ mod tests {
             make_model(
                 "daily_revenue",
                 vec!["orders"],
-                "SELECT date, SUM(amount) FROM smelt.ref('orders') GROUP BY date",
+                "SELECT date, SUM(amount) FROM smelt.models.orders GROUP BY date",
             ),
         ];
         let config = make_config(vec![]);
@@ -391,7 +395,7 @@ mod tests {
             make_model(
                 "mart",
                 vec!["staging"],
-                "SELECT * FROM smelt.ref('staging')",
+                "SELECT * FROM smelt.models.staging",
             ),
         ];
         let mut config = make_config(vec![(

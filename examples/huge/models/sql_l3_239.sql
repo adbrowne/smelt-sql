@@ -11,5 +11,6 @@ SELECT
     transaction_id,
     tier,
     is_verified
-FROM smelt.ref('sql_l2_81')
+FROM smelt.models.sql_l2_81
 WHERE event_type = 'purchase'
+

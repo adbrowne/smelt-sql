@@ -74,7 +74,7 @@ sources:
             type: TIMESTAMP
 ```
 
-Models reference sources with `smelt.source('raw.page_views')`.
+Models reference sources with `smelt.sources.raw.page_views`.
 
 For full configuration options, see the [sources configuration reference](../reference/sources-yml.md).
 
@@ -93,7 +93,7 @@ SELECT
     order_id,
     customer_id,
     amount
-FROM smelt.ref('staging.orders')
+FROM smelt.models.staging.orders
 WHERE status = 'completed'
 ```
 
@@ -125,7 +125,7 @@ Subdirectory names become schema names in the database:
 | `seeds/raw/country_codes.csv` | `raw.country_codes` |
 | `seeds/lookups/status_mapping.csv` | `lookups.status_mapping` |
 
-Models reference seeds the same way they reference other models: `smelt.ref('raw.country_codes')`.
+Models reference seeds the same way they reference other models: `smelt.models.raw.country_codes`.
 
 See the [seeds guide](../guide/seeds.md) for more details.
 

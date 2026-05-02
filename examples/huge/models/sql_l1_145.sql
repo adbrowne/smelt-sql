@@ -10,5 +10,6 @@ SELECT
     a.score,
     a.plan_type,
     b.region
-FROM smelt.ref('events') a
-LEFT JOIN smelt.ref('events') b ON a.user_id = b.user_id
+FROM smelt.models.events a
+LEFT JOIN smelt.models.events b ON a.user_id = b.user_id
+

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT updated_at, user_id, is_active
-    FROM smelt.ref('sql_l2_28')
+    FROM smelt.models.sql_l2_28
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.user_id
 FROM aggregated a
 INNER JOIN filtered f ON a.updated_at = f.updated_at
+

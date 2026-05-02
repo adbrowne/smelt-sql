@@ -13,5 +13,6 @@ SELECT
     SUM(revenue) AS agg_2,
     MAX(created_at) AS agg_3,
     AVG(price) AS agg_4
-FROM smelt.ref('clicks')
+FROM smelt.models.clicks
 GROUP BY revenue
+

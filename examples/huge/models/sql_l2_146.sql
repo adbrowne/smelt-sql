@@ -13,5 +13,6 @@ SELECT
     SUM(quantity) AS agg_2,
     AVG(price) AS agg_3,
     AVG(amount) AS agg_4
-FROM smelt.ref('sql_l1_204')
+FROM smelt.models.sql_l1_204
 GROUP BY event_time
+

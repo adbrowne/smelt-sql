@@ -13,5 +13,6 @@ SELECT
     SUM(quantity) AS agg_2,
     COUNT(*) AS agg_3,
     AVG(price) AS agg_4
-FROM smelt.ref('errors')
+FROM smelt.models.errors
 GROUP BY amount
+

@@ -187,7 +187,7 @@ fn test_round_trip_limit_offset() {
 
 #[test]
 fn test_round_trip_ref_call() {
-    let sql = "SELECT * FROM smelt.ref('events')";
+    let sql = "SELECT * FROM smelt.models.events";
     assert_round_trip(sql);
 }
 

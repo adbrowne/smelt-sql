@@ -10,7 +10,8 @@ SELECT
     status,
     updated_at,
     created_at
-FROM smelt.ref('sql_l1_156')
+FROM smelt.models.sql_l1_156
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_108') WHERE country = 'US'
+    SELECT user_id FROM smelt.models.sql_l1_108 WHERE country = 'US'
 )
+

@@ -11,5 +11,6 @@ SELECT
     quantity,
     event_date,
     page_path
-FROM smelt.ref('invoices')
+FROM smelt.models.invoices
 WHERE category IS NOT NULL
+

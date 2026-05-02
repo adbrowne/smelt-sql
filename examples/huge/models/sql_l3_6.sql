@@ -10,7 +10,8 @@ SELECT
     campaign_id,
     product_id,
     tier
-FROM smelt.ref('sql_l2_15')
+FROM smelt.models.sql_l2_15
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_235') WHERE platform = 'web'
+    SELECT user_id FROM smelt.models.sql_l2_235 WHERE platform = 'web'
 )
+

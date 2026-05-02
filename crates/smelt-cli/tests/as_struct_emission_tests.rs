@@ -100,7 +100,7 @@ fn as_struct_emits_duckdb_struct_literal() {
 
     // A model that uses smelt.as_struct on the alias `o`.
     // Note: avoid `row` as an alias name — it's a SQL reserved word that confuses the parser.
-    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.ref('orders') o";
+    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.models.orders o";
     let model = model_file("test_as_struct", sql);
     let result = compiler
         .compile(&model, "main")
@@ -139,7 +139,7 @@ fn as_struct_except_excludes_columns() {
     );
     compiler.set_upstream_schemas(schemas);
 
-    let sql = "SELECT smelt.as_struct(o EXCEPT tax) AS order_row FROM smelt.ref('orders') o";
+    let sql = "SELECT smelt.as_struct(o EXCEPT tax) AS order_row FROM smelt.models.orders o";
     let model = model_file("test_as_struct_except", sql);
     let result = compiler
         .compile(&model, "main")
@@ -167,7 +167,7 @@ fn as_struct_except_excludes_columns() {
     );
 }
 
-// ─── Test 3: smelt.fn.* call expands function body ───────────────────────────
+// ─── Test 3: smelt.functions.* call expands function body ───────────────────────────
 
 #[test]
 fn smelt_fn_call_expands_body() {
@@ -183,7 +183,7 @@ fn smelt_fn_call_expands_body() {
     );
     compiler.set_function_bodies(fn_bodies);
 
-    let sql = "SELECT smelt.fn.safe_div(revenue, cost) AS result FROM t";
+    let sql = "SELECT smelt.functions.safe_div(revenue, cost) AS result FROM t";
     let model = model_file("test_fn_call", sql);
     let result = compiler
         .compile(&model, "main")
@@ -195,19 +195,19 @@ fn smelt_fn_call_expands_body() {
         result.sql
     );
     assert!(
-        !result.sql.contains("smelt.fn.safe_div"),
-        "smelt.fn call should have been replaced, got: {}",
+        !result.sql.contains("smelt.functions.safe_div"),
+        "smelt.functions call should have been replaced, got: {}",
         result.sql
     );
 }
 
-// ─── Test 4: smelt.fn.* with no body map passes through verbatim ─────────────
+// ─── Test 4: smelt.functions.* with no body map passes through verbatim ─────────────
 
 #[test]
 fn smelt_fn_call_passthrough_when_no_body_map() {
-    // When no function_bodies are set (legacy / test mode), smelt.fn.* passes through.
+    // When no function_bodies are set (legacy / test mode), smelt.functions.* passes through.
     let compiler = duckdb_compiler();
-    let sql = "SELECT smelt.fn.some_fn(x) FROM t";
+    let sql = "SELECT smelt.functions.some_fn(x) FROM t";
     let model = model_file("test_fn_passthrough", sql);
     // Should not fail, but pass through verbatim
     let result = compiler
@@ -225,7 +225,7 @@ fn type_context_builds_alias_for_as_struct() {
     use smelt_parser::ast::File;
 
     // Use `order_row` not `row` (SQL reserved word confuses parser)
-    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.ref('orders') o";
+    let sql = "SELECT smelt.as_struct(o) AS order_row FROM smelt.models.orders o";
     let clean = smelt_parser::strip_frontmatter(sql);
     let parse = smelt_parser::parse(&clean);
 

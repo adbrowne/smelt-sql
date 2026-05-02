@@ -10,7 +10,8 @@ SELECT
     status,
     platform,
     is_verified
-FROM smelt.ref('page_views')
+FROM smelt.models.page_views
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('page_views') WHERE score >= 50
+    SELECT user_id FROM smelt.models.page_views WHERE score >= 50
 )
+

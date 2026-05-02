@@ -19,6 +19,7 @@ SELECT
         PARTITION BY p.category
         ORDER BY SUM(oi.unit_price * oi.quantity) DESC
     ) AS prev_product_revenue
-FROM smelt.ref('stg_products') AS p
-LEFT JOIN smelt.ref('stg_order_items') AS oi ON p.product_id = oi.product_id
+FROM smelt.models.staging.stg_products AS p
+LEFT JOIN smelt.models.staging.stg_order_items AS oi ON p.product_id = oi.product_id
 GROUP BY p.product_id, p.category, p.subcategory, p.brand_tier, p.unit_price
+

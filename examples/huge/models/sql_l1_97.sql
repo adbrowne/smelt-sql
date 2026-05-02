@@ -10,7 +10,8 @@ SELECT
     cohort_date,
     os_name,
     is_verified
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('categories') WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.models.categories WHERE category IS NOT NULL
 )
+

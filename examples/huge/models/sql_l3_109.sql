@@ -6,8 +6,9 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT amount, category, rating, 'source_0' AS source_tag FROM smelt.ref('sql_l2_22')
+SELECT amount, category, rating, 'source_0' AS source_tag FROM smelt.models.sql_l2_22
 UNION ALL
-SELECT amount, category, rating, 'source_1' AS source_tag FROM smelt.ref('sql_l2_14')
+SELECT amount, category, rating, 'source_1' AS source_tag FROM smelt.models.sql_l2_14
 UNION ALL
-SELECT amount, category, rating, 'source_2' AS source_tag FROM smelt.ref('sql_l2_149')
+SELECT amount, category, rating, 'source_2' AS source_tag FROM smelt.models.sql_l2_149
+

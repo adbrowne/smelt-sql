@@ -9,8 +9,9 @@
 -- context-binding syntax will replace these with column references
 -- once that phase lands.
 SELECT session_user, session_id
-FROM smelt.fn.sessionize(
-    smelt.source('source.session_events'),
+FROM smelt.functions.sessionize(
+    smelt.sources.source.session_events,
     user_col => CAST('u' AS VARCHAR),
     ts_col => CAST('2020-01-01' AS TIMESTAMP)
 ) AS s
+

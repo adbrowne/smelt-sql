@@ -11,5 +11,6 @@ SELECT
     is_verified,
     cost,
     region
-FROM smelt.ref('sql_l2_85')
+FROM smelt.models.sql_l2_85
 WHERE quantity > 0
+

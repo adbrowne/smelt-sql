@@ -10,4 +10,5 @@ SELECT
     updated_at,
     status,
     ROW_NUMBER() OVER (PARTITION BY updated_at ORDER BY created_at) AS win_val
-FROM smelt.ref('refunds')
+FROM smelt.models.refunds
+

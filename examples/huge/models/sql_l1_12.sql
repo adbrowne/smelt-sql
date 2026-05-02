@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT score, cost, duration_seconds
-    FROM smelt.ref('reviews')
+    FROM smelt.models.reviews
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.cost
 FROM aggregated a
 INNER JOIN filtered f ON a.score = f.score
+

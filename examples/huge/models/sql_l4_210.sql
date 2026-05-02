@@ -10,6 +10,7 @@ SELECT
     referrer,
     AVG(duration_seconds) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.ref('sql_l3_111')
+FROM smelt.models.sql_l3_111
 GROUP BY referrer
 HAVING COUNT(*) > 10
+

@@ -10,6 +10,7 @@ SELECT
     tier,
     AVG(duration_seconds) AS val_1,
     SUM(amount) AS val_2
-FROM smelt.ref('sql_l1_37')
+FROM smelt.models.sql_l1_37
 GROUP BY tier
 HAVING COUNT(*) > 10
+

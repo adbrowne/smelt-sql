@@ -12,5 +12,6 @@ SELECT
     COUNT(DISTINCT user_id) AS agg_1,
     MAX(created_at) AS agg_2,
     SUM(amount) AS agg_3
-FROM smelt.ref('sql_l3_43')
+FROM smelt.models.sql_l3_43
 GROUP BY created_at
+

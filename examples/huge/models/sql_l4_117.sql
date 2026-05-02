@@ -10,4 +10,5 @@ SELECT
     duration_seconds,
     price,
     RANK() OVER (PARTITION BY duration_seconds ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_67')
+FROM smelt.models.sql_l3_67
+

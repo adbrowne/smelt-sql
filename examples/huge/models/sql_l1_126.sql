@@ -6,6 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT browser, rating, event_date, 'source_0' AS source_tag FROM smelt.ref('notifications')
+SELECT browser, rating, event_date, 'source_0' AS source_tag FROM smelt.models.notifications
 UNION ALL
-SELECT browser, rating, event_date, 'source_1' AS source_tag FROM smelt.ref('notifications')
+SELECT browser, rating, event_date, 'source_1' AS source_tag FROM smelt.models.notifications
+

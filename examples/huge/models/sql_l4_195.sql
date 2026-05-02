@@ -10,6 +10,7 @@ SELECT
     cost,
     AVG(duration_seconds) AS val_1,
     AVG(amount) AS val_2
-FROM smelt.ref('sql_l3_159')
+FROM smelt.models.sql_l3_159
 GROUP BY cost
 HAVING COUNT(*) > 10
+

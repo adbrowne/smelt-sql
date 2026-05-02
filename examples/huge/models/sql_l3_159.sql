@@ -10,6 +10,7 @@ SELECT
     price,
     MAX(created_at) AS val_1,
     COUNT(*) AS val_2
-FROM smelt.ref('sql_l2_171')
+FROM smelt.models.sql_l2_171
 GROUP BY price
 HAVING COUNT(*) > 10
+

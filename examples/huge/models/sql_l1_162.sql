@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT region, revenue, platform
-    FROM smelt.ref('page_views')
+    FROM smelt.models.page_views
     WHERE event_type = 'purchase'
 )
 SELECT
     b.region,
     SUM(quantity) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('page_views') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.page_views j ON b.user_id = j.user_id
 GROUP BY b.region
+

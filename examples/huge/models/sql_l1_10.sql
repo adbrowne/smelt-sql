@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT transaction_id, browser, os_name
-    FROM smelt.ref('transactions')
+    FROM smelt.models.transactions
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.browser
 FROM aggregated a
 INNER JOIN filtered f ON a.transaction_id = f.transaction_id
+

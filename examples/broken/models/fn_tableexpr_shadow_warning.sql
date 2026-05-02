@@ -12,7 +12,7 @@ smelt.define shadow_demo(user_id: Expr<Text>, source: TableExpr) AS (
 )
 
 SELECT *
-FROM smelt.fn.shadow_demo(
+FROM smelt.functions.shadow_demo(
   'abc',
-  smelt.ref('fn_tableexpr_shadow_warning_other')
+  smelt.models.fn_tableexpr_shadow_warning_other
 ) AS s

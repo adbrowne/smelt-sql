@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT email_domain, channel, revenue
-    FROM smelt.ref('page_views')
+    FROM smelt.models.page_views
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.channel
 FROM aggregated a
 INNER JOIN filtered f ON a.email_domain = f.email_domain
+

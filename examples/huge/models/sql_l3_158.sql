@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('day', event_time) AS period,
     SUM(revenue) AS metric_1,
     COUNT(*) AS metric_2
-FROM smelt.ref('sql_l2_238')
+FROM smelt.models.sql_l2_238
 GROUP BY DATE_TRUNC('day', event_time)
+

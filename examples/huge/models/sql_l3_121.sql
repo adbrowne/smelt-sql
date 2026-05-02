@@ -10,7 +10,8 @@ SELECT
     cost,
     email_domain,
     amount
-FROM smelt.ref('sql_l2_177')
+FROM smelt.models.sql_l2_177
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_153') WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.models.sql_l2_153 WHERE event_type = 'purchase'
 )
+

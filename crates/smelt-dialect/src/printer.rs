@@ -1,8 +1,7 @@
 //! Dialect-aware CST printer.
 //!
 //! Walks a Rowan CST and emits SQL text, performing dialect-specific rewrites:
-//! - `smelt.ref('model')` → `schema.model`
-//! - `smelt.source('raw.events')` → `raw.events`
+//! - `smelt.<path>` → resolved table name (via `SmeltPathRef`/`SmeltPathCall`)
 //! - QUALIFY → subquery rewrite (when `!caps.supports_qualify`)
 //! - ARRAY[1,2,3] → ARRAY(1,2,3) (when `!caps.supports_array_literal`)
 //! - DATE '2024-01-01' → DATE('2024-01-01') (when `!caps.supports_date_literal`)
@@ -12,9 +11,9 @@
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
-use smelt_parser::ast::{SmeltAsStructCall, SmeltFnCall};
+use smelt_parser::ast::{SmeltAsStructCall, SmeltPathCall, SmeltPathRef};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
-use smelt_parser::{CastExpr, FunctionCall, RefCall, SourceCall};
+use smelt_parser::{CastExpr, FunctionCall};
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,6 +27,17 @@ pub type AsStructEmitter<'a> = Box<dyn Fn(&str, &[String]) -> Option<String> + '
 /// Called with `(fn_name, positional_arg_sqls, named_args)` → expanded SQL, or `None`.
 pub type SmeltFnExpander<'a> =
     Box<dyn Fn(&str, Vec<String>, Vec<(String, String)>) -> Option<String> + 'a>;
+
+/// Resolver closure type for `smelt.<path>` value references (`SMELT_PATH_REF`).
+/// Called with path segments (everything after `smelt`); returns backend SQL or `None` to
+/// emit verbatim.
+pub type SmeltPathRefResolver<'a> = Box<dyn Fn(&[String]) -> Option<String> + 'a>;
+
+/// Expander closure type for `smelt.<path>(<args>)` call forms (`SMELT_PATH_CALL`).
+/// Called with `(path_segments, positional_arg_sqls, named_arg_sqls)` → expanded SQL, or `None`
+/// to emit verbatim.
+pub type SmeltPathCallExpander<'a> =
+    Box<dyn Fn(&[String], Vec<String>, Vec<(String, String)>) -> Option<String> + 'a>;
 
 /// Context for dialect-aware printing.
 pub struct PrintContext<'a> {
@@ -49,6 +59,17 @@ pub struct PrintContext<'a> {
     /// Called with `(fn_name, positional_arg_sqls, named_args)` and returns the expanded SQL.
     /// `None` = pass through verbatim (backward compat for tests / contexts without function info).
     pub smelt_fn: Option<SmeltFnExpander<'a>>,
+    /// Resolver for `smelt.<path>` value references (`SMELT_PATH_REF`).
+    ///
+    /// Called with path segments (everything after `smelt`) and returns the backend SQL string.
+    /// `None` = pass through verbatim (backward compat for callers that have not configured
+    /// path resolution).
+    pub smelt_path_ref: Option<SmeltPathRefResolver<'a>>,
+    /// Expander for `smelt.<path>(<args>)` call forms (`SMELT_PATH_CALL`).
+    ///
+    /// Called with `(path_segments, positional_arg_sqls, named_arg_sqls)` and returns the
+    /// expanded SQL. `None` = pass through verbatim.
+    pub smelt_path_call: Option<SmeltPathCallExpander<'a>>,
 }
 
 /// Print a CST node as dialect-specific SQL.
@@ -74,77 +95,94 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             }
             print_children(node, ctx, out);
         }
-        SyntaxKind::SMELT_FN_CALL => {
-            if let Some(ref expander) = ctx.smelt_fn {
-                if let Some(call) = SmeltFnCall::cast(node.clone()) {
-                    // Extract the leaf function name (last segment after smelt.fn.)
-                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
-                    if let Some(fn_name) = segments.last().cloned() {
-                        // Extract positional arg SQL strings by printing each arg through ctx
-                        let positional_sqls: Vec<String> = call
-                            .arg_list()
-                            .map(|al| {
-                                al.positional_args()
-                                    .into_iter()
-                                    .map(|arg| {
-                                        let mut s = String::new();
-                                        print_node(arg.syntax(), ctx, &mut s);
-                                        s
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        // Extract named args as (name, sql) pairs
-                        let named_sqls: Vec<(String, String)> = call
-                            .arg_list()
-                            .map(|al| {
-                                al.named_params()
-                                    .filter_map(|np| {
-                                        let name = np.name()?;
-                                        let expr = np.value_expr()?;
-                                        let mut s = String::new();
-                                        print_node(expr.syntax(), ctx, &mut s);
-                                        Some((name, s))
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if let Some(expanded) = expander(&fn_name, positional_sqls, named_sqls) {
-                            // Re-parse the expanded SQL so smelt.ref() etc. in the body get rewritten.
-                            let reparsed = smelt_parser::parse(&expanded);
-                            print_node(&reparsed.syntax(), ctx, out);
-                            return;
+        SyntaxKind::SMELT_PATH_REF => {
+            if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
+                let segs = path_ref.segments();
+
+                // Try explicit resolver first.
+                let resolved = ctx
+                    .smelt_path_ref
+                    .as_ref()
+                    .and_then(|resolver| resolver(&segs));
+
+                // Fall back to built-in resolution based on the path namespace:
+                //   smelt.models.<name>   → schema.name  (or cross-engine / ephemeral)
+                //   smelt.sources.<src>.<tbl>  → src.tbl
+                let resolved = resolved.or_else(|| match segs.as_slice() {
+                    [ns, name] if ns == "models" => {
+                        if ctx.ephemeral_models.contains(name.as_str()) {
+                            Some(format!("__smelt_{}", name))
+                        } else if let Some(parquet_expr) = ctx.cross_engine_refs.get(name.as_str())
+                        {
+                            Some(parquet_expr.clone())
+                        } else {
+                            Some(format!("{}.{}", ctx.schema, name))
                         }
                     }
+                    [ns, src, tbl] if ns == "sources" => Some(format!("{}.{}", src, tbl)),
+                    _ => None,
+                });
+
+                if let Some(sql) = resolved {
+                    out.push_str(&sql);
+                    // Re-emit trailing trivia (whitespace/comments) captured
+                    // inside this node by the parser's look-ahead skip_trivia
+                    // call. These are direct-child tokens after the SMELT_PATH
+                    // sub-node (e.g. the space before an `AS` alias).
+                    for child in node.children_with_tokens() {
+                        if let SyntaxElement::Token(t) = child {
+                            if t.kind().is_trivia() {
+                                out.push_str(t.text());
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::SMELT_PATH_CALL => {
+            if let (Some(ref expander), Some(path_call)) =
+                (&ctx.smelt_path_call, SmeltPathCall::cast(node.clone()))
+            {
+                let segs = path_call.segments();
+                let positional: Vec<String> = path_call
+                    .arg_list()
+                    .map(|al| {
+                        al.positional_args()
+                            .into_iter()
+                            .map(|arg| {
+                                let mut s = String::new();
+                                print_node(arg.syntax(), ctx, &mut s);
+                                s
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let named: Vec<(String, String)> = path_call
+                    .arg_list()
+                    .map(|al| {
+                        al.named_params()
+                            .filter_map(|np| {
+                                let name = np.name()?;
+                                let expr = np.value_expr()?;
+                                let mut s = String::new();
+                                print_node(expr.syntax(), ctx, &mut s);
+                                Some((name, s))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(expanded) = expander(&segs, positional, named) {
+                    let reparsed = smelt_parser::parse(&expanded);
+                    print_node(&reparsed.syntax(), ctx, out);
+                    return;
                 }
             }
             print_children(node, ctx, out);
         }
         SyntaxKind::FUNCTION_CALL => {
             if let Some(fc) = FunctionCall::cast(node.clone()) {
-                if let Some(ref_call) = RefCall::from_function_call(fc.clone()) {
-                    if let Some(model_name) = ref_call.model_name() {
-                        if ctx.ephemeral_models.contains(model_name.as_str()) {
-                            out.push_str("__smelt_");
-                            out.push_str(&model_name);
-                        } else if let Some(parquet_expr) =
-                            ctx.cross_engine_refs.get(model_name.as_str())
-                        {
-                            out.push_str(parquet_expr);
-                        } else {
-                            out.push_str(ctx.schema);
-                            out.push('.');
-                            out.push_str(&model_name);
-                        }
-                        return;
-                    }
-                }
-                if let Some(source_call) = SourceCall::from_function_call(fc.clone()) {
-                    if let Some(qualified) = source_call.qualified_name() {
-                        out.push_str(&qualified);
-                        return;
-                    }
-                }
                 // Function name remapping per dialect
                 if let Some(name) = fc.name() {
                     if let Some(new_name) = remap_function_name(ctx.dialect, &name) {
@@ -514,6 +552,8 @@ mod tests {
             cross_engine_refs: HashMap::new(),
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         print(&parsed.syntax(), &ctx)
     }
@@ -569,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_ref_resolution() {
-        let sql = "SELECT * FROM smelt.ref('users')";
+        let sql = "SELECT * FROM smelt.models.users";
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, "SELECT * FROM main.users");
@@ -577,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_ref_resolution_custom_schema() {
-        let sql = "SELECT * FROM smelt.ref('users')";
+        let sql = "SELECT * FROM smelt.models.users";
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "analytics");
         assert_eq!(result, "SELECT * FROM analytics.users");
@@ -585,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_multiple_refs() {
-        let sql = "SELECT a.id, b.id FROM smelt.ref('model_a') a JOIN smelt.ref('model_b') b ON a.id = b.id";
+        let sql = "SELECT a.id, b.id FROM smelt.models.model_a a JOIN smelt.models.model_b b ON a.id = b.id";
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert!(result.contains("main.model_a"));
@@ -597,7 +637,7 @@ mod tests {
 
     #[test]
     fn test_cross_engine_ref_resolution() {
-        let sql = "SELECT * FROM smelt.ref('spark_model')";
+        let sql = "SELECT * FROM smelt.models.spark_model";
         let parsed = parse(sql);
         let (d, c) = duckdb_ctx();
         let mut cross_refs = HashMap::new();
@@ -613,6 +653,8 @@ mod tests {
             cross_engine_refs: cross_refs,
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
@@ -634,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_cross_engine_ref_mixed_with_normal_refs() {
-        let sql = "SELECT a.id, b.id FROM smelt.ref('local_model') a JOIN smelt.ref('spark_model') b ON a.id = b.id";
+        let sql = "SELECT a.id, b.id FROM smelt.models.local_model a JOIN smelt.models.spark_model b ON a.id = b.id";
         let parsed = parse(sql);
         let (d, c) = duckdb_ctx();
         let mut cross_refs = HashMap::new();
@@ -650,6 +692,8 @@ mod tests {
             cross_engine_refs: cross_refs,
             smelt_as_struct: None,
             smelt_fn: None,
+            smelt_path_ref: None,
+            smelt_path_call: None,
         };
         let result = print(&parsed.syntax(), &ctx);
         assert!(
@@ -668,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_source_resolution() {
-        let sql = "SELECT * FROM smelt.source('raw.events')";
+        let sql = "SELECT * FROM smelt.sources.raw.events";
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert_eq!(result, "SELECT * FROM raw.events");
@@ -678,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_ref_preserves_surrounding_formatting() {
-        let sql = "SELECT\n    user_id,\n    COUNT(*) as count\nFROM smelt.ref('events')\nWHERE event_type = 'click'";
+        let sql = "SELECT\n    user_id,\n    COUNT(*) as count\nFROM smelt.models.events\nWHERE event_type = 'click'";
         let (d, c) = duckdb_ctx();
         let result = print_with(sql, &d, &c, "main");
         assert!(result.contains("SELECT\n    user_id,"));

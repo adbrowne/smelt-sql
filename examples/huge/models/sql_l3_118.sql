@@ -10,6 +10,7 @@ SELECT
     campaign_id,
     MAX(created_at) AS val_1,
     SUM(quantity) AS val_2
-FROM smelt.ref('sql_l2_127')
+FROM smelt.models.sql_l2_127
 GROUP BY campaign_id
 HAVING COUNT(*) > 10
+

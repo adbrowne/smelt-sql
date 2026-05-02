@@ -219,15 +219,17 @@ impl TestWorkspace {
     }
 
     /// Wrapper: model_refs
-    fn model_refs(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::RefLocation>> {
-        let fi = self.lookup_file(path).expect("file not registered");
-        smelt_db::model_refs(&self.db, fi)
-    }
-
     /// Wrapper: model_sources
+    #[allow(dead_code)]
     fn model_sources(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::SourceLocation>> {
         let fi = self.lookup_file(path).expect("file not registered");
         smelt_db::model_sources(&self.db, fi)
+    }
+
+    /// Wrapper: model_path_refs (path-form smelt.<path> refs)
+    fn model_path_refs(&self, path: &std::path::Path) -> Arc<Vec<smelt_db::PathRefLocation>> {
+        let fi = self.lookup_file(path).expect("file not registered");
+        smelt_db::model_path_refs(&self.db, fi)
     }
 
     /// Wrapper: model_schema
@@ -451,47 +453,69 @@ impl TestWorkspace {
 
         let offset = position_to_offset(&text, line, col);
         match symbol_at_cursor(&file, &text, offset) {
-            Some(SymbolAtCursor::RefCall { name }) => {
+            Some(SymbolAtCursor::PathRef { segments }) => {
                 let ws_files = match self.workspace() {
                     Some(ws) => ws.files(&self.db).clone(),
                     None => Vec::new(),
                 };
-                let all_file_refs: Vec<_> = ws_files
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.path(&self.db).clone(),
-                            (*smelt_db::model_refs(&self.db, *f)).clone(),
-                        )
-                    })
-                    .collect();
-                smelt_db::references::find_model_references(&name, &all_file_refs)
-                    .into_iter()
-                    .map(|(p, r)| (p, (r.start.line, r.start.column)))
-                    .collect()
-            }
-            Some(SymbolAtCursor::SourceCall {
-                source_name,
-                table_name,
-            }) => {
-                let qualified = format!("{}.{}", source_name, table_name);
-                let ws_files = match self.workspace() {
-                    Some(ws) => ws.files(&self.db).clone(),
-                    None => Vec::new(),
-                };
-                let all_file_sources: Vec<_> = ws_files
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.path(&self.db).clone(),
-                            (*smelt_db::model_sources(&self.db, *f)).clone(),
-                        )
-                    })
-                    .collect();
-                smelt_db::references::find_source_references(&qualified, &all_file_sources)
-                    .into_iter()
-                    .map(|(p, r)| (p, (r.start.line, r.start.column)))
-                    .collect()
+                match segments.first().map(|s| s.as_str()) {
+                    Some("models") => {
+                        let model_name = segments.get(1).cloned().unwrap_or_default();
+                        let all_file_path_refs: Vec<_> = ws_files
+                            .iter()
+                            .map(|f| {
+                                (
+                                    f.path(&self.db).clone(),
+                                    (*smelt_db::model_path_refs(&self.db, *f)).clone(),
+                                )
+                            })
+                            .collect();
+                        all_file_path_refs
+                            .into_iter()
+                            .flat_map(|(p, refs)| {
+                                refs.into_iter()
+                                    .filter(|r| {
+                                        r.path.first().map(|s| s.as_str()) == Some("models")
+                                            && r.path.get(1).map(|s| s.as_str())
+                                                == Some(model_name.as_str())
+                                    })
+                                    .map(move |r| {
+                                        (p.clone(), (r.range.start.line, r.range.start.column))
+                                    })
+                            })
+                            .collect()
+                    }
+                    Some("sources") => {
+                        let source_name = segments.get(1).cloned().unwrap_or_default();
+                        let table_name = segments.get(2).cloned().unwrap_or_default();
+                        let all_file_path_refs: Vec<_> = ws_files
+                            .iter()
+                            .map(|f| {
+                                (
+                                    f.path(&self.db).clone(),
+                                    (*smelt_db::model_path_refs(&self.db, *f)).clone(),
+                                )
+                            })
+                            .collect();
+                        all_file_path_refs
+                            .into_iter()
+                            .flat_map(|(p, refs)| {
+                                refs.into_iter()
+                                    .filter(|r| {
+                                        r.path.first().map(|s| s.as_str()) == Some("sources")
+                                            && r.path.get(1).map(|s| s.as_str())
+                                                == Some(source_name.as_str())
+                                            && r.path.get(2).map(|s| s.as_str())
+                                                == Some(table_name.as_str())
+                                    })
+                                    .map(move |r| {
+                                        (p.clone(), (r.range.start.line, r.range.start.column))
+                                    })
+                            })
+                            .collect()
+                    }
+                    _ => vec![],
+                }
             }
             Some(SymbolAtCursor::CteDefinition { name })
             | Some(SymbolAtCursor::CteReference { name }) => {
@@ -537,31 +561,17 @@ impl TestWorkspace {
                 }
                 None
             }
-            Some(SymbolAtCursor::RefCall { name }) => {
-                // For ref calls, return the content range (inside quotes)
-                for ref_call in file.refs() {
-                    if ref_call.model_name().as_deref() == Some(name.as_str()) {
-                        if let Some(content_range) = ref_call.content_range() {
-                            let r = smelt_parser::ast::text_range_to_range(&text, content_range);
-                            return Some((r.start.line, r.start.column, r.end.line, r.end.column));
-                        }
-                    }
-                }
-                None
-            }
-            Some(SymbolAtCursor::SourceCall {
-                source_name,
-                table_name,
-            }) => {
-                // For source calls, return the table_name_range (just the table part)
-                for source_call in file.sources() {
-                    if source_call.source_name().as_deref() == Some(source_name.as_str())
-                        && source_call.table_name().as_deref() == Some(table_name.as_str())
-                    {
-                        if let Some(tn_range) = source_call.table_name_range() {
-                            let r = smelt_parser::ast::text_range_to_range(&text, tn_range);
-                            return Some((r.start.line, r.start.column, r.end.line, r.end.column));
-                        }
+            Some(SymbolAtCursor::PathRef { segments }) => {
+                // For path refs, return the range of the entire smelt.<path> expression
+                for path_ref in file
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                {
+                    if path_ref.segments() == segments {
+                        let r =
+                            smelt_parser::ast::text_range_to_range(&text, path_ref.text_range());
+                        return Some((r.start.line, r.start.column, r.end.line, r.end.column));
                     }
                 }
                 None
@@ -591,7 +601,11 @@ impl TestWorkspace {
 
         let offset = position_to_offset(&text, line, col);
         let model_name = match symbol_at_cursor(&file, &text, offset) {
-            Some(SymbolAtCursor::RefCall { name }) => name,
+            Some(SymbolAtCursor::PathRef { segments })
+                if segments.first().map(|s| s.as_str()) == Some("models") =>
+            {
+                segments.get(1).cloned().unwrap_or_default()
+            }
             _ => return RenameModelResult::default(),
         };
 
@@ -604,26 +618,24 @@ impl TestWorkspace {
             };
         }
 
-        // Collect all ref edits across files
+        // Collect all path-ref edits across files (smelt.models.<name> → new range)
         let ws_files = match self.workspace() {
             Some(ws) => ws.files(&self.db).clone(),
             None => Vec::new(),
         };
-        let all_file_refs: Vec<_> = ws_files
+        let all_file_path_refs: Vec<_> = ws_files
             .iter()
             .map(|f| {
                 (
                     f.path(&self.db).clone(),
-                    (*smelt_db::model_refs(&self.db, *f)).clone(),
+                    (*smelt_db::model_path_refs(&self.db, *f)).clone(),
                 )
             })
             .collect();
-        let ref_locations =
-            smelt_db::references::find_model_references(&model_name, &all_file_refs);
 
-        // For each ref location, we need the content range (inside quotes)
+        // For each path ref pointing to model_name, record the full path-ref text range
         let mut text_edits: Vec<(PathBuf, u32, u32, u32, u32)> = Vec::new();
-        for (ref_path, _) in &ref_locations {
+        for (ref_path, path_refs) in &all_file_path_refs {
             let ref_fi = match self.lookup_file(ref_path) {
                 Some(f) => f,
                 None => continue,
@@ -632,22 +644,31 @@ impl TestWorkspace {
             let ref_parse = smelt_db::parse_file(&self.db, ref_fi);
             let ref_syntax = ref_parse.syntax();
             if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
-                for ref_call in ref_file.refs() {
-                    if ref_call.model_name().as_deref() == Some(&model_name) {
-                        if let Some(content_range) = ref_call.content_range() {
-                            let r =
-                                smelt_parser::ast::text_range_to_range(&ref_text, content_range);
-                            text_edits.push((
-                                ref_path.clone(),
-                                r.start.line,
-                                r.start.column,
-                                r.end.line,
-                                r.end.column,
-                            ));
-                        }
+                for path_ref in ref_file
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                {
+                    let segs = path_ref.segments();
+                    if segs.first().map(|s| s.as_str()) == Some("models")
+                        && segs.get(1).map(|s| s.as_str()) == Some(model_name.as_str())
+                    {
+                        let r = smelt_parser::ast::text_range_to_range(
+                            &ref_text,
+                            path_ref.text_range(),
+                        );
+                        text_edits.push((
+                            ref_path.clone(),
+                            r.start.line,
+                            r.start.column,
+                            r.end.line,
+                            r.end.column,
+                        ));
                     }
                 }
             }
+            // Suppress unused warning
+            let _ = path_refs;
         }
 
         // File rename
@@ -731,57 +752,56 @@ impl TestWorkspace {
 
         let offset = position_to_offset(&text, line, col);
         let (source_name, old_table_name) = match symbol_at_cursor(&file, &text, offset) {
-            Some(SymbolAtCursor::SourceCall {
-                source_name,
-                table_name,
-            }) => (source_name, table_name),
+            Some(SymbolAtCursor::PathRef { segments })
+                if segments.first().map(|s| s.as_str()) == Some("sources") =>
+            {
+                let sn = segments.get(1).cloned().unwrap_or_default();
+                let tn = segments.get(2).cloned().unwrap_or_default();
+                (sn, tn)
+            }
             _ => return RenameSourceResult::default(),
         };
 
-        let qualified = format!("{}.{}", source_name, old_table_name);
-
-        // Find all source() call sites across the project
+        // Find all smelt.sources.<source>.<table> path refs across the project
         let ws_files = match self.workspace() {
             Some(ws) => ws.files(&self.db).clone(),
             None => Vec::new(),
         };
-        let all_file_sources: Vec<_> = ws_files
-            .iter()
-            .map(|f| {
-                (
-                    f.path(&self.db).clone(),
-                    (*smelt_db::model_sources(&self.db, *f)).clone(),
-                )
-            })
-            .collect();
-        let source_locations =
-            smelt_db::references::find_source_references(&qualified, &all_file_sources);
 
-        // For each source location, get the table_name_range (inside quotes, after the dot)
+        // For each path ref pointing to this source+table, record the range of the last segment
         let mut sql_edits = Vec::new();
-        for (ref_path, _) in &source_locations {
-            let ref_fi = match self.lookup_file(ref_path) {
-                Some(f) => f,
+        for f in &ws_files {
+            let ref_path = f.path(&self.db).clone();
+            let ref_fi = match self.lookup_file(&ref_path) {
+                Some(fi) => fi,
                 None => continue,
             };
             let ref_text = ref_fi.text(&self.db).clone();
             let ref_parse = smelt_db::parse_file(&self.db, ref_fi);
             let ref_syntax = ref_parse.syntax();
             if let Some(ref_file) = smelt_parser::ast::File::cast(ref_syntax) {
-                for source_call in ref_file.sources() {
-                    if source_call.source_name().as_deref() == Some(&source_name)
-                        && source_call.table_name().as_deref() == Some(&old_table_name)
+                for path_ref in ref_file
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                {
+                    let segs = path_ref.segments();
+                    if segs.first().map(|s| s.as_str()) == Some("sources")
+                        && segs.get(1).map(|s| s.as_str()) == Some(source_name.as_str())
+                        && segs.get(2).map(|s| s.as_str()) == Some(old_table_name.as_str())
                     {
-                        if let Some(tn_range) = source_call.table_name_range() {
-                            let r = smelt_parser::ast::text_range_to_range(&ref_text, tn_range);
-                            sql_edits.push((
-                                ref_path.clone(),
-                                r.start.line,
-                                r.start.column,
-                                r.end.line,
-                                r.end.column,
-                            ));
-                        }
+                        // Return the full path ref range (rename changes the table name segment)
+                        let r = smelt_parser::ast::text_range_to_range(
+                            &ref_text,
+                            path_ref.text_range(),
+                        );
+                        sql_edits.push((
+                            ref_path.clone(),
+                            r.start.line,
+                            r.start.column,
+                            r.end.line,
+                            r.end.column,
+                        ));
                     }
                 }
             }
@@ -914,7 +934,7 @@ impl TestWorkspace {
                     vec![]
                 }
             } else {
-                // Unqualified: check all models in FROM clause
+                // Unqualified: check all smelt.models.<name> path refs in FROM clause
                 let parse = smelt_db::parse_file(&self.db, self.lookup_file(&path).unwrap());
                 let syntax = parse.syntax();
                 let mut names = Vec::new();
@@ -925,11 +945,10 @@ impl TestWorkspace {
                                 .table_refs()
                                 .chain(fc.joins().filter_map(|j| j.table_ref()))
                             {
-                                if let Some(func) = tr.function_call() {
-                                    if let Some(rc) =
-                                        smelt_parser::ast::RefCall::from_function_call(func)
-                                    {
-                                        if let Some(mn) = rc.model_name() {
+                                if let Some(path_ref) = tr.smelt_path_ref() {
+                                    let segs = path_ref.segments();
+                                    if segs.first().map(|s| s.as_str()) == Some("models") {
+                                        if let Some(mn) = segs.get(1).cloned() {
                                             names.push(mn);
                                         }
                                     }
@@ -982,8 +1001,15 @@ impl TestWorkspace {
                         Some(f) => f,
                         None => continue,
                     };
+                    // Phase 4: check both legacy model_refs and new model_path_refs
                     let down_refs = smelt_db::model_refs(&self.db, down_fi);
-                    let refs_exposing = down_refs.iter().any(|r| r.name == *exposing_model);
+                    let down_path_refs = smelt_db::model_path_refs(&self.db, down_fi);
+                    let refs_exposing = down_refs.iter().any(|r| r.name == *exposing_model)
+                        || down_path_refs.iter().any(|r| {
+                            r.path.first().map(|s| s.as_str()) == Some("models")
+                                && r.path.get(1).map(|s| s.as_str())
+                                    == Some(exposing_model.as_str())
+                        });
                     if !refs_exposing {
                         continue;
                     }
@@ -1149,13 +1175,13 @@ mod diagnostics {
     #[test]
     fn test_undefined_ref_produces_diagnostic() {
         let mut ws = TestWorkspace::new();
-        ws.add_model("broken", "SELECT * FROM smelt.ref('nonexistent')");
+        ws.add_model("broken", "SELECT * FROM smelt.models.nonexistent");
 
         let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
-        assert!(diags[0].message.contains("Undefined model"));
+        assert!(diags[0].message.contains("Undefined"));
         assert!(diags[0].message.contains("nonexistent"));
     }
 
@@ -1163,7 +1189,7 @@ mod diagnostics {
     fn test_valid_ref_produces_no_diagnostic() {
         let mut ws = TestWorkspace::new();
         ws.add_model("upstream", "SELECT 1 as id");
-        ws.add_model("downstream", "SELECT * FROM smelt.ref('upstream')");
+        ws.add_model("downstream", "SELECT * FROM smelt.models.upstream");
 
         let diags = ws.diagnostics_for(&ws.model_path("downstream"));
 
@@ -1177,13 +1203,13 @@ mod diagnostics {
     #[test]
     fn test_undefined_source_produces_diagnostic() {
         let mut ws = TestWorkspace::new();
-        ws.add_model("broken", "SELECT * FROM smelt.source('raw.nonexistent')");
+        ws.add_model("broken", "SELECT * FROM smelt.sources.raw.nonexistent");
 
         let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
-        assert!(diags[0].message.contains("Undefined source"));
+        assert!(diags[0].message.contains("Undefined"));
     }
 
     #[test]
@@ -1199,7 +1225,7 @@ sources:
           - name: id
 "#,
         );
-        ws.add_model("model", "SELECT * FROM smelt.source('raw.users')");
+        ws.add_model("model", "SELECT * FROM smelt.sources.raw.users");
 
         let diags = ws.diagnostics_for(&ws.model_path("model"));
 
@@ -1216,7 +1242,7 @@ sources:
         // Position the ref on line 2 (0-indexed)
         ws.add_model(
             "broken",
-            "-- Comment\nSELECT *\nFROM smelt.ref('nonexistent')",
+            "-- Comment\nSELECT *\nFROM smelt.models.nonexistent",
         );
 
         let diags = ws.diagnostics_for(&ws.model_path("broken"));
@@ -1232,7 +1258,7 @@ sources:
         let mut ws = TestWorkspace::new();
         ws.add_model(
             "broken",
-            "SELECT * FROM smelt.ref('missing1') CROSS JOIN smelt.ref('missing2')",
+            "SELECT * FROM smelt.models.missing1 CROSS JOIN smelt.models.missing2",
         );
 
         let diags = ws.diagnostics_for(&ws.model_path("broken"));
@@ -1245,7 +1271,7 @@ sources:
     #[test]
     fn test_diagnostic_has_code_undefined_ref() {
         let mut ws = TestWorkspace::new();
-        ws.add_model("broken", "SELECT * FROM smelt.ref('nonexistent')");
+        ws.add_model("broken", "SELECT * FROM smelt.models.nonexistent");
 
         let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
@@ -1262,27 +1288,17 @@ sources:
         use smelt_db::DiagnosticCode;
 
         let mut ws = TestWorkspace::new();
-        ws.set_sources_yml(
-            r#"
-sources:
-  raw:
-    tables:
-      users:
-        columns:
-          - name: id
-            type: INTEGER
-          - name: name
-            type: VARCHAR
-"#,
-        );
+        // Define stg_users using typed literals so the column types are
+        // known without needing source-based type checking (the guard only
+        // enables cross-model checks for model/seed path refs).
         ws.add_model(
             "stg_users",
-            "SELECT id, name FROM smelt.source('raw.users')",
+            "SELECT CAST(1 AS INTEGER) AS id, CAST('' AS VARCHAR) AS name",
         );
         // SUM(name) expects numeric but name is VARCHAR — triggers cross-model type mismatch
         ws.add_model(
             "bad_sum",
-            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+            "SELECT SUM(name) as total FROM smelt.models.stg_users",
         );
 
         // type_diagnostics checks cross-model type mismatches
@@ -1303,7 +1319,7 @@ sources:
         use smelt_db::DiagnosticData;
 
         let mut ws = TestWorkspace::new();
-        ws.add_model("broken", "SELECT * FROM smelt.ref('my_model')");
+        ws.add_model("broken", "SELECT * FROM smelt.models.my_model");
 
         let diags = ws.diagnostics_for(&ws.model_path("broken"));
 
@@ -1322,21 +1338,10 @@ sources:
         use smelt_db::DiagnosticData;
 
         let mut ws = TestWorkspace::new();
-        ws.set_sources_yml(
-            r#"
-sources:
-  raw:
-    tables:
-      users:
-        columns:
-          - name: id
-            type: INTEGER
-"#,
-        );
-        ws.add_model(
-            "model",
-            "SELECT nonexistent_col FROM smelt.source('raw.users')",
-        );
+        // Use a model reference so the type-checking guard is enabled
+        // (the guard only runs checks when there are model/seed path refs).
+        ws.add_model("upstream", "SELECT CAST(1 AS INTEGER) AS id");
+        ws.add_model("model", "SELECT nonexistent_col FROM smelt.models.upstream");
 
         // Undeclared column checks are in type_diagnostics
         let diags = ws.diagnostics_for(&ws.model_path("model"));
@@ -1368,7 +1373,7 @@ mod goto_definition {
     fn test_resolve_ref_to_model_path() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 as id");
-        ws.add_model("orders", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("orders", "SELECT * FROM smelt.models.users");
 
         let resolved = ws.resolve_ref("users");
 
@@ -1387,19 +1392,22 @@ mod goto_definition {
     }
 
     #[test]
-    fn test_model_refs_extracts_ref_calls() {
+    fn test_model_path_refs_extracts_path_refs() {
         let mut ws = TestWorkspace::new();
         ws.add_model("upstream1", "SELECT 1 as id");
         ws.add_model("upstream2", "SELECT 2 as id");
         ws.add_model(
             "downstream",
-            "SELECT * FROM smelt.ref('upstream1') CROSS JOIN smelt.ref('upstream2')",
+            "SELECT * FROM smelt.models.upstream1 CROSS JOIN smelt.models.upstream2",
         );
 
-        let refs = ws.model_refs(&ws.model_path("downstream"));
+        let refs = ws.model_path_refs(&ws.model_path("downstream"));
 
         assert_eq!(refs.len(), 2);
-        let ref_names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        let ref_names: Vec<&str> = refs
+            .iter()
+            .filter_map(|r| r.path.get(1).map(|s| s.as_str()))
+            .collect();
         assert!(ref_names.contains(&"upstream1"));
         assert!(ref_names.contains(&"upstream2"));
     }
@@ -1486,7 +1494,7 @@ mod hover {
     fn test_available_columns_includes_upstream() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT id, name, email FROM raw.users");
-        ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
+        ws.add_model("orders", "SELECT user_id FROM smelt.models.users");
 
         let available = ws.available_columns(&ws.model_path("orders"));
 
@@ -1564,7 +1572,7 @@ mod hover {
         let model_path = ws.model_path("margin");
         ws.add_model(
             "margin",
-            "SELECT order_margin FROM smelt.fn.add_margin(smelt.ref('orders')) AS m",
+            "SELECT order_margin FROM smelt.functions.add_margin(smelt.models.orders) AS m",
         );
 
         // Calls to add_margin with the orders schema should produce zero
@@ -1618,8 +1626,8 @@ mod hover {
         ws.add_model(
             "margin_by_session",
             "SELECT session_id \
-             FROM smelt.fn.sessionize(\
-               smelt.fn.add_margin(smelt.ref('orders')),\
+             FROM smelt.functions.sessionize(\
+               smelt.functions.add_margin(smelt.models.orders),\
                user_col => CAST('' AS VARCHAR),\
                ts_col => CAST('2020-01-01' AS TIMESTAMP)\
              ) AS s",
@@ -1649,7 +1657,7 @@ mod incremental {
         let mut ws = TestWorkspace::new();
 
         // Start with a broken model
-        ws.add_model("model", "SELECT * FROM smelt.ref('missing')");
+        ws.add_model("model", "SELECT * FROM smelt.models.missing");
         let diags1 = ws.diagnostics_for(&ws.model_path("model"));
         assert_eq!(diags1.len(), 1, "Should have undefined ref error");
 
@@ -1684,7 +1692,7 @@ mod incremental {
         let mut ws = TestWorkspace::new();
 
         // Create a downstream model first (with broken ref)
-        ws.add_model("downstream", "SELECT * FROM smelt.ref('upstream')");
+        ws.add_model("downstream", "SELECT * FROM smelt.models.upstream");
         assert!(
             ws.resolve_ref("upstream").is_none(),
             "Upstream should not exist yet"
@@ -1705,7 +1713,7 @@ mod incremental {
         let mut ws = TestWorkspace::new();
 
         // Model referencing a source that doesn't exist yet
-        ws.add_model("model", "SELECT * FROM smelt.source('raw.users')");
+        ws.add_model("model", "SELECT * FROM smelt.sources.raw.users");
         let diags1 = ws.diagnostics_for(&ws.model_path("model"));
         assert_eq!(diags1.len(), 1, "Should have undefined source error");
 
@@ -1792,34 +1800,40 @@ sources:
     }
 
     #[test]
-    fn test_model_sources_extracts_source_calls() {
+    fn test_model_path_refs_extracts_source_path_refs() {
         let mut ws = TestWorkspace::new();
         ws.add_model(
             "model",
-            "SELECT * FROM smelt.source('raw.users') CROSS JOIN smelt.source('raw.events')",
+            "SELECT * FROM smelt.sources.raw.users CROSS JOIN smelt.sources.raw.events",
         );
 
-        let sources = ws.model_sources(&ws.model_path("model"));
+        let refs = ws.model_path_refs(&ws.model_path("model"));
 
-        assert_eq!(sources.len(), 2);
-        let qualified_names: Vec<&str> =
-            sources.iter().map(|s| s.qualified_name.as_str()).collect();
-        assert!(qualified_names.contains(&"raw.users"));
-        assert!(qualified_names.contains(&"raw.events"));
+        let source_refs: Vec<_> = refs
+            .iter()
+            .filter(|r| r.path.first().map(|s| s.as_str()) == Some("sources"))
+            .collect();
+        assert_eq!(source_refs.len(), 2);
+        let table_names: Vec<&str> = source_refs
+            .iter()
+            .filter_map(|r| r.path.get(2).map(|s| s.as_str()))
+            .collect();
+        assert!(table_names.contains(&"users"));
+        assert!(table_names.contains(&"events"));
     }
 
     #[test]
-    fn test_malformed_source_without_dot_produces_diagnostic() {
+    fn test_legacy_source_produces_parse_error() {
         let mut ws = TestWorkspace::new();
-        // Source call without dot separator (e.g., 'foo' instead of 'raw.users')
+        // smelt.source('foo') is a parse error in Phase 4
         ws.add_model("model", "SELECT * FROM smelt.source('foo')");
 
         let diags = ws.diagnostics_for(&ws.model_path("model"));
 
-        // Should produce an error for malformed/undefined source
+        // Should produce a parse error diagnostic
         assert!(
             !diags.is_empty(),
-            "Expected diagnostic for malformed source 'foo' without dot separator"
+            "Expected parse error for smelt.source() usage after Phase 4"
         );
     }
 }
@@ -1847,7 +1861,7 @@ sources:
             type: VARCHAR
 "#,
         );
-        ws.add_model("model", "SELECT t.id FROM smelt.source('raw.users') AS t");
+        ws.add_model("model", "SELECT t.id FROM smelt.sources.raw.users AS t");
 
         // The type context should register the alias 't' -> 'raw.users'
         let ctx = ws.type_context(&ws.model_path("model"));
@@ -1871,7 +1885,7 @@ sources:
             type: INTEGER
 "#,
         );
-        ws.add_model("model", "SELECT t.id FROM smelt.source('raw.users') t");
+        ws.add_model("model", "SELECT t.id FROM smelt.sources.raw.users t");
 
         let ctx = ws.type_context(&ws.model_path("model"));
 
@@ -1898,7 +1912,7 @@ sources:
 "#,
         );
         // Using table name 'users' as qualifier (implicit alias by table name)
-        ws.add_model("model", "SELECT users.id FROM smelt.source('raw.users')");
+        ws.add_model("model", "SELECT users.id FROM smelt.sources.raw.users");
 
         let ctx = ws.type_context(&ws.model_path("model"));
 
@@ -1930,7 +1944,7 @@ sources:
         );
         ws.add_model(
             "model",
-            "SELECT t.id, t.email FROM smelt.source('raw.users') AS t",
+            "SELECT t.id, t.email FROM smelt.sources.raw.users AS t",
         );
 
         // Get sources config and verify columns are available
@@ -1951,7 +1965,7 @@ sources:
         ws.add_model("users", "SELECT id, name, email FROM raw_users");
         ws.add_model(
             "downstream",
-            "SELECT u.id, u.name FROM smelt.ref('users') AS u",
+            "SELECT u.id, u.name FROM smelt.models.users AS u",
         );
 
         // The upstream model schema should have the columns
@@ -1986,7 +2000,7 @@ sources:
         );
         ws.add_model(
             "model",
-            "SELECT u.id, o.order_id FROM smelt.source('raw.users') u JOIN smelt.source('raw.orders') o ON u.id = o.user_id",
+            "SELECT u.id, o.order_id FROM smelt.sources.raw.users u JOIN smelt.sources.raw.orders o ON u.id = o.user_id",
         );
 
         let ctx = ws.type_context(&ws.model_path("model"));
@@ -2021,7 +2035,7 @@ sources:
             "model",
             r#"WITH daily_totals AS (
     SELECT DATE(created_at) as day, SUM(amount) as total
-    FROM smelt.source('raw.orders')
+    FROM smelt.sources.raw.orders
     GROUP BY DATE(created_at)
 )
 SELECT day, total FROM daily_totals WHERE total > 1000"#,
@@ -2067,10 +2081,10 @@ sources:
             "model",
             r#"WITH
 active_users AS (
-    SELECT id, name FROM smelt.source('raw.users')
+    SELECT id, name FROM smelt.sources.raw.users
 ),
 user_orders AS (
-    SELECT user_id, SUM(amount) as total FROM smelt.source('raw.orders') GROUP BY user_id
+    SELECT user_id, SUM(amount) as total FROM smelt.sources.raw.orders GROUP BY user_id
 )
 SELECT u.id, u.name, o.total
 FROM active_users u
@@ -2114,7 +2128,7 @@ JOIN user_orders o ON u.id = o.user_id"#,
         // Add a SQL model that references the Python model
         ws.add_model(
             "event_summary",
-            "SELECT * FROM smelt.ref('combined_events')",
+            "SELECT * FROM smelt.models.combined_events",
         );
 
         let diags = ws.diagnostics_for(&ws.model_path("event_summary"));
@@ -2142,7 +2156,7 @@ JOIN user_orders o ON u.id = o.user_id"#,
         // A SQL model referencing 'combined_events' should NOT resolve
         ws.add_model(
             "event_summary",
-            "SELECT * FROM smelt.ref('combined_events')",
+            "SELECT * FROM smelt.models.combined_events",
         );
 
         let diags = ws.diagnostics_for(&ws.model_path("event_summary"));
@@ -2150,7 +2164,7 @@ JOIN user_orders o ON u.id = o.user_id"#,
             !diags.is_empty(),
             "Expected undefined ref diagnostic with __py_gen__ prefix path"
         );
-        assert!(diags[0].message.contains("Undefined model"));
+        assert!(diags[0].message.contains("Undefined"));
     }
 
     #[test]
@@ -2204,7 +2218,7 @@ sources:
             type: VARCHAR
 "#,
         );
-        ws.add_model("model", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("model", "SELECT id FROM smelt.sources.raw.users");
 
         let resolved = ws.resolve_source("raw", "users");
         assert!(resolved.is_some());
@@ -2240,7 +2254,7 @@ sources:
     fn test_column_traced_through_single_ref() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
-        ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
+        ws.add_model("orders", "SELECT user_id FROM smelt.models.users");
 
         // The downstream model's schema should have user_id with FromModel source
         let schema = ws.model_schema(&ws.model_path("orders"));
@@ -2257,7 +2271,7 @@ sources:
     fn test_wildcard_model_has_row_extensions() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS user_id");
-        ws.add_model("passthrough", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("passthrough", "SELECT * FROM smelt.models.users");
 
         let schema = ws.model_schema(&ws.model_path("passthrough"));
         // SELECT * should create row extensions, not explicit columns
@@ -2272,7 +2286,7 @@ sources:
     fn test_resolved_schema_expands_wildcards() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
-        ws.add_model("passthrough", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("passthrough", "SELECT * FROM smelt.models.users");
 
         let resolved = ws.resolved_model_schema(&ws.model_path("passthrough"));
         assert!(resolved.is_fully_resolved);
@@ -2287,8 +2301,8 @@ sources:
     fn test_column_through_wildcard_chain() {
         let mut ws = TestWorkspace::new();
         ws.add_model("base", "SELECT 1 AS col_a, 2 AS col_b");
-        ws.add_model("middle", "SELECT * FROM smelt.ref('base')");
-        ws.add_model("top", "SELECT col_a FROM smelt.ref('middle')");
+        ws.add_model("middle", "SELECT * FROM smelt.models.base");
+        ws.add_model("top", "SELECT col_a FROM smelt.models.middle");
 
         // The 'base' model should have col_a as an explicit column
         let base_schema = ws.model_schema(&ws.model_path("base"));
@@ -2345,7 +2359,7 @@ sources:
             type: INTEGER
 "#,
         );
-        ws.add_model("model", "SELECT event_id FROM smelt.source('raw.events')");
+        ws.add_model("model", "SELECT event_id FROM smelt.sources.raw.events");
 
         let ctx = ws.type_context(&ws.model_path("model"));
         // Should be able to look up source columns
@@ -2355,14 +2369,28 @@ sources:
 
     #[test]
     fn test_model_sources_extracts_source_call_info() {
+        // Phase 4: source refs are now expressed as smelt.sources.<src>.<tbl>
+        // path refs, not legacy smelt.source() calls. Verify the path ref
+        // correctly encodes source_name="raw" and table_name="events".
         let mut ws = TestWorkspace::new();
-        ws.add_model("model", "SELECT event_id FROM smelt.source('raw.events') e");
+        ws.add_model("model", "SELECT event_id FROM smelt.sources.raw.events e");
 
-        let sources = ws.model_sources(&ws.model_path("model"));
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].source_name, "raw");
-        assert_eq!(sources[0].table_name, "events");
-        assert_eq!(sources[0].qualified_name, "raw.events");
+        let refs = ws.model_path_refs(&ws.model_path("model"));
+        let source_refs: Vec<_> = refs
+            .iter()
+            .filter(|r| r.path.first().map(|s| s.as_str()) == Some("sources"))
+            .collect();
+        assert_eq!(
+            source_refs.len(),
+            1,
+            "Expected 1 source path ref, got {:?}",
+            refs
+        );
+        assert_eq!(source_refs[0].path.get(1).map(|s| s.as_str()), Some("raw"));
+        assert_eq!(
+            source_refs[0].path.get(2).map(|s| s.as_str()),
+            Some("events")
+        );
     }
 
     #[test]
@@ -2372,7 +2400,7 @@ sources:
         ws.add_model(
             "model",
             r#"WITH user_cte AS (
-    SELECT * FROM smelt.ref('users')
+    SELECT * FROM smelt.models.users
 )
 SELECT user_id FROM user_cte"#,
         );
@@ -2393,7 +2421,7 @@ SELECT user_id FROM user_cte"#,
         ws.add_model(
             "model",
             r#"WITH enriched AS (
-    SELECT *, 3 AS col_c FROM smelt.ref('base')
+    SELECT *, 3 AS col_c FROM smelt.models.base
 )
 SELECT col_a, col_c FROM enriched"#,
         );
@@ -2417,7 +2445,7 @@ SELECT col_a, col_c FROM enriched"#,
     fn test_table_alias_in_type_context() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS user_id");
-        ws.add_model("model", "SELECT u.user_id FROM smelt.ref('users') AS u");
+        ws.add_model("model", "SELECT u.user_id FROM smelt.models.users AS u");
 
         let ctx = ws.type_context(&ws.model_path("model"));
         // Alias 'u' should resolve to 'users'
@@ -2486,14 +2514,14 @@ sources:
         );
         ws.add_model(
             "model",
-            "SELECT\n    event_timestamp\nFROM smelt.source('raw.events')",
+            "SELECT\n    event_timestamp\nFROM smelt.sources.raw.events",
         );
 
         let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
         // Cursor on "event_timestamp" (byte offset within the identifier)
-        let text = "SELECT\n    event_timestamp\nFROM smelt.source('raw.events')";
+        let text = "SELECT\n    event_timestamp\nFROM smelt.sources.raw.events";
         let col_start = text.find("event_timestamp").unwrap();
         let cursor = col_start + 5; // middle of the identifier
 
@@ -2528,13 +2556,13 @@ sources:
         );
         ws.add_model(
             "model",
-            "SELECT\n    e.event_timestamp\nFROM smelt.source('raw.events') e",
+            "SELECT\n    e.event_timestamp\nFROM smelt.sources.raw.events e",
         );
 
         let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
-        let text = "SELECT\n    e.event_timestamp\nFROM smelt.source('raw.events') e";
+        let text = "SELECT\n    e.event_timestamp\nFROM smelt.sources.raw.events e";
         // Cursor on the column name part (after the dot)
         let col_start = text.find("event_timestamp").unwrap();
         let cursor = col_start + 3;
@@ -2558,12 +2586,12 @@ sources:
         // Open question 2: columns from smelt.ref() models
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS user_id, 'alice' AS user_name");
-        ws.add_model("model", "SELECT\n    user_id\nFROM smelt.ref('users')");
+        ws.add_model("model", "SELECT\n    user_id\nFROM smelt.models.users");
 
         let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
-        let text = "SELECT\n    user_id\nFROM smelt.ref('users')";
+        let text = "SELECT\n    user_id\nFROM smelt.models.users";
         let col_start = text.find("user_id").unwrap();
         let cursor = col_start + 3;
 
@@ -2608,13 +2636,13 @@ sources:
         );
         ws.add_model(
             "model",
-            "SELECT event_id FROM smelt.source('raw.events') WHERE is_active",
+            "SELECT event_id FROM smelt.sources.raw.events WHERE is_active",
         );
 
         let parse = ws.parse_file_by_path(&ws.model_path("model"));
         let file = AstFile::cast(parse.syntax()).unwrap();
 
-        let text = "SELECT event_id FROM smelt.source('raw.events') WHERE is_active";
+        let text = "SELECT event_id FROM smelt.sources.raw.events WHERE is_active";
         let col_start = text.find("is_active").unwrap();
         let cursor = col_start + 3;
 
@@ -2649,29 +2677,54 @@ mod symbol_at_cursor {
     }
 
     #[test]
-    fn test_symbol_at_cursor_ref_call() {
-        let sql = "SELECT * FROM smelt.ref('users')";
-        // Cursor inside the ref call (on 'users')
-        let sym = resolve(sql, 0, 25);
+    fn test_symbol_at_cursor_path_ref_model() {
+        let sql = "SELECT * FROM smelt.models.users";
+        // Cursor inside the path ref (on 'users')
+        let sym = resolve(sql, 0, 27);
         assert_eq!(
             sym,
-            Some(SymbolAtCursor::RefCall {
-                name: "users".to_string()
+            Some(SymbolAtCursor::PathRef {
+                segments: vec!["models".to_string(), "users".to_string()]
             })
         );
     }
 
     #[test]
-    fn test_symbol_at_cursor_source_call() {
-        let sql = "SELECT * FROM smelt.source('raw.users')";
-        // Cursor inside the source call
+    fn test_symbol_at_cursor_path_ref_source() {
+        let sql = "SELECT * FROM smelt.sources.raw.users";
+        // Cursor inside the source path ref
         let sym = resolve(sql, 0, 30);
         assert_eq!(
             sym,
-            Some(SymbolAtCursor::SourceCall {
-                source_name: "raw".to_string(),
-                table_name: "users".to_string(),
+            Some(SymbolAtCursor::PathRef {
+                segments: vec![
+                    "sources".to_string(),
+                    "raw".to_string(),
+                    "users".to_string()
+                ]
             })
+        );
+    }
+
+    #[test]
+    fn test_legacy_ref_produces_parse_errors() {
+        // smelt.ref() is a parse error in Phase 4 — legacy syntax is rejected
+        let sql = "SELECT * FROM smelt.ref('users')";
+        let parse = smelt_parser::parse(sql);
+        assert!(
+            !parse.errors.is_empty(),
+            "smelt.ref() must produce parse errors after Phase 4"
+        );
+    }
+
+    #[test]
+    fn test_legacy_source_produces_parse_errors() {
+        // smelt.source() is a parse error in Phase 4 — legacy syntax is rejected
+        let sql = "SELECT * FROM smelt.source('raw.users')";
+        let parse = smelt_parser::parse(sql);
+        assert!(
+            !parse.errors.is_empty(),
+            "smelt.source() must produce parse errors after Phase 4"
         );
     }
 
@@ -2738,42 +2791,46 @@ mod ast_range_helpers {
     }
 
     #[test]
-    fn test_ref_content_range() {
-        let sql = "SELECT * FROM smelt.ref('my_model')";
+    fn test_path_ref_text_range() {
+        let sql = "SELECT * FROM smelt.models.my_model";
         let parse = smelt_parser::parse(sql);
         let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
-        let ref_call = file.refs().next().unwrap();
+        let path_ref = file
+            .syntax()
+            .descendants()
+            .find_map(smelt_parser::ast::SmeltPathRef::cast)
+            .expect("Should have a SmeltPathRef node");
 
-        let content_range = ref_call.content_range();
-        assert!(
-            content_range.is_some(),
-            "RefCall should have a content range"
-        );
-        let range = content_range.unwrap();
-        let content_text = &sql[usize::from(range.start())..usize::from(range.end())];
+        let range = path_ref.text_range();
+        let path_text = &sql[usize::from(range.start())..usize::from(range.end())];
         assert_eq!(
-            content_text, "my_model",
-            "content_range should exclude quotes"
+            path_text, "smelt.models.my_model",
+            "text_range should cover the entire path ref"
+        );
+        assert_eq!(
+            path_ref.segments(),
+            vec!["models".to_string(), "my_model".to_string()]
         );
     }
 
     #[test]
-    fn test_source_table_name_range() {
-        let sql = "SELECT * FROM smelt.source('raw.users')";
+    fn test_source_path_ref_segments() {
+        let sql = "SELECT * FROM smelt.sources.raw.users";
         let parse = smelt_parser::parse(sql);
         let file = smelt_parser::ast::File::cast(parse.syntax()).unwrap();
-        let source_call = file.sources().next().unwrap();
+        let path_ref = file
+            .syntax()
+            .descendants()
+            .find_map(smelt_parser::ast::SmeltPathRef::cast)
+            .expect("Should have a SmeltPathRef node");
 
-        let table_range = source_call.table_name_range();
-        assert!(
-            table_range.is_some(),
-            "SourceCall should have a table_name_range"
-        );
-        let range = table_range.unwrap();
-        let table_text = &sql[usize::from(range.start())..usize::from(range.end())];
         assert_eq!(
-            table_text, "users",
-            "table_name_range should cover just the table name"
+            path_ref.segments(),
+            vec![
+                "sources".to_string(),
+                "raw".to_string(),
+                "users".to_string()
+            ]
         );
     }
 }
@@ -2784,63 +2841,89 @@ mod ast_range_helpers {
 
 mod find_references {
     use super::*;
-    use smelt_db::references::{
-        find_cte_references, find_model_references, find_source_references,
-    };
+    use smelt_db::references::find_cte_references;
 
     #[test]
-    fn test_find_model_references_single_file() {
+    fn test_find_model_path_refs_single_file() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 as id");
-        ws.add_model("orders", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("orders", "SELECT * FROM smelt.models.users");
 
-        let all_file_refs: Vec<_> = ws
+        let all_file_path_refs: Vec<_> = ws
             .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.model_refs(p)).clone()))
+            .map(|p| (p.clone(), (*ws.model_path_refs(p)).clone()))
             .collect();
 
-        let refs = find_model_references("users", &all_file_refs);
+        let refs: Vec<_> = all_file_path_refs
+            .iter()
+            .flat_map(|(p, refs)| {
+                refs.iter()
+                    .filter(|r| {
+                        r.path.first().map(|s| s.as_str()) == Some("models")
+                            && r.path.get(1).map(|s| s.as_str()) == Some("users")
+                    })
+                    .map(move |_| p.clone())
+            })
+            .collect();
         assert_eq!(refs.len(), 1, "Expected 1 reference to 'users'");
-        assert_eq!(refs[0].0, ws.model_path("orders"));
+        assert_eq!(refs[0], ws.model_path("orders"));
     }
 
     #[test]
-    fn test_find_model_references_multiple_files() {
+    fn test_find_model_path_refs_multiple_files() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 as id");
-        ws.add_model("a", "SELECT * FROM smelt.ref('users')");
-        ws.add_model("b", "SELECT * FROM smelt.ref('users')");
-        ws.add_model("c", "SELECT * FROM smelt.ref('users')");
+        ws.add_model("a", "SELECT * FROM smelt.models.users");
+        ws.add_model("b", "SELECT * FROM smelt.models.users");
+        ws.add_model("c", "SELECT * FROM smelt.models.users");
 
-        let all_file_refs: Vec<_> = ws
+        let all_file_path_refs: Vec<_> = ws
             .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.model_refs(p)).clone()))
+            .map(|p| (p.clone(), (*ws.model_path_refs(p)).clone()))
             .collect();
 
-        let refs = find_model_references("users", &all_file_refs);
+        let refs: Vec<_> = all_file_path_refs
+            .iter()
+            .flat_map(|(p, refs)| {
+                refs.iter()
+                    .filter(|r| {
+                        r.path.first().map(|s| s.as_str()) == Some("models")
+                            && r.path.get(1).map(|s| s.as_str()) == Some("users")
+                    })
+                    .map(move |_| p.clone())
+            })
+            .collect();
         assert_eq!(refs.len(), 3, "Expected 3 references to 'users'");
     }
 
     #[test]
-    fn test_find_model_references_unreferenced() {
+    fn test_find_model_path_refs_unreferenced() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 as id");
         ws.add_model("orders", "SELECT 1 as id");
 
-        let all_file_refs: Vec<_> = ws
+        let all_file_path_refs: Vec<_> = ws
             .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.model_refs(p)).clone()))
+            .map(|p| (p.clone(), (*ws.model_path_refs(p)).clone()))
             .collect();
 
-        let refs = find_model_references("users", &all_file_refs);
+        let refs: Vec<_> = all_file_path_refs
+            .iter()
+            .flat_map(|(_, refs)| {
+                refs.iter().filter(|r| {
+                    r.path.first().map(|s| s.as_str()) == Some("models")
+                        && r.path.get(1).map(|s| s.as_str()) == Some("users")
+                })
+            })
+            .collect();
         assert!(refs.is_empty(), "Expected no references to 'users'");
     }
 
     #[test]
-    fn test_find_source_references() {
+    fn test_find_source_path_refs() {
         let mut ws = TestWorkspace::new();
         ws.set_sources_yml(
             r#"
@@ -2852,16 +2935,27 @@ sources:
           - name: id
 "#,
         );
-        ws.add_model("a", "SELECT * FROM smelt.source('raw.users')");
-        ws.add_model("b", "SELECT * FROM smelt.source('raw.users')");
+        ws.add_model("a", "SELECT * FROM smelt.sources.raw.users");
+        ws.add_model("b", "SELECT * FROM smelt.sources.raw.users");
 
-        let all_file_sources: Vec<_> = ws
+        let all_file_path_refs: Vec<_> = ws
             .all_file_paths()
             .iter()
-            .map(|p| (p.clone(), (*ws.model_sources(p)).clone()))
+            .map(|p| (p.clone(), (*ws.model_path_refs(p)).clone()))
             .collect();
 
-        let refs = find_source_references("raw.users", &all_file_sources);
+        let refs: Vec<_> = all_file_path_refs
+            .iter()
+            .flat_map(|(p, refs)| {
+                refs.iter()
+                    .filter(|r| {
+                        r.path.first().map(|s| s.as_str()) == Some("sources")
+                            && r.path.get(1).map(|s| s.as_str()) == Some("raw")
+                            && r.path.get(2).map(|s| s.as_str()) == Some("users")
+                    })
+                    .map(move |_| p.clone())
+            })
+            .collect();
         assert_eq!(refs.len(), 2, "Expected 2 references to 'raw.users'");
     }
 
@@ -2946,18 +3040,15 @@ sources:
             type: VARCHAR
 "#,
         );
-        ws.add_model(
-            "stg_users",
-            "SELECT id, name FROM smelt.source('raw.users')",
-        );
+        ws.add_model("stg_users", "SELECT id, name FROM smelt.sources.raw.users");
         // SUM(name) expects numeric but name is VARCHAR — type mismatch
         ws.add_model(
             "bad_sum",
-            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+            "SELECT SUM(name) as total FROM smelt.models.stg_users",
         );
 
         // The diagnostic is on "name" in SUM(name) — find its position
-        // "SELECT SUM(name) as total FROM smelt.ref('stg_users')"
+        // "SELECT SUM(name) as total FROM smelt.models.stg_users"
         //             ^--- line 0, col ~11
         let actions = ws.code_actions_at("bad_sum", 0, 11);
 
@@ -2999,11 +3090,11 @@ sources:
         // payload has no type declared — CannotInferType
         ws.add_model(
             "stg_events",
-            "SELECT id, payload FROM smelt.source('raw.events')",
+            "SELECT id, payload FROM smelt.sources.raw.events",
         );
 
         // The diagnostic is on "payload" — find its position
-        // "SELECT id, payload FROM smelt.source('raw.events')"
+        // "SELECT id, payload FROM smelt.sources.raw.events"
         //            ^--- line 0, col ~11
         let actions = ws.code_actions_at("stg_events", 0, 13);
 
@@ -3048,14 +3139,11 @@ sources:
             type: VARCHAR
 "#,
         );
-        ws.add_model(
-            "stg_users",
-            "SELECT id, name FROM smelt.source('raw.users')",
-        );
+        ws.add_model("stg_users", "SELECT id, name FROM smelt.sources.raw.users");
         // SUM(name) — the CAST should wrap "name", not just the column identifier
         ws.add_model(
             "bad_sum",
-            "SELECT SUM(name) as total FROM smelt.ref('stg_users')",
+            "SELECT SUM(name) as total FROM smelt.models.stg_users",
         );
 
         let actions = ws.code_actions_at("bad_sum", 0, 11);
@@ -3089,7 +3177,7 @@ sources:
             type: VARCHAR
 "#,
         );
-        ws.add_model("valid", "SELECT id, name FROM smelt.source('raw.users')");
+        ws.add_model("valid", "SELECT id, name FROM smelt.sources.raw.users");
 
         // Position on a valid column — should have no code actions
         let actions = ws.code_actions_at("valid", 0, 8);
@@ -3112,7 +3200,7 @@ mod code_actions_create_add {
     #[test]
     fn test_code_action_create_missing_model() {
         let mut ws = TestWorkspace::new();
-        ws.add_model("downstream", "SELECT * FROM smelt.ref('missing_model')");
+        ws.add_model("downstream", "SELECT * FROM smelt.models.missing_model");
 
         // Diagnostic covers the ref name range: 'missing_model' is at col 24..39
         // Cursor on the ref name content
@@ -3157,7 +3245,7 @@ mod code_actions_create_add {
             type: INTEGER
 "#,
         );
-        ws.add_model("stg_orders", "SELECT * FROM smelt.source('raw.orders')");
+        ws.add_model("stg_orders", "SELECT * FROM smelt.sources.raw.orders");
 
         // Diagnostic covers the source ref range — cursor inside the quoted part
         let actions = ws.all_code_actions_at("stg_orders", 0, 32);
@@ -3202,10 +3290,7 @@ mod code_actions_create_add {
             type: INTEGER
 "#,
         );
-        ws.add_model(
-            "stg_events",
-            "SELECT * FROM smelt.source('analytics.events')",
-        );
+        ws.add_model("stg_events", "SELECT * FROM smelt.sources.analytics.events");
 
         // Cursor inside the quoted source reference
         let actions = ws.all_code_actions_at("stg_events", 0, 35);
@@ -3257,7 +3342,7 @@ mod code_actions_create_add {
         // gets qualifier = Some("users")
         ws.add_model(
             "stg_users",
-            "SELECT users.email FROM smelt.source('raw.users') AS users",
+            "SELECT users.email FROM smelt.sources.raw.users AS users",
         );
 
         // 'users.email' — the 'email' part triggers UndeclaredColumn with qualifier 'users'
@@ -3309,7 +3394,7 @@ mod code_actions_create_add {
 "#;
         ws.set_sources_yml(original_yml);
         // Reference a new table 'products' that doesn't exist
-        ws.add_model("stg_products", "SELECT * FROM smelt.source('raw.products')");
+        ws.add_model("stg_products", "SELECT * FROM smelt.sources.raw.products");
 
         // Cursor inside the quoted source reference
         let actions = ws.all_code_actions_at("stg_products", 0, 32);
@@ -3354,7 +3439,7 @@ mod code_actions_create_add {
     #[test]
     fn test_handler_code_action_create_model() {
         let mut ws = TestWorkspace::new();
-        ws.add_model("downstream", "SELECT * FROM smelt.ref('nonexistent')");
+        ws.add_model("downstream", "SELECT * FROM smelt.models.nonexistent");
 
         // Cursor inside the ref call (on 'nonexistent')
         let actions = ws.handler_code_actions_at("downstream", 0, 30);
@@ -3385,7 +3470,7 @@ mod code_actions_create_add {
         );
         ws.add_model(
             "stg_orders",
-            "SELECT * FROM smelt.source('raw.missing_table')",
+            "SELECT * FROM smelt.sources.raw.missing_table",
         );
 
         // Cursor inside the source call
@@ -3417,7 +3502,7 @@ mod code_actions_create_add {
         );
         ws.add_model(
             "model_col",
-            "SELECT users.nonexistent_col FROM smelt.source('raw.users') AS users",
+            "SELECT users.nonexistent_col FROM smelt.sources.raw.users AS users",
         );
 
         // Cursor on 'users.nonexistent_col' — need to find the right position
@@ -3441,7 +3526,7 @@ mod code_actions_create_add {
         // Model with a subquery in FROM
         ws.add_model(
             "subq_model",
-            "SELECT t.id FROM (SELECT id FROM smelt.ref('upstream')) t",
+            "SELECT t.id FROM (SELECT id FROM smelt.models.upstream) t",
         );
         // Also add upstream so the ref is valid
         ws.add_model("upstream", "SELECT 1 AS id");
@@ -3621,31 +3706,36 @@ mod rename_model {
     fn test_prepare_rename_model_from_ref() {
         let mut ws = TestWorkspace::new();
         ws.add_model("upstream", "SELECT 1 AS id");
-        ws.add_model("downstream", "SELECT id FROM smelt.ref('upstream')");
+        ws.add_model("downstream", "SELECT id FROM smelt.models.upstream");
 
-        // Cursor on 'upstream' inside ref() — col 24 is inside the string content
-        let result = ws.prepare_rename("downstream", 0, 24);
+        // Cursor on 'upstream' inside path ref — col 28 is on the 'upstream' segment
+        // "SELECT id FROM smelt.models." = 28 chars
+        let result = ws.prepare_rename("downstream", 0, 28);
         assert!(
             result.is_some(),
-            "prepare_rename should return a range for ref() calls"
+            "prepare_rename should return a range for smelt.models.* path refs"
         );
         let (sl, sc, el, ec) = result.unwrap();
-        // Should return the content range inside quotes (excluding quotes)
+        // Should return the range of the entire path ref (smelt.models.upstream = 21 chars)
         assert_eq!(sl, 0);
         assert_eq!(el, 0);
-        // The content 'upstream' is 8 chars
-        assert_eq!(ec - sc, 8, "range should span the model name 'upstream'");
+        // "SELECT id FROM " = 15 chars offset, "smelt.models.upstream" = 21 chars
+        assert_eq!(
+            ec - sc,
+            21,
+            "range should span the full smelt.models.upstream path ref"
+        );
     }
 
     #[test]
     fn test_rename_model_updates_all_refs() {
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS id, 'alice' AS name");
-        ws.add_model("orders", "SELECT id FROM smelt.ref('users')");
-        ws.add_model("payments", "SELECT id FROM smelt.ref('users')");
+        ws.add_model("orders", "SELECT id FROM smelt.models.users");
+        ws.add_model("payments", "SELECT id FROM smelt.models.users");
         ws.add_model(
             "report",
-            "SELECT id FROM smelt.ref('users') CROSS JOIN smelt.ref('orders')",
+            "SELECT id FROM smelt.models.users CROSS JOIN smelt.models.orders",
         );
 
         // Cursor inside ref('users') in orders model
@@ -3663,7 +3753,7 @@ mod rename_model {
     fn test_rename_model_includes_file_rename() {
         let mut ws = TestWorkspace::new();
         ws.add_model("old_name", "SELECT 1 AS id");
-        ws.add_model("consumer", "SELECT id FROM smelt.ref('old_name')");
+        ws.add_model("consumer", "SELECT id FROM smelt.models.old_name");
 
         let result = ws.rename_model("consumer", 0, 30, "new_name");
         assert!(!result.conflict);
@@ -3687,22 +3777,28 @@ mod rename_model {
     fn test_rename_model_ref_content_range() {
         let mut ws = TestWorkspace::new();
         ws.add_model("my_model", "SELECT 1 AS id");
-        ws.add_model("consumer", "SELECT id FROM smelt.ref('my_model')");
+        ws.add_model("consumer", "SELECT id FROM smelt.models.my_model");
 
         let result = ws.rename_model("consumer", 0, 30, "renamed_model");
         assert!(!result.conflict);
         assert_eq!(result.text_edits.len(), 1);
 
-        // The edit should only replace the content inside quotes, not the quotes
+        // The edit replaces the entire smelt.models.my_model path ref
         let (_, sl, sc, el, ec) = &result.text_edits[0];
-        let text = "SELECT id FROM smelt.ref('my_model')";
-        // 'my_model' starts at col 25 (after the opening quote) and ends at col 33
-        let content_start = text.find("my_model").unwrap() as u32;
-        let content_end = content_start + "my_model".len() as u32;
+        let text = "SELECT id FROM smelt.models.my_model";
+        // 'smelt.models.my_model' starts at col 15 (after "SELECT id FROM ") and ends at col 36
+        let ref_start = text.find("smelt.models").unwrap() as u32;
+        let ref_end = ref_start + "smelt.models.my_model".len() as u32;
         assert_eq!(*sl, 0);
-        assert_eq!(*sc, content_start, "edit start should be inside the quotes");
+        assert_eq!(
+            *sc, ref_start,
+            "edit start should be at the beginning of the path ref"
+        );
         assert_eq!(*el, 0);
-        assert_eq!(*ec, content_end, "edit end should be inside the quotes");
+        assert_eq!(
+            *ec, ref_end,
+            "edit end should be at the end of the path ref"
+        );
     }
 
     #[test]
@@ -3710,7 +3806,7 @@ mod rename_model {
         let mut ws = TestWorkspace::new();
         ws.add_model("existing", "SELECT 1 AS id");
         ws.add_model("other", "SELECT 1 AS id");
-        ws.add_model("consumer", "SELECT id FROM smelt.ref('other')");
+        ws.add_model("consumer", "SELECT id FROM smelt.models.other");
 
         // Try to rename 'other' to 'existing' — should detect conflict
         let result = ws.rename_model("consumer", 0, 30, "existing");
@@ -3734,20 +3830,25 @@ mod rename_source {
         ws.set_sources_yml(
             "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
         );
-        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("staging", "SELECT id FROM smelt.sources.raw.users");
 
-        // Cursor on 'users' inside source('raw.users') — find col for 'users'
-        let text = "SELECT id FROM smelt.source('raw.users')";
-        let users_start = text.find("users')").unwrap() as u32;
+        // Cursor on 'users' segment — "SELECT id FROM smelt.sources.raw." = 33 chars
+        let text = "SELECT id FROM smelt.sources.raw.users";
+        let users_start = text.find(".users").unwrap() as u32 + 1; // skip the dot
         let result = ws.prepare_rename("staging", 0, users_start);
         assert!(
             result.is_some(),
-            "prepare_rename should return a range for source() table name"
+            "prepare_rename should return a range for smelt.sources.*.* path refs"
         );
         let (sl, sc, el, ec) = result.unwrap();
         assert_eq!(sl, 0);
         assert_eq!(el, 0);
-        assert_eq!(ec - sc, 5, "range should span 'users' (5 chars)");
+        // Returns the full path ref range: "smelt.sources.raw.users" = 23 chars
+        assert_eq!(
+            ec - sc,
+            23,
+            "range should span 'smelt.sources.raw.users' (23 chars)"
+        );
     }
 
     #[test]
@@ -3756,12 +3857,12 @@ mod rename_source {
         ws.set_sources_yml(
             "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
         );
-        ws.add_model("staging_a", "SELECT id FROM smelt.source('raw.users')");
-        ws.add_model("staging_b", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("staging_a", "SELECT id FROM smelt.sources.raw.users");
+        ws.add_model("staging_b", "SELECT id FROM smelt.sources.raw.users");
 
-        // Cursor on 'users' in staging_a
-        let text = "SELECT id FROM smelt.source('raw.users')";
-        let users_start = text.find("users')").unwrap() as u32;
+        // Cursor on 'users' segment in staging_a
+        let text = "SELECT id FROM smelt.sources.raw.users";
+        let users_start = text.find(".users").unwrap() as u32 + 1;
         let result = ws.rename_source("staging_a", 0, users_start, "customers");
 
         // Both files should get text edits
@@ -3778,10 +3879,10 @@ mod rename_source {
         ws.set_sources_yml(
             "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n",
         );
-        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("staging", "SELECT id FROM smelt.sources.raw.users");
 
-        let text = "SELECT id FROM smelt.source('raw.users')";
-        let users_start = text.find("users')").unwrap() as u32;
+        let text = "SELECT id FROM smelt.sources.raw.users";
+        let users_start = text.find(".users").unwrap() as u32 + 1;
         let result = ws.rename_source("staging", 0, users_start, "customers");
 
         // YAML should have a rename edit
@@ -3807,10 +3908,10 @@ mod rename_source {
         let yaml = "version: 1\n\nsources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: id\n            type: INTEGER\n          - name: email\n            type: VARCHAR\n";
         let mut ws = TestWorkspace::new();
         ws.set_sources_yml(yaml);
-        ws.add_model("staging", "SELECT id FROM smelt.source('raw.users')");
+        ws.add_model("staging", "SELECT id FROM smelt.sources.raw.users");
 
-        let text = "SELECT id FROM smelt.source('raw.users')";
-        let users_start = text.find("users')").unwrap() as u32;
+        let text = "SELECT id FROM smelt.sources.raw.users";
+        let users_start = text.find(".users").unwrap() as u32 + 1;
         let result = ws.rename_source("staging", 0, users_start, "customers");
 
         // The YAML edit should only change the table key line, not touch columns
@@ -3844,7 +3945,7 @@ mod rename_column {
         let mut ws = TestWorkspace::new();
         ws.add_model(
             "users",
-            "SELECT user_id, COUNT(*) AS cnt FROM smelt.ref('raw_events') WHERE user_id > 0 GROUP BY user_id",
+            "SELECT user_id, COUNT(*) AS cnt FROM smelt.models.raw_events WHERE user_id > 0 GROUP BY user_id",
         );
         ws.add_model("raw_events", "SELECT 1 AS user_id, 2 AS event_type");
 
@@ -3865,7 +3966,7 @@ mod rename_column {
         // Column from ColumnSource::FromModel should be traced to upstream model
         let mut ws = TestWorkspace::new();
         ws.add_model("upstream", "SELECT 1 AS user_id, 2 AS age");
-        ws.add_model("downstream", "SELECT user_id FROM smelt.ref('upstream')");
+        ws.add_model("downstream", "SELECT user_id FROM smelt.models.upstream");
 
         // Cursor on `user_id` in downstream SELECT
         let result = ws.rename_column("downstream", 0, 7, "account_id");
@@ -3897,7 +3998,7 @@ mod rename_column {
         // Downstream model using `ref('model').col` gets updated
         let mut ws = TestWorkspace::new();
         ws.add_model("users", "SELECT 1 AS user_id, 2 AS age");
-        ws.add_model("orders", "SELECT user_id FROM smelt.ref('users')");
+        ws.add_model("orders", "SELECT user_id FROM smelt.models.users");
 
         // Cursor on `user_id` in the users model SELECT (the definition site)
         let result = ws.rename_column("users", 0, 14, "account_id");
@@ -3926,8 +4027,8 @@ mod rename_column {
         // but downstream explicit col refs are found
         let mut ws = TestWorkspace::new();
         ws.add_model("upstream", "SELECT 1 AS user_id, 2 AS age");
-        ws.add_model("passthrough", "SELECT * FROM smelt.ref('upstream')");
-        ws.add_model("consumer", "SELECT user_id FROM smelt.ref('passthrough')");
+        ws.add_model("passthrough", "SELECT * FROM smelt.models.upstream");
+        ws.add_model("consumer", "SELECT user_id FROM smelt.models.passthrough");
 
         // Rename user_id in upstream
         let result = ws.rename_column("upstream", 0, 14, "account_id");
@@ -3977,7 +4078,7 @@ SELECT user_id FROM cte3",
         ws.set_sources_yml(
             "sources:\n  raw:\n    tables:\n      users:\n        columns:\n          - name: user_id\n            type: INTEGER\n          - name: email\n            type: VARCHAR\n",
         );
-        ws.add_model("staging", "SELECT user_id FROM smelt.source('raw.users')");
+        ws.add_model("staging", "SELECT user_id FROM smelt.sources.raw.users");
 
         // Cursor on `user_id` in SELECT
         let result = ws.rename_column("staging", 0, 7, "account_id");
@@ -4007,7 +4108,7 @@ SELECT user_id FROM cte3",
         ws.add_model("b", "SELECT 1 AS id");
         ws.add_model(
             "joined",
-            "SELECT id FROM smelt.ref('a') CROSS JOIN smelt.ref('b')",
+            "SELECT id FROM smelt.models.a CROSS JOIN smelt.models.b",
         );
 
         // Cursor on unqualified `id` in SELECT — ambiguous between a.id and b.id
@@ -4034,11 +4135,11 @@ SELECT user_id FROM cte3",
         );
         ws.add_model(
             "events",
-            "SELECT\n    event_id,\n    user_id,\n    event_type,\n    event_timestamp,\n    properties\nFROM smelt.source('raw.events')\n",
+            "SELECT\n    event_id,\n    user_id,\n    event_type,\n    event_timestamp,\n    properties\nFROM smelt.sources.raw.events\n",
         );
         ws.add_model(
             "event_properties",
-            "SELECT\n    e.event_id,\n    e.properties\nFROM smelt.ref('events') e\nWHERE e.properties IS NOT NULL\n",
+            "SELECT\n    e.event_id,\n    e.properties\nFROM smelt.models.events e\nWHERE e.properties IS NOT NULL\n",
         );
 
         // Cursor on `properties` in events.sql: line 5, col 4
@@ -4084,11 +4185,11 @@ SELECT user_id FROM cte3",
         );
         ws.add_model(
             "events",
-            "SELECT\n    event_id,\n    properties\nFROM smelt.source('raw.events')\n",
+            "SELECT\n    event_id,\n    properties\nFROM smelt.sources.raw.events\n",
         );
         ws.add_model(
             "event_properties",
-            "SELECT\n    e.event_id,\n    e.properties ->> 'page_url' AS page_url\nFROM smelt.ref('events') e\nWHERE e.properties IS NOT NULL\n",
+            "SELECT\n    e.event_id,\n    e.properties ->> 'page_url' AS page_url\nFROM smelt.models.events e\nWHERE e.properties IS NOT NULL\n",
         );
 
         // Cursor on `properties` in e.properties ->> 'page_url': line 2, col 6

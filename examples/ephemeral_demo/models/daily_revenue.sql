@@ -13,7 +13,7 @@ SELECT
     order_date,
     COUNT(*) AS order_count,
     SUM(amount) AS total_revenue
-FROM smelt.ref('cleaned_orders')
+FROM smelt.models.cleaned_orders
 GROUP BY order_date
 
 --- name: test_daily_revenue ---
@@ -29,3 +29,4 @@ test:
     - {order_date: '2024-01-15', order_count: 2, total_revenue: 79.98}
     - {order_date: '2024-01-16', order_count: 1, total_revenue: 75.5}
 ---
+

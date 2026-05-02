@@ -2,4 +2,5 @@
 SELECT
     user_id,
     nonexistent_col
-FROM smelt.ref('stg_users')
+FROM smelt.models.staging.stg_users
+

@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('week', event_time) AS period,
     COUNT(DISTINCT user_id) AS metric_1,
     MIN(created_at) AS metric_2
-FROM smelt.ref('products')
+FROM smelt.models.products
 GROUP BY DATE_TRUNC('week', event_time)
+

@@ -323,13 +323,13 @@ mod tests {
     fn test_rewrite_preserves_ref_calls() {
         let m = model(
             "m",
-            "SELECT country, COUNT(DISTINCT user_id) as u, COUNT(DISTINCT session_id) as s FROM smelt.ref('events') GROUP BY 1 -- smelt:cube_split",
+            "SELECT country, COUNT(DISTINCT user_id) as u, COUNT(DISTINCT session_id) as s FROM smelt.models.events GROUP BY 1 -- smelt:cube_split",
         );
         let steps = rewrite(&m).unwrap();
         // Both CreateTemp steps should preserve smelt.ref()
         for step in &steps[..2] {
             if let ExecutionStep::CreateTemp { sql, .. } = step {
-                assert!(sql.contains("smelt.ref('events')"));
+                assert!(sql.contains("smelt.models.events"));
             }
         }
     }

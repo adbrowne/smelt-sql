@@ -21,3 +21,4 @@ smelt.define sessionize(
             OVER (PARTITION BY user_col ORDER BY ts_col) AS session_id
     FROM source
 )
+

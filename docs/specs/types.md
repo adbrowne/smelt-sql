@@ -1,0 +1,253 @@
+---
+feature: types
+status: experimental
+last_reviewed: 2026-04-28
+owners: [andrew]
+---
+
+# Types
+
+> **Scope.** Normative spec for smelt's type system. Covers the concrete `DataType` vocabulary, the strict-by-default doctrine, type constraints, fragment sorts (`Expr<T>`, `TableExpr`, …), promotion rules, and how all of this applies equally to model schemas and `smelt.define` function signatures. Adjacent: `architecture.md`, `incremental_models.md`.
+
+## Surface
+
+### `DataType` vocabulary
+
+The single SQL-type vocabulary. Users write these names in `CAST(... AS T)`, sources YAML, and `smelt.define` annotations. Engine-specific spellings parse into this vocabulary; `to_backend_sql()` is the only path that emits an engine-specific name on output.
+
+| Family    | Types |
+|-----------|-------|
+| Boolean   | `Boolean` |
+| Numeric   | `SmallInt`, `Integer`, `BigInt`, `Float`, `Double`, `Decimal(p, s)` |
+| String    | `Varchar(max?)`, `Char(len)`, `Text` |
+| Binary    | `Blob` |
+| Temporal  | `Date`, `Time`, `Timestamp [WITH TIME ZONE]`, `Interval` |
+| Composite | `Array(T)`, `Struct({field: T, …})`, `Map(K, V)` |
+| Internal  | `Null`, `Unknown` (compiler-only — surface only via diagnostics) |
+
+Aliases the parser accepts (canonicalised on input): `INT`/`INT4` → `Integer`; `INT2`/`TINYINT` → `SmallInt`; `INT8`/`LONG` → `BigInt`; `INT16`/`HUGEINT` → `BigInt`; `REAL`/`FLOAT4` → `Float`; `STRING` → `Text`; `TIMESTAMPTZ` → `Timestamp WITH TIME ZONE`; `BOOL` → `Boolean`; `BYTEA`/`BINARY` → `Blob`.
+
+### Sources YAML
+
+```yaml
+sources:
+  <source>:
+    tables:
+      <table>:
+        columns:
+          - name: <id>
+            type: <DataType-string>      # e.g. INTEGER, DECIMAL(10,2)
+            description?: <text>
+```
+
+`type` strings use the vocabulary above (or any accepted alias).
+
+### `smelt.define` type annotations
+
+Parameter and return positions accept fragment sorts:
+
+| Sort | Form | Example |
+|------|------|---------|
+| Scalar expression | `Expr<T>` | `Expr<Integer>`, `Expr<Numeric>`, `Expr<Any>` |
+| Aggregate | `AggExpr<T>` | `AggExpr<BigInt>` |
+| Window-bearing | `WindowExpr<T>` | `WindowExpr<Double>` |
+| Table | `TableExpr` or `TableExpr<{col: T, …}>` | `TableExpr<{user_id: Text, ts: Timestamp}>` |
+| Select list | `SelectItems<Kind[, ctx]>` | `SelectItems<Agg, base>` |
+| Open struct value | `Expr<Struct<{f: T, …}>>` | `Expr<Struct<{ts: Timestamp, ..r}>>` |
+
+`T` is one of: a concrete `DataType`, a `TypeConstraint` (`Numeric`, `Ordered`, `Any`), or — in built-ins / `smelt.extern` only — a generic parameter (`<T: Constraint>`). Row-tail markers on `TableExpr<{…}>` and `Struct<{…}>`: omitted (closed), `..` (anonymous tail accepted), `..r` (named tail bound).
+
+`Kind` ∈ `{Scalar, Agg, Window}`. `ctx` is the name of a sibling parameter whose schema scopes the items.
+
+Trailing variadic `...` on the final argument is allowed in built-ins / `smelt.extern` only.
+
+### Diagnostic codes (user-visible)
+
+Type-related codes from `crates/smelt-db/src/lib.rs::DiagnosticCode`. These are the spec's checkable anchor points:
+
+`TypeMismatch`, `CannotInferType`, `UnknownCastType`, `UnrecognizedFunction`, `SourceTypeError`, `WindowInScalarContext`, `AmbiguousColumn`, `UndeclaredColumn`, `ArgTypeMismatch`, `FunctionBodyTypeMismatch`, `ReturnTypeMismatch`, `InvalidFunctionTypeRef`, `MissingArgument`, `RowRequirementUnsatisfied`, `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `ParameterShadowsColumn` (warning).
+
+### Hover
+
+The LSP renders types using this vocabulary. `Text` displays as `Text`, not `Varchar`. Constraints display by name (`Numeric`, `Ordered`). Unknown types display as `Unknown`.
+
+## Semantics
+
+### 1. Strict-by-default doctrine
+
+Cross-family operations must produce `Unknown` and emit a diagnostic. The compiler must not synthesise an implicit cast across families. This is settled doctrine, not a configurable mode.
+
+- `Integer + Varchar`, `Boolean + Integer`, `42 + '3'` → `Unknown` + `TypeMismatch`.
+- Mixed-type array literals (e.g. `[1, 'hello']`) → error.
+- UNION / INTERSECT / EXCEPT branches with incompatible families → `Unknown` + diagnostic.
+
+The user must write an explicit `CAST` to bridge families. The LSP provides quick-fixes; committed code is strict.
+
+### 2. Numeric promotion chain
+
+The least-upper-bound (LUB) for promotion (in expressions, UNION, generic argument inference) follows a single linear chain:
+
+```
+SmallInt < Integer < BigInt < Decimal < Double
+```
+
+`Float` collapses into `Double` for promotion purposes. When the LUB is `Decimal` and the inputs include any integer family member, the result must be `Decimal(38, 10)` (Decimal precision/scale arithmetic is deferred — see Known Divergences).
+
+### 3. Integer division is truncating
+
+`Integer / Integer → Integer`. The integer family is preserved through `/` (no widening to Double). Backend SQL generation may insert casts to match an engine's native semantics, but the smelt-internal type is the truncating result.
+
+### 4. String unification
+
+`Text`, `Varchar(_)`, `Char(_)` are interchangeable for type-equality (`normalize()` collapses `Text ↔ Varchar(None)`). String operations discard length annotations. String functions (`UPPER`, `SUBSTRING`, `||`, …) return `Text`. Backend output emits `VARCHAR` for engines without a `TEXT` type via `to_backend_sql()`.
+
+### 5. Canonical built-in returns
+
+Built-in SQL function return types are taken from the canonical registry in `crates/smelt-types/src/signatures.rs::BuiltinRegistry` and must be enforced via `CAST` in generated SQL. Examples:
+
+- `SUM(Integer | BigInt | SmallInt) → BigInt`
+- `AVG(any numeric) → Double`
+- `COUNT(*) → BigInt` (non-nullable)
+- `CEIL(Double) → Double`, `CEIL(Decimal(p,_)) → Decimal(p, 0)`
+- `SIGN(any numeric) → SmallInt`
+
+Engine-native precision is opt-in via the backend namespace (`postgres.sum(...)`); using it marks the model as non-portable.
+
+### 6. Type constraints
+
+- `Numeric` ≡ `{SmallInt, Integer, BigInt, Float, Double, Decimal(*)}`. `Boolean` excluded.
+- `Ordered` ≡ `Numeric ∪ {Text, Varchar(*), Char(*)} ∪ {Date, Time, Timestamp(*), Interval} ∪ {Boolean, Blob}`. Composite types (`Array`, `Struct`, `Map`), `Null`, and `Unknown` are non-members.
+- `Any` accepts every concrete `DataType`.
+- `Numeric ⊂ Ordered` is structural; callers do not restate the bound.
+
+A constraint is satisfied iff the actual type is a member. Constraints are **not** coercion: passing `Integer` to a parameter declared `Expr<Double>` is an error (no implicit promotion across concrete types).
+
+### 7. Fragment sort subtyping
+
+The only subtype relations are linear chains:
+
+```
+Expr<T>             <:  AggExpr<T>             <:  WindowExpr<T>
+SelectItems<Scalar> <:  SelectItems<Agg>       <:  SelectItems<Window>
+```
+
+`TableExpr` and `OrderSpec` are unrelated to the expression chain. Splice points enforce a kind ceiling:
+
+| Position | Accepted kinds |
+|----------|----------------|
+| `WHERE`, `GROUP BY`, `ON` | `Scalar` only |
+| `HAVING` | `Scalar`, `Agg` |
+| `SELECT` (no GROUP BY) | `Scalar`, `Agg`, `Window` |
+| `SELECT` (with GROUP BY) | `Scalar`, `Agg` |
+| `QUALIFY` | `Scalar`, `Agg`, `Window` |
+
+### 8. Generics inference (built-ins / `smelt.extern` only)
+
+For each type parameter `T` in a signature, the checker collects every position where `T` appears: argument positions, plus the expected return type when the call is in checking mode (`TypeContext.expected_return`). Then:
+
+- If `T`'s declared constraint has a promotion chain (only `Numeric` in v1), bind `T` to the LUB of the collected positions under that chain.
+- Otherwise, every position must unify to the same concrete type (after `Text ↔ Varchar` normalization). A mismatch is a `TypeMismatch` / `ArgTypeMismatch` at the first conflicting position.
+
+After binding, the declared constraint is discharged (e.g. `T: Ordered` rejects `T = Map<…>`).
+
+### 9. Variadics
+
+Trailing `...` marks the final argument position as variadic. Variadics expand to N positions for inference, all sharing the same `T` if one is declared. Variadics are positional only — `name => value` syntax does not apply. At most one variadic per signature; user-defined `smelt.define` functions are not variadic in v1.
+
+### 10. Bidirectional checking
+
+- **Call sites**: declared parameter types are pushed into arguments (checking mode).
+- **Function bodies**: parameter types seed the type context; the body synthesises bottom-up. If a return type is declared (Tier 3), it provides a checking target — a body that synthesises a different type emits `ReturnTypeMismatch`.
+- **Row variables** on `TableExpr<{…, ..r}>` and `Expr<Struct<{…, ..r}>>` unify locally per call site against the concrete caller schema.
+- Errors are local; row variables never appear in user-facing diagnostics — they bind first, then any error reports the concrete fields.
+- Tier 1 (unannotated) functions are checked by binding parameter names to the caller's argument types in the type context and re-checking the body. Tier 2/3 functions are checked in isolation under their declared signatures.
+
+### 11. Nullability
+
+Columns carry `nullable: bool` in `TypedColumn`. Inference rules:
+
+- Non-nullable: `COALESCE(…)` with at least one non-null argument; `CASE … ELSE …` when all branches are non-null; `CAST` preserves the input's nullability; struct/array literals (the container itself); `EXISTS`; `COUNT(*)` and `COUNT(expr)`.
+- Always nullable: `SUM`, `AVG`, `MIN`, `MAX` (empty groups → NULL); scalar subqueries; `IN (subquery)`; array subscript (out-of-bounds → NULL); struct field access (conservative).
+
+**Parameter-type nullability is not part of the v1 annotation surface** (research §16 #10). All `Expr<T>` parameters and returns are implicitly nullable; the column-level `nullable` flag flows through model-body inference but does not appear in `smelt.define` signatures.
+
+### 12. Models are functions
+
+A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.define m(...)` whose `TableExpr` parameters default to `smelt.<path>` references resolved against the workspace (the universal addressing scheme — see `architecture.md` §"Resolution"). The materialization decision (`table` / `view` / `ephemeral` / `materialized_view`) is orthogonal to the type system. In particular:
+
+- A model's `smelt.<path>` references — whatever they resolve to (upstream model, source, seed) — contribute `TypedColumn` entries to the body's `TypeContext`, exactly as `TableExpr` parameters do for functions.
+- The output of a model is a `ModelSchema` (`Vec<Column>` + row extensions + input constraints), which is the same data a function returning `TableExpr` would produce.
+- `TableExpr<{…}>` row-polymorphism applies identically to function parameters and to model input constraints.
+
+### 13. `TableExpr` row polymorphism
+
+- Bare `TableExpr` accepts any caller schema unchanged.
+- `TableExpr<{col: Type, …}>` requires every declared column to be present in the caller's schema with a satisfying type (concrete equality after `Text ↔ Varchar` normalization, or constraint satisfaction).
+- Closed shape (no tail) tolerates extra caller columns by default in v1 (open-record); use `..` to make this explicit, or `..r` to bind extras to a row variable for use in the body and return type.
+- Failures emit `RowRequirementUnsatisfied` at the argument expression; the body check is short-circuited so no cascading diagnostics surface from inside the callee.
+
+### 14. Strict family-rejection examples
+
+| Expression | Result | Diagnostic |
+|------------|--------|------------|
+| `42 + '3'` | `Unknown` | `TypeMismatch` |
+| `TRUE + 1` | `Unknown` | `TypeMismatch` |
+| `[1, 'hello']` | `Unknown` (array) | `TypeMismatch` |
+| `SELECT 1 UNION SELECT 'a'` | `Unknown` per column | `TypeMismatch` |
+| Window function in `WHERE` | flagged | `WindowInScalarContext` |
+
+## Constraints & Invariants
+
+- The `DataType` enum in `crates/smelt-types/src/lib.rs` is the single SQL-type vocabulary; backend-specific names (HUGEINT, STRING, TIMESTAMPTZ) parse into it on input, and `to_backend_sql()` is the only emission path that produces an engine-specific name.
+- `crates/smelt-db/src/type_inference.rs` and `crates/smelt-types/src/signatures.rs` contain pure functions (no Salsa imports). Salsa queries are thin wrappers — see CLAUDE.md "Pure Function Rule".
+- Function call inference is **local**: row-variable unification, generic binding, and constraint discharge all happen at the call site without cross-module constraint solving.
+- `Numeric ⊂ Ordered` is structural — callers do not need to restate constraints.
+- Adding a type to `Ordered` is non-breaking; removing one is breaking.
+- Fragment sort subtyping is linear-only — no branching subtype relations are permitted.
+- One canonical built-in registry (per `signatures.rs::BuiltinRegistry`); per-dialect registries are out of scope. Backend availability is a per-function `backends:` property, not a registry split.
+- **Out of scope for v1**: nullability in parameter types; `Decimal(p,s)` precision arithmetic; multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`.
+
+## Known Divergences / Open Questions
+
+- **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double` (with the integer/Decimal mixing rule producing `Decimal(38,10)`). `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (§16 #9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. Implementation conformance is a follow-up plan.
+- **Decimal precision/scale arithmetic is deferred.** The current `Decimal(38,10)` widening rule is the v1 fallback; a future spec will define proper Decimal precision arithmetic (`Decimal(p1, s1) + Decimal(p2, s2)`).
+- **Nullability scope mismatch.** The column-level `nullable: bool` flag is implemented and load-bearing in inference, but it does not appear in `smelt.define` parameter types (§16 #10). This spec scopes nullability to the column form only.
+- **Fragment sort coverage.** `Expr<T>`, `TableExpr`, and `TableExpr<{…}>` are landed. `AggExpr<T>` and `WindowExpr<T>` are partially landed: the `ExprKind` axis enforces the kind ceiling at splice points (`WindowInScalarContext`), but type-annotation parsing for `AggExpr<T>` / `WindowExpr<T>` may still be in flight per the smelt-functions plan (Step 3, Phase 13). Validate against the live `crates/smelt-types/src/signatures.rs::SmeltType` enum.
+- **`Float` as a distinct DataType.** `DataType::Float` exists in code; research treats Float as Double. This spec aligns with research and lists `Float` collapsing into `Double` as the normative rule. `Float` may be removed from the enum in a future plan.
+- **`docs/type_semantics.md` overlap.** The legacy quasi-spec contains backend-divergence material that is still useful (DuckDB/Spark divergence registry). Recommendation: keep it as a backend-divergence appendix referenced from this spec; over time, fold or trim.
+- **`Map<K,V>` rules.** `DataType::Map` exists in the vocabulary but research is silent on its semantics. This spec marks `Map` as non-`Ordered`; broader rules for Map equality, ordering, and arithmetic remain open.
+
+## References
+
+### Code
+
+- `crates/smelt-types/src/lib.rs` — `DataType`, `TypedColumn`, `is_numeric` / `is_string` / `is_temporal`, `normalize`, `to_backend_sql`
+- `crates/smelt-types/src/parse.rs` — type-string parsing (sources YAML, `CAST`, type annotations)
+- `crates/smelt-types/src/signatures.rs` — `SmeltType`, `ExprKind`, `TypeConstraint`, `SchemaRequirement`, `RowTail`, `StructRowTail`, `BuiltinRegistry`, `unify_call`, `numeric_lub`, `kind_ceiling`, `subkind_of`
+- `crates/smelt-types/src/functions.rs` — `SqlFunction`, `FunctionCategory`
+- `crates/smelt-db/src/type_inference.rs` — pure inference (`TypeContext`, `infer_expression_type`, `infer_expression_kind`, `promote_types`, `infer_select_column_types`, `check_window_in_scalar_contexts`)
+- `crates/smelt-db/src/schema.rs` — `ModelSchema`, `Column`, `ColumnSource`, `RowExtension`, `InputConstraint`, `ModelFunctionType`
+- `crates/smelt-db/src/function_body_check.rs` — Tier 1 / 2 / 3 body checking
+- `crates/smelt-db/src/lib.rs::DiagnosticCode` — diagnostic surface
+
+### Tests
+
+- `crates/smelt-db/tests/type_property_tests.rs` — DuckDB oracle for type inference
+- `crates/smelt-types/tests/registry_coverage.rs` — built-in registry coverage
+- Unit tests under `crates/smelt-db/src/type_inference.rs::tests` and `function_body_check.rs::tests`
+
+### Plans (history) — oldest → newest
+
+- `docs/plans/20260321-dialect-function-remapping.md`
+- `docs/plans/20260404-parser-type-testing-completeness.md`
+- `docs/plans/20260405-schema-evolution-complex-types.md`
+- `docs/plans/20260422-smelt-functions.md`
+
+### Related specs
+
+- `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
+- `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
+
+### Backend divergence appendix
+
+`docs/type_semantics.md` documents intentional smelt-vs-backend choices (truncating int division, `BigInt` vs `Decimal(38,0)` for `SUM`, `Text` vs `Varchar`) and the divergence registry at `crates/smelt-db/tests/prop_helpers/divergences.rs`. Treat that document as the backend-divergence appendix to this spec; `docs/specs/types.md` is the canonical source for normative type rules.

@@ -5,7 +5,7 @@
 use rowan::TextRange;
 use smelt_parser::ast::{
     BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, SmeltAsStructCall, SmeltFnCall, StructLiteral, Subquery,
+    SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, SmeltType,
@@ -546,7 +546,7 @@ impl TypeContext {
     /// Used by Phase 36 struct-parameter resolution to enumerate the
     /// concrete columns reachable through a table alias passed as a
     /// struct argument (e.g. `smelt.fn.event_hour(e)` where `e` is an
-    /// alias for `smelt.source('source.events') AS e`).
+    /// alias for `smelt.sources.source.events AS e`).
     ///
     /// Alias resolution is applied first so `e` maps to `events` (or
     /// whatever the underlying table name is). Returns an empty `Vec`
@@ -628,14 +628,14 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_function_type(&func, ctx);
     }
 
-    // Try smelt.fn.<name>(...) user-function call site. Returns the declared
-    // return type of the resolved signature, or Unknown if the function
-    // cannot be resolved / lacks a return annotation. Diagnostics for
+    // Try smelt.functions.<name>(...) user-function call site. Returns the
+    // declared return type of the resolved signature, or Unknown if the
+    // function cannot be resolved / lacks a return annotation. Diagnostics for
     // unresolved functions / arg mismatches are emitted elsewhere
-    // (`function_body_check::check_smelt_fn_call`), so this path is
+    // (`function_body_check::check_smelt_path_call`), so this path is
     // type-only.
-    if let Some(call) = expr.as_smelt_fn_call() {
-        return infer_smelt_fn_call_type(&call, ctx);
+    if let Some(call) = expr.as_smelt_path_call() {
+        return infer_smelt_path_call_type(&call, ctx);
     }
 
     // Try smelt.as_struct(alias [EXCEPT cols]) — Phase 38.
@@ -805,11 +805,10 @@ pub fn infer_expression_kind(expr: &Expr, ctx: &TypeContext) -> ExprKind {
         return infer_function_call_kind(&func, ctx);
     }
 
-    // smelt.fn.* user-defined call: scalar today (Phase 14 doesn't track
-    // kind through user-defined fragments; that's a later phase). Until
-    // then, treat as the most permissive kind so call sites in WHERE
-    // don't false-positive.
-    if expr.as_smelt_fn_call().is_some() {
+    // smelt.functions.* user-defined call: scalar today (kind tracking
+    // through user-defined fragments is a later phase). Until then, treat
+    // as the most permissive kind so call sites in WHERE don't false-positive.
+    if expr.as_smelt_path_call().is_some() {
         return ExprKind::Scalar;
     }
 
@@ -1215,7 +1214,7 @@ pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext
     ctx
 }
 
-/// Infer the return type of a `smelt.fn.<name>(...)` call site.
+/// Infer the return type of a `smelt.functions.<name>(...)` call site.
 ///
 /// Uses the workspace function-signature index seeded on [`TypeContext`]
 /// (via [`TypeContext::add_function_signature`]) — no Salsa access. Returns:
@@ -1229,8 +1228,8 @@ pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext
 ///     malformed annotations, or missing annotations — diagnostic emission
 ///     is the call-site checker's job, not inference's.
 ///   - `None` only when the function cannot be resolved in this context.
-fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<TypedColumn> {
-    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option<TypedColumn> {
+    let segments = call.segments();
     let name = segments.last()?;
     let sig = ctx.lookup_function_signature(name)?;
 
@@ -1277,7 +1276,7 @@ fn infer_smelt_fn_call_type(call: &SmeltFnCall, ctx: &TypeContext) -> Option<Typ
 ///
 /// Falls back to `DataType::Unknown` whenever any step cannot be completed.
 fn resolve_struct_return_type(
-    call: &SmeltFnCall,
+    call: &SmeltPathCall,
     ctx: &TypeContext,
     sig: &smelt_types::signatures::FunctionSig,
     ret_fields: &[(String, DataType)],

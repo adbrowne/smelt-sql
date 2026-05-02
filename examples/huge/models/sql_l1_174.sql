@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT price, cost, profit
-    FROM smelt.ref('users')
+    FROM smelt.models.users
     WHERE is_active = true
 )
 SELECT
     b.price,
     SUM(revenue) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('users') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.users j ON b.user_id = j.user_id
 GROUP BY b.price
+

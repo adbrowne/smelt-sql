@@ -10,5 +10,6 @@ SELECT
     os_name,
     AVG(amount) AS agg_0,
     COUNT(*) AS agg_1
-FROM smelt.ref('shipments')
+FROM smelt.models.shipments
 GROUP BY os_name
+

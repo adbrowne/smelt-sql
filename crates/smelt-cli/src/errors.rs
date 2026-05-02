@@ -41,7 +41,7 @@ pub enum CliError {
     #[error("Source tables not found in database:\n  {}\n\nHint: Create source tables manually or use 'smelt seed' command", missing.join("\n  "))]
     SourceTablesNotFound { missing: Vec<String> },
 
-    #[error("Model '{model}' uses named parameters which are not yet supported\n\n  --> {file}:{line}:{col}\n   |\n{snippet}\n   |\n   = note: Named parameters will be supported in a future release\n   = help: For now, use: FROM smelt.ref('model_name') without parameters")]
+    #[error("Model '{model}' uses named parameters which are not yet supported\n\n  --> {file}:{line}:{col}\n   |\n{snippet}\n   |\n   = note: Named parameters will be supported in a future release\n   = help: For now, use: FROM smelt.models.model_name without parameters")]
     NamedParametersNotSupported {
         model: String,
         file: PathBuf,

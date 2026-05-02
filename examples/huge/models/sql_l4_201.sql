@@ -10,4 +10,5 @@ SELECT
     campaign_id,
     rating,
     ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_112')
+FROM smelt.models.sql_l3_112
+

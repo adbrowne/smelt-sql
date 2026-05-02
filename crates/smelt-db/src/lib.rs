@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use rowan::TextRange;
 use salsa::{Accumulator, Setter};
 use serde::Deserialize;
-use smelt_parser::{self, File as AstFile, RefCall, TableRef};
+use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
 pub use smelt_types::TypedColumn;
 use smelt_types::{parse_type, DataType};
@@ -45,7 +45,7 @@ pub use function_body_check::{
 };
 pub use schema::{
     Column, ColumnConstraint, ColumnSource, FunctionInput, FunctionOutput, InputConstraint,
-    ModelFunctionType, ModelSchema, ResolvedSchema, RowExtension, TypedField,
+    ModelFunctionType, ModelSchema, RefKind, ResolvedSchema, RowExtension, TypedField,
 };
 pub use type_inference::{
     check_window_in_scalar_contexts, infer_cte_columns, infer_expression_kind,
@@ -429,6 +429,12 @@ pub enum DiagnosticCode {
     /// are only meaningful with PASSING clauses, which `smelt.extern` does
     /// not support (§16 #18). Introduced in Phase 52.
     ExternFragmentParamUnsupported,
+    /// Emitted when a `smelt.<path>` reference resolves to an entity whose
+    /// kind is not valid in the surrounding position — for example,
+    /// `FROM smelt.tests.foo` (test in a `TableExpr` position). Anchored
+    /// at the path-form ref's text range. Introduced in Phase 2a of the
+    /// smelt-`<path>` migration (architecture Surface §"Resolution").
+    KindMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -536,57 +542,89 @@ pub fn parse_model(db: &dyn salsa::Database, file: SourceFile) -> Option<Arc<Mod
     }))
 }
 
+/// Legacy `smelt.models.name` locations.
+///
+/// Phase 4: `smelt.ref()` is now a parse error; this query always returns an
+/// empty vec. Kept so callers compile without changes during the migration.
+/// Will be removed in a follow-up cleanup.
 #[salsa::tracked]
 pub fn model_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<RefLocation>> {
-    let parse = parse_file(db, file);
-    let text = file.text(db);
-    let syntax = parse.syntax();
-
-    if let Some(ast) = AstFile::cast(syntax) {
-        let refs: Vec<RefLocation> = ast
-            .refs()
-            .filter_map(|ref_call| {
-                let name = ref_call.model_name()?;
-                let text_range = ref_call.name_range().unwrap_or(ref_call.range());
-                let range = smelt_parser::ast::text_range_to_range(text, text_range);
-                Some(RefLocation { name, range })
-            })
-            .collect();
-
-        Arc::new(refs)
-    } else {
-        Arc::new(Vec::new())
-    }
+    // smelt.ref() is a parse error — no legacy RefCall nodes can appear.
+    let _ = (db, file);
+    Arc::new(Vec::new())
 }
 
+/// Path-form refs (`smelt.<path>` in value position) extracted with
+/// their resolution metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathRefLocation {
+    pub path: Vec<String>,
+    pub range: Range,
+    /// True when this ref appears in a `TableExpr` (FROM/JOIN) position.
+    /// Phase 2a uses this to gate kind-mismatch diagnostics: a path
+    /// resolving to a `Test` is invalid in `TableExpr` positions.
+    pub in_table_expr_position: bool,
+}
+
+/// Extract every unified `smelt.<path>` value-form ref from a file.
+///
+/// Phase 2a — Salsa-tracked sister of [`model_refs`] for the new path
+/// surface. The legacy `model_refs` query still surfaces
+/// `smelt.models.name` callsites; this query surfaces the unified
+/// path-form value refs (no `(`) so the diagnostic pass can validate
+/// them through [`resolve_ref_path`]. Call-form path refs are not
+/// included here — they're consumed by the function-call pipeline.
 #[salsa::tracked]
-pub fn model_sources(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<SourceLocation>> {
+pub fn model_path_refs(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<PathRefLocation>> {
     let parse = parse_file(db, file);
     let text = file.text(db);
     let syntax = parse.syntax();
 
-    if let Some(ast) = AstFile::cast(syntax) {
-        let sources: Vec<SourceLocation> = ast
-            .sources()
-            .filter_map(|source_call| {
-                let qualified_name = source_call.qualified_name()?;
-                let source_name = source_call.source_name()?;
-                let table_name = source_call.table_name()?;
-                let text_range = source_call.name_range().unwrap_or(source_call.range());
-                let range = smelt_parser::ast::text_range_to_range(text, text_range);
-                Some(SourceLocation {
-                    source_name,
-                    table_name,
-                    qualified_name,
-                    range,
-                })
-            })
-            .collect();
+    let Some(ast) = AstFile::cast(syntax) else {
+        return Arc::new(Vec::new());
+    };
 
-        Arc::new(sources)
-    } else {
-        Arc::new(Vec::new())
+    let mut out = Vec::new();
+    for path_ref in ast.syntax().descendants().filter_map(SmeltPathRef::cast) {
+        // Skip nested path refs that are part of a SmeltPathCall.
+        if path_ref
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .any(|a| smelt_parser::ast::SmeltPathCall::cast(a).is_some())
+        {
+            continue;
+        }
+        let in_table_expr_position = is_in_table_expr_position(path_ref.syntax());
+        let path = path_ref.segments();
+        let range = smelt_parser::ast::text_range_to_range(text, path_ref.text_range());
+        out.push(PathRefLocation {
+            path,
+            range,
+            in_table_expr_position,
+        });
     }
+    Arc::new(out)
+}
+
+/// True when this `SMELT_PATH_REF` node sits in a `TableExpr` position
+/// — i.e. it's the body of a TableRef under a FROM/JOIN clause.
+fn is_in_table_expr_position(node: &smelt_parser::syntax_kind::SyntaxNode) -> bool {
+    use smelt_parser::syntax_kind::SyntaxKind as Sk;
+    node.ancestors()
+        .any(|a| matches!(a.kind(), Sk::TABLE_REF | Sk::FROM_CLAUSE | Sk::JOIN_CLAUSE))
+}
+
+/// Legacy `smelt.sources.schema.table` locations.
+///
+/// Phase 4: `smelt.source()` is now a parse error; this query always returns
+/// an empty vec. Kept so callers compile without changes during the migration.
+/// Will be removed in a follow-up cleanup.
+#[salsa::tracked]
+pub fn model_sources(db: &dyn salsa::Database, file: SourceFile) -> Arc<Vec<SourceLocation>> {
+    // smelt.source() is a parse error — no legacy SourceCall nodes can appear.
+    let _ = (db, file);
+    Arc::new(Vec::new())
 }
 
 #[salsa::tracked]
@@ -1014,8 +1052,8 @@ pub fn function_body_diagnostics_for_file(
 
     // Phase 26: Build closures for nested Tier 1 expansion, mirroring the
     // closure setup in `smelt_fn_call_diagnostics_for_file`. When the Tier 2
-    // body contains a `smelt.fn.*` call to a Tier 1 callee, we expand it
-    // using the Tier 2 context's concrete parameter types so errors cascade
+    // body contains a `smelt.functions.*` call to a Tier 1 callee, we expand
+    // it using the Tier 2 context's concrete parameter types so errors cascade
     // to the Tier 2 body check site with full frame stacks.
     let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
     files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
@@ -1109,13 +1147,6 @@ pub fn function_body_diagnostics_for_file(
             None
         };
 
-    let smelt_fn_schema_lookup =
-        |_call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> {
-            // Tier 2 body checks don't expand wildcard CTE bodies, so
-            // cross-function CTE schema inference is unused here.
-            None
-        };
-
     let default_type_lookup = |sig: &FunctionSig, param_name: &str| -> Option<DataType> {
         let decl_path = decl_lookup(sig)?;
         let f = files.iter().find(|f| f.path(db) == &decl_path)?;
@@ -1141,11 +1172,11 @@ pub fn function_body_diagnostics_for_file(
         None
     };
 
-    let nested_handler = |call: &smelt_parser::ast::SmeltFnCall,
+    let nested_handler = |call: &smelt_parser::ast::SmeltPathCall,
                           nested_ctx: &TypeContext,
                           nested_text: &str|
      -> Vec<Diagnostic> {
-        function_body_check::check_smelt_fn_call(
+        function_body_check::check_smelt_path_call(
             call,
             nested_ctx,
             nested_text,
@@ -1157,7 +1188,7 @@ pub fn function_body_diagnostics_for_file(
             &tableexpr_schema_lookup,
             &default_type_lookup,
             &table_ref_schema_lookup,
-            &smelt_fn_schema_lookup,
+            &|_: &smelt_parser::ast::SmeltPathCall| None,
         )
     };
 
@@ -1190,7 +1221,7 @@ pub fn function_body_diagnostics_for_file(
         // For Tier 1 functions (unannotated), `check_function_body` already
         // runs expansion at call-site only; the nested handler still handles
         // Tier 1 → Tier 1 chains correctly via the same guard in
-        // `check_smelt_fn_call`.
+        // `check_smelt_path_call`.
         out.extend(function_body_check::check_function_body_with_expansion(
             sig,
             &body_expr,
@@ -1718,16 +1749,16 @@ pub fn missing_provenance_advisory_for_file(
         let where_range =
             smelt_parser::ast::text_range_to_range(raw_text, where_clause.text_range());
 
-        // Find smelt.fn.* calls in the FROM clause.
+        // Find smelt.functions.* calls in the FROM clause.
         let Some(from_clause) = select.from_clause() else {
             continue;
         };
         for table_ref in from_clause.table_refs() {
-            let Some(call) = table_ref.smelt_fn_call() else {
+            let Some(call) = table_ref.smelt_path_call() else {
                 continue;
             };
             // Derive the function name from the call path segments (last segment = name).
-            let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+            let segments = call.segments();
             let Some(fn_name) = segments.last().cloned() else {
                 continue;
             };
@@ -1784,10 +1815,10 @@ pub fn missing_provenance_advisory_for_file(
     out
 }
 
-/// Per-file diagnostics for `smelt.fn.<name>(...)` call sites (Phase 6).
+/// Per-file diagnostics for `smelt.functions.<name>(...)` call sites.
 ///
-/// For every `SMELT_FN_CALL` AST node in `file`, runs the pure
-/// [`function_body_check::check_smelt_fn_call`] with closures over
+/// For every `SMELT_PATH_CALL` AST node in `file`, runs the pure
+/// [`function_body_check::check_smelt_path_call`] with closures over
 /// [`resolve_function`] (for signature lookup) and [`parse_file`] (for
 /// body lookup). Call-site diagnostics emitted:
 ///   - [`DiagnosticCode::UnknownSmeltFn`]
@@ -1798,16 +1829,15 @@ pub fn missing_provenance_advisory_for_file(
 ///     [`DiagnosticData::ExpansionFrames`] attached.
 ///
 /// Pure-function-rule note: the analysis lives in
-/// `function_body_check::check_smelt_fn_call`; this wrapper builds the
-/// call-site [`TypeContext`] (seeded with the workspace's signatures so
-/// nested `smelt.fn.*` calls can resolve) and threads Salsa-backed
-/// closures through for signature / body lookup.
+/// `function_body_check::check_smelt_path_call`; this wrapper builds the
+/// call-site [`TypeContext`] (seeded with the workspace's signatures) and
+/// threads Salsa-backed closures through for signature / body lookup.
 pub fn smelt_fn_call_diagnostics_for_file(
     db: &dyn salsa::Database,
     workspace: Workspace,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
-    use smelt_parser::ast::SmeltFnCall;
+    use smelt_parser::ast::SmeltPathCall;
     use smelt_parser::syntax_kind::SyntaxKind;
 
     let parse = parse_file(db, file);
@@ -1815,16 +1845,84 @@ pub fn smelt_fn_call_diagnostics_for_file(
     let text_raw = file.text(db);
     let clean_text = smelt_parser::strip_frontmatter(text_raw).to_string();
 
-    // Collect every SMELT_FN_CALL node in the file. These can appear in
-    // SELECT expressions or (post-Phase-8) nested inside a `smelt.define`
-    // body. Phase 6 covers both cases uniformly.
-    let call_nodes: Vec<SmeltFnCall> = syntax
+    // Build the set of define names whose bodies are deferred (i.e. skipped
+    // by `function_body_diagnostics_for_file` because they have TableExpr /
+    // SelectItems params). Calls inside those bodies are NOT dispatched
+    // through the body re-walk, so we must check them here.
+    use smelt_types::signatures::SmeltType;
+    let deferred_define_names: std::collections::HashSet<String> = {
+        let ast_file = AstFile::cast(syntax.clone());
+        ast_file
+            .as_ref()
+            .map(|af| {
+                af.defines()
+                    .filter(|def| {
+                        let Some(sig) = def.name().and_then(|n| {
+                            let sigs = file_signature_inputs(db, file);
+                            sigs.iter().find(|s| s.name == n).cloned()
+                        }) else {
+                            return false;
+                        };
+                        sig.params.iter().any(|p| match &p.type_ref {
+                            Some(Err(
+                                smelt_types::signatures::SmeltTypeParseError::UnsupportedSort {
+                                    sort,
+                                    ..
+                                },
+                            )) if matches!(
+                                sort.as_str(),
+                                "TableExpr" | "AggExpr" | "WindowExpr" | "SelectItems"
+                            ) =>
+                            {
+                                true
+                            }
+                            Some(Ok(SmeltType::TableExpr(_))) => true,
+                            _ => false,
+                        })
+                    })
+                    .filter_map(|def| def.name())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // Collect SMELT_PATH_CALL nodes (smelt.functions.* form).
+    //
+    // For nodes outside a DEFINE_BODY: always include (top-level call sites
+    // in models / expression-only defines).
+    //
+    // For nodes inside a DEFINE_BODY: include only when the enclosing define
+    // is deferred (has TableExpr/SelectItems params) — those bodies are
+    // skipped by `function_body_diagnostics_for_file`, so any nested
+    // `smelt.functions.*` calls would otherwise go unchecked. For
+    // non-deferred defines, the body re-walk dispatches nested calls through
+    // `nested_path_handler`, so we exclude them here to avoid duplication.
+    let path_call_nodes: Vec<SmeltPathCall> = syntax
         .descendants()
-        .filter(|n| n.kind() == SyntaxKind::SMELT_FN_CALL)
-        .filter_map(SmeltFnCall::cast)
+        .filter(|n| n.kind() == SyntaxKind::SMELT_PATH_CALL)
+        .filter(|n| {
+            let inside_define_body = n.ancestors().any(|a| a.kind() == SyntaxKind::DEFINE_BODY);
+            if !inside_define_body {
+                return true; // Top-level call site — always check.
+            }
+            // Inside a define body: only check if the define is deferred.
+            // Walk up to find the enclosing DEFINE node and check its name.
+            use smelt_parser::syntax_kind::SyntaxKind as Sk;
+            let enclosing_define_name = n
+                .ancestors()
+                .find(|a| a.kind() == Sk::SMELT_DEFINE)
+                .and_then(|def| {
+                    use smelt_parser::ast::SmeltDefine;
+                    SmeltDefine::cast(def).and_then(|d| d.name())
+                });
+            enclosing_define_name
+                .map(|nm| deferred_define_names.contains(&nm))
+                .unwrap_or(false)
+        })
+        .filter_map(SmeltPathCall::cast)
         .collect();
 
-    if call_nodes.is_empty() {
+    if path_call_nodes.is_empty() {
         return Vec::new();
     }
 
@@ -1835,10 +1933,10 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // that's fine, the body walk doesn't need SQL scope.
     let mut ctx: TypeContext = (*type_context(db, workspace, file)).clone();
 
-    // Seed every workspace-visible `FunctionSig` so
-    // `infer_smelt_fn_call_type` can resolve nested `smelt.fn.*` returns.
-    // Iterating all files is O(N) but only runs when a call site is
-    // present — pure function files with no calls skip this entirely.
+    // Seed every workspace-visible `FunctionSig` so path-call type inference
+    // can resolve nested function returns. Iterating all files is O(N) but
+    // only runs when a call site is present — pure function files with no
+    // calls skip this entirely.
     let mut files: Vec<SourceFile> = workspace.files(db).to_vec();
     files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
     for f in &files {
@@ -1944,9 +2042,9 @@ pub fn smelt_fn_call_diagnostics_for_file(
 
     // Phase 15: resolve a `TableExpr` argument expression to its
     // caller-supplied column schema. Today we recognise two shapes:
-    //   - `smelt.ref('model_name')` — look up the referenced model's
+    //   - `smelt.models.model_name` — look up the referenced model's
     //     typed schema through the Salsa provider.
-    //   - `smelt.source('src.table')` — look up the source's declared
+    //   - `smelt.sources.src.table` — look up the source's declared
     //     columns (Phase 15 fixtures only use `smelt.ref`, but extending
     //     is cheap).
     // Any other shape (bare subquery, another function call, …)
@@ -1956,65 +2054,98 @@ pub fn smelt_fn_call_diagnostics_for_file(
     let tableexpr_schema_lookup = |arg_expr: &smelt_parser::ast::Expr,
                                    ctx: &TypeContext|
      -> Option<Vec<(String, TypedColumn)>> {
-        // Try to extract a `smelt.ref('X')` from the argument's function
+        // Try to extract a `smelt.models.X` from the argument's function
         // call node, if any. We accept the call nested inside an
         // EXPRESSION wrapper.
-        use smelt_parser::ast::{FunctionCall, RefCall, SourceCall, Subquery};
+        use smelt_parser::ast::Subquery;
         use smelt_parser::syntax_kind::SyntaxKind as Sk;
 
+        // Phase 4: unified `smelt.<path>` value form. Walks the
+        // expression for any `SMELT_PATH_REF`; resolves through the
+        // path-tuple resolver and dispatches on the resolved kind.
         for node in arg_expr.syntax().descendants() {
-            if node.kind() == Sk::FUNCTION_CALL {
-                let func = FunctionCall::cast(node)?;
-                if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-                    if let Some(model_name) = ref_call.model_name() {
-                        let provider = SalsaRefSchemaProvider::new(db, workspace);
-                        if let Some(cols) = provider
-                            .resolved_columns(&model_name)
-                            .or_else(|| provider.seed_columns(&model_name))
-                        {
-                            return Some(cols);
-                        }
-                    }
-                }
-                if let Some(src_call) = SourceCall::from_function_call(func) {
-                    if let (Some(source_name), Some(table_name)) =
-                        (src_call.source_name(), src_call.table_name())
-                    {
-                        // Look up the source schema via the project's
-                        // sources.yml. We build a minimal provider-free
-                        // lookup against `sources_config`.
-                        let sources = sources_config(
-                            db,
-                            *workspace
-                                .projects(db)
-                                .first()
-                                .expect("at least one project"),
-                        );
-                        for s in &sources.sources {
-                            if s.name != source_name {
-                                continue;
-                            }
-                            for t in &s.tables {
-                                if t.name == table_name {
-                                    let cols: Vec<(String, TypedColumn)> = t
-                                        .columns
-                                        .iter()
-                                        .map(|c| {
-                                            (
-                                                c.name.clone(),
-                                                TypedColumn {
-                                                    data_type: c
-                                                        .data_type
-                                                        .clone()
-                                                        .unwrap_or(DataType::Unknown),
-                                                    nullable: true,
-                                                },
-                                            )
-                                        })
-                                        .collect();
+            if node.kind() == Sk::SMELT_PATH_REF {
+                let path_ref = match SmeltPathRef::cast(node) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let path = path_ref.segments();
+                if let Some(resolved) = resolve_ref_path(db, workspace, path.clone()) {
+                    match resolved.kind {
+                        RefKind::Model => {
+                            if let Some(sf) = resolved.source_file {
+                                let schema = resolved_model_schema(db, workspace, sf);
+                                let cols: Vec<(String, TypedColumn)> = schema
+                                    .columns
+                                    .iter()
+                                    .map(|c| {
+                                        let tc = c.data_type.clone().unwrap_or(TypedColumn {
+                                            data_type: DataType::Unknown,
+                                            nullable: true,
+                                        });
+                                        (c.name.clone(), tc)
+                                    })
+                                    .collect();
+                                if !cols.is_empty() {
                                     return Some(cols);
                                 }
                             }
+                        }
+                        RefKind::Seed => {
+                            // Seed columns come from `discover_seed_infos`;
+                            // reuse the legacy provider helper.
+                            let leaf = path.last().cloned().unwrap_or_default();
+                            let provider = SalsaRefSchemaProvider::new(db, workspace);
+                            if let Some(cols) = provider.seed_columns(&leaf) {
+                                return Some(cols);
+                            }
+                        }
+                        RefKind::Source => {
+                            // Path tuple shape: ["sources", <src>, <tbl>].
+                            if path.len() >= 3 {
+                                let source_name = path[path.len() - 2].clone();
+                                let table_name = path[path.len() - 1].clone();
+                                let sources = sources_config(
+                                    db,
+                                    *workspace
+                                        .projects(db)
+                                        .first()
+                                        .expect("at least one project"),
+                                );
+                                for s in &sources.sources {
+                                    if s.name != source_name {
+                                        continue;
+                                    }
+                                    for t in &s.tables {
+                                        if t.name == table_name {
+                                            let cols: Vec<(String, TypedColumn)> = t
+                                                .columns
+                                                .iter()
+                                                .map(|c| {
+                                                    (
+                                                        c.name.clone(),
+                                                        TypedColumn {
+                                                            data_type: c
+                                                                .data_type
+                                                                .clone()
+                                                                .unwrap_or(DataType::Unknown),
+                                                            nullable: true,
+                                                        },
+                                                    )
+                                                })
+                                                .collect();
+                                            return Some(cols);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        RefKind::Function | RefKind::Test => {
+                            // A function or test in `TableExpr` arg
+                            // position is a kind mismatch; surface the
+                            // failure to downstream UnknownIdentifier
+                            // diagnostics — no schema is provided.
+                            return None;
                         }
                     }
                 }
@@ -2063,91 +2194,32 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // Phase 45: resolve a `TableRef` inside a function body's FROM /
     // JOIN clauses to the joined schema, so the body's bare-column
     // resolver can see e.g. `dim_customer.col` from
-    // `JOIN smelt.ref('dim_customer') AS dim_customer`.
+    // `JOIN smelt.models.dim_customer AS dim_customer`.
     //
     // Supported shapes:
-    //   - `smelt.ref('model')` — same path as `tableexpr_schema_lookup`.
-    //   - `smelt.source('src.tbl')` — same path as `tableexpr_schema_lookup`.
-    //   - `smelt.fn.<name>(...)` returning TableExpr — uses
-    //     `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`.
+    //   - `smelt.models.model` — same path as `tableexpr_schema_lookup`.
+    //   - `smelt.sources.src.tbl` — same path as `tableexpr_schema_lookup`.
     // Unsupported shapes (subqueries, CTE refs, derived tables) return
     // `None`. Phase 46 widens to those.
     let table_ref_schema_lookup =
         |table_ref: &smelt_parser::ast::TableRef| -> Option<Vec<(String, TypedColumn)>> {
-            use smelt_parser::ast::{RefCall, SourceCall};
-
-            // smelt.fn.<name>(...) in FROM/JOIN position — resolve through
-            // the workspace function signature index + Phase 17 return-
-            // schema inference.
-            if let Some(fn_call) = table_ref.smelt_fn_call() {
+            // `smelt.<path>` value-form in JOIN position.
+            if let Some(path_ref) = table_ref.smelt_path_ref() {
+                let segs = path_ref.segments();
+                let entity_name = segs.last().cloned().unwrap_or_default();
                 let provider = SalsaRefSchemaProvider::new(db, workspace);
-                return provider.resolve_smelt_fn_call_schema(&fn_call);
+                return provider
+                    .resolved_columns(&entity_name)
+                    .or_else(|| provider.seed_columns(&entity_name));
             }
 
-            // Otherwise the table-ref is either a bare identifier (caller
-            // already handled), a subquery (deferred), or a function-call
-            // wrapping `smelt.ref` / `smelt.source`. Walk the function-
-            // call subtree to detect the latter.
-            let func = table_ref.function_call()?;
-            if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-                if let Some(model_name) = ref_call.model_name() {
-                    let provider = SalsaRefSchemaProvider::new(db, workspace);
-                    return provider
-                        .resolved_columns(&model_name)
-                        .or_else(|| provider.seed_columns(&model_name));
-                }
-            }
-            if let Some(src_call) = SourceCall::from_function_call(func) {
-                if let (Some(source_name), Some(table_name)) =
-                    (src_call.source_name(), src_call.table_name())
-                {
-                    let sources = sources_config(
-                        db,
-                        *workspace
-                            .projects(db)
-                            .first()
-                            .expect("at least one project"),
-                    );
-                    for s in &sources.sources {
-                        if s.name != source_name {
-                            continue;
-                        }
-                        for t in &s.tables {
-                            if t.name == table_name {
-                                let cols: Vec<(String, TypedColumn)> = t
-                                    .columns
-                                    .iter()
-                                    .map(|c| {
-                                        (
-                                            c.name.clone(),
-                                            TypedColumn {
-                                                data_type: c
-                                                    .data_type
-                                                    .clone()
-                                                    .unwrap_or(DataType::Unknown),
-                                                nullable: true,
-                                            },
-                                        )
-                                    })
-                                    .collect();
-                                return Some(cols);
-                            }
-                        }
-                    }
-                }
-            }
             None
         };
 
-    // Phase 47: resolve a `smelt.fn.<name>(<args>)` call appearing as
-    // the source of a wildcard CTE body to the callee's inferred
-    // return schema (closes review finding #22). Wraps
-    // `SalsaRefSchemaProvider::resolve_smelt_fn_call_schema`.
-    let smelt_fn_schema_lookup =
-        |call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> {
-            let provider = SalsaRefSchemaProvider::new(db, workspace);
-            provider.resolve_smelt_fn_call_schema(call)
-        };
+    // Path-call CTE wildcard expansion deferred to a follow-on phase.
+    // Return `None` to fall back to the opaque-CTE marker.
+    let smelt_path_schema_lookup =
+        |_call: &smelt_parser::ast::SmeltPathCall| -> Option<Vec<(String, TypedColumn)>> { None };
 
     // Phase 17: resolve a parameter's default-value expression by
     // re-parsing the declaring file and walking to the matching
@@ -2180,8 +2252,8 @@ pub fn smelt_fn_call_diagnostics_for_file(
     };
 
     let mut out = Vec::new();
-    for call in &call_nodes {
-        out.extend(function_body_check::check_smelt_fn_call(
+    for call in &path_call_nodes {
+        out.extend(function_body_check::check_smelt_path_call(
             call,
             &ctx,
             &clean_text,
@@ -2193,7 +2265,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &tableexpr_schema_lookup,
             &default_type_lookup,
             &table_ref_schema_lookup,
-            &smelt_fn_schema_lookup,
+            &smelt_path_schema_lookup,
         ));
     }
     out
@@ -2416,15 +2488,10 @@ pub fn cte_cycle_diagnostics_for_file(
             continue;
         };
         let empty_ctx = type_inference::TypeContext::new();
-        // Cycle detection is purely structural — pass a no-op
-        // smelt_fn_schema_lookup; per-CTE schema content isn't needed.
-        let no_smelt_fn =
-            |_call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> { None };
         let (_ctx, cycle_diags) = function_body_check::extract_function_body_cte_schemas(
             &select,
             &empty_ctx,
             &clean_text,
-            &no_smelt_fn,
         );
         out.extend(cycle_diags);
     }
@@ -2484,6 +2551,195 @@ pub fn resolve_ref(
         }
     }
     None
+}
+
+/// Result of resolving a `smelt.<path>` ref against the workspace.
+///
+/// Phase 2a unifies model / seed / source / function / test resolution
+/// behind a single entry point — [`resolve_ref_path`]. Callers dispatch
+/// on `kind` to decide what to do; `source_file` is populated for
+/// `Model`, `Function`, and `Test` kinds (the entity lives in a
+/// `.sql` file tracked by Salsa).
+#[derive(Clone)]
+pub struct ResolvedRef {
+    pub kind: RefKind,
+    /// The Salsa-tracked file backing the entity. Populated for
+    /// `Model` / `Function` / `Test`. `None` for seeds and sources
+    /// (which live outside the SQL file index).
+    pub source_file: Option<SourceFile>,
+    /// The path tuple used to perform the lookup, for round-tripping
+    /// into diagnostics.
+    pub path: Vec<String>,
+}
+
+impl std::fmt::Debug for ResolvedRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRef")
+            .field("kind", &self.kind)
+            .field("source_file", &self.source_file.is_some())
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// Resolve a path tuple (`["models", "users"]`,
+/// `["seeds", "raw", "users"]`, …) against the workspace.
+///
+/// Per architecture Surface §"Resolution: smelt.<path> is the universal
+/// addressing scheme":
+/// - `.sql` file with a bare SELECT → `Model`
+/// - `.sql` file declaring `smelt.define` → `Function`
+/// - `.sql` file with `materialization: test` (Phase 2a stand-in for
+///   the future `smelt.test` declaration kind) → `Test`
+/// - `.csv` under a project's `seed_paths` → `Seed`
+/// - `.yml` declaring an external table → `Source`
+///
+/// The tuple is matched against each workspace `SourceFile`'s path,
+/// falling back to seed/source registries for non-SQL kinds. Kind
+/// dispatch is by file format/content, never by directory name.
+pub fn resolve_ref_path(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    path: Vec<String>,
+) -> Option<ResolvedRef> {
+    if path.is_empty() {
+        return None;
+    }
+
+    // Try every project root in the workspace; the first match wins.
+    for project in workspace.projects(db).iter().copied() {
+        let project_root = project.root(db).clone();
+
+        // Seeds: project-configured seed_paths under <root>. We compare
+        // the leaf segment to the seed name (top-level CSVs only, per
+        // current `discover_seed_infos`).
+        if path.len() >= 2 && path[0] == "seeds" {
+            let leaf = path.last().expect("path non-empty").clone();
+            for seed in project_seeds(db, project).iter() {
+                if seed.name == leaf {
+                    return Some(ResolvedRef {
+                        kind: RefKind::Seed,
+                        source_file: None,
+                        path,
+                    });
+                }
+            }
+        }
+
+        // Sources: project-level `sources.yml`. Path tuple shape is
+        // `["sources", <source_name>, <table_name>]` *or* an arbitrary
+        // path under a `sources/` directory followed by the source +
+        // table; today we accept the canonical shape.
+        if path.len() >= 3 && path[0] == "sources" {
+            let source_name = &path[path.len() - 2];
+            let table_name = &path[path.len() - 1];
+            if resolve_source(db, project, source_name.clone(), table_name.clone()).is_some() {
+                return Some(ResolvedRef {
+                    kind: RefKind::Source,
+                    source_file: None,
+                    path,
+                });
+            }
+        }
+
+        // SQL files: walk every workspace file, compute its
+        // workspace-relative path tuple, and compare.
+        for file in workspace.files(db).iter().copied() {
+            let file_path = file.path(db);
+            // Accept .sql files, .py files (Python models whose content is
+            // generated SQL), and virtual `*.sql::model_name` paths created
+            // by multi-model file splitting.
+            let path_str = file_path.to_str().unwrap_or("");
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "sql" && ext != "py" && !path_str.contains(".sql::") {
+                continue;
+            }
+            // Match if file_path lives under project_root.
+            let file_tuple = match file_path_tuple(&project_root, file_path, file, db) {
+                Some(t) => t,
+                None => continue,
+            };
+            if file_tuple == path {
+                let kind = sql_file_kind(db, file);
+                return Some(ResolvedRef {
+                    kind,
+                    source_file: Some(file),
+                    path,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Compute the path tuple for a SQL file relative to its project root.
+/// Returns `None` if the file is not a descendant of the project root.
+fn file_path_tuple(
+    project_root: &Path,
+    file_path: &Path,
+    file: SourceFile,
+    db: &dyn salsa::Database,
+) -> Option<Vec<String>> {
+    let rel = file_path.strip_prefix(project_root).ok()?;
+    let parent = rel.parent()?;
+    let mut tuple: Vec<String> = parent
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    // Leaf segment: prefer the parsed model name (so multi-model files
+    // expose their declared `name:` rather than the filename), falling
+    // back to the file stem for non-model SQL files (functions, tests).
+    let leaf = parse_model(db, file).map(|m| m.name.clone()).or_else(|| {
+        file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    })?;
+    tuple.push(leaf);
+    Some(tuple)
+}
+
+/// Determine the kind of a SQL file by its content. Model, function,
+/// and test all live in `.sql` files; the dispatch is on
+/// content/frontmatter, not filename.
+fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
+    let raw_text = file.text(db);
+    // 1. `smelt.define` → Function. Inspect the parsed AST; this is
+    //    cheap because the parse is already cached via Salsa.
+    let parse = parse_file(db, file);
+    if let Some(ast) = AstFile::cast(parse.syntax()) {
+        if ast.defines().next().is_some() {
+            return RefKind::Function;
+        }
+    }
+    // 2. `materialization: test` frontmatter (Phase 2a stand-in for the
+    //    forthcoming `smelt.test` declaration). Use `extract_file_metadata`
+    //    so multi-model files with mixed materializations are handled.
+    if let Ok(meta) = smelt_core::extract_file_metadata(raw_text) {
+        match meta {
+            smelt_core::FileMetadata::Single { metadata, .. } => {
+                if metadata.materialization == Some(smelt_core::Materialization::Test) {
+                    return RefKind::Test;
+                }
+            }
+            smelt_core::FileMetadata::Multi { models } => {
+                if models
+                    .iter()
+                    .all(|s| s.metadata.materialization == Some(smelt_core::Materialization::Test))
+                    && !models.is_empty()
+                {
+                    return RefKind::Test;
+                }
+            }
+            smelt_core::FileMetadata::Empty => {}
+        }
+    }
+    // 3. Default: Model.
+    RefKind::Model
 }
 
 #[salsa::tracked]
@@ -2658,7 +2914,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         return;
     }
 
-    // Undefined refs
+    // Undefined refs (legacy `smelt.models.name` form)
     let refs = model_refs(db, file);
     for ref_loc in refs.iter() {
         if resolve_ref(db, workspace, ref_loc.name.clone()).is_none()
@@ -2674,6 +2930,68 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }),
             })
             .accumulate(db);
+        }
+    }
+
+    // Phase 2a: unified path-form refs. Resolve through the path-tuple
+    // resolver and either (a) flag undefined paths or (b) flag a
+    // kind-mismatch when a `smelt.tests.*` path appears in a FROM
+    // position (architecture Surface §"Resolution").
+    let path_refs = model_path_refs(db, file);
+    for path_ref_loc in path_refs.iter() {
+        match resolve_ref_path(db, workspace, path_ref_loc.path.clone()) {
+            Some(resolved) => {
+                if resolved.kind == RefKind::Test && path_ref_loc.in_table_expr_position {
+                    let leaf = path_ref_loc.path.last().cloned().unwrap_or_default();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Cannot reference test '{leaf}' in a FROM position — \
+                             smelt.tests.* paths are not valid as TableExpr values"
+                        ),
+                        range: path_ref_loc.range,
+                        code: Some(DiagnosticCode::KindMismatch),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+            None => {
+                let path_str = format!("smelt.{}", path_ref_loc.path.join("."));
+                // Emit the right diagnostic code based on the path namespace so
+                // code-action providers can offer the correct quickfix:
+                //   smelt.sources.* → UndefinedSource (offer "Add table to YAML")
+                //   smelt.models.*  → UndefinedModelRef (offer "Create model")
+                //   anything else   → UndefinedModelRef (generic fallback)
+                let is_source_path =
+                    path_ref_loc.path.first().map(|s| s.as_str()) == Some("sources");
+                if is_source_path && path_ref_loc.path.len() >= 3 {
+                    let source_name = path_ref_loc.path[path_ref_loc.path.len() - 2].clone();
+                    let table_name = path_ref_loc.path[path_ref_loc.path.len() - 1].clone();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("Undefined source: '{}.{}'", source_name, table_name),
+                        range: path_ref_loc.range,
+                        code: Some(DiagnosticCode::UndefinedSource),
+                        data: Some(DiagnosticData::UndefinedSource {
+                            source_name,
+                            table_name,
+                        }),
+                    })
+                    .accumulate(db);
+                } else {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("Undefined ref: {path_str}"),
+                        range: path_ref_loc.range,
+                        code: Some(DiagnosticCode::UndefinedModelRef),
+                        data: Some(DiagnosticData::UndefinedRef {
+                            model_name: path_ref_loc.path.last().cloned().unwrap_or_default(),
+                        }),
+                    })
+                    .accumulate(db);
+                }
+            }
         }
     }
 
@@ -2749,25 +3067,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 
     let syntax = parse.syntax();
     if let Some(ast) = AstFile::cast(syntax) {
-        for source_call in ast.sources() {
-            if let Some(qualified_name) = source_call.qualified_name() {
-                if !qualified_name.contains('.') {
-                    let text_range = source_call.name_range().unwrap_or(source_call.range());
-                    let range = smelt_parser::ast::text_range_to_range(text, text_range);
-                    DiagnosticAcc(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format!(
-                            "Malformed source reference: '{}'. Expected format: 'source_name.table_name'",
-                            qualified_name
-                        ),
-                        range,
-                        code: Some(DiagnosticCode::MalformedSource),
-                        data: None,
-                    })
-                    .accumulate(db);
-                }
-            }
-        }
+        // Phase 4: smelt.source() is a parse error so there are no SourceCall
+        // nodes to validate. The malformed-source check is superseded by the
+        // parser rejection.
 
         if let Some(select_stmt) = ast.select_stmt() {
             if let Some(select_list) = select_stmt.select_list() {
@@ -2974,10 +3276,10 @@ pub fn model_schema(db: &dyn salsa::Database, file: SourceFile) -> Arc<ModelSche
         from_clause
             .table_refs()
             .filter_map(|table_ref| {
+                // Path-form: smelt.models.foo → leaf segment "foo"
                 table_ref
-                    .function_call()
-                    .and_then(RefCall::from_function_call)
-                    .and_then(|r| r.model_name())
+                    .smelt_path_ref()
+                    .and_then(|pr| pr.segments().last().cloned())
             })
             .collect()
     } else {
@@ -3064,6 +3366,8 @@ pub fn available_columns(
     let schema = model_schema(db, file);
     let mut available = schema.columns.clone();
 
+    // Walk FROM/JOIN clause SmeltPathRef nodes for smelt.models.* refs and
+    // include upstream model columns (used by LSP column completion).
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
 
@@ -3071,12 +3375,11 @@ pub fn available_columns(
         if let Some(select_stmt) = ast.select_stmt() {
             if let Some(from_clause) = select_stmt.from_clause() {
                 for table_ref in from_clause.table_refs() {
-                    if let Some(func) = table_ref.function_call() {
-                        if let Some(ref_call) = RefCall::from_function_call(func) {
-                            if let Some(model_name) = ref_call.model_name() {
-                                if let Some(upstream) =
-                                    resolve_ref(db, workspace, model_name.clone())
-                                {
+                    if let Some(path_ref) = table_ref.smelt_path_ref() {
+                        let segs = path_ref.segments();
+                        if segs.first().map(|s| s.as_str()) == Some("models") {
+                            if let Some(model_name) = segs.last().cloned() {
+                                if let Some(upstream) = resolve_ref(db, workspace, model_name) {
                                     let upstream_schema = model_schema(db, upstream);
                                     for col in upstream_schema.columns.iter() {
                                         available.push(col.clone());
@@ -3143,15 +3446,13 @@ pub trait RefSchemaProvider {
     /// loop wants to distinguish them (CSV files don't participate in
     /// SELECT * schema resolution, etc.).
     fn seed_columns(&self, seed_name: &str) -> Option<Vec<(String, TypedColumn)>>;
-    /// Returns the inferred output columns for a `smelt.fn.<name>(...)`
-    /// call in FROM position (Phase 17). Default impl returns `None` —
-    /// providers that can't resolve function calls (static test fixtures
-    /// without sig data) fall back to "no schema contribution", which
-    /// matches the Phase-15 behaviour where `smelt.fn.*` in FROM was
-    /// opaque.
-    fn smelt_fn_columns(
+    /// Returns the typed columns for the `smelt.functions.<name>(...)` call in
+    /// FROM position, by resolving the function's `TableExpr` return schema.
+    /// The default implementation returns `None`; `SalsaRefSchemaProvider`
+    /// overrides this with a full Salsa-backed resolution.
+    fn smelt_path_call_columns(
         &self,
-        _call: &smelt_parser::ast::SmeltFnCall,
+        _call: &smelt_parser::ast::SmeltPathCall,
     ) -> Option<Vec<(String, TypedColumn)>> {
         None
     }
@@ -3180,83 +3481,42 @@ impl SalsaRefSchemaProvider<'_> {
         &self,
         table_ref: &smelt_parser::ast::TableRef,
     ) -> Option<Vec<(String, TypedColumn)>> {
-        use smelt_parser::ast::{RefCall, SourceCall};
-
-        // smelt.fn.<name>(...) in FROM/JOIN position.
-        if let Some(fn_call) = table_ref.smelt_fn_call() {
-            return self.resolve_smelt_fn_call_schema(&fn_call);
+        // smelt.functions.<name>(...) in FROM/JOIN position — resolve schema.
+        if let Some(path_call) = table_ref.smelt_path_call() {
+            return self.resolve_smelt_path_call_schema(&path_call);
         }
 
-        let func = table_ref.function_call()?;
-        if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-            if let Some(model_name) = ref_call.model_name() {
-                return self
-                    .resolved_columns(&model_name)
-                    .or_else(|| self.seed_columns(&model_name));
-            }
+        // smelt.<path> value-form in FROM/JOIN position.
+        if let Some(path_ref) = table_ref.smelt_path_ref() {
+            let segs = path_ref.segments();
+            let entity_name = segs.last().cloned().unwrap_or_default();
+            return self
+                .resolved_columns(&entity_name)
+                .or_else(|| self.seed_columns(&entity_name));
         }
-        if let Some(src_call) = SourceCall::from_function_call(func) {
-            if let (Some(source_name), Some(table_name)) =
-                (src_call.source_name(), src_call.table_name())
-            {
-                let project = self.workspace.projects(self.db).first().copied()?;
-                let sources = sources_config(self.db, project);
-                for s in &sources.sources {
-                    if s.name != source_name {
-                        continue;
-                    }
-                    for t in &s.tables {
-                        if t.name == table_name {
-                            let cols: Vec<(String, TypedColumn)> = t
-                                .columns
-                                .iter()
-                                .map(|c| {
-                                    (
-                                        c.name.clone(),
-                                        TypedColumn {
-                                            data_type: c
-                                                .data_type
-                                                .clone()
-                                                .unwrap_or(DataType::Unknown),
-                                            nullable: true,
-                                        },
-                                    )
-                                })
-                                .collect();
-                            return Some(cols);
-                        }
-                    }
-                }
-            }
-        }
+
         None
     }
 
-    /// Resolve a `smelt.fn.<name>(...)` call in FROM position to its
-    /// inferred output schema (Phase 17).
+    /// Resolve a `smelt.functions.<name>(...)` path-call in FROM position
+    /// to its inferred output schema.
     ///
     /// Flow:
-    ///   1. Resolve the call path's tail segment to a workspace
-    ///      `FunctionSig`. Built-ins don't participate — they aren't
-    ///      `TableExpr`-returning.
-    ///   2. If the signature's return type isn't `TableExpr`, return
-    ///      `None` — scalar returns don't contribute a FROM schema.
+    ///   1. Resolve the path's tail segment to a workspace `FunctionSig`.
+    ///   2. If the signature's return type isn't `TableExpr`, return `None`.
     ///   3. Re-parse the callee's file and find the body `SelectStmt`.
-    ///   4. Build a body ctx by resolving each `TableExpr` argument
-    ///      (typically `smelt.ref('model_name')`) to its schema and
-    ///      seeding via `add_tableexpr_param`. Other `Expr<T>` params
-    ///      are seeded to `Unknown` — their types don't affect output
-    ///      schema inference in Phase 17's scope.
-    ///   5. Call `infer_tableexpr_return_schema` on the body and
-    ///      return the column list.
-    fn resolve_smelt_fn_call_schema(
+    ///   4. Build a body ctx by resolving each `TableExpr` argument to its
+    ///      schema, seeding via `add_tableexpr_param`. Other `Expr<T>` params
+    ///      are seeded to `Unknown`.
+    ///   5. Call `infer_tableexpr_return_schema` on the body and return cols.
+    fn resolve_smelt_path_call_schema(
         &self,
-        call: &smelt_parser::ast::SmeltFnCall,
+        call: &smelt_parser::ast::SmeltPathCall,
     ) -> Option<Vec<(String, TypedColumn)>> {
-        use smelt_parser::ast::{Expr as AstExpr, FunctionCall, RefCall, SourceCall};
+        use smelt_parser::ast::Expr as AstExpr;
         use smelt_types::signatures::SmeltType;
 
-        let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+        let segments = call.segments();
         let name = segments.last()?.clone();
         let sig_arc = resolve_function(self.db, self.workspace, name)?;
         let sig: &smelt_types::signatures::FunctionSig = sig_arc.as_ref();
@@ -3328,71 +3588,26 @@ impl SalsaRefSchemaProvider<'_> {
             if matches!(&param.type_ref, Some(Ok(SmeltType::TableExpr(_)))) {
                 // Resolve the TableExpr argument to its column schema.
                 if let Some(arg_expr) = bindings.get(&param.name) {
-                    // If the argument is itself a smelt.fn.* call, resolve
+                    // If the argument is itself a smelt.functions.* call, resolve
                     // it recursively to get the inner call's output schema.
-                    if let Some(nested) = arg_expr.as_smelt_fn_call() {
-                        if let Some(cols) = self.resolve_smelt_fn_call_schema(&nested) {
+                    if let Some(nested) = arg_expr.as_smelt_path_call() {
+                        if let Some(cols) = self.resolve_smelt_path_call_schema(&nested) {
                             body_ctx.add_tableexpr_param(&param.name, &cols);
                         }
                         continue;
                     }
-                    // Walk the arg expression for a smelt.ref('X') call
-                    // and resolve its schema.
+                    // Walk the arg expression for a smelt.<path> ref.
                     for node in arg_expr.syntax().descendants() {
-                        if node.kind() == smelt_parser::SyntaxKind::FUNCTION_CALL {
-                            let func = match FunctionCall::cast(node) {
-                                Some(f) => f,
-                                None => continue,
-                            };
-                            if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-                                if let Some(model_name) = ref_call.model_name() {
-                                    if let Some(cols) = self
-                                        .resolved_columns(&model_name)
-                                        .or_else(|| self.seed_columns(&model_name))
-                                    {
-                                        body_ctx.add_tableexpr_param(&param.name, &cols);
-                                        break;
-                                    }
-                                }
-                            }
-                            if let Some(src_call) = SourceCall::from_function_call(func) {
-                                if let (Some(source_name), Some(table_name)) =
-                                    (src_call.source_name(), src_call.table_name())
+                        if node.kind() == smelt_parser::SyntaxKind::SMELT_PATH_REF {
+                            if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
+                                let segs = path_ref.segments();
+                                let entity_name = segs.last().cloned().unwrap_or_default();
+                                if let Some(cols) = self
+                                    .resolved_columns(&entity_name)
+                                    .or_else(|| self.seed_columns(&entity_name))
                                 {
-                                    let project = self.workspace.projects(self.db).first().copied();
-                                    if let Some(p) = project {
-                                        let sources = sources_config(self.db, p);
-                                        for s in &sources.sources {
-                                            if s.name != source_name {
-                                                continue;
-                                            }
-                                            for t in &s.tables {
-                                                if t.name == table_name {
-                                                    let cols: Vec<(String, TypedColumn)> = t
-                                                        .columns
-                                                        .iter()
-                                                        .map(|c| {
-                                                            (
-                                                                c.name.clone(),
-                                                                TypedColumn {
-                                                                    data_type: c
-                                                                        .data_type
-                                                                        .clone()
-                                                                        .unwrap_or(
-                                                                            DataType::Unknown,
-                                                                        ),
-                                                                    nullable: true,
-                                                                },
-                                                            )
-                                                        })
-                                                        .collect();
-                                                    body_ctx
-                                                        .add_tableexpr_param(&param.name, &cols);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
+                                    body_ctx.add_tableexpr_param(&param.name, &cols);
+                                    break;
                                 }
                             }
                         }
@@ -3400,8 +3615,6 @@ impl SalsaRefSchemaProvider<'_> {
                 }
             } else {
                 // Expr<T> param — bind to Unknown for schema inference.
-                // The return schema only needs types from the projection
-                // list, which references params' types via inference.
                 let dt = match &param.type_ref {
                     Some(Ok(SmeltType::Expr(
                         smelt_types::signatures::TypeConstraint::Concrete(dt),
@@ -3412,8 +3625,8 @@ impl SalsaRefSchemaProvider<'_> {
             }
         }
 
-        // Seed workspace signatures so nested smelt.fn.* calls in the
-        // body (if any) infer their return types.
+        // Seed workspace signatures so nested function calls in the
+        // body infer their return types.
         let mut wsp_files = files.clone();
         wsp_files.sort_by(|a, b| a.path(self.db).cmp(b.path(self.db)));
         for f in &wsp_files {
@@ -3423,44 +3636,16 @@ impl SalsaRefSchemaProvider<'_> {
             }
         }
 
-        // Phase 22: extract CTE schemas from the body's WITH clause so
-        // that `infer_tableexpr_return_schema` can resolve bare column
-        // references that come from CTE-derived rows (e.g. `session_id`
-        // in `session_rollup` whose body SELECTs from a `sessionized` CTE).
-        // Cycle diagnostics are discarded — they're surfaced separately by
-        // `cte_cycle_diagnostics_for_file`.
-        //
-        // Phase 47: when a CTE body has `SELECT * FROM smelt.fn.<name>(...)`,
-        // resolve the callee's return schema by recursing through this
-        // method. The workspace-level `function_call_cycle_fn_ids` set is
-        // consulted to short-circuit cycle members, preventing infinite
-        // recursion through chained or cyclic call graphs.
-        let cycle_set = function_call_cycle_fn_ids(self.db, self.workspace);
-        let smelt_fn_schema_lookup =
-            |inner_call: &smelt_parser::ast::SmeltFnCall| -> Option<Vec<(String, TypedColumn)>> {
-                let segs = inner_call
-                    .call_path()
-                    .map(|p| p.segments())
-                    .unwrap_or_default();
-                let inner_name = segs.last()?;
-                if cycle_set.contains(inner_name) {
-                    return None;
-                }
-                self.resolve_smelt_fn_call_schema(inner_call)
-            };
+        // Extract CTE schemas from the body's WITH clause so that
+        // `infer_tableexpr_return_schema` can resolve bare column references
+        // from CTE-derived rows. Cycle diagnostics are discarded — they're
+        // surfaced separately by `cte_cycle_diagnostics_for_file`.
         let (body_ctx_with_ctes, _cycle_diags) =
-            function_body_check::extract_function_body_cte_schemas(
-                &body_select,
-                &body_ctx,
-                "",
-                &smelt_fn_schema_lookup,
-            );
+            function_body_check::extract_function_body_cte_schemas(&body_select, &body_ctx, "");
         let mut body_ctx = body_ctx_with_ctes;
 
-        // Phase 45: seed JOIN-aliased schemas so that
-        // `infer_tableexpr_return_schema` can expand `<alias>.*`
-        // projections from joined tables (e.g. `dim_customer.*` in
-        // `JOIN smelt.ref('dim_customer') AS dim_customer`).
+        // Seed JOIN-aliased schemas so that `infer_tableexpr_return_schema`
+        // can expand `<alias>.*` projections from joined tables.
         let join_lookup =
             |table_ref: &smelt_parser::ast::TableRef| -> Option<Vec<(String, TypedColumn)>> {
                 self.resolve_table_ref_schema(table_ref)
@@ -3536,11 +3721,11 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
         None
     }
 
-    fn smelt_fn_columns(
+    fn smelt_path_call_columns(
         &self,
-        call: &smelt_parser::ast::SmeltFnCall,
+        call: &smelt_parser::ast::SmeltPathCall,
     ) -> Option<Vec<(String, TypedColumn)>> {
-        self.resolve_smelt_fn_call_schema(call)
+        self.resolve_smelt_path_call_schema(call)
     }
 }
 
@@ -3622,11 +3807,51 @@ pub fn build_type_context(
                     }
 
                     let columns = infer_cte_columns(&cte, &ctx);
-                    for (col_name, typed_col) in columns {
-                        ctx.add_cte_column(&cte_name, &col_name, typed_col);
+                    for (col_name, typed_col) in &columns {
+                        ctx.add_cte_column(&cte_name, col_name, typed_col.clone());
                     }
 
                     ctx.add_alias(&cte_name, &cte_name);
+
+                    // If the CTE body is a wildcard SELECT from a
+                    // smelt.functions.* call that couldn't be resolved,
+                    // mark the CTE opaque so outer column references
+                    // don't cascade false-positive UndeclaredColumn
+                    // diagnostics.
+                    //
+                    // Note: we cannot rely on `columns.is_empty()` here
+                    // because `infer_cte_columns` always returns at least
+                    // one entry for `SELECT *` (a synthetic "col1" with
+                    // Unknown type). Instead, check directly whether the
+                    // FROM source is a SMELT_PATH_CALL that didn't resolve.
+                    {
+                        let should_mark_opaque = cte
+                            .query()
+                            .and_then(|q| q.select_stmt())
+                            .map(|s| {
+                                let has_wildcard = s
+                                    .select_list()
+                                    .map(|sl| sl.items().any(|item| item.is_wildcard()))
+                                    .unwrap_or(false);
+                                if !has_wildcard {
+                                    return false;
+                                }
+                                // The FROM clause has a smelt path call
+                                // that couldn't be resolved.
+                                s.from_clause()
+                                    .and_then(|fc| {
+                                        fc.table_refs().find_map(|tr| tr.smelt_path_call())
+                                    })
+                                    .map(|path_call| {
+                                        refs.smelt_path_call_columns(&path_call).is_none()
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if should_mark_opaque {
+                            ctx.mark_cte_opaque(&cte_name);
+                        }
+                    }
                 }
             }
         }
@@ -3659,74 +3884,65 @@ fn process_table_ref_pure(
     refs: &dyn RefSchemaProvider,
     ctx: &mut TypeContext,
 ) {
-    // Phase 17: `smelt.fn.<name>(...)` in FROM position contributes the
-    // inferred TableExpr output schema as a FROM-scope entry. The
-    // provider performs the resolution; fixtures without a provider
-    // implementation (static tests) fall through silently.
-    if let Some(call) = table_ref.smelt_fn_call() {
-        let alias = table_ref.alias();
-        let bind_to = alias.clone().unwrap_or_else(|| {
-            // Fall back to the trailing call-path segment so a
-            // call without `AS alias` still has a stable qualifier.
-            call.call_path()
-                .map(|p| p.segments())
-                .and_then(|segs| segs.last().cloned())
-                .unwrap_or_else(|| "__smelt_fn_call".to_string())
-        });
-        if let Some(cols) = refs.smelt_fn_columns(&call) {
+    // `smelt.<path>` call-form references (SMELT_PATH_CALL) in the FROM
+    // clause. Ask the provider for the inferred TableExpr return schema.
+    // If the provider resolves it, seed all columns under the alias binding
+    // so the caller's SELECT can validate projections (e.g. UndeclaredColumn
+    // for columns not in the function's return schema). If not resolved,
+    // fall back to an opaque alias registration.
+    if let Some(path_call) = table_ref.smelt_path_call() {
+        let segments = path_call.segments();
+        let fn_name = segments.last().cloned().unwrap_or_default();
+        let bind_to = table_ref.alias().unwrap_or_else(|| fn_name.clone());
+        if let Some(cols) = refs.smelt_path_call_columns(&path_call) {
             for (col_name, typed_col) in &cols {
                 ctx.add_model_column(&bind_to, col_name, typed_col.clone());
             }
+            if !bind_to.is_empty() {
+                ctx.add_alias(&bind_to, &bind_to);
+            }
+        } else if !bind_to.is_empty() {
+            // Opaque fallback: alias is registered but no column types.
             ctx.add_alias(&bind_to, &bind_to);
         }
-        // Don't fall through to the generic identifier path —
-        // SMELT_FN_CALL isn't an identifier-shaped TableRef.
+        // Don't fall through to the generic identifier path.
         return;
     }
 
-    // Check for smelt.ref() calls
-    if let Some(func) = table_ref.function_call() {
-        if let Some(ref_call) = RefCall::from_function_call(func) {
-            if let Some(model_name) = ref_call.model_name() {
-                // Try as a seed first (the LSP path tries seeds via the seed
-                // CSV check; here we ask the provider both ways).
-                if let Some(cols) = refs.seed_columns(&model_name) {
-                    for (col_name, typed_col) in cols {
-                        ctx.add_model_column(&model_name, &col_name, typed_col);
-                    }
-                    if let Some(explicit_alias) = table_ref.alias() {
-                        ctx.add_alias(&explicit_alias, &model_name);
-                    }
-                } else if let Some(cols) = refs.resolved_columns(&model_name) {
-                    for (col_name, typed_col) in cols {
-                        ctx.add_model_column(&model_name, &col_name, typed_col);
-                    }
-                    if let Some(explicit_alias) = table_ref.alias() {
-                        ctx.add_alias(&explicit_alias, &model_name);
-                    }
-                }
+    // `smelt.<path>` value-form references (SMELT_PATH_REF) in the
+    // FROM clause. The path tuple is used to determine the entity name for
+    // schema lookup: the last segment of the path is tried as both a model
+    // name and a seed name.
+    if let Some(path_ref) = table_ref.smelt_path_ref() {
+        let segments = path_ref.segments();
+        let entity_name = segments.last().cloned().unwrap_or_default();
+        // Try seed first, then model.
+        if let Some(cols) = refs
+            .seed_columns(&entity_name)
+            .or_else(|| refs.resolved_columns(&entity_name))
+        {
+            for (col_name, typed_col) in &cols {
+                ctx.add_model_column(&entity_name, col_name, typed_col.clone());
             }
+            let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
+            ctx.add_alias(&bind_to, &entity_name);
+        } else if segments.first().map(|s| s.as_str()) == Some("sources") {
+            // smelt.sources.<source_name>.<table_name> path refs. The source
+            // columns were already seeded into `ctx` by `build_type_context`
+            // (via `add_source_column`). We just need to register the alias
+            // so that `lookup_identifier` can resolve `alias → entity_name`
+            // and correctly validate qualified refs like `alias.col_name`
+            // as well as bare alias references (e.g. `smelt.functions.f(e)`
+            // where `e` is an alias for a source table).
+            let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
+            ctx.add_alias(&bind_to, &entity_name);
         }
-    }
-
-    if let Some(func) = table_ref.function_call() {
-        if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
-            if let Some(source_name) = source_call.source_name() {
-                if let Some(table_name) = source_call.table_name() {
-                    let qualified_name = format!("{}.{}", source_name, table_name);
-
-                    if let Some(explicit_alias) = table_ref.alias() {
-                        ctx.add_alias(&explicit_alias, &qualified_name);
-                    }
-                    ctx.add_alias(&table_name, &qualified_name);
-                }
-            }
-        }
+        return;
     }
 
     // CTE references with aliases (e.g. "FROM daily_totals dt")
     // OR bare upstream MODEL/seed references (e.g. "FROM main.stg_orders AS o"
-    // — produced by the dialect printer after `smelt.ref('stg_orders')` is
+    // — produced by the dialect printer after `smelt.models.stg_orders` is
     // resolved). Without this branch, the alias `o` is never bound and
     // `o.line_revenue` resolves to Unknown, which silently narrows
     // `SUM(o.line_revenue)` to BIGINT in `_smelt_typed`. See B8.
@@ -3797,7 +4013,7 @@ fn process_table_ref_pure(
 /// Extract the table-name segment from a bare `TableRef` like `schema.table`,
 /// stripping an optional schema qualifier. Used by `process_table_ref_pure`
 /// to look up upstream MODEL/seed schemas after the dialect printer has
-/// resolved `smelt.ref('foo')` to `<schema>.foo`.
+/// resolved `smelt.models.foo` to `<schema>.foo`.
 ///
 /// Returns `None` for function calls and subqueries (those have their own
 /// handling paths).
@@ -3864,11 +4080,10 @@ pub fn type_context(
     let provider = SalsaRefSchemaProvider::new(db, workspace);
     let mut ctx = build_type_context(&ast, &sources, &provider);
 
-    // Seed the workspace's `smelt.define` signatures so
-    // `infer_smelt_fn_call_type` can resolve declared return types when a
-    // SELECT projects a `smelt.fn.*` call. Kept pure — we only hand the
-    // signature data to the `TypeContext`; analysis logic doesn't call
-    // back into Salsa.
+    // Seed the workspace's `smelt.define` signatures so path-call type
+    // inference can resolve declared return types when a SELECT projects a
+    // `smelt.functions.*` call. Kept pure — we only hand the signature data to
+    // the `TypeContext`; analysis logic doesn't call back into Salsa.
     let mut wsp_files: Vec<SourceFile> = workspace.files(db).to_vec();
     wsp_files.sort_by(|a, b| a.path(db).cmp(b.path(db)));
     for f in &wsp_files {
@@ -3996,29 +4211,14 @@ pub fn model_input_constraints(
     let mut alias_to_ref: HashMap<String, String> = HashMap::new();
     if let Some(from_clause) = select_stmt.from_clause() {
         for table_ref in from_clause.table_refs() {
-            if let Some(func) = table_ref.function_call() {
-                if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-                    if let Some(model_name) = ref_call.model_name() {
-                        alias_to_ref.insert(model_name.clone(), model_name.clone());
+            // smelt.<path> table references in FROM position.
+            if let Some(path_ref) = table_ref.smelt_path_ref() {
+                let segs = path_ref.segments();
+                if let Some(entity_name) = segs.last().cloned() {
+                    if !entity_name.is_empty() {
+                        alias_to_ref.insert(entity_name.clone(), entity_name.clone());
                         if let Some(alias) = table_ref.alias() {
-                            alias_to_ref.insert(alias, model_name);
-                        }
-                    }
-                }
-                if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
-                    let input_name = source_call
-                        .table_name()
-                        .or_else(|| source_call.qualified_name())
-                        .unwrap_or_default();
-                    if !input_name.is_empty() {
-                        alias_to_ref.insert(input_name.clone(), input_name.clone());
-                        if let Some(qn) = source_call.qualified_name() {
-                            if qn != input_name {
-                                alias_to_ref.insert(qn, input_name.clone());
-                            }
-                        }
-                        if let Some(alias) = table_ref.alias() {
-                            alias_to_ref.insert(alias, input_name);
+                            alias_to_ref.insert(alias, entity_name);
                         }
                     }
                 }
@@ -4026,31 +4226,14 @@ pub fn model_input_constraints(
         }
         for join in from_clause.joins() {
             if let Some(table_ref) = join.table_ref() {
-                if let Some(func) = table_ref.function_call() {
-                    if let Some(ref_call) = RefCall::from_function_call(func.clone()) {
-                        if let Some(model_name) = ref_call.model_name() {
-                            alias_to_ref.insert(model_name.clone(), model_name.clone());
+                // smelt.<path> table references in JOIN position.
+                if let Some(path_ref) = table_ref.smelt_path_ref() {
+                    let segs = path_ref.segments();
+                    if let Some(entity_name) = segs.last().cloned() {
+                        if !entity_name.is_empty() {
+                            alias_to_ref.insert(entity_name.clone(), entity_name.clone());
                             if let Some(alias) = table_ref.alias() {
-                                alias_to_ref.insert(alias, model_name);
-                            }
-                        }
-                    }
-                    if let Some(source_call) =
-                        smelt_parser::ast::SourceCall::from_function_call(func)
-                    {
-                        let input_name = source_call
-                            .table_name()
-                            .or_else(|| source_call.qualified_name())
-                            .unwrap_or_default();
-                        if !input_name.is_empty() {
-                            alias_to_ref.insert(input_name.clone(), input_name.clone());
-                            if let Some(qn) = source_call.qualified_name() {
-                                if qn != input_name {
-                                    alias_to_ref.insert(qn, input_name.clone());
-                                }
-                            }
-                            if let Some(alias) = table_ref.alias() {
-                                alias_to_ref.insert(alias, input_name);
+                                alias_to_ref.insert(alias, entity_name);
                             }
                         }
                     }
@@ -4227,54 +4410,93 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 
     let refs = model_refs(db, file);
     let sources = model_sources(db, file);
-    if refs.is_empty() && sources.is_empty() {
+    // Phase 4: also include path-form refs that point to MODELS, SEEDS, or
+    // SOURCES (smelt.models.* / smelt.seeds.* / smelt.sources.*) in the
+    // "has any upstream dependency" guard. Without this, a model that uses
+    // ONLY path-form refs (no legacy smelt.ref()/smelt.source()) would be
+    // skipped by the early-return and never get column checks.
+    //
+    // Phase 4: path refs to models/seeds/sources bypass the early-return so
+    // column checks run for models that use only path-form refs (no legacy
+    // smelt.ref()/smelt.source()).
+    //
+    // Note: smelt.functions.* path refs in SELECT position (not FROM) are
+    // excluded — they expand inline and don't bring FROM-scope columns.
+    // However, smelt.functions.* in FROM/JOIN position (SMELT_PATH_CALL nodes
+    // that appear directly in a TableRef) DO provide column scope and must
+    // bypass the early-return so that UndeclaredColumn checks run against the
+    // inferred return schema of the function call.
+    let has_data_path_refs = model_path_refs(db, file).iter().any(|loc| {
+        matches!(
+            loc.path.first().map(|s| s.as_str()),
+            Some("models") | Some("seeds") | Some("sources")
+        )
+    });
+    // Check for smelt.functions.* (SMELT_PATH_CALL) nodes in FROM/JOIN position.
+    let has_from_position_path_calls = {
+        use smelt_parser::syntax_kind::SyntaxKind as Sk;
+        let syntax = parse_file(db, file).syntax();
+        syntax.descendants().any(|n| {
+            n.kind() == Sk::SMELT_PATH_CALL
+                && n.ancestors()
+                    .any(|a| matches!(a.kind(), Sk::TABLE_REF | Sk::FROM_CLAUSE | Sk::JOIN_CLAUSE))
+        })
+    };
+    // Files that have ONLY smelt.functions.* calls in FROM (no direct data refs)
+    // skip the CannotInferType check since type inference for function return
+    // schemas is intentionally limited. They still run check_undeclared_columns.
+    let has_direct_data_refs = !refs.is_empty() || !sources.is_empty() || has_data_path_refs;
+    if !has_direct_data_refs && !has_from_position_path_calls {
         return;
     }
 
     let text = file.text(db);
-    let typed_schema = typed_model_schema(db, workspace, file);
 
-    for col in &typed_schema.columns {
-        if col.name == "*" {
-            continue;
-        }
+    if has_direct_data_refs {
+        let typed_schema = typed_model_schema(db, workspace, file);
 
-        match &col.data_type {
-            Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown) => {
-                let range = smelt_parser::ast::text_range_to_range(text, col.range);
-                DiagnosticAcc(Diagnostic {
-                    severity: DiagnosticSeverity::Warning,
-                    message: format!(
+        for col in &typed_schema.columns {
+            if col.name == "*" {
+                continue;
+            }
+
+            match &col.data_type {
+                Some(typed_col) if matches!(typed_col.data_type, DataType::Unknown) => {
+                    let range = smelt_parser::ast::text_range_to_range(text, col.range);
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        message: format!(
                         "Could not infer type for column '{}'. Consider adding an explicit CAST.",
                         col.name
                     ),
-                    range,
-                    code: Some(DiagnosticCode::CannotInferType),
-                    data: Some(DiagnosticData::CannotInferType {
-                        column_name: col.name.clone(),
-                    }),
-                })
-                .accumulate(db);
-            }
-            None => {
-                let range = smelt_parser::ast::text_range_to_range(text, col.range);
-                DiagnosticAcc(Diagnostic {
-                    severity: DiagnosticSeverity::Warning,
-                    message: format!(
+                        range,
+                        code: Some(DiagnosticCode::CannotInferType),
+                        data: Some(DiagnosticData::CannotInferType {
+                            column_name: col.name.clone(),
+                        }),
+                    })
+                    .accumulate(db);
+                }
+                None => {
+                    let range = smelt_parser::ast::text_range_to_range(text, col.range);
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        message: format!(
                         "Could not infer type for column '{}'. Consider adding an explicit CAST.",
                         col.name
                     ),
-                    range,
-                    code: Some(DiagnosticCode::CannotInferType),
-                    data: Some(DiagnosticData::CannotInferType {
-                        column_name: col.name.clone(),
-                    }),
-                })
-                .accumulate(db);
+                        range,
+                        code: Some(DiagnosticCode::CannotInferType),
+                        data: Some(DiagnosticData::CannotInferType {
+                            column_name: col.name.clone(),
+                        }),
+                    })
+                    .accumulate(db);
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    } // end if has_direct_data_refs
 
     let parse = parse_file(db, file);
     let syntax = parse.syntax();
@@ -4343,8 +4565,19 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
 
     // Detect cycles: base schema has content but resolved is empty OR all
     // types are Unknown → cycle recovery fired.
-    for ref_loc in refs.iter() {
-        if let Some(upstream) = resolve_ref(db, workspace, ref_loc.name.clone()) {
+    //
+    // Phase 4: `model_refs` always returns empty (legacy syntax is a parse
+    // error). Check path-form refs (smelt.models.*) instead.
+    for path_loc in model_path_refs(db, file).iter() {
+        // Only model refs can form cycles.
+        if path_loc.path.first().map(|s| s.as_str()) != Some("models") {
+            continue;
+        }
+        let model_name = match path_loc.path.last() {
+            Some(n) => n.clone(),
+            None => continue,
+        };
+        if let Some(upstream) = resolve_ref(db, workspace, model_name.clone()) {
             let upstream_base = model_schema(db, upstream);
             let upstream_resolved = resolved_model_schema(db, workspace, upstream);
             let all_unknown = !upstream_resolved.columns.is_empty()
@@ -4361,9 +4594,9 @@ pub fn check_type_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     severity: DiagnosticSeverity::Warning,
                     message: format!(
                         "Circular dependency involving model '{}' — type information unavailable",
-                        ref_loc.name
+                        model_name
                     ),
-                    range: ref_loc.range,
+                    range: path_loc.range,
                     code: Some(DiagnosticCode::CircularDependency),
                     data: None,
                 })
@@ -4429,16 +4662,14 @@ pub fn logical_plan(
     let bodies = workspace_function_bodies(db, workspace);
     let cycle_set = function_call_cycle_fn_ids(db, workspace);
 
-    // Walk the CST to collect all smelt.fn.* call sites, resolving each
-    // function's signature and properties via Salsa before we leave the
-    // tracked boundary.
+    // Walk the CST to collect all smelt.functions.* (path-form) call sites.
     let call_inputs: Vec<FnCallInput> = ast
         .syntax()
         .descendants()
-        .filter_map(smelt_parser::ast::SmeltFnCall::cast)
+        .filter_map(smelt_parser::ast::SmeltPathCall::cast)
         .map(|call| {
-            let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
-            let fn_id = segments.join(".");
+            let segments = call.segments();
+            let fn_id = segments.last().cloned().unwrap_or_default();
 
             let sig_opt = if fn_id.is_empty() {
                 None
@@ -4602,10 +4833,10 @@ fn workspace_function_bodies(
     Arc::new(out)
 }
 
-/// Phase 41 — workspace-wide call graph for `smelt.define` declarations.
+/// Workspace-wide call graph for `smelt.define` declarations.
 ///
 /// Returns a map from caller `fn_id` → callees (set of `fn_id`s reached from
-/// the body's `smelt.fn.*` call sites). Externs and unresolved references
+/// the body's `smelt.functions.*` call sites). Externs and unresolved references
 /// are dropped — they are sinks in the graph.  Salsa-tracked so each
 /// workspace pays the walk once per parse-graph epoch.
 #[salsa::tracked]
@@ -4628,12 +4859,8 @@ fn workspace_function_call_graph(
             let mut callees: Vec<String> = body
                 .syntax()
                 .descendants()
-                .filter_map(smelt_parser::ast::SmeltFnCall::cast)
-                .map(|c| {
-                    c.call_path()
-                        .map(|p| p.segments().join("."))
-                        .unwrap_or_default()
-                })
+                .filter_map(smelt_parser::ast::SmeltPathCall::cast)
+                .filter_map(|c| c.segments().last().cloned())
                 .filter(|s| !s.is_empty())
                 .collect();
             callees.sort();

@@ -1634,7 +1634,7 @@ pub struct MultiModelScenario {
     pub upstream_sql: String,
     /// The upstream output columns with their types
     pub upstream_columns: Vec<TypedSource>,
-    /// The downstream model SQL (uses smelt.ref('upstream'))
+    /// The downstream model SQL (uses smelt.models.upstream)
     pub downstream_sql: String,
     /// DuckDB-equivalent SQL (flattened CTEs, no smelt.ref)
     pub duckdb_sql: String,
@@ -1762,7 +1762,7 @@ pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenar
                     }
 
                     let downstream_sql = format!(
-                        "SELECT {} FROM smelt.ref('upstream') GROUP BY {}",
+                        "SELECT {} FROM smelt.models.upstream GROUP BY {}",
                         select_items.join(", "),
                         group_col.name
                     );
@@ -1811,7 +1811,7 @@ pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenar
                         .map(|e| format!("{} AS {}", e.sql, e.alias))
                         .collect();
                     let downstream_sql = format!(
-                        "SELECT {} FROM smelt.ref('upstream')",
+                        "SELECT {} FROM smelt.models.upstream",
                         expr_items.join(", ")
                     );
 
@@ -1904,7 +1904,7 @@ pub fn three_model_scenario_strategy() -> impl Strategy<Value = ThreeModelScenar
                     .map(|e| format!("{} AS {}", e.sql, e.alias))
                     .collect();
                 let model_b_sql = format!(
-                    "SELECT {} FROM smelt.ref('model_a')",
+                    "SELECT {} FROM smelt.models.model_a",
                     b_items.join(", ")
                 );
 
@@ -1935,7 +1935,7 @@ pub fn three_model_scenario_strategy() -> impl Strategy<Value = ThreeModelScenar
                     .map(|e| format!("{} AS {}", e.sql, e.alias))
                     .collect();
                 let model_c_sql = format!(
-                    "SELECT {} FROM smelt.ref('model_b')",
+                    "SELECT {} FROM smelt.models.model_b",
                     c_items.join(", ")
                 );
 
@@ -2049,7 +2049,7 @@ pub fn join_scenario_strategy() -> impl Strategy<Value = JoinScenario> {
                     .collect();
 
                 let join_sql = format!(
-                    "SELECT {} FROM smelt.ref('left_model') l INNER JOIN smelt.ref('right_model') r ON l.join_key = r.join_key",
+                    "SELECT {} FROM smelt.models.left_model l INNER JOIN smelt.models.right_model r ON l.join_key = r.join_key",
                     expr_items.join(", ")
                 );
 

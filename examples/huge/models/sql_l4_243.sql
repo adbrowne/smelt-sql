@@ -10,6 +10,7 @@ SELECT
     platform,
     AVG(price) AS val_1,
     COUNT(*) AS val_2
-FROM smelt.ref('sql_l3_31')
+FROM smelt.models.sql_l3_31
 GROUP BY platform
 HAVING COUNT(*) > 10
+

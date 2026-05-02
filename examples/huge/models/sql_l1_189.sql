@@ -10,6 +10,7 @@ SELECT
     is_active,
     MIN(created_at) AS val_1,
     AVG(duration_seconds) AS val_2
-FROM smelt.ref('clicks')
+FROM smelt.models.clicks
 GROUP BY is_active
 HAVING COUNT(*) > 10
+

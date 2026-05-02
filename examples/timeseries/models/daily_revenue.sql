@@ -13,7 +13,8 @@ SELECT
     AVG(amount) as avg_transaction_amount,
     MIN(transaction_timestamp) as first_transaction,
     MAX(transaction_timestamp) as last_transaction,
-FROM smelt.source('raw.transactions')
+FROM smelt.sources.raw.transactions
 WHERE transaction_timestamp IS NOT NULL
 GROUP BY 1, 2
 ORDER BY 1, 2
+

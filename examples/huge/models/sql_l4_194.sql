@@ -10,7 +10,8 @@ SELECT
     is_verified,
     page_path,
     region
-FROM smelt.ref('sql_l3_155')
+FROM smelt.models.sql_l3_155
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_165') WHERE platform = 'web'
+    SELECT user_id FROM smelt.models.sql_l3_165 WHERE platform = 'web'
 )
+

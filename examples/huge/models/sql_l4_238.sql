@@ -10,7 +10,8 @@ SELECT
     amount,
     event_date,
     created_at
-FROM smelt.ref('sql_l3_230')
+FROM smelt.models.sql_l3_230
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_230') WHERE created_at >= '2024-01-01'
+    SELECT user_id FROM smelt.models.sql_l3_230 WHERE created_at >= '2024-01-01'
 )
+

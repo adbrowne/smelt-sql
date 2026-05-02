@@ -10,6 +10,7 @@ SELECT
     status,
     MAX(created_at) AS val_1,
     AVG(price) AS val_2
-FROM smelt.ref('sql_l3_36')
+FROM smelt.models.sql_l3_36
 GROUP BY status
 HAVING COUNT(*) > 10
+

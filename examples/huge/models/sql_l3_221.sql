@@ -6,6 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT plan_type, quantity, price, 'source_0' AS source_tag FROM smelt.ref('sql_l2_170')
+SELECT plan_type, quantity, price, 'source_0' AS source_tag FROM smelt.models.sql_l2_170
 UNION ALL
-SELECT plan_type, quantity, price, 'source_1' AS source_tag FROM smelt.ref('sql_l2_166')
+SELECT plan_type, quantity, price, 'source_1' AS source_tag FROM smelt.models.sql_l2_166
+

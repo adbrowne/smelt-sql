@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_type, browser, session_id
-    FROM smelt.ref('sql_l1_115')
+    FROM smelt.models.sql_l1_115
     WHERE amount > 0
 )
 SELECT
     b.event_type,
     SUM(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l1_115') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l1_115 j ON b.user_id = j.user_id
 GROUP BY b.event_type
+

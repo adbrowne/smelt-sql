@@ -12,5 +12,6 @@ SELECT
     SUM(amount) AS agg_1,
     COUNT(*) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3
-FROM smelt.ref('sql_l1_160')
+FROM smelt.models.sql_l1_160
 GROUP BY price
+

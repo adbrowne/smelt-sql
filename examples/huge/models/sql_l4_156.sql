@@ -10,7 +10,8 @@ SELECT
     revenue,
     status,
     created_at
-FROM smelt.ref('sql_l3_23')
+FROM smelt.models.sql_l3_23
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_141') WHERE quantity > 0
+    SELECT user_id FROM smelt.models.sql_l3_141 WHERE quantity > 0
 )
+

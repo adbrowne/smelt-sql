@@ -10,5 +10,6 @@ SELECT
     DATE_TRUNC('week', event_time) AS period,
     COUNT(*) AS metric_1,
     AVG(amount) AS metric_2
-FROM smelt.ref('sql_l3_231')
+FROM smelt.models.sql_l3_231
 GROUP BY DATE_TRUNC('week', event_time)
+

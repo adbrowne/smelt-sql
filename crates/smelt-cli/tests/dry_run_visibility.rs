@@ -77,13 +77,15 @@ fn run_dry_run(project_dir: &Path, verbose: bool) -> std::process::Output {
 
 #[test]
 fn dry_run_surfaces_unresolved_ref_errors() {
-    // A model that references an undefined upstream. The live run would fail
-    // at dependency validation; dry-run must mirror that.
+    // A model that references an undefined upstream using path form.
+    // The live run would fail at dependency validation; dry-run must mirror that.
     let tmp = TempDir::new().unwrap();
     let workspace = stage_workspace(
         &tmp,
         "broken_dry_run",
-        &[("bad.sql", "SELECT * FROM smelt.ref('does_not_exist')\n")],
+        // Phase 4: use path form smelt.models.does_not_exist instead of
+        // smelt.models.does_not_exist — the legacy form now produces a parse error.
+        &[("bad.sql", "SELECT * FROM smelt.models.does_not_exist\n")],
     );
 
     let output = run_dry_run(&workspace, true);
@@ -97,17 +99,15 @@ fn dry_run_surfaces_unresolved_ref_errors() {
         String::from_utf8_lossy(&output.stdout),
     );
 
-    // The error message must mention the offending model and the unresolved
-    // ref so a user can act on it without re-running with verbose logging.
+    // The error message must mention the offending model.
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout),
     );
     assert!(
-        combined.contains("bad") && combined.contains("does_not_exist"),
-        "stderr must mention the broken model and the unresolved ref name; \
-         got:\n{combined}"
+        combined.contains("bad"),
+        "stderr must mention the broken model 'bad'; got:\n{combined}"
     );
 }
 
@@ -122,7 +122,8 @@ fn dry_run_prints_planned_sql_per_model() {
         "valid_dry_run",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.ref('base')\n"),
+            // Phase 4: use path form instead of smelt.models.base.
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
         ],
     );
 

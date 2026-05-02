@@ -10,7 +10,8 @@ SELECT
     event_time,
     os_name,
     transaction_id
-FROM smelt.ref('sql_l1_173')
+FROM smelt.models.sql_l1_173
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_245') WHERE country = 'US'
+    SELECT user_id FROM smelt.models.sql_l1_245 WHERE country = 'US'
 )
+

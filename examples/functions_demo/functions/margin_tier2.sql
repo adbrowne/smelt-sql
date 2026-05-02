@@ -8,3 +8,4 @@ smelt.define margin_tier2(
          ELSE (revenue - cost) / cost
     END
 )
+

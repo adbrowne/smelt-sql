@@ -10,5 +10,6 @@ SELECT
     a.os_name,
     a.country,
     b.quantity
-FROM smelt.ref('sql_l2_16') a
-LEFT JOIN smelt.ref('sql_l2_52') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l2_16 a
+LEFT JOIN smelt.models.sql_l2_52 b ON a.user_id = b.user_id
+

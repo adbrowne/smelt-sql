@@ -10,7 +10,8 @@ SELECT
     profit,
     os_name,
     device_type
-FROM smelt.ref('users')
+FROM smelt.models.users
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('users') WHERE created_at >= '2024-01-01'
+    SELECT user_id FROM smelt.models.users WHERE created_at >= '2024-01-01'
 )
+

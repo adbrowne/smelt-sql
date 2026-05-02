@@ -542,3 +542,39 @@ fn test_spark_array_slice() {
         smelt.errors
     );
 }
+
+// ===== smelt.<path> migration, Phase 1 =====
+
+/// pg_query rejects the unified `smelt.<path>` value form because it is a
+/// smelt-specific extension (just like `smelt.ref(`, `smelt.source(`,
+/// `smelt.metric(` today). `compare_parse_results` short-circuits to `Ok(true)`
+/// for any input flagged by `has_smelt_extensions`, so the path form must be
+/// recognised by the stripper.
+#[test]
+fn pg_query_round_trip_smelt_path_in_from() {
+    let sql = "SELECT * FROM smelt.models.users";
+
+    // smelt-parser must accept it cleanly.
+    let smelt = SmeltParseResult::parse(sql);
+    assert!(
+        smelt.success,
+        "smelt should parse smelt.<path> value form: {:?}",
+        smelt.errors
+    );
+
+    // The smelt-extension classifier must flag this — without it
+    // compare_parse_results would compare against pg_query and fail.
+    assert!(
+        smelt_parser_compat::has_smelt_extensions(sql),
+        "has_smelt_extensions must recognise the unified smelt.<path> value form"
+    );
+
+    // Therefore compare_parse_results returns Ok(true) (short-circuited).
+    match smelt_parser_compat::compare_parse_results(sql) {
+        Ok(_) => (),
+        Err(e) => panic!(
+            "compare_parse_results must short-circuit on smelt extensions: {}",
+            e
+        ),
+    }
+}

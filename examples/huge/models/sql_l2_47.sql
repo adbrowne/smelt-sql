@@ -11,5 +11,6 @@ SELECT
     cohort_date,
     browser,
     transaction_id
-FROM smelt.ref('sql_l1_53')
+FROM smelt.models.sql_l1_53
 WHERE status = 'active'
+

@@ -6,6 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT os_name, price, is_verified, 'source_0' AS source_tag FROM smelt.ref('sql_l2_90')
+SELECT os_name, price, is_verified, 'source_0' AS source_tag FROM smelt.models.sql_l2_90
 UNION ALL
-SELECT os_name, price, is_verified, 'source_1' AS source_tag FROM smelt.ref('sql_l2_140')
+SELECT os_name, price, is_verified, 'source_1' AS source_tag FROM smelt.models.sql_l2_140
+

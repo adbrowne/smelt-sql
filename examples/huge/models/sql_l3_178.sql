@@ -10,4 +10,5 @@ SELECT
     score,
     transaction_id,
     ROW_NUMBER() OVER (PARTITION BY score ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l2_164')
+FROM smelt.models.sql_l2_164
+

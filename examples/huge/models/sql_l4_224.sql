@@ -10,5 +10,6 @@ SELECT
     a.category,
     a.device_type,
     b.user_id
-FROM smelt.ref('sql_l3_17') a
-INNER JOIN smelt.ref('sql_l3_17') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_17 a
+INNER JOIN smelt.models.sql_l3_17 b ON a.user_id = b.user_id
+

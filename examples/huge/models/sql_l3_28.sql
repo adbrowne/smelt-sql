@@ -11,5 +11,6 @@ SELECT
     price,
     is_active,
     referrer
-FROM smelt.ref('sql_l2_59')
+FROM smelt.models.sql_l2_59
 WHERE score >= 50
+

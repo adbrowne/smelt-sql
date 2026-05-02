@@ -10,6 +10,7 @@ SELECT
     is_active,
     AVG(duration_seconds) AS val_1,
     SUM(revenue) AS val_2
-FROM smelt.ref('sql_l1_143')
+FROM smelt.models.sql_l1_143
 GROUP BY is_active
 HAVING COUNT(*) > 10
+

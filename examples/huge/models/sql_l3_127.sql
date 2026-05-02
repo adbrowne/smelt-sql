@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT ip_address, user_id, referrer
-    FROM smelt.ref('sql_l2_38')
+    FROM smelt.models.sql_l2_38
     WHERE category IS NOT NULL
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.user_id
 FROM aggregated a
 INNER JOIN filtered f ON a.ip_address = f.ip_address
+

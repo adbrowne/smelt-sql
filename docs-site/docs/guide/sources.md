@@ -43,7 +43,7 @@ The top-level key under `sources` is the schema name (`raw` in this example). Ea
 
 ## Using sources in models
 
-Reference a source in your SQL models with `smelt.source('schema.table')`:
+Reference a source in your SQL models with `smelt.sources.schema.table`:
 
 ```sql
 -- models/stg_customers.sql
@@ -52,7 +52,7 @@ SELECT
     COALESCE(name_prefix, '') AS name_prefix,
     CAST(signup_date AS DATE) AS signup_date,
     COALESCE(segment, 'Unknown') AS segment
-FROM smelt.source('raw.customers')
+FROM smelt.sources.raw.customers
 ```
 
 The argument is always `'schema.table'` -- the schema name and table name separated by a dot.
@@ -96,7 +96,7 @@ sources:
             type: VARCHAR
 ```
 
-Reference them as `smelt.source('raw.users')` and `smelt.source('analytics.page_views')` respectively.
+Reference them as `smelt.sources.raw.users` and `smelt.sources.analytics.page_views` respectively.
 
 ## Loading source data
 

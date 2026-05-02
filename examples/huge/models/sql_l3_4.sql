@@ -10,6 +10,7 @@ SELECT
     order_id,
     SUM(quantity) AS val_1,
     AVG(amount) AS val_2
-FROM smelt.ref('sql_l2_65')
+FROM smelt.models.sql_l2_65
 GROUP BY order_id
 HAVING COUNT(*) > 10
+

@@ -30,12 +30,15 @@ fn setup_single_file(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1 — plan contains a FunctionCall node for smelt.fn.* calls
+// Test 1 — plan contains a FunctionCall node for smelt.functions.* calls
 // ---------------------------------------------------------------------------
 
 #[test]
 fn plan_builds_function_call_node() {
-    let (db, file, ws) = setup_single_file("models/m.sql", "SELECT smelt.fn.some_fn(a, b) FROM t");
+    let (db, file, ws) = setup_single_file(
+        "models/m.sql",
+        "SELECT smelt.functions.some_fn(a, b) FROM t",
+    );
 
     let plan =
         smelt_db::logical_plan(&db, ws, file).expect("plan should be Some for a valid model");
@@ -43,7 +46,7 @@ fn plan_builds_function_call_node() {
     let call = first_function_call(&plan).expect("expected a FunctionCall node in plan");
     assert_eq!(
         call.fn_id, "some_fn",
-        "FunctionCall fn_id should be the segments after smelt.fn."
+        "FunctionCall fn_id should be the segments after smelt.functions."
     );
 }
 
@@ -55,7 +58,8 @@ fn plan_builds_function_call_node() {
 fn transparent_flag_matches_function_transparency() {
     // --- smelt.define → transparent = true ---
     {
-        let define_text = "smelt.define some_fn(x) AS (x + 1)\nSELECT smelt.fn.some_fn(col) FROM t";
+        let define_text =
+            "smelt.define some_fn(x) AS (x + 1)\nSELECT smelt.functions.some_fn(col) FROM t";
         let (db, file, ws) = setup_single_file("models/define_model.sql", define_text);
         let plan = smelt_db::logical_plan(&db, ws, file).expect("plan should be Some");
         let call = first_function_call(&plan).expect("expected a FunctionCall in plan");
@@ -67,7 +71,7 @@ fn transparent_flag_matches_function_transparency() {
 
     // --- smelt.extern → transparent = false ---
     {
-        let extern_text = "smelt.extern ext_fn(x)\nSELECT smelt.fn.ext_fn(col) FROM t";
+        let extern_text = "smelt.extern ext_fn(x)\nSELECT smelt.functions.ext_fn(col) FROM t";
         let (db, file, ws) = setup_single_file("models/extern_model.sql", extern_text);
         let plan = smelt_db::logical_plan(&db, ws, file).expect("plan should be Some");
         let call = first_function_call(&plan).expect("expected a FunctionCall in plan");
@@ -134,7 +138,7 @@ fn properties_propagate_from_frontmatter() {
     //
     // Per-declaration frontmatter uses the `---…---` fence immediately before
     // the `smelt.define` keyword.
-    let text = "---\ndeterministic: true\n---\nsmelt.define det_fn(x) AS (x * 2)\nSELECT smelt.fn.det_fn(col) FROM t";
+    let text = "---\ndeterministic: true\n---\nsmelt.define det_fn(x) AS (x * 2)\nSELECT smelt.functions.det_fn(col) FROM t";
 
     let (db, file, ws) = setup_single_file("models/det_model.sql", text);
     let plan = smelt_db::logical_plan(&db, ws, file).expect("plan should be Some");
@@ -160,7 +164,10 @@ fn properties_propagate_from_frontmatter() {
 
 #[test]
 fn plan_is_salsa_query_stable_results() {
-    let (db, file, ws) = setup_single_file("models/m.sql", "SELECT smelt.fn.some_fn(a, b) FROM t");
+    let (db, file, ws) = setup_single_file(
+        "models/m.sql",
+        "SELECT smelt.functions.some_fn(a, b) FROM t",
+    );
 
     let plan1 = smelt_db::logical_plan(&db, ws, file);
     let plan2 = smelt_db::logical_plan(&db, ws, file);
@@ -228,7 +235,7 @@ fn provenance_parsed_from_frontmatter() {
         "smelt.define add_margin_with_provenance(source: TableExpr<{revenue: Numeric, cost: Numeric}>) -> TableExpr AS (\n",
         "  SELECT source.*, revenue - cost AS margin FROM source\n",
         ")\n",
-        "SELECT smelt.fn.add_margin_with_provenance(t) FROM t\n",
+        "SELECT smelt.functions.add_margin_with_provenance(t) FROM t\n",
     );
 
     let (db, file, ws) = setup_with_project_root(dir.path(), "models/m.sql", text);
@@ -260,7 +267,7 @@ fn undeclared_provenance_is_opaque() {
         "deterministic: true\n",
         "---\n",
         "smelt.define no_prov_fn(x) AS (x + 1)\n",
-        "SELECT smelt.fn.no_prov_fn(col) FROM t\n",
+        "SELECT smelt.functions.no_prov_fn(col) FROM t\n",
     );
 
     let (db, file, ws) = setup_single_file("models/no_prov.sql", text);
@@ -292,7 +299,7 @@ fn deterministic_idempotent_append_only_propagate() {
         "append_only: true\n",
         "---\n",
         "smelt.define triple_flag_fn(x) AS (x * 2)\n",
-        "SELECT smelt.fn.triple_flag_fn(col) FROM t\n",
+        "SELECT smelt.functions.triple_flag_fn(col) FROM t\n",
     );
 
     let (db, file, ws) = setup_single_file("models/triple_flag.sql", text);
@@ -342,7 +349,7 @@ fn provenance_schema_frozen_under_unstable_flag() {
         "smelt.define fn_with_prov(source: TableExpr<{revenue: Numeric, cost: Numeric}>) -> TableExpr AS (\n",
         "  SELECT source.*, revenue - cost AS margin FROM source\n",
         ")\n",
-        "SELECT smelt.fn.fn_with_prov(t) FROM t\n",
+        "SELECT smelt.functions.fn_with_prov(t) FROM t\n",
     );
 
     let (db, file, ws) = setup_with_project_root(dir.path(), "models/m.sql", text);

@@ -10,4 +10,5 @@ SELECT
     channel,
     quantity,
     ROW_NUMBER() OVER (PARTITION BY channel ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_145')
+FROM smelt.models.sql_l3_145
+

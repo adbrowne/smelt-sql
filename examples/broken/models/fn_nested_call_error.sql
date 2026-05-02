@@ -1,7 +1,7 @@
 -- Phase 12 canonical broken fixture for the multi-level frame renderer.
 -- The chain is:
---   `outer_call(y) AS (smelt.fn.middle(y))`
---   `middle(z) AS (smelt.fn.inner_unary(z))`
+--   `outer_call(y) AS (smelt.functions.middle(y))`
+--   `middle(z) AS (smelt.functions.inner_unary(z))`
 --   `inner_unary(x) AS (x + undefined_var)`
 --
 -- The innermost body contains an `undefined_var` identifier that does not
@@ -11,7 +11,7 @@
 -- append their own frames, yielding three expansion frames total on the
 -- diagnostic. The LSP renderer emits them outer-to-inner.
 smelt.define inner_unary(x) AS (x + undefined_var)
-smelt.define middle(z) AS (smelt.fn.inner_unary(z))
-smelt.define outer_call(y) AS (smelt.fn.middle(y))
+smelt.define middle(z) AS (smelt.functions.inner_unary(z))
+smelt.define outer_call(y) AS (smelt.functions.middle(y))
 
-SELECT smelt.fn.outer_call(1) AS threaded
+SELECT smelt.functions.outer_call(1) AS threaded

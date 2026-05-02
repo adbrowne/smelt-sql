@@ -1,0 +1,71 @@
+---
+feature: <feature_slug>
+status: experimental
+last_reviewed: YYYY-MM-DD
+owners: [andrew]
+---
+
+# <Feature Title>
+
+> **What this is.** A normative spec for `<feature>`. This is the canonical answer to "how does `<feature>` work?". Behavior changes start here, then propagate to plans, code, and user docs.
+>
+> **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
+
+## Surface
+
+The contract this spec defines — what callers can observe, depend on, and be told by error messages. For feature specs, "callers" are users; for system specs (`architecture.md`), "callers" can include other crates / components, and the surface includes contracts between them.
+
+If anything in this section is user-visible, you must update the corresponding `docs-site/` page in the same PR.
+
+- Syntax additions or changes
+- YAML frontmatter fields, their types and defaults
+- CLI flags / subcommands
+- Public Rust API (user-facing or cross-crate)
+- Error messages and diagnostic codes the user will see
+- Wire-format / on-disk artifacts users or downstream tools interact with
+
+## Semantics
+
+Formal behavior. What the system does given the surface. Use precise language ("must", "must not", "if X then Y"). Reference test files for executable specifications where they exist.
+
+- Evaluation rules / type rules / rewrite rules
+- Edge cases and how they're handled
+- Failure modes (what error fires when, and why)
+- Interactions with adjacent features (link to their specs, don't duplicate)
+
+## Design
+
+The rationale — *why* the spec is shaped this way. Captures the load-bearing decisions and the alternatives rejected, so future contributors can tell when a constraint is structural versus when it's open to revisit.
+
+- Why each surface choice (annotation form, default, error code) is what it is
+- Alternatives considered and why rejected (briefly — the spec is not a research doc; link to `docs/research/` if there is more)
+- Cross-feature interactions that drove the shape (link to other specs)
+- Architectural decisions the implementation must respect (these often graduate into Constraints & Invariants below)
+
+Keep this section dense — one paragraph per decision, not an essay. If a decision needs deep justification, write it in `docs/research/` and link.
+
+## Constraints & Invariants
+
+What must always hold. What is explicitly not supported and why. These are the things `smelt:validate` will check against.
+
+- Invariants the implementation must preserve (e.g., "`type_inference.rs` is pure")
+- Properties that must hold across all inputs (proptest-style)
+- Things explicitly out of scope (and the reason — keeps future plans honest)
+
+## Known Divergences / Open Questions
+
+Where current implementation differs from intent, or where intent itself is undecided. Update as part of any plan that touches this feature.
+
+- Implementation gaps known at `last_reviewed`
+- Open design questions with current best-known answer
+- Tensions with other specs (link to them)
+
+## References
+
+Concrete pointers — kept current, not historical.
+
+- **Code**: primary implementation paths (`crates/...`, `src/...`)
+- **Tests**: tests that exercise the spec (especially the spec-invariant tests)
+- **User docs**: `docs-site/docs/...` pages that document this feature
+- **Plans (history)**: links to past `docs/plans/*` that landed work in this area, ordered oldest → newest
+- **Related specs**: other `docs/specs/*.md` files this one depends on or interacts with

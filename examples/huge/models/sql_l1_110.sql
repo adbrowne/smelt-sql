@@ -10,5 +10,6 @@ SELECT
     a.is_active,
     a.platform,
     b.browser
-FROM smelt.ref('products') a
-INNER JOIN smelt.ref('products') b ON a.user_id = b.user_id
+FROM smelt.models.products a
+INNER JOIN smelt.models.products b ON a.user_id = b.user_id
+

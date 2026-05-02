@@ -10,5 +10,6 @@ SELECT
     a.transaction_id,
     a.os_name,
     b.referrer
-FROM smelt.ref('sql_l1_90') a
-LEFT JOIN smelt.ref('sql_l1_90') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l1_90 a
+LEFT JOIN smelt.models.sql_l1_90 b ON a.user_id = b.user_id
+

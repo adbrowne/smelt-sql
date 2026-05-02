@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, cost, cohort_date
-    FROM smelt.ref('sql_l1_0')
+    FROM smelt.models.sql_l1_0
     WHERE quantity > 0
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.cost
 FROM aggregated a
 INNER JOIN filtered f ON a.amount = f.amount
+

@@ -19,3 +19,4 @@ SELECT
     DAYOFWEEK(calendar_date) AS day_of_week,
     QUARTER(calendar_date) AS quarter
 FROM date_spine
+

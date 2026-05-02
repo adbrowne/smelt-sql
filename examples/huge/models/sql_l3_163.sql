@@ -11,5 +11,6 @@ SELECT
     updated_at,
     cost,
     plan_type
-FROM smelt.ref('sql_l2_221')
+FROM smelt.models.sql_l2_221
 WHERE platform = 'web'
+

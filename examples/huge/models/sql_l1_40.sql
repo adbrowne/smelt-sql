@@ -11,5 +11,6 @@ SELECT
     SUM(revenue) AS agg_0,
     COUNT(*) AS agg_1,
     SUM(quantity) AS agg_2
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 GROUP BY cost
+

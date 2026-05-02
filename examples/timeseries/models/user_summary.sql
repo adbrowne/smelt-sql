@@ -11,5 +11,5 @@ SELECT
     user_id,
     MIN(event_timestamp) AS first_event_timestamp,
     MAX(event_timestamp) AS last_event_timestamp
-FROM smelt.source('raw.events')
+FROM smelt.sources.raw.events
 GROUP BY user_id

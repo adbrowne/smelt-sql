@@ -11,5 +11,6 @@ SELECT
     email_domain,
     duration_seconds,
     category
-FROM smelt.ref('categories')
+FROM smelt.models.categories
 WHERE quantity > 0
+

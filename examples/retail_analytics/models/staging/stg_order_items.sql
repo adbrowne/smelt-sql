@@ -12,4 +12,5 @@ SELECT
         WHEN return_flag = false THEN 'N/A'
     END AS return_reason,
     CAST(item_date AS DATE) AS item_date
-FROM smelt.source('raw.order_items')
+FROM smelt.sources.raw.order_items
+

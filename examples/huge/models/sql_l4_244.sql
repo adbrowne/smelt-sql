@@ -10,5 +10,6 @@ SELECT
     a.discount,
     a.email_domain,
     b.browser
-FROM smelt.ref('sql_l3_171') a
-LEFT JOIN smelt.ref('sql_l3_186') b ON a.user_id = b.user_id
+FROM smelt.models.sql_l3_171 a
+LEFT JOIN smelt.models.sql_l3_186 b ON a.user_id = b.user_id
+

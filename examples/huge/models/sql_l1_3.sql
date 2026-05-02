@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT country, page_path, quantity
-    FROM smelt.ref('notifications')
+    FROM smelt.models.notifications
     WHERE platform = 'web'
 )
 SELECT
     b.country,
     AVG(duration_seconds) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('notifications') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.notifications j ON b.user_id = j.user_id
 GROUP BY b.country
+

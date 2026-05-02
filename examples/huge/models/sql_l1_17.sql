@@ -11,5 +11,6 @@ SELECT
     duration_seconds,
     cohort_date,
     segment
-FROM smelt.ref('campaigns')
+FROM smelt.models.campaigns
 WHERE quantity > 0
+

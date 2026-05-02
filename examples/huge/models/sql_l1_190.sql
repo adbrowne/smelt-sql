@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT country, created_at, order_id
-    FROM smelt.ref('users')
+    FROM smelt.models.users
     WHERE event_type = 'purchase'
 )
 SELECT
     b.country,
     SUM(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('users') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.users j ON b.user_id = j.user_id
 GROUP BY b.country
+

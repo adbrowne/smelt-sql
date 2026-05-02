@@ -6,5 +6,6 @@ SELECT
     COUNT(CASE WHEN event_type = 'add_to_cart' THEN 1 END) AS cart_adds,
     COUNT(CASE WHEN event_type = 'purchase' THEN 1 END) AS purchases,
     COUNT(CASE WHEN event_type = 'purchase' THEN 1 END) * 1.0 / COUNT(*) AS conversion_rate
-FROM smelt.ref('stg_events')
+FROM smelt.models.staging.stg_events
 GROUP BY visitor_id
+

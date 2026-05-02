@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT country, campaign_id, status
-    FROM smelt.ref('sql_l3_80')
+    FROM smelt.models.sql_l3_80
     WHERE platform = 'web'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.campaign_id
 FROM aggregated a
 INNER JOIN filtered f ON a.country = f.country
+

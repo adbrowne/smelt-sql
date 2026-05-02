@@ -70,7 +70,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// Pre-populate `raw.orders` in the DuckDB file so the source
-/// (`smelt.source('raw.orders')`) resolves at run time. Uses the embedded
+/// (`smelt.sources.raw.orders`) resolves at run time. Uses the embedded
 /// `duckdb` crate directly — equivalent to a `load_raw.py` step.
 fn seed_raw_orders(db_path: &Path) -> anyhow::Result<()> {
     let conn = duckdb::Connection::open(db_path)?;
@@ -253,7 +253,7 @@ fn smelt_shop_min_idempotency_and_types() {
     );
 
     // B8: qualified column refs over a bare upstream MODEL table. After
-    // `smelt.ref('stg_orders')` is resolved to `main.stg_orders AS o`, the
+    // `smelt.models.stg_orders` is resolved to `main.stg_orders AS o`, the
     // alias `o` was not registered in the TypeContext, so `o.line_revenue`
     // (a derived column in the upstream model — not in sources.yml)
     // resolved to Unknown and SUM was narrowed to BIGINT. This is what

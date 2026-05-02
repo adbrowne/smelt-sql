@@ -10,7 +10,8 @@ SELECT
     order_id,
     user_id,
     os_name
-FROM smelt.ref('sql_l1_62')
+FROM smelt.models.sql_l1_62
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_62') WHERE created_at >= '2024-01-01'
+    SELECT user_id FROM smelt.models.sql_l1_62 WHERE created_at >= '2024-01-01'
 )
+

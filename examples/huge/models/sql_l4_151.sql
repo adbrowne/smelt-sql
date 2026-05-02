@@ -11,5 +11,6 @@ SELECT
     is_active,
     channel,
     created_at
-FROM smelt.ref('sql_l3_153')
+FROM smelt.models.sql_l3_153
 WHERE is_active = true
+

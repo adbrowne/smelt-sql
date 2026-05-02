@@ -6,7 +6,7 @@ WITH customer_metrics AS (
         order_count,
         total_revenue,
         total_net_revenue
-    FROM smelt.ref('int_customer_orders')
+    FROM smelt.models.intermediate.int_customer_orders
 ),
 
 customer_quantiles AS (
@@ -36,3 +36,4 @@ SELECT
         ELSE 'At Risk'
     END AS computed_segment
 FROM customer_quantiles
+

@@ -10,7 +10,8 @@ SELECT
     score,
     plan_type,
     discount
-FROM smelt.ref('sql_l1_173')
+FROM smelt.models.sql_l1_173
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l1_54') WHERE is_active = true
+    SELECT user_id FROM smelt.models.sql_l1_54 WHERE is_active = true
 )
+

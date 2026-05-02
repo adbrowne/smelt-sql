@@ -6,6 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT transaction_id, created_at, status, 'source_0' AS source_tag FROM smelt.ref('shipments')
+SELECT transaction_id, created_at, status, 'source_0' AS source_tag FROM smelt.models.shipments
 UNION ALL
-SELECT transaction_id, created_at, status, 'source_1' AS source_tag FROM smelt.ref('shipments')
+SELECT transaction_id, created_at, status, 'source_1' AS source_tag FROM smelt.models.shipments
+

@@ -10,7 +10,8 @@ SELECT
     is_verified,
     channel,
     os_name
-FROM smelt.ref('sql_l2_54')
+FROM smelt.models.sql_l2_54
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_110') WHERE is_active = true
+    SELECT user_id FROM smelt.models.sql_l2_110 WHERE is_active = true
 )
+

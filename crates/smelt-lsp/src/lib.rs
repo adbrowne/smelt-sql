@@ -14,10 +14,9 @@ use smelt_core::{
 };
 use smelt_db::{
     check_type_diagnostics, file_diagnostics, functions_in_file,
-    yaml_edits::{find_source_column_yaml_rename, find_source_table_yaml_rename},
-    Database, Diagnostic as DbDiagnostic, DiagnosticAcc, DiagnosticCode as DbCode,
-    DiagnosticData as DbData, DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile,
-    Workspace,
+    yaml_edits::find_source_column_yaml_rename, Database, Diagnostic as DbDiagnostic,
+    DiagnosticAcc, DiagnosticCode as DbCode, DiagnosticData as DbData,
+    DiagnosticSeverity as DbSeverity, ProjectInput, SourceFile, Workspace,
 };
 // salsa is not a direct dependency of smelt-lsp; we access
 // the Salsa DB exclusively through smelt_db's public API.
@@ -436,27 +435,25 @@ fn find_column_in_ctes(
                     }
                 }
             }
-            // If no explicit match, trace through wildcards
+            // If no explicit match, trace through wildcards (smelt.<path> form)
             if !found_explicit && has_wildcard {
                 if let Some(from_clause) = cte_select.from_clause() {
                     let all_refs = from_clause
                         .table_refs()
                         .chain(from_clause.joins().filter_map(|j| j.table_ref()));
                     for table_ref in all_refs {
-                        if let Some(func) = table_ref.function_call() {
-                            if let Some(ref_call) =
-                                smelt_parser::ast::RefCall::from_function_call(func)
-                            {
-                                if let Some(model_name) = ref_call.model_name() {
-                                    if let Some(upstream_path) = resolve_ref_path(db, &model_name) {
-                                        find_column_in_model_chain(
-                                            db,
-                                            &upstream_path,
-                                            column_name,
-                                            10,
-                                            locations,
-                                        );
-                                    }
+                        if let Some(path_ref) = table_ref.smelt_path_ref() {
+                            let model_name =
+                                path_ref.segments().last().cloned().unwrap_or_default();
+                            if !model_name.is_empty() {
+                                if let Some(upstream_path) = resolve_ref_path(db, &model_name) {
+                                    find_column_in_model_chain(
+                                        db,
+                                        &upstream_path,
+                                        column_name,
+                                        10,
+                                        locations,
+                                    );
                                 }
                             }
                         }
@@ -582,28 +579,15 @@ fn find_column_in_sources(
         Some(s) => s,
         None => return,
     };
-    let from_clause = match select_stmt.from_clause() {
+    // smelt.source() was removed in Phase 4 — no source refs to check.
+    // The from_clause is no longer needed here; kept as _from_clause for
+    // potential future use with smelt.sources.* path refs.
+    let _from_clause = match select_stmt.from_clause() {
         Some(f) => f,
         None => return,
     };
 
-    // Collect source references with their aliases
-    let mut source_refs: Vec<(String, String, Option<String>)> = Vec::new(); // (source_name, table_name, alias)
-    let all_table_refs = from_clause
-        .table_refs()
-        .chain(from_clause.joins().filter_map(|j| j.table_ref()));
-
-    for table_ref in all_table_refs {
-        if let Some(func) = table_ref.function_call() {
-            if let Some(source_call) = smelt_parser::ast::SourceCall::from_function_call(func) {
-                if let (Some(sn), Some(tn)) = (source_call.source_name(), source_call.table_name())
-                {
-                    let alias = table_ref.alias();
-                    source_refs.push((sn, tn, alias));
-                }
-            }
-        }
-    }
+    let source_refs: Vec<(String, String, Option<String>)> = Vec::new();
 
     for (source_name, table_name, alias) in &source_refs {
         // Check if this source matches the qualifier
@@ -641,7 +625,7 @@ fn find_column_in_sources(
     }
 }
 
-/// Collect model names from FROM clause ref() calls
+/// Collect model names from FROM clause smelt.<path> refs
 fn collect_from_model_names(db: &Database, path: &std::path::Path) -> Vec<String> {
     let file = match lookup_file(db, path) {
         Some(f) => f,
@@ -668,11 +652,9 @@ fn collect_from_model_names(db: &Database, path: &std::path::Path) -> Vec<String
         .chain(from_clause.joins().filter_map(|j| j.table_ref()));
 
     for table_ref in all_refs {
-        if let Some(func) = table_ref.function_call() {
-            if let Some(ref_call) = smelt_parser::ast::RefCall::from_function_call(func) {
-                if let Some(model_name) = ref_call.model_name() {
-                    names.push(model_name);
-                }
+        if let Some(path_ref) = table_ref.smelt_path_ref() {
+            if let Some(model_name) = path_ref.segments().last().cloned() {
+                names.push(model_name);
             }
         }
     }
@@ -861,18 +843,18 @@ pub fn render_expansion_frames(
     (message, related_information)
 }
 
-/// Find the innermost `SMELT_FN_CALL` whose text range contains `offset`.
+/// Find the innermost `SMELT_PATH_CALL` whose text range contains `offset`.
 ///
-/// Used by hover and completion to dispatch on a `smelt.fn.<name>(...)`
+/// Used by hover and completion to dispatch on a `smelt.functions.<name>(...)`
 /// call site (Phase 48: hover wiring + PASSING-body completion).
 pub fn find_smelt_fn_call_at_cursor(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     offset: usize,
-) -> Option<smelt_parser::ast::SmeltFnCall> {
-    let mut best: Option<smelt_parser::ast::SmeltFnCall> = None;
+) -> Option<smelt_parser::ast::SmeltPathCall> {
+    let mut best: Option<smelt_parser::ast::SmeltPathCall> = None;
     let mut best_size: usize = usize::MAX;
     for node in syntax.descendants() {
-        if let Some(call) = smelt_parser::ast::SmeltFnCall::cast(node) {
+        if let Some(call) = smelt_parser::ast::SmeltPathCall::cast(node) {
             let r = call.text_range();
             let start: usize = r.start().into();
             let end: usize = r.end().into();
@@ -1078,6 +1060,7 @@ impl Backend {
                 DbCode::DeclaredCardinalityUnverifiable => "declared-cardinality-unverifiable",
                 DbCode::MissingProvenancePushdownAdvisory => "missing-provenance-pushdown-advisory",
                 DbCode::ExternFragmentParamUnsupported => "extern-fragment-param-unsupported",
+                DbCode::KindMismatch => "kind-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -2089,11 +2072,6 @@ impl LanguageServer for Backend {
         // the non-Send AST before any await points.
         enum GotoTarget {
             RefModel(PathBuf),
-            SourceFile {
-                sources_path: PathBuf,
-                source_name: String,
-                table_name: String,
-            },
             /// CTE definition in the same file — target is an LSP Range
             SameFile(Range),
             /// Column definitions (potentially multiple for ambiguous refs)
@@ -2112,40 +2090,6 @@ impl LanguageServer for Backend {
             if let Some(syntax) = syntax {
                 if let Some(file) = AstFile::cast(syntax) {
                     match symbol_at_cursor(&file, &text, cursor_offset) {
-                        Some(SymbolAtCursor::RefCall { name }) => {
-                            resolve_ref_path(&db, &name).map(GotoTarget::RefModel)
-                        }
-                        Some(SymbolAtCursor::SourceCall {
-                            source_name,
-                            table_name,
-                        }) => {
-                            let project_root = file_project_root(&db, &effective_path);
-                            let project = lookup_project(&db, &project_root);
-                            if project
-                                .and_then(|p| {
-                                    smelt_db::resolve_source(
-                                        &db,
-                                        p,
-                                        source_name.clone(),
-                                        table_name.clone(),
-                                    )
-                                })
-                                .is_some()
-                            {
-                                let sources_path = project_root.join("sources.yml");
-                                if sources_path.exists() {
-                                    Some(GotoTarget::SourceFile {
-                                        sources_path,
-                                        source_name,
-                                        table_name,
-                                    })
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        }
                         Some(SymbolAtCursor::CteReference { name }) => {
                             // Jump to CTE definition
                             let mut result = None;
@@ -2298,6 +2242,15 @@ impl LanguageServer for Backend {
                                 }
                             }
                         }
+                        Some(SymbolAtCursor::PathRef { segments }) => {
+                            // Resolve via the unified path data plane (Phase 2a).
+                            let ws = Workspace::try_get(&db);
+                            ws.and_then(|w| {
+                                smelt_db::resolve_ref_path(&db, w, segments)
+                                    .and_then(|r| r.source_file)
+                                    .map(|f| GotoTarget::RefModel(f.path(&db).clone()))
+                            })
+                        }
                         None => None,
                     }
                 } else {
@@ -2320,25 +2273,6 @@ impl LanguageServer for Backend {
                 drop(py_sources);
 
                 if let Ok(target_uri) = Url::from_file_path(&actual_path) {
-                    Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                        uri: target_uri,
-                        range: Range {
-                            start: Position::new(target_line, 0),
-                            end: Position::new(target_line, 0),
-                        },
-                    })))
-                } else {
-                    Ok(None)
-                }
-            }
-            Some(GotoTarget::SourceFile {
-                sources_path,
-                source_name,
-                table_name,
-            }) => {
-                let target_line = find_source_table_line(&sources_path, &source_name, &table_name);
-
-                if let Ok(target_uri) = Url::from_file_path(&sources_path) {
                     Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri: target_uri,
                         range: Range {
@@ -2430,41 +2364,20 @@ impl LanguageServer for Backend {
             if let Some(syntax) = syntax {
                 if let Some(file) = AstFile::cast(syntax) {
                     match symbol_at_cursor(&file, &text, cursor_offset) {
-                        Some(SymbolAtCursor::RefCall { name }) => {
-                            let all_files = workspace_files(&db);
-                            let all_file_refs: Vec<_> = all_files
-                                .iter()
-                                .map(|f| {
-                                    (
-                                        f.path(&db).clone(),
-                                        (*smelt_db::model_refs(&db, *f)).clone(),
-                                    )
-                                })
-                                .collect();
-                            let refs =
-                                smelt_db::references::find_model_references(&name, &all_file_refs);
-                            RefResult::PathRanges(refs)
-                        }
-                        Some(SymbolAtCursor::SourceCall {
-                            source_name,
-                            table_name,
-                        }) => {
-                            let qualified_name = format!("{}.{}", source_name, table_name);
-                            let all_files = workspace_files(&db);
-                            let all_file_sources: Vec<_> = all_files
-                                .iter()
-                                .map(|f| {
-                                    (
-                                        f.path(&db).clone(),
-                                        (*smelt_db::model_sources(&db, *f)).clone(),
-                                    )
-                                })
-                                .collect();
-                            let refs = smelt_db::references::find_source_references(
-                                &qualified_name,
-                                &all_file_sources,
-                            );
-                            RefResult::PathRanges(refs)
+                        Some(SymbolAtCursor::PathRef { segments }) => {
+                            // Find all files that contain a path ref with these segments
+                            let ws = Workspace::try_get(&db);
+                            let ws_files = ws.map(|w| w.files(&db).clone()).unwrap_or_default();
+                            let mut all_refs: Vec<(PathBuf, smelt_parser::ast::Range)> = Vec::new();
+                            for f in &ws_files {
+                                let path_refs = smelt_db::model_path_refs(&db, *f);
+                                for loc in path_refs.iter() {
+                                    if loc.path == segments {
+                                        all_refs.push((f.path(&db).clone(), loc.range));
+                                    }
+                                }
+                            }
+                            RefResult::PathRanges(all_refs)
                         }
                         Some(SymbolAtCursor::CteDefinition { name })
                         | Some(SymbolAtCursor::CteReference { name }) => {
@@ -2808,52 +2721,6 @@ impl LanguageServer for Backend {
                         }
                         found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
                     }
-                    Some(SymbolAtCursor::RefCall { name }) => {
-                        // For ref calls, return the content range (inside quotes)
-                        let mut found_range = None;
-                        for ref_call in file.refs() {
-                            if ref_call.model_name().as_deref() == Some(name.as_str()) {
-                                if let Some(content_range) = ref_call.content_range() {
-                                    let r = smelt_parser::ast::text_range_to_range(
-                                        &text,
-                                        content_range,
-                                    );
-                                    found_range = Some((
-                                        r.start.line,
-                                        r.start.column,
-                                        r.end.line,
-                                        r.end.column,
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-                        found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
-                    }
-                    Some(SymbolAtCursor::SourceCall {
-                        source_name,
-                        table_name,
-                    }) => {
-                        // For source calls, return the table_name_range (just the table part)
-                        let mut found_range = None;
-                        for source_call in file.sources() {
-                            if source_call.source_name().as_deref() == Some(source_name.as_str())
-                                && source_call.table_name().as_deref() == Some(table_name.as_str())
-                            {
-                                if let Some(tn_range) = source_call.table_name_range() {
-                                    let r = smelt_parser::ast::text_range_to_range(&text, tn_range);
-                                    found_range = Some((
-                                        r.start.line,
-                                        r.start.column,
-                                        r.end.line,
-                                        r.end.column,
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-                        found_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, table_name))
-                    }
                     Some(SymbolAtCursor::ColumnRef { qualifier: _, name }) => {
                         // For column references, find the IDENT token at the cursor
                         // and return its range
@@ -2904,6 +2771,30 @@ impl LanguageServer for Backend {
                             }
                         }
                         best_range.map(|(sl, sc, el, ec)| (sl, sc, el, ec, name))
+                    }
+                    Some(SymbolAtCursor::PathRef { segments }) => {
+                        // For path refs, return the range of the entire smelt.<path> node
+                        for path_ref in file
+                            .syntax()
+                            .descendants()
+                            .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                        {
+                            if path_ref.segments() == segments {
+                                let r = smelt_parser::ast::text_range_to_range(
+                                    &text,
+                                    path_ref.text_range(),
+                                );
+                                let placeholder = segments.last().cloned().unwrap_or_default();
+                                return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                                    range: Range {
+                                        start: Position::new(r.start.line, r.start.column),
+                                        end: Position::new(r.end.line, r.end.column),
+                                    },
+                                    placeholder,
+                                }));
+                            }
+                        }
+                        return Ok(None);
                     }
                     _ => None,
                 }
@@ -2972,14 +2863,8 @@ impl LanguageServer for Backend {
                 /// old .sql file path (if it exists in the project)
                 old_model_path: Option<PathBuf>,
             },
-            Source {
-                /// (file_path, start_line, start_col, end_line, end_col) for SQL edits
-                sql_edits: Vec<(PathBuf, u32, u32, u32, u32)>,
-                /// YAML line edit: (line_number, old_line, new_line)
-                yaml_edit: Option<(u32, String, String)>,
-                /// Path to sources.yml
-                sources_yml_path: PathBuf,
-            },
+            // RenameKind::Source removed in Phase 4: smelt.source() is a parse error;
+            // source renames are handled through path-form refs (smelt.sources.*).
             Column {
                 /// Local edits in the current file: (start_line, start_col, end_line, end_col)
                 local_edits: Vec<(u32, u32, u32, u32)>,
@@ -3020,155 +2905,6 @@ impl LanguageServer for Backend {
                                 })
                                 .collect();
                             Some(RenameKind::Cte { edits })
-                        }
-                        Some(SymbolAtCursor::RefCall { name }) => {
-                            // Check for naming conflict
-                            let all_files_paths = all_file_paths(&db);
-                            let all_files_inputs = workspace_files(&db);
-                            let new_model_path = effective_path
-                                .parent()
-                                .unwrap_or(effective_path.as_ref())
-                                .join(format!("{}.sql", new_name));
-                            if all_files_paths.contains(&new_model_path) {
-                                return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
-                                    "A model named '{}' already exists",
-                                    new_name
-                                )));
-                            }
-
-                            // Collect all ref locations across the project
-                            let all_file_refs: Vec<_> = all_files_inputs
-                                .iter()
-                                .map(|f| {
-                                    (
-                                        f.path(&db).clone(),
-                                        (*smelt_db::model_refs(&db, *f)).clone(),
-                                    )
-                                })
-                                .collect();
-                            let ref_locations =
-                                smelt_db::references::find_model_references(&name, &all_file_refs);
-
-                            // For each ref location, get the content range (inside quotes)
-                            let mut edits = Vec::new();
-                            for (ref_path, _) in &ref_locations {
-                                let ref_file = match lookup_file(&db, ref_path) {
-                                    Some(f) => f,
-                                    None => continue,
-                                };
-                                let ref_text = ref_file.text(&db).clone();
-                                let ref_parse = smelt_db::parse_file(&db, ref_file);
-                                let ref_syntax = ref_parse.syntax();
-                                if let Some(ref_file) = AstFile::cast(ref_syntax) {
-                                    for ref_call in ref_file.refs() {
-                                        if ref_call.model_name().as_deref() == Some(&name) {
-                                            if let Some(content_range) = ref_call.content_range() {
-                                                let r = smelt_parser::ast::text_range_to_range(
-                                                    &ref_text,
-                                                    content_range,
-                                                );
-                                                edits.push((
-                                                    ref_path.clone(),
-                                                    r.start.line,
-                                                    r.start.column,
-                                                    r.end.line,
-                                                    r.end.column,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Check if the model .sql file exists
-                            let model_dir =
-                                effective_path.parent().unwrap_or(effective_path.as_ref());
-                            let old_model_path = model_dir.join(format!("{}.sql", name));
-                            let old_path = if all_files_paths.contains(&old_model_path) {
-                                Some(old_model_path)
-                            } else {
-                                None
-                            };
-
-                            Some(RenameKind::Model {
-                                model_name: name,
-                                edits,
-                                old_model_path: old_path,
-                            })
-                        }
-                        Some(SymbolAtCursor::SourceCall {
-                            source_name,
-                            table_name,
-                        }) => {
-                            let qualified = format!("{}.{}", source_name, table_name);
-
-                            // Collect all source() call sites across the project
-                            let all_files_inputs = workspace_files(&db);
-                            let all_file_sources: Vec<_> = all_files_inputs
-                                .iter()
-                                .map(|f| {
-                                    (
-                                        f.path(&db).clone(),
-                                        (*smelt_db::model_sources(&db, *f)).clone(),
-                                    )
-                                })
-                                .collect();
-                            let source_locations = smelt_db::references::find_source_references(
-                                &qualified,
-                                &all_file_sources,
-                            );
-
-                            // For each source location, get the table_name_range
-                            let mut sql_edits = Vec::new();
-                            for (ref_path, _) in &source_locations {
-                                let ref_file = match lookup_file(&db, ref_path) {
-                                    Some(f) => f,
-                                    None => continue,
-                                };
-                                let ref_text = ref_file.text(&db).clone();
-                                let ref_parse = smelt_db::parse_file(&db, ref_file);
-                                let ref_syntax = ref_parse.syntax();
-                                if let Some(ref_file) = AstFile::cast(ref_syntax) {
-                                    for source_call in ref_file.sources() {
-                                        if source_call.source_name().as_deref()
-                                            == Some(source_name.as_str())
-                                            && source_call.table_name().as_deref()
-                                                == Some(table_name.as_str())
-                                        {
-                                            if let Some(tn_range) = source_call.table_name_range() {
-                                                let r = smelt_parser::ast::text_range_to_range(
-                                                    &ref_text, tn_range,
-                                                );
-                                                sql_edits.push((
-                                                    ref_path.clone(),
-                                                    r.start.line,
-                                                    r.start.column,
-                                                    r.end.line,
-                                                    r.end.column,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Find the YAML table key line for rename
-                            let project_root = file_project_root(&db, &effective_path);
-                            let sources_yml_content = project_sources_yaml(&db, &project_root);
-                            let sources_yml_path = project_root.join("sources.yml");
-
-                            let yaml_edit = find_source_table_yaml_rename(
-                                &sources_yml_content,
-                                &source_name,
-                                &table_name,
-                                &new_name,
-                            );
-
-                            Some(RenameKind::Source {
-                                sql_edits,
-                                yaml_edit,
-                                sources_yml_path,
-                            })
                         }
                         Some(SymbolAtCursor::ColumnRef {
                             qualifier,
@@ -3307,9 +3043,13 @@ impl LanguageServer for Backend {
                                             Some(f) => f,
                                             None => continue,
                                         };
-                                        let down_model_refs =
-                                            smelt_db::model_refs(&db, down_file_input);
-                                        if !down_model_refs.iter().any(|r| r.name == *exposing) {
+                                        let down_model_path_refs =
+                                            smelt_db::model_path_refs(&db, down_file_input);
+                                        if !down_model_path_refs.iter().any(|r| {
+                                            r.path.first().map(|s| s.as_str()) == Some("models")
+                                                && r.path.get(1).map(|s| s.as_str())
+                                                    == Some(exposing.as_str())
+                                        }) {
                                             continue;
                                         }
                                         let down_text = down_file_input.text(&db).clone();
@@ -3372,6 +3112,60 @@ impl LanguageServer for Backend {
                                 yaml_edit,
                                 sources_yml_path,
                             })
+                        }
+                        Some(SymbolAtCursor::PathRef { segments })
+                            if segments.first().map(|s| s.as_str()) == Some("models") =>
+                        {
+                            if let Some(model_name) = segments.get(1).cloned() {
+                                // Collect all smelt.models.<model_name> path-ref ranges across workspace
+                                let ws = Workspace::try_get(&db);
+                                let ws_files = ws.map(|w| w.files(&db).clone()).unwrap_or_default();
+                                let mut edits: Vec<(PathBuf, u32, u32, u32, u32)> = Vec::new();
+                                for f in &ws_files {
+                                    let path = f.path(&db).clone();
+                                    let f_parse = smelt_db::parse_file(&db, *f);
+                                    let f_text = f.text(&db).clone();
+                                    let f_syntax = f_parse.syntax();
+                                    if let Some(f_file) = AstFile::cast(f_syntax) {
+                                        for path_ref in f_file
+                                            .syntax()
+                                            .descendants()
+                                            .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                                        {
+                                            let segs = path_ref.segments();
+                                            if segs.first().map(|s| s.as_str()) == Some("models")
+                                                && segs.get(1).map(|s| s.as_str())
+                                                    == Some(model_name.as_str())
+                                            {
+                                                let r = smelt_parser::ast::text_range_to_range(
+                                                    &f_text,
+                                                    path_ref.text_range(),
+                                                );
+                                                edits.push((
+                                                    path.clone(),
+                                                    r.start.line,
+                                                    r.start.column,
+                                                    r.end.line,
+                                                    r.end.column,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Compute old model file path
+                                let old_model_path = ws
+                                    .and_then(|w| smelt_db::resolve_ref(&db, w, model_name.clone()))
+                                    .map(|sf| sf.path(&db).clone());
+
+                                Some(RenameKind::Model {
+                                    model_name,
+                                    edits,
+                                    old_model_path,
+                                })
+                            } else {
+                                None
+                            }
                         }
                         _ => None,
                     }
@@ -3473,68 +3267,6 @@ impl LanguageServer for Backend {
                     Backend::sync_workspace(&mut db, &tracked, &project_roots);
                     drop(tracked);
                     drop(db);
-                }
-
-                Ok(Some(WorkspaceEdit {
-                    document_changes: Some(DocumentChanges::Operations(document_changes)),
-                    ..Default::default()
-                }))
-            }
-            Some(RenameKind::Source {
-                sql_edits,
-                yaml_edit,
-                sources_yml_path,
-            }) => {
-                if sql_edits.is_empty() && yaml_edit.is_none() {
-                    return Ok(None);
-                }
-
-                let mut document_changes: Vec<DocumentChangeOperation> = Vec::new();
-
-                // Group SQL text edits by file path
-                let mut edits_by_file: HashMap<PathBuf, Vec<TextEdit>> = HashMap::new();
-                for (file_path, sl, sc, el, ec) in sql_edits {
-                    edits_by_file.entry(file_path).or_default().push(TextEdit {
-                        range: Range {
-                            start: Position::new(sl, sc),
-                            end: Position::new(el, ec),
-                        },
-                        new_text: new_name.clone(),
-                    });
-                }
-
-                for (file_path, file_edits) in edits_by_file {
-                    let file_uri = Url::from_file_path(&file_path).unwrap_or_else(|_| uri.clone());
-                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
-                        text_document: OptionalVersionedTextDocumentIdentifier {
-                            uri: file_uri,
-                            version: None,
-                        },
-                        edits: file_edits.into_iter().map(OneOf::Left).collect(),
-                    }));
-                }
-
-                // Add YAML edit for the table key rename
-                if let Some((line_num, _old_line, new_line)) = yaml_edit {
-                    let yaml_uri =
-                        Url::from_file_path(&sources_yml_path).unwrap_or_else(|_| uri.clone());
-                    // Replace the entire line containing the old table key
-                    // We need to figure out the line length. Since we have the old line,
-                    // we use it to compute the end column.
-                    let old_line_len = _old_line.len() as u32;
-                    document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
-                        text_document: OptionalVersionedTextDocumentIdentifier {
-                            uri: yaml_uri,
-                            version: None,
-                        },
-                        edits: vec![OneOf::Left(TextEdit {
-                            range: Range {
-                                start: Position::new(line_num, 0),
-                                end: Position::new(line_num, old_line_len),
-                            },
-                            new_text: new_line,
-                        })],
-                    }));
                 }
 
                 Ok(Some(WorkspaceEdit {
@@ -3681,18 +3413,26 @@ impl LanguageServer for Backend {
             offset
         };
 
-        // Check if hovering over a ref() or source() call
+        // Check if hovering over a smelt.<path> ref
         if let Some(syntax) = syntax {
             if let Some(file) = AstFile::cast(syntax) {
-                // Check ref() calls
-                for ref_call in file.refs() {
-                    let range = ref_call.range();
+                // Check smelt.models.<name> path refs
+                for path_ref in file
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                {
+                    let segments = path_ref.segments();
+                    if segments.first().map(|s| s.as_str()) != Some("models") {
+                        continue;
+                    }
+                    let range = path_ref.text_range();
                     let start: usize = range.start().into();
                     let end: usize = range.end().into();
 
-                    // Check if cursor is within this ref call
+                    // Check if cursor is within this path ref
                     if cursor_offset >= start && cursor_offset <= end {
-                        if let Some(model_name) = ref_call.model_name() {
+                        if let Some(model_name) = segments.get(1).cloned() {
                             // Resolve upstream model and show its resolved schema
                             let ws = Workspace::try_get(&db);
                             let upstream_file =
@@ -3800,18 +3540,26 @@ impl LanguageServer for Backend {
                     }
                 }
 
-                // Check source() calls
-                for source_call in file.sources() {
-                    let range = source_call.range();
+                // Check smelt.sources.<source>.<table> path refs
+                for path_ref in file
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                {
+                    let segments = path_ref.segments();
+                    if segments.first().map(|s| s.as_str()) != Some("sources") {
+                        continue;
+                    }
+                    let range = path_ref.text_range();
                     let start: usize = range.start().into();
                     let end: usize = range.end().into();
 
-                    // Check if cursor is within this source call
+                    // Check if cursor is within this path ref
                     if cursor_offset >= start && cursor_offset <= end {
                         if let (Some(source_name), Some(table_name)) =
-                            (source_call.source_name(), source_call.table_name())
+                            (segments.get(1).cloned(), segments.get(2).cloned())
                         {
-                            let qualified_name = source_call.qualified_name().unwrap_or_default();
+                            let qualified_name = format!("{}.{}", source_name, table_name);
 
                             // Try to resolve the source
                             let project_root = file_project_root(&db, &effective_path);
@@ -3921,7 +3669,7 @@ impl LanguageServer for Backend {
                 // surface the declared return type or the parameter binding
                 // for a `PASSING <name> AS (...)` clause.
                 if let Some(call) = find_smelt_fn_call_at_cursor(file.syntax(), cursor_offset) {
-                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+                    let segments = call.segments();
                     let fn_name = segments.last().cloned().unwrap_or_default();
                     let ws = Workspace::try_get(&db);
                     let sig = ws.and_then(|w| smelt_db::resolve_function(&db, w, fn_name.clone()));
@@ -4381,6 +4129,50 @@ impl LanguageServer for Backend {
 
                 items
             }
+            CompletionContext::SmeltPath => {
+                // Phase 2c: return all workspace entities as `smelt.<segments>` labels.
+                let ws = Workspace::try_get(&db);
+                let Some(w) = ws else { return Ok(None) };
+                let all_files = w.files(&db).clone();
+                // Determine the project root from the current file.
+                let project_root = file_project_root(&db, &effective_path);
+                let mut items: Vec<CompletionItem> = all_files
+                    .iter()
+                    .filter_map(|f| {
+                        let file_path = f.path(&db);
+                        // Only SQL files.
+                        if file_path.extension().and_then(|e| e.to_str()) != Some("sql") {
+                            return None;
+                        }
+                        let rel = file_path.strip_prefix(&project_root).ok()?;
+                        let parent = rel.parent()?;
+                        let mut segments: Vec<String> = parent
+                            .components()
+                            .filter_map(|c| match c {
+                                std::path::Component::Normal(s) => {
+                                    Some(s.to_string_lossy().into_owned())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        let stem = file_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())?;
+                        segments.push(stem.clone());
+                        let label = format!("smelt.{}", segments.join("."));
+                        let insert = segments.join(".");
+                        Some(CompletionItem {
+                            label,
+                            insert_text: Some(insert),
+                            kind: Some(CompletionItemKind::MODULE),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.label.cmp(&b.label));
+                items
+            }
             CompletionContext::None => Vec::new(),
         };
 
@@ -4394,12 +4186,16 @@ impl LanguageServer for Backend {
 
 /// Completion context types
 #[derive(Debug)]
-enum CompletionContext {
+pub enum CompletionContext {
     InsideRef,               // Cursor inside ref('|')
     InsideSource,            // Cursor inside source('|')
     ColumnName,              // Cursor in a position where column name is expected
     QualifiedColumn(String), // Cursor after alias. (e.g., "t." for table alias t)
     FromClause,              // Cursor in FROM/JOIN position (offer CTE names)
+    /// Phase 2c: cursor positioned after a `smelt.` prefix (path form), e.g.
+    /// `FROM smelt.|` or `FROM smelt.models.|`. Completion should return all
+    /// workspace entities as `smelt.<segments>` labels.
+    SmeltPath,
     /// Phase 48: cursor inside the body of a `PASSING <name> AS (|)` clause
     /// attached to a `smelt.fn.<callee>(...)` call. Carries the parameter
     /// name and the trailing call-path segment so the completion list can
@@ -4412,7 +4208,7 @@ enum CompletionContext {
 }
 
 /// Determine what kind of completion to provide based on cursor position
-fn determine_completion_context(text: &str, offset: usize) -> CompletionContext {
+pub fn determine_completion_context(text: &str, offset: usize) -> CompletionContext {
     // Look backward from cursor to determine context
     let before_cursor = &text[..offset.min(text.len())];
 
@@ -4423,6 +4219,37 @@ fn determine_completion_context(text: &str, offset: usize) -> CompletionContext 
     // most recent `smelt.fn.<...>` call before the PASSING.
     if let Some(ctx) = detect_passing_body(before_cursor) {
         return ctx;
+    }
+
+    // Phase 2c: detect cursor after a `smelt.` path prefix. This must be
+    // checked before the legacy `ref(` / `source(` checks so that
+    // `smelt.ref(` still falls through to InsideRef.
+    // Pattern: text ends with `smelt.` or `smelt.<word>.` (possibly with
+    // partial segment at cursor).
+    {
+        // Find the last word boundary: scan back from cursor for valid path chars
+        // (alphanumeric, _, .) until we hit whitespace or other delimiter.
+        let trimmed = before_cursor
+            .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        let suffix = &before_cursor[trimmed.len()..];
+        // A smelt path starts with `smelt.` and contains only word chars and dots.
+        if suffix.starts_with("smelt.")
+            && suffix[6..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            // Make sure this is NOT `smelt.ref(` or `smelt.source(` (legacy forms
+            // get their own context below).
+            let rest = &suffix[6..];
+            let is_legacy = rest.starts_with("ref(")
+                || rest.starts_with("ref('")
+                || rest.starts_with("source(")
+                || rest.starts_with("source('")
+                || rest.starts_with("fn.");
+            if !is_legacy {
+                return CompletionContext::SmeltPath;
+            }
+        }
     }
 
     // Check if we're inside source('')
@@ -4605,11 +4432,12 @@ fn detect_passing_body(before_cursor: &str) -> Option<CompletionContext> {
         return None;
     }
 
-    // Step 5: extract the callee name — last `smelt.fn.<...>` call before
-    // the `PASSING`. We look for the most recent `smelt.fn.` literal in
+    // Step 5: extract the callee name — last `smelt.functions.<...>` call before
+    // the `PASSING`. We look for the most recent `smelt.functions.` literal in
     // `before_cursor` and take the dotted-identifier that follows.
-    let smelt_fn = before_cursor.rfind("smelt.fn.")?;
-    let after = &before_cursor[smelt_fn + "smelt.fn.".len()..];
+    // Phase 5b: `smelt.fn.*` is removed; only `smelt.functions.*` is valid.
+    let smelt_fn = before_cursor.rfind("smelt.functions.")?;
+    let after = &before_cursor[smelt_fn + "smelt.functions.".len()..];
     let mut last_segment_end = 0usize;
     for (i, ch) in after.char_indices() {
         if ch.is_alphanumeric() || ch == '_' || ch == '.' {
@@ -4696,69 +4524,23 @@ fn extract_from_aliases(
     select_stmt: &smelt_parser::ast::SelectStmt,
     db: &smelt_db::Database,
 ) -> std::collections::HashMap<String, AliasTarget> {
-    use smelt_parser::ast::{RefCall, SourceCall};
-
     let mut aliases = std::collections::HashMap::new();
 
     if let Some(from_clause) = select_stmt.from_clause() {
         // Process main table refs in FROM clause
         for table_ref in from_clause.table_refs() {
-            if let Some(func) = table_ref.function_call() {
-                // Check for smelt.source()
-                if let Some(source_call) = SourceCall::from_function_call(func.clone()) {
-                    if let (Some(source_name), Some(table_name)) =
-                        (source_call.source_name(), source_call.table_name())
-                    {
-                        // Use explicit alias if present, otherwise use table name
-                        let alias_name = table_ref.alias().unwrap_or_else(|| table_name.clone());
-                        aliases.insert(
-                            alias_name,
-                            AliasTarget::Source {
-                                source_name,
-                                table_name,
-                            },
-                        );
-                    }
-                }
-                // Check for smelt.ref()
-                else if let Some(ref_call) = RefCall::from_function_call(func) {
-                    if let Some(model_name) = ref_call.model_name() {
-                        // Use explicit alias if present, otherwise use model name
-                        let alias_name = table_ref.alias().unwrap_or_else(|| model_name.clone());
-                        aliases.insert(alias_name, AliasTarget::Model { model_name });
-                    }
-                }
+            if let Some(path_ref) = table_ref.smelt_path_ref() {
+                let segments = path_ref.segments();
+                add_path_ref_alias(&table_ref, &segments, &mut aliases);
             }
         }
 
         // Process JOINed table refs
         for join in from_clause.joins() {
             if let Some(table_ref) = join.table_ref() {
-                if let Some(func) = table_ref.function_call() {
-                    // Check for smelt.source()
-                    if let Some(source_call) = SourceCall::from_function_call(func.clone()) {
-                        if let (Some(source_name), Some(table_name)) =
-                            (source_call.source_name(), source_call.table_name())
-                        {
-                            let alias_name =
-                                table_ref.alias().unwrap_or_else(|| table_name.clone());
-                            aliases.insert(
-                                alias_name,
-                                AliasTarget::Source {
-                                    source_name,
-                                    table_name,
-                                },
-                            );
-                        }
-                    }
-                    // Check for smelt.ref()
-                    else if let Some(ref_call) = RefCall::from_function_call(func) {
-                        if let Some(model_name) = ref_call.model_name() {
-                            let alias_name =
-                                table_ref.alias().unwrap_or_else(|| model_name.clone());
-                            aliases.insert(alias_name, AliasTarget::Model { model_name });
-                        }
-                    }
+                if let Some(path_ref) = table_ref.smelt_path_ref() {
+                    let segments = path_ref.segments();
+                    add_path_ref_alias(&table_ref, &segments, &mut aliases);
                 }
             }
         }
@@ -4768,6 +4550,37 @@ fn extract_from_aliases(
     let _ = db;
 
     aliases
+}
+
+/// Insert an alias entry for a `smelt.<path>` table ref based on its segments.
+fn add_path_ref_alias(
+    table_ref: &smelt_parser::ast::TableRef,
+    segments: &[String],
+    aliases: &mut std::collections::HashMap<String, AliasTarget>,
+) {
+    match segments.first().map(|s| s.as_str()) {
+        Some("models") => {
+            if let Some(model_name) = segments.get(1).cloned() {
+                let alias_name = table_ref.alias().unwrap_or_else(|| model_name.clone());
+                aliases.insert(alias_name, AliasTarget::Model { model_name });
+            }
+        }
+        Some("sources") => {
+            if let (Some(source_name), Some(table_name)) =
+                (segments.get(1).cloned(), segments.get(2).cloned())
+            {
+                let alias_name = table_ref.alias().unwrap_or_else(|| table_name.clone());
+                aliases.insert(
+                    alias_name,
+                    AliasTarget::Source {
+                        source_name,
+                        table_name,
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

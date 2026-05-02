@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT device_type, category, page_path
-    FROM smelt.ref('orders')
+    FROM smelt.models.orders
     WHERE is_active = true
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.category
 FROM aggregated a
 INNER JOIN filtered f ON a.device_type = f.device_type
+

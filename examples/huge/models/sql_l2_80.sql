@@ -12,5 +12,6 @@ SELECT
     MIN(created_at) AS agg_1,
     SUM(quantity) AS agg_2,
     COUNT(DISTINCT user_id) AS agg_3
-FROM smelt.ref('sql_l1_39')
+FROM smelt.models.sql_l1_39
 GROUP BY country
+

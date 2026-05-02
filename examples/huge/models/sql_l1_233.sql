@@ -11,5 +11,6 @@ SELECT
     platform,
     transaction_id,
     quantity
-FROM smelt.ref('products')
+FROM smelt.models.products
 WHERE score >= 50
+

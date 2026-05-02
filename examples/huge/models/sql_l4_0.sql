@@ -10,7 +10,8 @@ SELECT
     browser,
     revenue,
     page_path
-FROM smelt.ref('sql_l3_157')
+FROM smelt.models.sql_l3_157
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l3_14') WHERE score >= 50
+    SELECT user_id FROM smelt.models.sql_l3_14 WHERE score >= 50
 )
+

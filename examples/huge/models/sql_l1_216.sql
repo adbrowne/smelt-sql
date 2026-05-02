@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT referrer, segment, device_type
-    FROM smelt.ref('orders')
+    FROM smelt.models.orders
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.segment
 FROM aggregated a
 INNER JOIN filtered f ON a.referrer = f.referrer
+

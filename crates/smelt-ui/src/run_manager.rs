@@ -618,6 +618,8 @@ fn compile_sql(sql: &str, schema: &str, backend: &dyn smelt_backend::Backend) ->
         cross_engine_refs: std::collections::HashMap::new(),
         smelt_as_struct: None,
         smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: None,
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }

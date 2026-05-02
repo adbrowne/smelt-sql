@@ -10,4 +10,5 @@ SELECT
     cohort_date,
     page_path,
     LAG(amount, 1) OVER (PARTITION BY cohort_date ORDER BY created_at) AS win_val
-FROM smelt.ref('transactions')
+FROM smelt.models.transactions
+

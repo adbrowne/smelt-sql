@@ -12,5 +12,6 @@ SELECT
     SUM(quantity) AS agg_1,
     SUM(amount) AS agg_2,
     MIN(created_at) AS agg_3
-FROM smelt.ref('sql_l1_28')
+FROM smelt.models.sql_l1_28
 GROUP BY created_at
+

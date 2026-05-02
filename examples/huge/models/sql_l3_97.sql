@@ -8,12 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT profit, country, category
-    FROM smelt.ref('sql_l2_6')
+    FROM smelt.models.sql_l2_6
     WHERE country = 'US'
 )
 SELECT
     b.profit,
     COUNT(*) AS agg_val
 FROM base b
-INNER JOIN smelt.ref('sql_l2_17') j ON b.user_id = j.user_id
+INNER JOIN smelt.models.sql_l2_17 j ON b.user_id = j.user_id
 GROUP BY b.profit
+

@@ -11,5 +11,6 @@ SELECT
     score,
     region,
     segment
-FROM smelt.ref('sql_l1_42')
+FROM smelt.models.sql_l1_42
 WHERE is_active = true
+

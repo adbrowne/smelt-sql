@@ -18,3 +18,4 @@ test:
     - {customer_id: 2, revenue_decile: 3, frequency_decile: 3}
     - {customer_id: 3, revenue_decile: 4, frequency_decile: 4}
 ---
+

@@ -8,4 +8,5 @@ WITH x AS (
     CAST(30 AS DECIMAL(18, 2)) AS cost
 )
 SELECT margin
-FROM smelt.fn.add_margin(x)
+FROM smelt.functions.add_margin(x)
+

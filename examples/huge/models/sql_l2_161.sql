@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT quantity, os_name, price
-    FROM smelt.ref('sql_l1_182')
+    FROM smelt.models.sql_l1_182
     WHERE status = 'active'
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.os_name
 FROM aggregated a
 INNER JOIN filtered f ON a.quantity = f.quantity
+

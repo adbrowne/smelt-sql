@@ -7,8 +7,9 @@
 -- Schema propagation for nested smelt.fn.* TableExpr arguments is deferred
 -- to a later phase — see "Deferred during implementation" in the plan.
 SELECT session_id
-FROM smelt.fn.sessionize(
-    smelt.fn.add_margin(smelt.ref('orders')),
+FROM smelt.functions.sessionize(
+    smelt.functions.add_margin(smelt.models.orders),
     user_col => CAST('' AS VARCHAR),
     ts_col => CAST('2020-01-01' AS TIMESTAMP)
 ) AS s
+

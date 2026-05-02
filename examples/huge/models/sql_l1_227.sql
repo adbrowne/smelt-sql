@@ -11,5 +11,6 @@ SELECT
     session_id,
     category,
     transaction_id
-FROM smelt.ref('events')
+FROM smelt.models.events
 WHERE score >= 50
+

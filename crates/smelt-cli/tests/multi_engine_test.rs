@@ -59,15 +59,7 @@ fn make_config_with_targets(targets: HashMap<String, Target>) -> Config {
 fn extract_refs_from_sql(sql: &str) -> Vec<RefInfo> {
     let parse = smelt_parser::parse(sql);
     if let Some(file) = smelt_parser::File::cast(parse.syntax()) {
-        file.refs()
-            .filter_map(|ref_call| {
-                Some(RefInfo {
-                    model_name: ref_call.model_name()?,
-                    has_named_params: ref_call.named_params().count() > 0,
-                    range: ref_call.range(),
-                })
-            })
-            .collect()
+        smelt_core::extract_refs(&file)
     } else {
         Vec::new()
     }
@@ -91,7 +83,7 @@ fn make_model_file(name: &str, sql: &str) -> ModelFile {
 #[test]
 fn test_logical_graph_cross_engine_edges() {
     let upstream_sql = "SELECT 1 as id, 'hello' as name";
-    let downstream_sql = "SELECT * FROM smelt.ref('upstream_model')";
+    let downstream_sql = "SELECT * FROM smelt.models.upstream_model";
 
     let models = vec![
         make_model_file("upstream_model", upstream_sql),
@@ -131,7 +123,7 @@ fn test_logical_graph_cross_engine_edges() {
 fn test_logical_graph_no_cross_engine_edges_same_target() {
     let models = vec![
         make_model_file("model_a", "SELECT 1 as id"),
-        make_model_file("model_b", "SELECT * FROM smelt.ref('model_a')"),
+        make_model_file("model_b", "SELECT * FROM smelt.models.model_a"),
     ];
 
     let mut targets = HashMap::new();
@@ -153,7 +145,7 @@ fn test_logical_graph_no_cross_engine_edges_same_target() {
 
 #[test]
 fn test_compiler_cross_engine_ref_emits_read_parquet() {
-    let sql = "SELECT * FROM smelt.ref('spark_model')";
+    let sql = "SELECT * FROM smelt.models.spark_model";
     let model = make_model_file("duckdb_consumer", sql);
 
     let mut targets = HashMap::new();
@@ -196,8 +188,8 @@ fn test_compiler_cross_engine_ref_emits_read_parquet() {
 fn test_compiler_cross_engine_mixed_refs() {
     let sql = r#"
 SELECT a.id, b.name
-FROM smelt.ref('local_model') a
-JOIN smelt.ref('spark_model') b ON a.id = b.id
+FROM smelt.models.local_model a
+JOIN smelt.models.spark_model b ON a.id = b.id
 "#;
     let model = make_model_file("mixed_consumer", sql);
 
@@ -343,7 +335,7 @@ async fn test_cross_engine_end_to_end_compile_and_execute() {
     visitors,
     sessions,
     ROUND(CAST(sessions AS DOUBLE) / CAST(visitors AS DOUBLE), 2) as session_rate
-FROM smelt.ref('visitor_daily')"#;
+FROM smelt.models.visitor_daily"#;
 
     let model = make_model_file("daily_metrics", model_sql);
 

@@ -17,3 +17,4 @@ backends: [duckdb]
 smelt.define coerce_to_text(x: Expr<Numeric>) -> Expr<Text> AS (CAST(x AS TEXT))
 
 smelt.extern duckdb.read_parquet(path: Expr<Text>) -> Expr<Text>
+

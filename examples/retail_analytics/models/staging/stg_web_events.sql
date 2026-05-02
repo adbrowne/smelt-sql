@@ -16,4 +16,5 @@ SELECT
     COALESCE(referrer_source, 'direct') AS referrer_source,
     COALESCE(device_type, 'unknown') AS device_type,
     CAST(event_date AS DATE) AS event_date
-FROM smelt.source('raw.web_events')
+FROM smelt.sources.raw.web_events
+

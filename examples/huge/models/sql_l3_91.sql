@@ -10,7 +10,8 @@ SELECT
     revenue,
     cohort_date,
     event_date
-FROM smelt.ref('sql_l2_33')
+FROM smelt.models.sql_l2_33
 WHERE user_id IN (
-    SELECT user_id FROM smelt.ref('sql_l2_185') WHERE status = 'active'
+    SELECT user_id FROM smelt.models.sql_l2_185 WHERE status = 'active'
 )
+

@@ -10,5 +10,6 @@ SELECT
     amount,
     SUM(revenue) AS agg_0,
     MIN(created_at) AS agg_1
-FROM smelt.ref('sql_l2_206')
+FROM smelt.models.sql_l2_206
 GROUP BY amount
+

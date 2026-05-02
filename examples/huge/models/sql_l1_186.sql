@@ -10,5 +10,6 @@ SELECT
     a.score,
     a.quantity,
     b.discount
-FROM smelt.ref('payments') a
-INNER JOIN smelt.ref('payments') b ON a.user_id = b.user_id
+FROM smelt.models.payments a
+INNER JOIN smelt.models.payments b ON a.user_id = b.user_id
+

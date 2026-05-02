@@ -11,5 +11,6 @@ SELECT
     campaign_id,
     channel,
     browser
-FROM smelt.ref('sql_l3_8')
+FROM smelt.models.sql_l3_8
 WHERE category IS NOT NULL
+

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT rating, plan_type, event_time
-    FROM smelt.ref('sql_l1_17')
+    FROM smelt.models.sql_l1_17
     WHERE score >= 50
 ),
 aggregated AS (
@@ -22,3 +22,4 @@ SELECT
     f.plan_type
 FROM aggregated a
 INNER JOIN filtered f ON a.rating = f.rating
+

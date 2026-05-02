@@ -10,4 +10,5 @@ SELECT
     rating,
     country,
     ROW_NUMBER() OVER (PARTITION BY rating ORDER BY created_at) AS win_val
-FROM smelt.ref('sql_l3_115')
+FROM smelt.models.sql_l3_115
+

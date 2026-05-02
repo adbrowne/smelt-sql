@@ -11,5 +11,6 @@ SELECT
     session_id,
     page_path,
     cost
-FROM smelt.ref('sql_l3_166')
+FROM smelt.models.sql_l3_166
 WHERE status = 'active'
+
