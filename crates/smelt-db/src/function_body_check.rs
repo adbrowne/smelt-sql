@@ -15,7 +15,7 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall, TableRef};
+use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltFnCall, SmeltPathCall, TableRef};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
@@ -89,6 +89,11 @@ pub enum BodyShape {
 /// legacy `check_function_body` entrypoint this is `None` — body walks
 /// that never expand further work exactly as they did in Phase 6.
 pub type NestedCallHandler<'a> = dyn Fn(&SmeltFnCall, &TypeContext, &str) -> Vec<Diagnostic> + 'a;
+
+/// Callback type for dispatching nested `smelt.functions.*` path-form calls
+/// encountered during body-recursion (Phase 5a).
+pub type NestedPathCallHandler<'a> =
+    dyn Fn(&SmeltPathCall, &TypeContext, &str) -> Vec<Diagnostic> + 'a;
 
 /// Check a single `smelt.define` body, producing Phase-5 diagnostics.
 ///
@@ -1365,6 +1370,7 @@ pub fn check_smelt_fn_call(
                 &body_text,
                 &body_ctx,
                 &nested_handler,
+                None,
             );
             // Phase 21: validate caller-provided Expr<T>/SelectItems<Kind>
             // fragment arguments against the inferred splice contexts.
@@ -1440,6 +1446,633 @@ pub fn check_smelt_fn_call(
     // Phase 15: re-append the shadow warnings we set aside above —
     // they're not cascade errors so they must survive even when inner
     // body-check diagnostics are empty.
+    diagnostics.extend(shadow_warnings);
+
+    diagnostics
+}
+
+/// Phase 5a: Check a single `smelt.functions.*` (path-form) call site.
+///
+/// Produces the same diagnostics as [`check_smelt_fn_call`] for the equivalent
+/// `smelt.fn.*` form:  `ArgTypeMismatch`, `MissingArgument`, `UnknownSmeltFn`,
+/// body-type errors, and `RowRequirementUnsatisfied`. Mixed-form bodies
+/// (a path-called function whose body itself contains `smelt.fn.*` or further
+/// `smelt.functions.*` calls) are handled through the two nested handlers.
+///
+/// Pure-function-rule: no Salsa calls; all Salsa boundary closures are passed in.
+#[allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::only_used_in_recursion
+)]
+pub fn check_smelt_path_call(
+    call: &SmeltPathCall,
+    ctx: &TypeContext,
+    text: &str,
+    sig_lookup: &dyn Fn(&str) -> Option<FunctionSig>,
+    builtin_lookup: &dyn Fn(&str) -> Option<&'static Signature>,
+    lub: &dyn Fn(&DataType, &DataType) -> DataType,
+    body_lookup: &dyn Fn(&FunctionSig) -> Option<(String, BodyShape)>,
+    decl_lookup: &dyn Fn(&FunctionSig) -> Option<PathBuf>,
+    tableexpr_schema_lookup: &dyn Fn(&Expr, &TypeContext) -> Option<Vec<(String, TypedColumn)>>,
+    default_type_lookup: &dyn Fn(&FunctionSig, &str) -> Option<DataType>,
+    table_ref_schema_lookup: &dyn Fn(&TableRef) -> Option<Vec<(String, TypedColumn)>>,
+    smelt_path_schema_lookup: &dyn Fn(&SmeltPathCall) -> Option<Vec<(String, TypedColumn)>>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // 1. Resolve the function. Segments after the leading `smelt` are returned
+    //    by `call.segments()` — for `smelt.functions.foo` that is
+    //    `["functions", "foo"]`. The leaf name is used for lookup; the full
+    //    path is used in diagnostic messages.
+    let path_range = match call.call_path_range() {
+        Some(r) => to_range(r, text),
+        None => to_range(call.text_range(), text),
+    };
+    let segments = call.segments();
+    let Some(name) = segments.last().cloned() else {
+        return diagnostics;
+    };
+
+    // Build the display path for messages: "smelt.functions.foo"
+    let display_path = format!("smelt.{}", segments.join("."));
+
+    let Some(sig) = sig_lookup(&name) else {
+        if let Some(builtin_sig) = builtin_lookup(&name) {
+            // Builtin function: collect args and run unify_call.
+            let arg_list_ref = call.arg_list();
+            let positional_exprs: Vec<Expr> = arg_list_ref
+                .as_ref()
+                .map(|al| al.positional_args())
+                .unwrap_or_default();
+            let named_values: Vec<Expr> = arg_list_ref
+                .as_ref()
+                .map(|al| al.named_params().filter_map(|np| np.value_expr()).collect())
+                .unwrap_or_default();
+            let mut arg_exprs: Vec<Expr> =
+                Vec::with_capacity(positional_exprs.len() + named_values.len());
+            arg_exprs.extend(positional_exprs);
+            arg_exprs.extend(named_values);
+
+            let arg_types: Vec<DataType> = arg_exprs
+                .iter()
+                .map(|a| {
+                    infer_expression_type(a, ctx)
+                        .map(|t| t.data_type)
+                        .unwrap_or(DataType::Unknown)
+                })
+                .collect();
+
+            match unify_call(builtin_sig, &arg_types, lub) {
+                Ok(_) => {}
+                Err(UnificationError::MissingArgs { expected, got }) => {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "`{}` expects at least {} argument(s), got {}",
+                            display_path, expected, got
+                        ),
+                        range: path_range,
+                        code: Some(DiagnosticCode::MissingArgument),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::ConstraintViolation {
+                    position,
+                    param_constraint,
+                    actual,
+                }) => {
+                    let arg_range = arg_exprs
+                        .get(position.saturating_sub(1))
+                        .map(|e| to_range(e.text_range(), text))
+                        .unwrap_or(path_range);
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument at position {} has type `{}`, which does not satisfy constraint `{}` of `{}`",
+                            position,
+                            actual,
+                            format_constraint(&param_constraint),
+                            display_path
+                        ),
+                        range: arg_range,
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::InconsistentBinding {
+                    var_name,
+                    positions,
+                    types,
+                }) => {
+                    let anchor_pos = positions.get(1).copied().unwrap_or(1);
+                    let arg_range = arg_exprs
+                        .get(anchor_pos.saturating_sub(1))
+                        .map(|e| to_range(e.text_range(), text))
+                        .unwrap_or(path_range);
+                    let type_list = types
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Type variable `{}` in `{}` inferred inconsistently across positions {:?}: {}",
+                            var_name, display_path, positions, type_list
+                        ),
+                        range: arg_range,
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::EmptyVariadicTypeVar { .. }) => {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "`{}` is variadic and requires at least one argument",
+                            display_path
+                        ),
+                        range: path_range,
+                        code: Some(DiagnosticCode::MissingArgument),
+                        data: None,
+                    });
+                }
+                Err(UnificationError::TooManyArgs { .. }) => {}
+            }
+        } else {
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!("Unknown function `{}`", display_path),
+                range: path_range,
+                code: Some(DiagnosticCode::UnknownSmeltFn),
+                data: None,
+            });
+        }
+        return diagnostics;
+    };
+
+    // 2. Bind arguments to parameters (same logic as check_smelt_fn_call).
+    let arg_list = call.arg_list();
+    let positional: Vec<Expr> = arg_list
+        .as_ref()
+        .map(|al| al.positional_args())
+        .unwrap_or_default();
+    let named: Vec<smelt_parser::ast::NamedParam> = arg_list
+        .as_ref()
+        .map(|al| al.named_params().collect())
+        .unwrap_or_default();
+
+    let mut bindings: std::collections::HashMap<String, (Expr, TextRange)> =
+        std::collections::HashMap::new();
+
+    for (i, arg) in positional.iter().enumerate() {
+        if let Some(p) = sig.params.get(i) {
+            bindings.insert(p.name.clone(), (arg.clone(), arg.text_range()));
+        }
+    }
+
+    for np in &named {
+        let Some(nm) = np.name() else { continue };
+        if let Some(value_expr) = np.value_expr() {
+            bindings.insert(nm.clone(), (value_expr.clone(), value_expr.text_range()));
+        }
+    }
+
+    // PASSING clauses.
+    let passing_clauses: Vec<smelt_parser::ast::PassingClause> = call.passing_clauses().collect();
+    for clause in &passing_clauses {
+        let Some(clause_name) = clause.name() else {
+            continue;
+        };
+        let param_exists = sig.params.iter().any(|p| p.name == clause_name);
+        if !param_exists {
+            let clause_range = clause
+                .name_range()
+                .map(|r| to_range(r, text))
+                .unwrap_or(path_range);
+            diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "PASSING clause names `{}` which is not a parameter of `{}`",
+                    clause_name, display_path
+                ),
+                range: clause_range,
+                code: Some(DiagnosticCode::UnknownPassingParameter),
+                data: None,
+            });
+            continue;
+        }
+        if let Some(body_expr) = clause.body_expr() {
+            let body_range = body_expr.text_range();
+            bindings.insert(clause_name, (body_expr, body_range));
+        }
+    }
+
+    // 3. Build call-site binding types + detect missing / type-mismatched args.
+    let mut body_ctx = TypeContext::new();
+    let mut frame_bindings: Vec<(String, String)> = Vec::new();
+
+    for param in &sig.params {
+        if param.name.is_empty() {
+            continue;
+        }
+
+        if is_tableexpr_param(param) {
+            if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
+                let cols = tableexpr_schema_lookup(arg_expr, ctx).unwrap_or_default();
+
+                if cols.is_empty() && is_clearly_non_table(arg_expr) {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument for TableExpr parameter `{}` of `{}` must be a table reference, CTE, or subquery — got `{}`",
+                            param.name,
+                            display_path,
+                            arg_expr.text().to_string().trim()
+                        ),
+                        range: to_range(*arg_range, text),
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                    frame_bindings.push((param.name.clone(), "<not-a-table>".to_string()));
+                    continue;
+                }
+
+                if let Some(req) = tableexpr_schema_requirement(param) {
+                    let arg_schema: Vec<(String, DataType)> = cols
+                        .iter()
+                        .map(|(n, tc)| (n.clone(), tc.data_type.clone()))
+                        .collect();
+                    match check_schema_requirement(req, &arg_schema) {
+                        Ok(binding) => {
+                            body_ctx.add_tableexpr_param(&param.name, &cols);
+                            if let Some(b) = binding {
+                                body_ctx.set_row_var_binding(&b.name, b.extras);
+                            }
+                            frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
+                        }
+                        Err(mismatch) => {
+                            diagnostics.push(row_requirement_diagnostic(
+                                &mismatch,
+                                &sig.name,
+                                &param.name,
+                                to_range(*arg_range, text),
+                            ));
+                            frame_bindings
+                                .push((param.name.clone(), "<row-req-failed>".to_string()));
+                        }
+                    }
+                } else {
+                    body_ctx.add_tableexpr_param(&param.name, &cols);
+                    frame_bindings.push((param.name.clone(), "TableExpr".to_string()));
+                }
+            } else if !param.has_default {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Missing required argument `{}` for `{}`",
+                        param.name, display_path
+                    ),
+                    range: path_range,
+                    code: Some(DiagnosticCode::MissingArgument),
+                    data: None,
+                });
+                frame_bindings.push((param.name.clone(), "<missing>".to_string()));
+            } else {
+                frame_bindings.push((param.name.clone(), "<default>".to_string()));
+            }
+            continue;
+        }
+
+        if is_struct_param(param) {
+            if let Some((arg_expr, arg_range)) = bindings.get(&param.name) {
+                let cols = tableexpr_schema_lookup(arg_expr, ctx)
+                    .or_else(|| {
+                        let qualifier = arg_expr.text().trim().to_string();
+                        if qualifier.is_empty() {
+                            return None;
+                        }
+                        let cols: Vec<(String, TypedColumn)> = ctx
+                            .columns_for_qualifier(&qualifier)
+                            .into_iter()
+                            .map(|(col_name, tc)| (col_name.to_string(), tc.clone()))
+                            .collect();
+                        if cols.is_empty() {
+                            None
+                        } else {
+                            Some(cols)
+                        }
+                    })
+                    .unwrap_or_default();
+                let concrete_fields: Vec<(String, DataType)> = cols
+                    .iter()
+                    .map(|(n, tc)| (n.clone(), tc.data_type.clone()))
+                    .collect();
+
+                if let Some((declared_fields, tail)) = struct_param_fields(param) {
+                    if concrete_fields.is_empty() {
+                        body_ctx.add_function_param(
+                            &param.name,
+                            TypedColumn::nullable(DataType::Unknown),
+                        );
+                        frame_bindings.push((param.name.clone(), "Struct<unknown>".to_string()));
+                    } else {
+                        match check_struct_row_var_binding(declared_fields, &concrete_fields, tail)
+                        {
+                            Ok(extras_opt) => {
+                                body_ctx.add_function_param(
+                                    &param.name,
+                                    TypedColumn::nullable(DataType::Unknown),
+                                );
+                                if let (StructRowTail::Named(var_name), Some(extras)) =
+                                    (tail, extras_opt)
+                                {
+                                    body_ctx.set_row_var_binding(var_name, extras);
+                                }
+                                frame_bindings.push((
+                                    param.name.clone(),
+                                    format!("Struct<{} fields>", concrete_fields.len()),
+                                ));
+                            }
+                            Err(mismatch) => {
+                                diagnostics.push(struct_field_diagnostic(
+                                    &mismatch,
+                                    &sig.name,
+                                    &param.name,
+                                    to_range(*arg_range, text),
+                                ));
+                                frame_bindings
+                                    .push((param.name.clone(), "<struct-req-failed>".to_string()));
+                            }
+                        }
+                    }
+                } else {
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), "Struct<?>".to_string()));
+                }
+            } else if !param.has_default {
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format!(
+                        "Missing required argument `{}` for `{}`",
+                        param.name, display_path
+                    ),
+                    range: path_range,
+                    code: Some(DiagnosticCode::MissingArgument),
+                    data: None,
+                });
+                frame_bindings.push((param.name.clone(), "<missing>".to_string()));
+            } else {
+                frame_bindings.push((param.name.clone(), "<default>".to_string()));
+            }
+            continue;
+        }
+
+        match bindings.get(&param.name) {
+            Some((arg_expr, arg_range)) => {
+                let arg_type = infer_expression_type(arg_expr, ctx)
+                    .map(|t| t.data_type)
+                    .unwrap_or(DataType::Unknown);
+
+                let constraint_violation = match &param.type_ref {
+                    Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(expected)))) => {
+                        !matches!(arg_type, DataType::Unknown | DataType::Null)
+                            && !types_assignment_compatible(expected, &arg_type)
+                    }
+                    Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => {
+                        !matches!(arg_type, DataType::Unknown | DataType::Null)
+                            && !arg_type.is_numeric()
+                    }
+                    Some(Ok(SmeltType::Expr(TypeConstraint::Any))) => false,
+                    _ => false,
+                };
+
+                if constraint_violation {
+                    let expected_text = match &param.type_ref {
+                        Some(Ok(SmeltType::Expr(TypeConstraint::Concrete(dt)))) => dt.to_string(),
+                        Some(Ok(SmeltType::Expr(TypeConstraint::Numeric))) => "Numeric".to_string(),
+                        _ => "<unknown>".to_string(),
+                    };
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Argument `{}` has type `{}`, which does not satisfy parameter `{}: {}` of `{}`",
+                            arg_expr.text().trim(),
+                            arg_type,
+                            param.name,
+                            expected_text,
+                            sig.name
+                        ),
+                        range: to_range(*arg_range, text),
+                        code: Some(DiagnosticCode::ArgTypeMismatch),
+                        data: None,
+                    });
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), arg_type.to_string()));
+                    continue;
+                }
+
+                body_ctx.add_function_param(&param.name, TypedColumn::nullable(arg_type.clone()));
+                frame_bindings.push((param.name.clone(), arg_type.to_string()));
+            }
+            None => {
+                if !param.has_default {
+                    diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Missing required argument `{}` for `{}`",
+                            param.name, display_path
+                        ),
+                        range: path_range,
+                        code: Some(DiagnosticCode::MissingArgument),
+                        data: None,
+                    });
+                    body_ctx
+                        .add_function_param(&param.name, TypedColumn::nullable(DataType::Unknown));
+                    frame_bindings.push((param.name.clone(), "<missing>".to_string()));
+                } else {
+                    let dt = default_type_lookup(&sig, &param.name).unwrap_or(DataType::Unknown);
+                    body_ctx.add_function_param(&param.name, TypedColumn::nullable(dt.clone()));
+                    frame_bindings.push((param.name.clone(), format!("{} (default)", dt)));
+                }
+            }
+        }
+    }
+
+    // Register SelectItems fragment-param kinds.
+    for p in &sig.params {
+        if p.name.is_empty() {
+            continue;
+        }
+        if let Some(Ok(SmeltType::SelectItems { kind, .. })) = &p.type_ref {
+            body_ctx.add_fragment_param_kind(&p.name, *kind);
+        }
+    }
+
+    // Pre-resolve JOIN-aliased schemas for shadow-warning check.
+    let preview_body_for_joins = body_lookup(&sig);
+    if let Some((_, BodyShape::Select(preview_select))) = &preview_body_for_joins {
+        register_join_alias_schemas(&mut body_ctx, preview_select, &sig, table_ref_schema_lookup);
+    }
+
+    diagnostics.extend(compute_shadow_warnings(&sig, &body_ctx));
+
+    let shadow_warnings: Vec<Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::ParameterShadowsColumn))
+        .cloned()
+        .collect();
+    diagnostics.retain(|d| d.code != Some(DiagnosticCode::ParameterShadowsColumn));
+
+    if !diagnostics.is_empty() {
+        diagnostics.extend(shadow_warnings);
+        return diagnostics;
+    }
+
+    let has_schema_param = sig.params.iter().any(|p| {
+        matches!(
+            &p.type_ref,
+            Some(Ok(SmeltType::TableExpr(_)))
+                | Some(Ok(SmeltType::SelectItems { .. }))
+                | Some(Ok(SmeltType::Struct { .. }))
+        )
+    });
+    if sig.tier != Tier::One && !has_schema_param {
+        diagnostics.extend(shadow_warnings);
+        return diagnostics;
+    }
+
+    let Some((body_text, body_shape)) = body_lookup(&sig) else {
+        diagnostics.extend(shadow_warnings);
+        return diagnostics;
+    };
+
+    // Nested handler for SMELT_FN_CALL nodes inside the body.
+    let nested_fn_handler = |nested_call: &SmeltFnCall,
+                             nested_ctx: &TypeContext,
+                             nested_text: &str|
+     -> Vec<Diagnostic> {
+        check_smelt_fn_call(
+            nested_call,
+            nested_ctx,
+            nested_text,
+            sig_lookup,
+            builtin_lookup,
+            lub,
+            body_lookup,
+            decl_lookup,
+            tableexpr_schema_lookup,
+            default_type_lookup,
+            table_ref_schema_lookup,
+            // smelt_fn_schema_lookup: use a no-op since we don't have access to
+            // the Salsa-backed one here. CTE wildcard expansion from fn calls inside
+            // path-called bodies is deferred.
+            &|_: &SmeltFnCall| None,
+        )
+    };
+
+    // Nested handler for SMELT_PATH_CALL nodes inside the body (recursive).
+    let nested_path_handler = |nested_call: &SmeltPathCall,
+                               nested_ctx: &TypeContext,
+                               nested_text: &str|
+     -> Vec<Diagnostic> {
+        check_smelt_path_call(
+            nested_call,
+            nested_ctx,
+            nested_text,
+            sig_lookup,
+            builtin_lookup,
+            lub,
+            body_lookup,
+            decl_lookup,
+            tableexpr_schema_lookup,
+            default_type_lookup,
+            table_ref_schema_lookup,
+            smelt_path_schema_lookup,
+        )
+    };
+
+    let inner = match &body_shape {
+        BodyShape::Expression(body_expr) => {
+            walk_body_with_ctx(body_expr, &body_ctx, &body_text, &nested_fn_handler)
+        }
+        BodyShape::Select(select_stmt) => {
+            for (name, sig_entry) in ctx.function_signatures_iter() {
+                body_ctx.add_function_signature(name, sig_entry.clone());
+            }
+
+            let (body_ctx_with_ctes, _cycle_diags) = extract_function_body_cte_schemas(
+                select_stmt,
+                &body_ctx,
+                &body_text,
+                // smelt_fn_schema_lookup: no-op for CTE wildcard expansion inside
+                // path-called function bodies (deferred to follow-on phase).
+                &|_: &SmeltFnCall| None,
+            );
+            let body_ctx = body_ctx_with_ctes;
+
+            let mut body_diags = check_function_select_body(
+                &sig,
+                select_stmt,
+                &body_text,
+                &body_ctx,
+                &nested_fn_handler,
+                Some(&nested_path_handler),
+            );
+            body_diags.extend(check_fragment_context_bindings(
+                &sig,
+                select_stmt,
+                &body_ctx,
+                ctx,
+                &bindings,
+                text,
+            ));
+            body_diags
+        }
+    };
+
+    let decl_path = decl_lookup(&sig);
+    let decl_range = Some(sig.name_range);
+    let call_site_range = Some(path_range);
+
+    for mut d in inner {
+        d.range = path_range;
+
+        let mut frames: Vec<FrameInfo> = match d.data.take() {
+            Some(DiagnosticData::ExpansionFrames(existing)) => existing,
+            _ => Vec::new(),
+        };
+
+        if !frame_bindings.is_empty() {
+            frames.push(FrameInfo {
+                function: sig.name.clone(),
+                param: frame_bindings
+                    .iter()
+                    .map(|(p, t)| format!("{}: {}", p, t))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                bound_type: String::new(),
+                decl_path: decl_path.clone(),
+                decl_range,
+                call_site_range,
+            });
+        } else {
+            frames.push(FrameInfo {
+                function: sig.name.clone(),
+                param: String::new(),
+                bound_type: String::new(),
+                decl_path: decl_path.clone(),
+                decl_range,
+                call_site_range,
+            });
+        }
+        d.data = Some(DiagnosticData::ExpansionFrames(frames));
+        diagnostics.push(d);
+    }
+
     diagnostics.extend(shadow_warnings);
 
     diagnostics
@@ -1652,6 +2285,7 @@ fn check_function_select_body(
     text: &str,
     body_ctx: &TypeContext,
     nested_handler: &NestedCallHandler<'_>,
+    nested_path_handler: Option<&NestedPathCallHandler<'_>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -1693,6 +2327,18 @@ fn check_function_select_body(
         if node.kind() == SyntaxKind::SMELT_FN_CALL {
             if let Some(call) = SmeltFnCall::cast(node) {
                 diagnostics.extend(nested_handler(&call, body_ctx, text));
+            }
+        }
+    }
+
+    // Phase 5a: walk every `SMELT_PATH_CALL` in the SELECT statement and
+    // dispatch through the path-call handler (if provided).
+    if let Some(handler) = nested_path_handler {
+        for node in select_stmt.syntax().descendants() {
+            if node.kind() == SyntaxKind::SMELT_PATH_CALL {
+                if let Some(call) = SmeltPathCall::cast(node) {
+                    diagnostics.extend(handler(&call, body_ctx, text));
+                }
             }
         }
     }
@@ -2174,6 +2820,53 @@ pub fn extract_function_body_cte_schemas(
                     None => {
                         ctx.mark_cte_opaque(cte_name);
                     }
+                }
+            } else {
+                // Phase 5a: if the CTE source is a `smelt.functions.*` path
+                // call (SMELT_PATH_CALL), mark the CTE opaque so outer
+                // bare-column references don't fire spurious `UnknownIdentifier`
+                // diagnostics. Full schema resolution for path-call CTE sources
+                // is deferred to a follow-on phase.
+                let has_path_call_source = dfs
+                    .ctes
+                    .get(cte_name)
+                    .and_then(|c| c.query())
+                    .and_then(|q| q.select_stmt())
+                    .and_then(|s| {
+                        let has_wildcard = s
+                            .select_list()
+                            .map(|sl| sl.items().any(|item| item.is_wildcard()))
+                            .unwrap_or(false);
+                        if !has_wildcard {
+                            return None;
+                        }
+                        s.from_clause()
+                            .and_then(|fc| fc.table_refs().find_map(|tr| tr.smelt_path_call()))
+                    })
+                    .is_some();
+
+                // Bare `smelt.functions.*(...) PASSING ...` CTE body shape:
+                // no SELECT_STMT child in the CTE, but a SMELT_PATH_CALL exists.
+                let has_path_call_direct = {
+                    use smelt_parser::syntax_kind::SyntaxKind;
+                    dfs.ctes
+                        .get(cte_name)
+                        .map(|c| {
+                            let cte_node = c.syntax();
+                            // Only applies when there is no SELECT statement inside.
+                            let has_select = cte_node
+                                .descendants()
+                                .any(|d| d.kind() == SyntaxKind::SELECT_STMT);
+                            let has_path = cte_node
+                                .descendants()
+                                .any(|d| d.kind() == SyntaxKind::SMELT_PATH_CALL);
+                            !has_select && has_path
+                        })
+                        .unwrap_or(false)
+                };
+
+                if has_path_call_source || has_path_call_direct {
+                    ctx.mark_cte_opaque(cte_name);
                 }
             }
         }

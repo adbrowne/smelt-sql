@@ -786,6 +786,12 @@ impl SmeltPathCall {
         self.0.children().filter_map(PassingClause::cast)
     }
 
+    /// Text range of the `SMELT_PATH` child (path only, excluding the args parens).
+    /// Returns `None` on error-recovery paths where the path node is absent.
+    pub fn call_path_range(&self) -> Option<TextRange> {
+        self.path().map(|p| p.syntax().text_range())
+    }
+
     /// Text range of the entire `SMELT_PATH_CALL` node.
     pub fn text_range(&self) -> TextRange {
         self.0.text_range()

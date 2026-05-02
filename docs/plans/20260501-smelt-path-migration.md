@@ -65,6 +65,8 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 | 2c    | done     | 59c7f16 | 2026-05-01 |
 | 3     | done     | 19e412b | 2026-05-01 |
 | 4     | done     | 7a7d320 | 2026-05-01 |
+| 5a    | done     |         | 2026-05-02 |
+| 5b    | pending  |         |            |
 
 ---
 
@@ -327,6 +329,88 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 
 ---
 
+### Phase 5a: Port function-call diagnostics to SmeltPathCall
+
+**Goal.** Extend `smelt_fn_call_diagnostics_for_file` to walk `SMELT_PATH_CALL` nodes and produce identical diagnostics (`ArgTypeMismatch`, `MissingArgument`, `UnknownSmeltFn`, body-type errors, cycle errors, etc.) for `smelt.functions.<name>(...)` calls. After this phase the same checks fire regardless of whether the call uses the legacy `smelt.fn.*` node or the path `smelt.functions.*` node. The `broken/` fixtures are still written in `smelt.fn.*` form; migration is Phase 5b.
+
+**Pre-conditions.** Phases 1–4 done. `SmeltPathCall` AST node exists. `SmeltFnCall` still parsed and checked.
+
+**TDD tests to write first.**
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs::path_form_arg_type_mismatch` — a workspace containing `smelt.define needs_number(x: Expr<Numeric>) AS (x + 1)` and a model `SELECT smelt.functions.needs_number('text') AS r` produces exactly one `ArgTypeMismatch` diagnostic anchored at the `'text'` argument span. Mirrors the existing `fn_call_wrong_arg_type.sql` fixture behaviour.
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs::path_form_missing_arg` — `SELECT smelt.functions.takes_two(1) AS r` (where `takes_two(a, b)` is defined) produces exactly one `MissingArgument` diagnostic.
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs::path_form_unknown_fn` — `SELECT smelt.functions.does_not_exist(1) AS r` produces exactly one `UnknownSmeltFn` diagnostic anchored at the path span.
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs::path_form_nested_body_error` — a call through two levels of transparent functions (`outer_call(y) → middle(z) → inner_unary(z)`) where `inner_unary` has a body type error: calling `smelt.functions.outer_call(1)` produces a diagnostic with a frame stack reaching into the inner body, identical to the `fn_nested_call_error.sql` fixture.
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs::path_form_tableexpr_row_requirement` — calling a `TableExpr<{revenue: Numeric, cost: Numeric}>` function with a table that is missing `cost` produces `RowRequirementMissing`. Mirrors `fn_row_requirement_missing.sql`.
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs::path_form_parity` — for each diagnostic code already exercised by a `smelt.fn.*` fixture in `examples/broken/`, calling the same function via `smelt.functions.*` form against the same workspace produces the same set of diagnostic codes (codes only, not spans — spans may differ by prefix length). This is the parity test; it blocks migration in 5b on any code gap.
+
+**Implementation shape.**
+- Add `pub fn check_smelt_path_call(call: &SmeltPathCall, ctx: &TypeContext, text: &str, ...)` to `crates/smelt-db/src/function_body_check.rs`. Its signature mirrors `check_smelt_fn_call` exactly (same callback parameters); the only difference is the input node type. Internally derive `fn_id` as `call.segments().last()` (same last-segment rule as `SmeltFnCall`). Derive `path_range` from `call.text_range()` (the whole node) as the fallback; add a `call_path_range() -> Option<TextRange>` accessor to `SmeltPathCall` in `ast.rs` that returns the `SmeltPath` child's range, so diagnostics anchor to the path not the parens.
+- In `smelt_fn_call_diagnostics_for_file` (lib.rs): after collecting `SMELT_FN_CALL` nodes, collect `SMELT_PATH_CALL` nodes and call `check_smelt_path_call` for each one using the same closures built earlier in the function. Extend the `nested_handler` inside `check_function_body_select` to also walk `SMELT_PATH_CALL` children.
+- **Stay pure** (architecture Constraints §2): no new Salsa calls inside `check_smelt_path_call`; closures are passed in from the Salsa boundary exactly as for `check_smelt_fn_call`.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-db/src/function_body_check.rs` — add `check_smelt_path_call`, extend nested handler
+- `crates/smelt-db/src/lib.rs` — extend `smelt_fn_call_diagnostics_for_file` walker
+- `crates/smelt-parser/src/ast.rs` — add `call_path_range()` to `SmeltPathCall`
+- `crates/smelt-db/tests/fn_path_call_diagnostics.rs` (new)
+
+**Docs touched.**
+- None in this phase.
+
+**Review checklist** (material findings only):
+- [ ] All six TDD tests above exist and are green
+- [ ] All existing `broken/` fixture diagnostics still fire (no regression in `smelt.fn.*` checking)
+- [ ] `check_smelt_path_call` uses the same closure callbacks as `check_smelt_fn_call`; no Salsa calls inside the pure checker
+- [ ] `path_form_parity` test covers every diagnostic code exercised by the `broken/` `smelt.fn.*` fixtures
+- [ ] `cargo clippy --all-targets` zero warnings
+
+**Commit.** `db: extend function-call diagnostics to smelt.<path> call form`
+
+---
+
+### Phase 5b: Migrate broken/ fixtures and complete smelt.fn.* removal
+
+**Goal.** Migrate every `broken/` fixture from `smelt.fn.*` to `smelt.functions.*`, delete the `SmeltFnCall` / `SMELT_FN_CALL` AST surface, remove `SmeltRef::LegacyFn`, retire the `smelt.fn.` parser arm, and drop the `broken/` skip from `all_examples_use_path_syntax`. After this phase `smelt.fn.*` is completely gone from the codebase.
+
+**Pre-conditions.** Phase 5a done. `check_smelt_path_call` produces correct diagnostics for all broken-fixture codes.
+
+**TDD tests to write first.**
+- `crates/smelt-parser/src/parser.rs::tests::smelt_fn_form_rejected_by_parser` — `smelt.fn.foo(x)` produces a parse error with a suggestion pointing the user at `smelt.functions.foo(x)` (or general `smelt.<path>` form).
+- `crates/smelt-parser/tests/no_legacy_fn_ast.rs::smelt_fn_call_not_in_public_ast` — `SmeltFnCall` is not a public type in `smelt_parser::ast`; attempting to use it by name fails to compile. (Implement as a doc-test or compile-error test using `trybuild`, or simply assert the type no longer exists in the module's exported names via reflection.)
+- `crates/smelt-cli/tests/example_diagnostics.rs::all_examples_use_path_syntax_including_broken` — the existing `all_examples_use_path_syntax` test passes with the `broken/` skip removed; i.e. the migrated `broken/` fixtures contain no `smelt.ref(`, `smelt.source(`, or `smelt.fn.` strings.
+- `crates/smelt-cli/tests/example_diagnostics.rs::broken_workspace_diagnostics_still_fire` — every expected diagnostic code from the broken workspace (verified against a reference list in the test) still fires after the migration, confirming Phase 5a's parity guarantee holds end-to-end on the migrated files.
+
+**Implementation shape.**
+- Rewrite every `examples/broken/models/*.sql` file that uses `smelt.fn.X(...)` → `smelt.functions.X(...)`. The directory structure and function declarations (`smelt.define`, `smelt.extern`) are unchanged; only call sites change.
+- Remove `SmeltRef::LegacyFn` from `crates/smelt-core/src/refs.rs` (including the `to_path` adapter arm and `fn_id` arm).
+- Delete `SmeltFnCall` struct and `SMELT_FN_CALL` `SyntaxKind` variant; remove the parser arm in `smelt-parser` that recognises `smelt.fn.` as a function-call prefix.
+- Delete `check_smelt_fn_call` from `function_body_check.rs`; the `SMELT_FN_CALL` walker in `smelt_fn_call_diagnostics_for_file` is removed (only the `SMELT_PATH_CALL` walker remains).
+- Remove the `broken/` exclusion comment and `if ... == "broken"` guard from `all_examples_use_path_syntax`.
+- Update `docs/specs/functions.md` Known Divergences: remove the bullet "`smelt.<path>` function call diagnostics cover only `smelt.fn.*` form" (this divergence is now resolved).
+
+**Critical files (allowed to touch in this phase).**
+- `examples/broken/models/*.sql` — migrate all `smelt.fn.*` call sites
+- `crates/smelt-parser/src/{lexer.rs, parser.rs, syntax_kind.rs, ast.rs}` — remove `SmeltFnCall` / `SMELT_FN_CALL`
+- `crates/smelt-core/src/refs.rs` — remove `LegacyFn`
+- `crates/smelt-db/src/{function_body_check.rs, lib.rs, references.rs}` — remove `check_smelt_fn_call` and `SMELT_FN_CALL` walker
+- `crates/smelt-cli/tests/example_diagnostics.rs` — remove `broken/` skip
+- `docs/specs/functions.md` — remove resolved Known Divergence bullet
+
+**Docs touched.**
+- `docs/specs/functions.md` Known Divergences section updated
+
+**Review checklist** (material findings only):
+- [ ] Zero matches for `smelt\.fn\.` in `crates/` and `examples/` (excluding string literals in rejection-error test assertions)
+- [ ] `SmeltFnCall` and `SMELT_FN_CALL` do not appear in any non-test source file
+- [ ] `SmeltRef::LegacyFn` is gone from `smelt-core`
+- [ ] `broken_workspace_diagnostics_still_fire` test covers every expected diagnostic code
+- [ ] All four TDD tests above exist and are green
+- [ ] `cargo test` and `cargo clippy --all-targets` clean
+
+**Commit.** `parser+db+core: complete smelt.fn.* removal`
+
+---
+
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
@@ -335,6 +419,8 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 - **`SMELT_PATH_REF` trailing-trivia printer bug fixed in Phase 3** (smelt-dialect). The parser's `skip_trivia()` look-ahead before `start_node_at(outer_checkpoint, SMELT_PATH_REF)` wrapped trailing whitespace inside the node. The printer then emitted the resolved SQL without that whitespace, collapsing `raw.orders AS o` → `raw.ordersAS o`. Fixed in `printer.rs` by re-emitting trailing trivia tokens after the resolver replacement.
 - **Path resolver only matched `[ns, name]` (two-segment models)**. `smelt.models.staging.stg_events` (three segments) returned `None` from `make_path_ref_resolver`, causing DuckDB `NameListToString` errors. Fixed by changing the pattern to `[ns, rest @ ..] if ns == "models"` and using `rest.last()` as the physical table name.
 - **`smelt.fn.*` / `SmeltFnCall` removal deferred** (Phase 4). The `examples/broken/` workspace still uses `smelt.fn.*` calls to exercise `ArgTypeMismatch`, `UnknownIdentifier` with expansion frames, and other function-body diagnostics. The `smelt_fn_call_diagnostics_for_file` type checker operates on `SmeltFnCall` nodes only; removing `SMELT_FN_CALL`/`SmeltFnCall` would silence those diagnostics. `SmeltRef::LegacyFn` is kept in `smelt-core` for now. Full removal requires extending function-call type checking to `SmeltPathCall` first, then migrating `broken/` fixtures to path form.
+- **`workspace_function_call_graph` blind to `SMELT_PATH_CALL` edges** (Phase 5a review). The call-graph builder that powers cycle detection (`function_call_cycle_fn_ids`) only walks `SMELT_FN_CALL` nodes inside `smelt.define` bodies. A body containing `smelt.functions.bar(x)` (SMELT_PATH_CALL) is invisible to the cycle detector. No current fixtures expose this gap — broken/ bodies still use `smelt.fn.*`. After Phase 5b migrates broken/ bodies to `smelt.functions.*`, cycle detection will break for those fixtures unless the call-graph walker is extended. Must be fixed in Phase 5b before removing `SMELT_FN_CALL`.
+- **`walk_body` Expression-shape bodies do not dispatch `SMELT_PATH_CALL` nested calls** (Phase 5a review). `check_function_body_select` was extended to walk `SMELT_PATH_CALL` nodes, but the Expression-shape body walk (`walk_body_with_ctx`) only dispatches `SMELT_FN_CALL`. A scalar body like `AS (smelt.functions.bar(x) + 1)` calling further path-form functions silently skips the nested diagnostic check. Current fixtures are unaffected because broken/ bodies still use `smelt.fn.*`. After Phase 5b migration, nested path calls inside scalar bodies will be missed. Must be fixed in Phase 5b.
 
 ## Verification
 
@@ -344,4 +430,5 @@ How to confirm the spec is satisfied at the end:
 - `cargo clippy --all-targets` zero warnings
 - `cargo run -p smelt-cli -- run --workspace examples/retail_analytics` succeeds end-to-end
 - `/smelt:validate architecture` reports zero drift
-- `grep -r "smelt\.ref(\|smelt\.source(\|smelt\.fn\." crates/ examples/ docs-site/ docs/specs/` returns no matches
+- `/smelt:validate functions` reports zero drift (Known Divergence for path-call diagnostics removed)
+- `grep -r "smelt\.ref(\|smelt\.source(\|smelt\.fn\." crates/ examples/ docs-site/ docs/specs/` returns no matches except string literals inside rejection-error test assertions

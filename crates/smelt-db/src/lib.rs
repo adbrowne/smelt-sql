@@ -1845,7 +1845,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
     workspace: Workspace,
     file: SourceFile,
 ) -> Vec<Diagnostic> {
-    use smelt_parser::ast::SmeltFnCall;
+    use smelt_parser::ast::{SmeltFnCall, SmeltPathCall};
     use smelt_parser::syntax_kind::SyntaxKind;
 
     let parse = parse_file(db, file);
@@ -1862,7 +1862,23 @@ pub fn smelt_fn_call_diagnostics_for_file(
         .filter_map(SmeltFnCall::cast)
         .collect();
 
-    if call_nodes.is_empty() {
+    // Phase 5a: also collect SMELT_PATH_CALL nodes (smelt.functions.* form).
+    // Only collect top-level call sites — nodes inside a DEFINE_BODY are
+    // dispatched through the nested_path_handler during body re-walk, not
+    // here. This mirrors the invariant for SMELT_FN_CALL nodes (they are also
+    // top-level only in this loop; nested ones live inside other files).
+    let path_call_nodes: Vec<SmeltPathCall> = syntax
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SMELT_PATH_CALL)
+        .filter(|n| {
+            // Exclude nodes that are inside a smelt.define body. Those are
+            // nested calls and will be dispatched through the body re-walk.
+            !n.ancestors().any(|a| a.kind() == SyntaxKind::DEFINE_BODY)
+        })
+        .filter_map(SmeltPathCall::cast)
+        .collect();
+
+    if call_nodes.is_empty() && path_call_nodes.is_empty() {
         return Vec::new();
     }
 
@@ -2176,6 +2192,11 @@ pub fn smelt_fn_call_diagnostics_for_file(
             provider.resolve_smelt_fn_call_schema(call)
         };
 
+    // Phase 5a: path-call CTE wildcard expansion deferred to a follow-on
+    // phase. Return `None` to fall back to the opaque-CTE marker.
+    let smelt_path_schema_lookup =
+        |_call: &smelt_parser::ast::SmeltPathCall| -> Option<Vec<(String, TypedColumn)>> { None };
+
     // Phase 17: resolve a parameter's default-value expression by
     // re-parsing the declaring file and walking to the matching
     // PARAM node. Returns the inferred `DataType` of the default
@@ -2221,6 +2242,24 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &default_type_lookup,
             &table_ref_schema_lookup,
             &smelt_fn_schema_lookup,
+        ));
+    }
+
+    // Phase 5a: check SMELT_PATH_CALL nodes (smelt.functions.* form).
+    for call in &path_call_nodes {
+        out.extend(function_body_check::check_smelt_path_call(
+            call,
+            &ctx,
+            &clean_text,
+            &sig_lookup,
+            &builtin_lookup,
+            &lub,
+            &body_lookup,
+            &decl_lookup,
+            &tableexpr_schema_lookup,
+            &default_type_lookup,
+            &table_ref_schema_lookup,
+            &smelt_path_schema_lookup,
         ));
     }
     out
