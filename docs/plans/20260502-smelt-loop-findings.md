@@ -36,7 +36,7 @@ Phase 1 is documentation-only. Phases 2–5 are code fixes, each preceded by TDD
 | 3 | TB-2: seed DATE→TEXT | done | 2026-05-03 | ec0dc2e |
 | 4 | TB-1: --verbose wiring | done | 2026-05-03 | 9fff792 |
 | 5 | TB-4: --version flag | done | 2026-05-03 | 0ba461e |
-| 6 | User docs (all DG items) | done | 2026-05-03 | (this commit) |
+| 6 | User docs (all DG items) | done | 2026-05-03 | d4a02e4 |
 
 ---
 
