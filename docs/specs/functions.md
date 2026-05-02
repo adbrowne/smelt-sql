@@ -63,10 +63,23 @@ smelt.extern <name>(<param-list>) -> <Type> [;]
 smelt.<path>(<arg-list>)
 ```
 
-- `<path>` is the workspace-relative directory of the declaring file (segments separated by `.`) joined with the function name. Examples: a `smelt.define session_rollup(...)` declared in `functions/patterns/x.sql` is called as `smelt.functions.patterns.session_rollup(...)`; a `smelt.define helper(...)` declared in `random/x.sql` is called as `smelt.random.x.helper(...)`. The same `smelt.<path>` resolution rule that locates models, seeds, and sources locates functions — see `architecture.md` §"Resolution".
+- `<path>` is the workspace-relative directory of the declaring file (segments separated by `.`) joined with the function name. The filename stem is **not** a path component. Examples: a `smelt.define session_rollup(...)` declared in `functions/patterns/x.sql` is called as `smelt.functions.patterns.session_rollup(...)`; a `smelt.define helper(...)` declared in `random/x.sql` is called as `smelt.random.helper(...)`. The same `smelt.<path>` resolution rule that locates models, seeds, and sources locates functions — see `architecture.md` §"Resolution".
 - Arguments may be positional or named with `param => value` (PostgreSQL/Oracle convention).
 - Named-argument syntax does **not** apply to variadic positions.
 - Externs are called by their **bare** declared name (e.g. `read_parquet(x)`), not via `smelt.<path>`. Built-ins are likewise called by bare name. The bare-name namespace is workspace-wide; the declaring path of an extern is irrelevant to the call surface (see `architecture.md` §"Externs are flat").
+
+#### Boolean-position placement
+
+A `smelt.<path>(...)` call whose return type is `Expr<Boolean>` is valid in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression. Splice-context kind ceilings (Semantics §7 in `types.md`) still apply — a function whose body is `Agg`-kinded is rejected in `WHERE`/`ON`/`GROUP BY` even if the declared return type is `Expr<Boolean>`. Example:
+
+```sql
+-- functions/orders.sql declares is_shipped(status TEXT) -> Expr<Boolean>
+SELECT *
+FROM smelt.models.orders
+WHERE smelt.functions.is_shipped(status)
+```
+
+A future revision will add the file-location → call-path mapping table here once path-prefix enforcement (`UnknownSmeltFn` on mismatch) lands; see `docs/plans/20260502-smelt-loop-findings.md` Phase 2.
 
 ### `PASSING` clauses
 

@@ -29,14 +29,14 @@ Phase 1 is documentation-only. Phases 2–5 are code fixes, each preceded by TDD
 
 ## Progress tracking
 
-| Phase | Topic | Status |
-|-------|-------|--------|
-| 1 | Spec stubs + corrections | pending |
-| 2 | TB-5: path-prefix enforcement | pending |
-| 3 | TB-2: seed DATE→TEXT | pending |
-| 4 | TB-1: --verbose wiring | pending |
-| 5 | TB-4: --version flag | pending |
-| 6 | User docs (all DG items) | pending |
+| Phase | Topic | Status | Date | Commit |
+|-------|-------|--------|------|--------|
+| 1 | Spec stubs + corrections | done | 2026-05-03 | (this commit) |
+| 2 | TB-5: path-prefix enforcement | pending | | |
+| 3 | TB-2: seed DATE→TEXT | pending | | |
+| 4 | TB-1: --verbose wiring | pending | | |
+| 5 | TB-4: --version flag | pending | | |
+| 6 | User docs (all DG items) | pending | | |
 
 ---
 

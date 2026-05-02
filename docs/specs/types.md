@@ -106,12 +106,18 @@ SmallInt < Integer < BigInt < Decimal < Double
 Built-in SQL function return types are taken from the canonical registry in `crates/smelt-types/src/signatures.rs::BuiltinRegistry` and must be enforced via `CAST` in generated SQL. Examples:
 
 - `SUM(Integer | BigInt | SmallInt) → BigInt`
+- `SUM(Double | Float) → Double`
+- `SUM(Decimal(p, s)) → Decimal(38, s)` (canonical widening; precision arithmetic deferred — see Known Divergences)
 - `AVG(any numeric) → Double`
-- `COUNT(*) → BigInt` (non-nullable)
+- `MIN(T) → T`, `MAX(T) → T` for any `T: Ordered` (input type preserved; nullability §11 applies — empty group returns `NULL`).
+- `COUNT(*) → BigInt` (non-nullable — guaranteed by SQL semantics).
+- `COUNT(expr) → BigInt` (non-nullable).
 - `CEIL(Double) → Double`, `CEIL(Decimal(p,_)) → Decimal(p, 0)`
 - `SIGN(any numeric) → SmallInt`
 
 Engine-native precision is opt-in via the backend namespace (`postgres.sum(...)`); using it marks the model as non-portable.
+
+**Aggregate non-nullability via `COALESCE`.** A `COALESCE(<agg>, <literal>)` expression where `<literal>` is a non-null literal whose type matches `<agg>`'s return type is non-nullable. This is the canonical idiom for "empty-group becomes 0" (e.g. `COALESCE(SUM(amount), 0)`); the column-level `nullable: bool` flag flips to `false` after the COALESCE wrap. Type matching follows §11 nullability rules — this section only specifies the non-nullability outcome, not the equality predicate.
 
 ### 6. Type constraints
 
