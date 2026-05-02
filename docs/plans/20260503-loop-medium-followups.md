@@ -28,7 +28,7 @@ TB-B and TB-C (function return type not flowing into `smelt table`) are independ
 
 | Phase | Topic | Status | Date | Commit |
 |-------|-------|--------|------|--------|
-| 1 | TB-A: build-path path-prefix enforcement + fixture | pending | | |
+| 1 | TB-A: build-path path-prefix enforcement + fixture | done | 2026-05-03 | |
 | 2 | TB-B/C: function return type propagation into schema | pending | | |
 | 3 | Docs, harness, skill cleanup | pending | | |
 

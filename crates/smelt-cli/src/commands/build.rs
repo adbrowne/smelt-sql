@@ -90,6 +90,28 @@ fn show_plan(args: BuildArgs) -> Result<()> {
         )
     })?;
 
+    // Path-prefix enforcement: same rule as the build path. Reject
+    // stem-included call paths before printing the plan.
+    {
+        let diags = smelt_db::file_diagnostics(&db, ws, source_file);
+        let mut fn_path_errors: Vec<String> = Vec::new();
+        for diag in diags {
+            if diag.code == Some(smelt_db::DiagnosticCode::UnknownSmeltFn) {
+                fn_path_errors.push(diag.message.clone());
+            }
+        }
+        if !fn_path_errors.is_empty() {
+            for err in &fn_path_errors {
+                eprintln!("error: {err}");
+            }
+            return Err(anyhow!(
+                "Unknown smelt function call(s) — the filename stem is not a path component; \
+                 see `smelt docs show concepts/functions`.\n{}",
+                fn_path_errors.join("\n")
+            ));
+        }
+    }
+
     let plan = smelt_db::logical_plan(&db, ws, source_file)
         .ok_or_else(|| anyhow!("File {} did not parse as a valid model", abs_file.display()))?;
 
