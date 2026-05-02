@@ -100,6 +100,11 @@ rows = con.execute("SELECT customer_id, revenue FROM mart_top_customers ORDER BY
 for r in rows:
     print(r)
 # tuple-of-tuples; no pandas required
+
+# Expected-schema check (DuckDB DESCRIBE returns (name, type, ...) per column):
+got = [(r[0], r[1]) for r in con.execute("DESCRIBE mart_top_customers").fetchall()]
+expected = [("customer_id", "INTEGER"), ("customer_name", "VARCHAR"), ("total_revenue", "DOUBLE")]
+assert got == expected, f"schema mismatch: {got}"
 ```
 
 `smelt-datagen` is bundled inside the `smelt-sql` wheel — do not try to `pip install smelt-datagen` separately.
@@ -141,6 +146,7 @@ If `smelt build` fails, work through these before changing approach:
 - **"Unknown ref / source"** → run `smelt docs show concepts/project-structure`. Confirm seed CSV is under `seeds/` and the model frontmatter `name:` matches what other models call via `smelt.models.<name>`. Seed names = seed filename minus `.csv`.
 - **YAML frontmatter parse error** → the `---` fences must be on their own lines, with valid YAML between. No tabs.
 - **Type errors on aggregates** → `SUM`/`COUNT` infer as non-null, and `COUNT(*)` lands as `BIGINT` (not `INTEGER`). For `LEFT JOIN`-fed sums where the right side may be empty, wrap in `COALESCE(SUM(...), 0)`; if a downstream column or test expects `INTEGER`, add an outer `CAST(... AS INTEGER)`. A worked mart pattern: `SELECT c.customer_id, COALESCE(SUM(CASE WHEN o.status = 'shipped' THEN o.amount END), 0) AS revenue FROM smelt.models.raw_customers c LEFT JOIN smelt.models.stg_orders o USING (customer_id) GROUP BY c.customer_id` — ensures every customer appears with `0` revenue instead of `NULL`.
+- **`smelt table` shows `UNKNOWN` for a column fed by a `smelt.functions.*` call** → known cosmetic gap; the function's declared `-> Expr<T>` does not flow into the materialized model's `smelt table` view. The DuckDB column type is correct — confirm with `duckdb <db> -c 'DESCRIBE <model>'` and proceed.
 - **`smelt diff` reports phantom nullability changes after a clean build** → known issue; safe to ignore for app correctness, but don't use `smelt diff` as a CI gate yet.
 - **Stale model cache after deleting a `.sql` file** → `rm .smelt/schemas/<deleted_model>.json` manually.
 
@@ -150,6 +156,9 @@ If `smelt build` fails, work through these before changing approach:
 - After the first `smelt build` (which materializes seeds), run `duckdb my-project.duckdb -c 'DESCRIBE raw_<seed>'` to see physical types, **and** `smelt table <staging_model>` after building each staging model to see smelt's *inferred* types. The two can disagree even on a passthrough `SELECT col` — e.g. DuckDB may store a column as `DATE` while smelt infers `TEXT`, and smelt's inferred types govern downstream type-checking and the materialized column types. When the spec dictates a target type, `CAST` explicitly in staging rather than trusting the seed's type to flow through. Date-shaped strings landing as `VARCHAR`, and numeric CSVs landing as `DOUBLE` rather than `DECIMAL`, want the same fix.
 - Add models in dependency order: seeds → staging → intermediate → marts.
 - After every 1-2 new models, `smelt build` again. Don't write the whole project blind.
+- **If the spec asks for `smelt.define` functions**, read `smelt docs show guide/functions` first — the call-path rule (does the filename stem appear?) is easy to get wrong, and `smelt build --show-plan models/<m>.sql` is the fastest way to confirm a call resolves before doing a full build.
+  - A function returning `Expr<Boolean>` composes fine inside `CASE WHEN smelt.functions.<...>(...) THEN ... END` and inside aggregate wrappers like `SUM(CASE WHEN ... )` — no extra cast needed.
+  - A function declared `-> Expr<Double>` forces the materialized column to `DOUBLE` regardless of the seed CSV's apparent precision. If a spec says "DECIMAL or DOUBLE", DOUBLE-via-function satisfies it; if it requires DECIMAL specifically, type the function as `Expr<Decimal<...>>` instead.
 - For plan inspection without execution, use `smelt build --show-plan <model.sql>` (one model at a time). `smelt build --verbose` only emits extra detail when models actually run.
 - **Validate schema, not just rows.** Before declaring done, `DESCRIBE` each output table (or `smelt table <model>`) and compare column types against the spec. Harness validators often check row counts and value sums but not column types, so a `VARCHAR`-vs-`DATE` mismatch will silently pass row-level checks.
 
