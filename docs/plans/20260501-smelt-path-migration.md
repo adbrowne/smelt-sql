@@ -65,8 +65,8 @@ The architecture spec now mandates a single addressing scheme — `smelt.<path>`
 | 2c    | done     | 59c7f16 | 2026-05-01 |
 | 3     | done     | 19e412b | 2026-05-01 |
 | 4     | done     | 7a7d320 | 2026-05-01 |
-| 5a    | done     |         | 2026-05-02 |
-| 5b    | pending  |         |            |
+| 5a    | done     | a814f53 | 2026-05-02 |
+| 5b    | done     |         | 2026-05-02 |
 
 ---
 

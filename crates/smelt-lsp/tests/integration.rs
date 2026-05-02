@@ -1572,7 +1572,7 @@ mod hover {
         let model_path = ws.model_path("margin");
         ws.add_model(
             "margin",
-            "SELECT order_margin FROM smelt.fn.add_margin(smelt.models.orders) AS m",
+            "SELECT order_margin FROM smelt.functions.add_margin(smelt.models.orders) AS m",
         );
 
         // Calls to add_margin with the orders schema should produce zero
@@ -1626,8 +1626,8 @@ mod hover {
         ws.add_model(
             "margin_by_session",
             "SELECT session_id \
-             FROM smelt.fn.sessionize(\
-               smelt.fn.add_margin(smelt.models.orders),\
+             FROM smelt.functions.sessionize(\
+               smelt.functions.add_margin(smelt.models.orders),\
                user_col => CAST('' AS VARCHAR),\
                ts_col => CAST('2020-01-01' AS TIMESTAMP)\
              ) AS s",

@@ -35,7 +35,7 @@ fn build_db(
 #[test]
 fn tier2_calling_tier1_expands_inline() {
     // File 1 (Tier 1 — unannotated): `broken_tier1(x) AS (x + 'text')`.
-    // File 2 (Tier 2 — annotated): `tier2_caller(n: Expr<Integer>) AS (smelt.fn.broken_tier1(n))`.
+    // File 2 (Tier 2 — annotated): `tier2_caller(n: Expr<Integer>) AS (smelt.functions.broken_tier1(n))`.
     //
     // Phase 26: checking the Tier 2 body at definition time should expand the
     // Tier 1 call using n=Integer, discover x + 'text' with x=Integer is a
@@ -45,7 +45,8 @@ fn tier2_calling_tier1_expands_inline() {
     let tier2_path = root.join("functions").join("tier2_caller.sql");
 
     let tier1_src = "smelt.define broken_tier1(x) AS (x + 'text')\n";
-    let tier2_src = "smelt.define tier2_caller(n: Expr<Integer>) AS (smelt.fn.broken_tier1(n))\n";
+    let tier2_src =
+        "smelt.define tier2_caller(n: Expr<Integer>) AS (smelt.functions.broken_tier1(n))\n";
 
     let (db, ws, handles) = build_db(root, &[(tier1_path, tier1_src), (tier2_path, tier2_src)]);
     let tier2_file = handles[1];
@@ -77,7 +78,8 @@ fn tier1_error_surfaces_against_tier2_body() {
     let tier2_path = root.join("functions").join("tier2_with_frames.sql");
 
     let tier1_src = "smelt.define broken_t1(x) AS (x + 'text')\n";
-    let tier2_src = "smelt.define tier2_with_frames(n: Expr<Integer>) AS (smelt.fn.broken_t1(n))\n";
+    let tier2_src =
+        "smelt.define tier2_with_frames(n: Expr<Integer>) AS (smelt.functions.broken_t1(n))\n";
 
     let (db, ws, handles) = build_db(root, &[(tier1_path, tier1_src), (tier2_path, tier2_src)]);
     let tier2_file = handles[1];
@@ -105,8 +107,8 @@ fn tier1_error_surfaces_against_tier2_body() {
 fn transitive_tier1_chain_expands() {
     // Tier 1 → Tier 1 → Tier 2 chain:
     //   tier1_inner(x) AS (x + 'text')           — broken Tier 1
-    //   tier1_outer(y) AS (smelt.fn.tier1_inner(y)) — Tier 1 calling Tier 1
-    //   tier2_top(n: Expr<Integer>) AS (smelt.fn.tier1_outer(n))  — Tier 2 calling chain
+    //   tier1_outer(y) AS (smelt.functions.tier1_inner(y)) — Tier 1 calling Tier 1
+    //   tier2_top(n: Expr<Integer>) AS (smelt.functions.tier1_outer(n))  — Tier 2 calling chain
     //
     // Checking the Tier 2 file must cascade the error through the Tier 1 chain.
     let root = PathBuf::from("/fake/project");
@@ -115,8 +117,8 @@ fn transitive_tier1_chain_expands() {
     let top_path = root.join("functions").join("tier2_top.sql");
 
     let inner_src = "smelt.define tier1_inner(x) AS (x + 'text')\n";
-    let outer_src = "smelt.define tier1_outer(y) AS (smelt.fn.tier1_inner(y))\n";
-    let top_src = "smelt.define tier2_top(n: Expr<Integer>) AS (smelt.fn.tier1_outer(n))\n";
+    let outer_src = "smelt.define tier1_outer(y) AS (smelt.functions.tier1_inner(y))\n";
+    let top_src = "smelt.define tier2_top(n: Expr<Integer>) AS (smelt.functions.tier1_outer(n))\n";
 
     let (db, ws, handles) = build_db(
         root,
@@ -156,7 +158,7 @@ fn tier2_signature_stable_when_tier1_callee_breaks() {
 
     let tier1_clean_src = "smelt.define tier1_clean(x) AS (x + 1)\n";
     let tier2_src =
-        "smelt.define tier2_uses_tier1(n: Expr<Integer>) AS (smelt.fn.tier1_clean(n))\n";
+        "smelt.define tier2_uses_tier1(n: Expr<Integer>) AS (smelt.functions.tier1_clean(n))\n";
 
     let mut db = Database::default();
     let project = db.set_project_input(root.clone(), String::new());

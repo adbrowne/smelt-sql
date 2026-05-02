@@ -843,18 +843,18 @@ pub fn render_expansion_frames(
     (message, related_information)
 }
 
-/// Find the innermost `SMELT_FN_CALL` whose text range contains `offset`.
+/// Find the innermost `SMELT_PATH_CALL` whose text range contains `offset`.
 ///
-/// Used by hover and completion to dispatch on a `smelt.fn.<name>(...)`
+/// Used by hover and completion to dispatch on a `smelt.functions.<name>(...)`
 /// call site (Phase 48: hover wiring + PASSING-body completion).
 pub fn find_smelt_fn_call_at_cursor(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     offset: usize,
-) -> Option<smelt_parser::ast::SmeltFnCall> {
-    let mut best: Option<smelt_parser::ast::SmeltFnCall> = None;
+) -> Option<smelt_parser::ast::SmeltPathCall> {
+    let mut best: Option<smelt_parser::ast::SmeltPathCall> = None;
     let mut best_size: usize = usize::MAX;
     for node in syntax.descendants() {
-        if let Some(call) = smelt_parser::ast::SmeltFnCall::cast(node) {
+        if let Some(call) = smelt_parser::ast::SmeltPathCall::cast(node) {
             let r = call.text_range();
             let start: usize = r.start().into();
             let end: usize = r.end().into();
@@ -3669,7 +3669,7 @@ impl LanguageServer for Backend {
                 // surface the declared return type or the parameter binding
                 // for a `PASSING <name> AS (...)` clause.
                 if let Some(call) = find_smelt_fn_call_at_cursor(file.syntax(), cursor_offset) {
-                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
+                    let segments = call.segments();
                     let fn_name = segments.last().cloned().unwrap_or_default();
                     let ws = Workspace::try_get(&db);
                     let sig = ws.and_then(|w| smelt_db::resolve_function(&db, w, fn_name.clone()));
@@ -4432,11 +4432,12 @@ fn detect_passing_body(before_cursor: &str) -> Option<CompletionContext> {
         return None;
     }
 
-    // Step 5: extract the callee name — last `smelt.fn.<...>` call before
-    // the `PASSING`. We look for the most recent `smelt.fn.` literal in
+    // Step 5: extract the callee name — last `smelt.functions.<...>` call before
+    // the `PASSING`. We look for the most recent `smelt.functions.` literal in
     // `before_cursor` and take the dotted-identifier that follows.
-    let smelt_fn = before_cursor.rfind("smelt.fn.")?;
-    let after = &before_cursor[smelt_fn + "smelt.fn.".len()..];
+    // Phase 5b: `smelt.fn.*` is removed; only `smelt.functions.*` is valid.
+    let smelt_fn = before_cursor.rfind("smelt.functions.")?;
+    let after = &before_cursor[smelt_fn + "smelt.functions.".len()..];
     let mut last_segment_end = 0usize;
     for (i, ch) in after.char_indices() {
         if ch.is_alphanumeric() || ch == '_' || ch == '.' {

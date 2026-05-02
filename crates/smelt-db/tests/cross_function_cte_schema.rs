@@ -1,6 +1,6 @@
 //! Phase 47 — cross-function CTE schema inference.
 //!
-//! When a CTE body has the shape `SELECT * FROM smelt.fn.<name>(<args>)`,
+//! When a CTE body has the shape `SELECT * FROM smelt.functions.<name>(<args>)`,
 //! the CTE's schema should be inferred from the callee's return schema
 //! (rather than being marked opaque). Closes review finding #22.
 //!
@@ -12,10 +12,10 @@
 //!      outer SELECT references a column not in the inferred schema;
 //!      `UndeclaredColumn` fires.
 //!   3. `cte_schema_inference_handles_chained_smelt_fn_calls` — a CTE
-//!      body wrapping `smelt.fn.add_margin(smelt.fn.add_one(...))`
+//!      body wrapping `smelt.functions.add_margin(smelt.functions.add_one(...))`
 //!      resolves recursively through both calls.
 //!   4. `mark_cte_opaque_still_used_as_fallback` — when the inner
-//!      smelt.fn.* doesn't resolve, the opaque-CTE fallback still
+//!      smelt.functions.* doesn't resolve, the opaque-CTE fallback still
 //!      keeps outer column references quiet (only the
 //!      `UnknownSmeltFn` error fires).
 
@@ -79,9 +79,9 @@ fn cte_schema_inferred_from_smelt_fn_call() {
     let fn_src = "smelt.define add_one(t: TableExpr) -> TableExpr AS (\
         SELECT t.id FROM t\
     )\n";
-    // Phase 4: use path form (smelt.ref() is removed).
+    // Phase 5b: use smelt.functions.* form (smelt.fn.* is removed).
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.add_one(smelt.models.events)\
+        SELECT * FROM smelt.functions.add_one(smelt.models.events)\
     ) SELECT id FROM x\n";
 
     let (db, ws, files) = build_db(
@@ -121,9 +121,9 @@ fn cte_schema_typo_inside_caller_caught() {
     let fn_src = "smelt.define add_one(t: TableExpr) -> TableExpr AS (\
         SELECT t.id FROM t\
     )\n";
-    // Phase 4: use path form (smelt.ref() is removed).
+    // Phase 5b: use smelt.functions.* form (smelt.fn.* is removed).
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.add_one(smelt.models.events)\
+        SELECT * FROM smelt.functions.add_one(smelt.models.events)\
     ) SELECT does_not_exist FROM x\n";
 
     let (db, ws, files) = build_db(
@@ -155,7 +155,7 @@ fn cte_schema_typo_inside_caller_caught() {
 
 #[test]
 fn cte_schema_inference_handles_chained_smelt_fn_calls() {
-    // CTE body wraps two smelt.fn calls: add_margin(add_one(...)).
+    // CTE body wraps two smelt.functions calls: add_margin(add_one(...)).
     // Recursive resolution must walk both calls so the outer
     // SELECT can resolve `margin` (added by add_margin).
     let root = PathBuf::from("/fake/project");
@@ -175,9 +175,9 @@ fn cte_schema_inference_handles_chained_smelt_fn_calls() {
     let margin_src = "smelt.define add_margin(src: TableExpr) -> TableExpr AS (\
         SELECT src.*, src.revenue - src.cost AS margin FROM src\
     )\n";
-    // Phase 4: use path form (smelt.ref() is removed).
+    // Phase 5b: use smelt.functions.* form (smelt.fn.* is removed).
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.add_margin(smelt.fn.add_one(smelt.models.orders))\
+        SELECT * FROM smelt.functions.add_margin(smelt.functions.add_one(smelt.models.orders))\
     ) SELECT margin FROM x\n";
 
     let (db, ws, files) = build_db(
@@ -199,7 +199,7 @@ fn cte_schema_inference_handles_chained_smelt_fn_calls() {
         .collect();
     assert!(
         bad.is_empty(),
-        "expected no errors for chained smelt.fn calls; got {bad:#?}"
+        "expected no errors for chained smelt.functions calls; got {bad:#?}"
     );
 }
 
@@ -213,7 +213,7 @@ fn mark_cte_opaque_still_used_as_fallback() {
     let model_path = root.join("models").join("uses_unknown_fn.sql");
 
     let model_src = "WITH x AS (\
-        SELECT * FROM smelt.fn.does_not_exist()\
+        SELECT * FROM smelt.functions.does_not_exist()\
     ) SELECT some_col FROM x\n";
 
     let (db, ws, files) = build_db(

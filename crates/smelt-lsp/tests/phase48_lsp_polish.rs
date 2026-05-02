@@ -1,4 +1,4 @@
-//! Phase 48 polish: hover wiring on `smelt.fn.*` call sites,
+//! Phase 48 polish: hover wiring on `smelt.functions.*` call sites,
 //! PASSING-body column completion, and multi-level frame trace
 //! diagnostics in the LSP layer.
 //!
@@ -13,7 +13,7 @@ use smelt_db::{
     declared_return_hover_text, resolve_function, Database, Diagnostic as DbDiagnosticT,
     DiagnosticData, SourceFile, Workspace,
 };
-use smelt_parser::ast::{File as AstFile, SmeltFnCall};
+use smelt_parser::ast::{File as AstFile, SmeltPathCall};
 use smelt_types::FrameInfo;
 
 // ---------------------------------------------------------------------------
@@ -86,21 +86,21 @@ impl Phase48Workspace {
 }
 
 // ---------------------------------------------------------------------------
-// Hover helpers — exercise the pure path-and-cursor → `SmeltFnCall` lookup
+// Hover helpers — exercise the pure path-and-cursor → `SmeltPathCall` lookup
 // and the `declared_return_hover_text` formatter.
 // ---------------------------------------------------------------------------
 
-/// Find the innermost `SMELT_FN_CALL` whose text range contains `offset`.
+/// Find the innermost `SMELT_PATH_CALL` whose text range contains `offset`.
 /// This mirrors the helper that hover() calls; we re-implement it here so
 /// the test can assert on the same machinery without depending on private
 /// state inside the LSP module.
-fn find_smelt_fn_call_at_cursor(
+fn find_smelt_path_call_at_cursor(
     syntax: &smelt_parser::syntax_kind::SyntaxNode,
     offset: usize,
-) -> Option<SmeltFnCall> {
-    let mut best: Option<SmeltFnCall> = None;
+) -> Option<SmeltPathCall> {
+    let mut best: Option<SmeltPathCall> = None;
     for node in syntax.descendants() {
-        if let Some(call) = SmeltFnCall::cast(node) {
+        if let Some(call) = SmeltPathCall::cast(node) {
             let r = call.text_range();
             let start: usize = r.start().into();
             let end: usize = r.end().into();
@@ -124,7 +124,7 @@ fn find_smelt_fn_call_at_cursor(
     best
 }
 
-/// Phase 48 — Test 1 (Phase 24 deferral): hover on a `smelt.fn.<name>(...)`
+/// Phase 48 — Test 1 (Phase 24 deferral): hover on a `smelt.functions.<name>(...)`
 /// call's function-name segment must produce a tooltip containing the
 /// declared return type rendered by `declared_return_hover_text`.
 #[test]
@@ -136,7 +136,7 @@ fn lsp_hover_on_smelt_fn_call_shows_declared_return() {
         "widen_to_double",
         "smelt.define widen_to_double(x: Expr<Integer>) -> Expr<Double> AS (ABS(x))",
     );
-    let model_sql = "SELECT smelt.fn.widen_to_double(1) AS w FROM (SELECT 1) t";
+    let model_sql = "SELECT smelt.functions.widen_to_double(1) AS w FROM (SELECT 1) t";
     let model_path = ws.add_model("caller", model_sql);
 
     let workspace = Workspace::try_get(&ws.db).expect("workspace registered");
@@ -148,9 +148,11 @@ fn lsp_hover_on_smelt_fn_call_shows_declared_return() {
     let file = ws.db.source_file(&model_path).unwrap();
     let parse = smelt_db::parse_file(&ws.db, file);
     let syntax = parse.syntax();
-    let call = find_smelt_fn_call_at_cursor(&syntax, cursor)
-        .expect("cursor on call path must resolve to the SmeltFnCall");
-    assert_eq!(call.path_text(), "smelt.fn.widen_to_double");
+    let call = find_smelt_path_call_at_cursor(&syntax, cursor)
+        .expect("cursor on call path must resolve to the SmeltPathCall");
+    let segments = call.segments();
+    let call_path_str = format!("smelt.{}", segments.join("."));
+    assert_eq!(call_path_str, "smelt.functions.widen_to_double");
 
     let hover = declared_return_hover_text(&sig).expect("Tier 3 fn must have a hover return-text");
     assert!(
@@ -181,7 +183,7 @@ fn lsp_hover_on_passing_clause_param_shows_param_signature() {
         )",
     );
     let model_sql =
-        "SELECT * FROM smelt.fn.session_rollup(smelt.models.upstream) PASSING metrics AS (COUNT(*)) AS sr";
+        "SELECT * FROM smelt.functions.session_rollup(smelt.models.upstream) PASSING metrics AS (COUNT(*)) AS sr";
     ws.add_model("upstream", "SELECT 1 AS x");
     let model_path = ws.add_model("caller", model_sql);
 
@@ -194,15 +196,15 @@ fn lsp_hover_on_passing_clause_param_shows_param_signature() {
     let syntax = parse.syntax();
     let ast_file = AstFile::cast(syntax).unwrap();
 
-    // Find the smelt.fn.session_rollup call and its first PASSING clause.
-    let mut found_call: Option<SmeltFnCall> = None;
+    // Find the smelt.functions.session_rollup call and its first PASSING clause.
+    let mut found_call: Option<SmeltPathCall> = None;
     for node in ast_file.syntax().descendants() {
-        if let Some(call) = SmeltFnCall::cast(node) {
+        if let Some(call) = SmeltPathCall::cast(node) {
             found_call = Some(call);
             break;
         }
     }
-    let call = found_call.expect("must find SmeltFnCall");
+    let call = found_call.expect("must find SmeltPathCall");
     let passing = call
         .passing_clauses()
         .next()
@@ -269,7 +271,7 @@ fn lsp_completion_in_passing_body_lists_context_columns() {
         "session_rollup",
         // The CTE body is written with explicit column projections so the
         // Phase 48 completion path can resolve column names without
-        // recursively expanding `smelt.fn.sessionize(...)` (the latter
+        // recursively expanding `smelt.functions.sessionize(...)` (the latter
         // requires the full Phase 47 cross-function schema lookup, which
         // is plumbed through the Salsa schema-provider — out of scope for
         // a unit-level helper test).

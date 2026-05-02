@@ -402,17 +402,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is
-    /// the start of a `smelt.fn.<path>(...)` call. Does not consume any tokens.
-    /// The trigger is exactly three non-trivia tokens:
-    ///   IDENT("smelt")  DOT  IDENT("fn")
-    /// The path segments after `fn` and the `(...)` are validated by
-    /// `parse_smelt_fn_call`.
+    /// the start of a `smelt.fn.<path>(...)` call (Phase 5b: now rejected).
+    /// Used only in the rejection arms that emit parse errors.
     fn at_smelt_fn_trigger(&self) -> bool {
         // First non-trivia token must be IDENT "smelt".
         if !self.at(IDENT) || !self.current_text().eq_ignore_ascii_case("smelt") {
             return false;
         }
-
         // Find the next non-trivia token: must be DOT.
         let mut lookahead = 1;
         while let Some(t) = self.tokens.get(self.pos + lookahead) {
@@ -422,11 +418,9 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        match self.tokens.get(self.pos + lookahead) {
-            Some(t) if t.kind == DOT => {}
-            _ => return false,
+        if self.tokens.get(self.pos + lookahead).map(|t| t.kind) != Some(DOT) {
+            return false;
         }
-
         // Find the next non-trivia token: must be IDENT "fn".
         lookahead += 1;
         while let Some(t) = self.tokens.get(self.pos + lookahead) {
@@ -442,8 +436,6 @@ impl<'a> Parser<'a> {
         if tok.kind != IDENT {
             return false;
         }
-        // Compute the starting offset of this lookahead token so we can read
-        // its text without consuming.
         let mut offset = self.offset;
         for prior in 0..lookahead {
             offset += self.tokens[self.pos + prior].len;
@@ -1806,118 +1798,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a `smelt.fn.<segment>(.<segment>)*(args)` call as a `SMELT_FN_CALL`.
-    ///
-    /// The caller must have verified `at_smelt_fn_trigger()` first. The minimal
-    /// valid form is `smelt.fn.<name>(...)` — the three prefix tokens
-    /// `smelt . fn` must be followed by at least one `.<IDENT>` segment and
-    /// then `(`. Intermediate namespace segments (`smelt.fn.core.math.name`)
-    /// are legal and all captured inside a single `CALL_PATH` node including
-    /// the `smelt.fn.` prefix.
-    fn parse_smelt_fn_call(&mut self) {
-        self.start_node(SMELT_FN_CALL);
-        self.start_node(CALL_PATH);
-
-        // Consume the three trigger tokens: `smelt`, `.`, `fn`.
-        self.skip_trivia();
-        self.advance(); // IDENT "smelt"
-        self.skip_trivia();
-        self.advance(); // DOT
-        self.skip_trivia();
-        self.advance(); // IDENT "fn"
-
-        // Require at least one `.<IDENT>` segment after `smelt.fn`.
-        self.skip_trivia();
-        if !self.at(DOT) {
-            self.error("Expected '.' after 'smelt.fn'".to_string());
-            self.finish_node(); // CALL_PATH
-            self.finish_node(); // SMELT_FN_CALL
-            return;
-        }
-        self.advance(); // DOT
-        self.skip_trivia();
-        if !self.at(IDENT) {
-            self.error("Expected identifier after 'smelt.fn.'".to_string());
-            self.finish_node(); // CALL_PATH
-            self.finish_node(); // SMELT_FN_CALL
-            return;
-        }
-        self.advance(); // IDENT (first path segment after smelt.fn.)
-
-        // Continue consuming `.<IDENT>` segments as long as more follow. Stop
-        // when the next non-trivia token is `(` (start of the arg list) or
-        // anything else (which is an error).
-        loop {
-            // Peek past any trivia to the next non-trivia token.
-            let mut lookahead = 0;
-            while let Some(t) = self.tokens.get(self.pos + lookahead) {
-                if t.kind.is_trivia() {
-                    lookahead += 1;
-                } else {
-                    break;
-                }
-            }
-            let next_kind = self
-                .tokens
-                .get(self.pos + lookahead)
-                .map(|t| t.kind)
-                .unwrap_or(EOF);
-            if next_kind != DOT {
-                break;
-            }
-
-            // There is a `.` after the last IDENT. Peek past the DOT to see
-            // what follows — we only extend the path if it's an IDENT.
-            let mut lookahead2 = lookahead + 1;
-            while let Some(t) = self.tokens.get(self.pos + lookahead2) {
-                if t.kind.is_trivia() {
-                    lookahead2 += 1;
-                } else {
-                    break;
-                }
-            }
-            let after_dot = self
-                .tokens
-                .get(self.pos + lookahead2)
-                .map(|t| t.kind)
-                .unwrap_or(EOF);
-            if after_dot != IDENT {
-                break;
-            }
-
-            // Consume `.<IDENT>`.
-            self.skip_trivia();
-            self.advance(); // DOT
-            self.skip_trivia();
-            self.advance(); // IDENT
-        }
-
-        self.finish_node(); // CALL_PATH
-
-        // Argument list is required. Reuse parse_arg_list (handles named
-        // params `x => y` for free).
-        self.skip_trivia();
-        if self.at(LPAREN) {
-            self.parse_arg_list();
-        } else {
-            self.error("Expected '(' after smelt.fn.<path>".to_string());
-        }
-
-        // Parse zero or more `PASSING <name> AS (<body>)` clauses that
-        // trail the argument list. The keyword `PASSING` is context-sensitive:
-        // it is only special here, immediately after a recognised smelt.fn.*
-        // call; everywhere else it is a plain IDENT.
-        loop {
-            self.skip_trivia();
-            if !self.at_contextual_keyword("PASSING") {
-                break;
-            }
-            self.parse_passing_clause();
-        }
-
-        self.finish_node(); // SMELT_FN_CALL
-    }
-
     /// Parse a single `PASSING <name> AS (<body>)` clause.
     /// The caller must have verified `at_contextual_keyword("PASSING")` first.
     fn parse_passing_clause(&mut self) {
@@ -2229,27 +2109,10 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
         }
 
-        // Phase 15: `smelt.fn.<path>(...)` can appear in a FROM clause
-        // when the callee returns `TableExpr`. Recognise the trigger
-        // before falling through to the generic identifier path — the
-        // trigger consumes four tokens (IDENT "smelt" DOT IDENT "fn")
-        // which the generic path would split into two dotted IDENTs
-        // plus an un-parsed suffix, losing the SMELT_FN_CALL structure.
+        // Phase 5b: reject legacy smelt.fn.* in FROM position.
         if self.at(IDENT) && self.at_smelt_fn_trigger() {
-            self.parse_smelt_fn_call();
-            // Fall through to the shared trailing-shape handling below
-            // (TABLESAMPLE, PIVOT/UNPIVOT, AS-alias) so a call in FROM
-            // reads as `smelt.fn.f(args) [AS alias]`, etc.
-            self.skip_trivia();
-            if self.at(AS_KW) {
-                self.advance();
-                self.skip_trivia();
-                self.expect(IDENT);
-            } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
-                self.advance();
-            }
-            self.finish_node(); // TABLE_REF
-            return;
+            self.error("smelt.fn.* is removed; use smelt.functions.<name> instead".to_string());
+            // Fall through — the generic IDENT path below handles error recovery.
         }
 
         // Phase 4: reject legacy smelt.ref() and smelt.source() call forms.
@@ -3087,13 +2950,47 @@ impl<'a> Parser<'a> {
             // Must be checked BEFORE the generic IDENT branch.
             self.parse_smelt_as_struct();
         } else if self.at(IDENT) && self.at_smelt_fn_trigger() {
-            // smelt.fn.<path>(args) — user-declared function call. Must be
-            // checked BEFORE the generic IDENT / namespaced-function branch so
-            // that smelt.fn.* calls produce a SMELT_FN_CALL node rather than a
-            // FUNCTION_CALL. smelt.ref(...) / smelt.source(...) remain on the
-            // FUNCTION_CALL path because the trigger requires the second
-            // segment to be exactly `fn`.
-            self.parse_smelt_fn_call();
+            // Phase 5b: reject legacy smelt.fn.* call syntax in expression
+            // position. Emit an error pointing the user toward the unified
+            // `smelt.functions.*` form, then parse the call as a generic
+            // FUNCTION_CALL for error recovery.
+            self.error("smelt.fn.* is removed; use smelt.functions.<name> instead".to_string());
+            // Consume smelt . fn . <name> and then the arg list as a FUNCTION_CALL
+            // for error recovery so parsing can continue.
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // consume "smelt"
+            self.skip_trivia();
+            self.advance(); // consume "."
+            self.skip_trivia();
+            self.advance(); // consume "fn"
+                            // Consume any remaining path segments
+            loop {
+                self.skip_trivia();
+                if !self.at(DOT) {
+                    break;
+                }
+                let mut la = 1;
+                while let Some(t) = self.tokens.get(self.pos + la) {
+                    if t.kind.is_trivia() {
+                        la += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if self.tokens.get(self.pos + la).map(|t| t.kind) == Some(IDENT) {
+                    self.advance(); // DOT
+                    self.skip_trivia();
+                    self.advance(); // IDENT
+                } else {
+                    break;
+                }
+            }
+            self.skip_trivia();
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            if self.at(LPAREN) {
+                self.parse_arg_list();
+            }
+            self.finish_node();
         } else if self.at(IDENT) && self.at_smelt_legacy_ref_or_source_trigger() {
             // Phase 4: reject legacy smelt.ref() and smelt.source() in
             // expression position. Emit the error and fall through to the
@@ -4187,16 +4084,11 @@ impl<'a> Parser<'a> {
             self.finish_node();
         } else if self.at(VALUES_KW) {
             self.parse_values_clause();
-        } else if self.at_smelt_fn_trigger() {
-            // Phase 44b: CTE body is a bare `smelt.fn.*` call with optional
-            // PASSING clauses. Wrap in SUBQUERY so `Cte::query()` returns Some.
-            self.start_node(SUBQUERY);
-            self.parse_smelt_fn_call();
-            self.finish_node();
         } else if self.at_smelt_path_trigger() {
             // smelt.<path> migration, Phase 1: a CTE body is a bare
-            // `smelt.<path>(args)` call (parity with the smelt.fn.* CTE body
-            // grammar above). The value form is also accepted here even
+            // `smelt.<path>(args)` call. Phase 5b removes the smelt.fn.* arm
+            // here; use smelt.functions.* instead. The value form is also
+            // accepted here even
             // though parameterless table-shaped paths are unusual — the
             // resolver in Phase 2a decides the kind.
             self.start_node(SUBQUERY);
@@ -7000,15 +6892,11 @@ LIMIT 100
         assert_eq!(file.defines().count(), 1);
     }
 
-    // ===== Phase 2: smelt.fn.* call syntax =====
+    // ===== Phase 2 → Phase 5b: smelt.fn.* rejection tests =====
+    // Phase 5b removes the smelt.fn.* parser arm. Tests that previously
+    // verified successful parsing now verify rejection (parse errors).
 
-    use crate::ast::{ArgList, CallPath, Expr, SmeltFnCall};
     use crate::syntax_kind::SyntaxNode;
-
-    /// Helper: collect all SMELT_FN_CALL descendants of a node.
-    fn smelt_fn_calls(root: &SyntaxNode) -> Vec<SmeltFnCall> {
-        root.descendants().filter_map(SmeltFnCall::cast).collect()
-    }
 
     /// Helper: collect all FUNCTION_CALL descendants of a node.
     fn function_calls(root: &SyntaxNode) -> Vec<FunctionCall> {
@@ -7016,116 +6904,27 @@ LIMIT 100
     }
 
     #[test]
-    fn parses_smelt_fn_call_simple() {
-        let input = "SELECT smelt.fn.safe_divide(a, b) FROM t";
-        let (parse, file) = parse_file_text(input);
-        assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
-        );
-
-        let calls = smelt_fn_calls(file.syntax());
-        assert_eq!(calls.len(), 1, "expected exactly one SMELT_FN_CALL");
-
-        // The old FUNCTION_CALL path must not fire for smelt.fn.*. There are
-        // zero FUNCTION_CALL nodes in this input.
-        let fcalls = function_calls(file.syntax());
-        assert!(
-            fcalls.is_empty(),
-            "expected no FUNCTION_CALL nodes for smelt.fn.* calls, got {}",
-            fcalls.len()
-        );
-
-        let call = &calls[0];
-        let path = call.call_path().expect("should have CALL_PATH");
-        let path_text_compact: String = path
-            .syntax()
-            .text()
-            .to_string()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        assert_eq!(path_text_compact, "smelt.fn.safe_divide");
-
-        let args = call.arg_list().expect("should have ARG_LIST");
-        // Two arguments, zero named params.
-        let named: Vec<_> = args.named_params().collect();
-        assert!(
-            named.is_empty(),
-            "simple positional args should produce no NAMED_PARAM"
-        );
-        // Count expression arguments.
-        let expr_args = args
-            .syntax()
-            .children()
-            .filter(|n| Expr::cast(n.clone()).is_some())
-            .count();
-        assert_eq!(expr_args, 2, "expected two positional arguments");
-    }
-
-    #[test]
-    fn parses_smelt_fn_call_named_args() {
-        let input = "SELECT smelt.fn.safe_divide(numerator => a, denominator => b) FROM t";
-        let (parse, file) = parse_file_text(input);
-        assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
-        );
-
-        let calls = smelt_fn_calls(file.syntax());
-        assert_eq!(calls.len(), 1);
-        let args: ArgList = calls[0].arg_list().expect("should have ARG_LIST");
-        let named: Vec<_> = args.named_params().collect();
-        assert_eq!(named.len(), 2, "expected two NAMED_PARAM children");
-        assert_eq!(named[0].name().as_deref(), Some("numerator"));
-        assert_eq!(named[1].name().as_deref(), Some("denominator"));
-    }
-
-    #[test]
-    fn parses_smelt_fn_call_nested_namespace() {
-        let input = "SELECT smelt.fn.core.math.safe_divide(a, b) FROM t";
-        let (parse, file) = parse_file_text(input);
-        assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
-        );
-
-        let calls = smelt_fn_calls(file.syntax());
-        assert_eq!(calls.len(), 1);
-
-        let call = &calls[0];
-        let path: CallPath = call.call_path().expect("CALL_PATH should be present");
-        // The full path including the `smelt.fn.` prefix should be captured
-        // inside CALL_PATH — joining IDENT tokens with `.` gives the logical
-        // dotted name.
-        let joined = call.path_text();
-        assert_eq!(joined, "smelt.fn.core.math.safe_divide");
-
-        // The raw text of the CALL_PATH node (whitespace stripped) also
-        // contains the nested namespace.
-        let raw_compact: String = path
-            .syntax()
-            .text()
-            .to_string()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        assert!(
-            raw_compact.contains("core.math.safe_divide"),
-            "CALL_PATH text should contain nested namespace, got {:?}",
-            raw_compact
-        );
-
-        // The logical segments (stripped of the smelt.fn prefix) are
-        // `["core", "math", "safe_divide"]`.
-        assert_eq!(path.segments(), vec!["core", "math", "safe_divide"]);
+    fn smelt_fn_call_is_now_rejected() {
+        // Phase 5b: smelt.fn.* must produce parse errors.
+        let inputs = &[
+            "SELECT smelt.fn.safe_divide(a, b) FROM t",
+            "SELECT smelt.fn.safe_divide(numerator => a, denominator => b) FROM t",
+            "SELECT smelt.fn.core.math.safe_divide(a, b) FROM t",
+            "SELECT * FROM t WHERE smelt.fn.is_valid(x)",
+        ];
+        for input in inputs {
+            let (parse, _file) = parse_file_text(input);
+            assert!(
+                !parse.errors.is_empty(),
+                "Phase 5b: smelt.fn.* must produce parse errors for input: {:?}",
+                input
+            );
+        }
     }
 
     #[test]
     fn smelt_fn_without_parens_is_error() {
+        // smelt.fn.foo without parens was already an error; still an error.
         let input = "SELECT smelt.fn.foo FROM t";
         let (parse, _file) = parse_file_text(input);
         assert!(
@@ -7135,44 +6934,16 @@ LIMIT 100
     }
 
     #[test]
-    fn smelt_fn_inside_where() {
-        let input = "SELECT * FROM t WHERE smelt.fn.is_valid(x)";
-        let (parse, file) = parse_file_text(input);
-        assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
-        );
-
-        let calls = smelt_fn_calls(file.syntax());
-        assert_eq!(calls.len(), 1);
-
-        // The call must sit under a WHERE_CLAUSE ancestor.
-        let in_where = calls[0]
-            .syntax()
-            .ancestors()
-            .any(|n| n.kind() == WHERE_CLAUSE);
-        assert!(in_where, "SMELT_FN_CALL must be inside WHERE_CLAUSE");
-    }
-
-    #[test]
     fn smelt_ref_still_parses_as_function_call() {
         // Phase 4 update: smelt.ref() is rejected with an error. The test
         // is retained to verify that error recovery still produces a
-        // FUNCTION_CALL (not SMELT_FN_CALL) so downstream CST walkers
-        // don't panic.
+        // FUNCTION_CALL so downstream CST walkers don't panic.
         let input = "SELECT * FROM smelt.ref('model')";
         let (parse, file) = parse_file_text(input);
         // Phase 4: must have at least one parse error.
         assert!(
             !parse.errors.is_empty(),
             "Phase 4: smelt.ref() must produce a parse error"
-        );
-
-        // Even with the error, the recovered CST must NOT produce SMELT_FN_CALL.
-        assert!(
-            smelt_fn_calls(file.syntax()).is_empty(),
-            "smelt.ref should NOT be parsed as SMELT_FN_CALL even in error recovery"
         );
 
         // Error recovery produces a FUNCTION_CALL node.
@@ -7184,26 +6955,13 @@ LIMIT 100
     }
 
     #[test]
-    fn smelt_fn_call_inside_define_body() {
-        // Phase 2 integrates with Phase 1 grammar: a smelt.fn.* call appears
-        // inside a smelt.define body expression.
+    fn smelt_fn_call_inside_define_body_is_rejected() {
+        // Phase 5b: smelt.fn.* inside a define body must now produce errors.
         let input = "smelt.define wrap(x) AS (smelt.fn.safe_divide(x, 1))";
-        let (parse, file) = parse_file_text(input);
+        let (parse, _file) = parse_file_text(input);
         assert!(
-            parse.errors.is_empty(),
-            "unexpected errors: {:?}",
-            parse.errors
-        );
-
-        let defines: Vec<SmeltDefine> = file.defines().collect();
-        assert_eq!(defines.len(), 1);
-        let body = defines[0].body().expect("smelt.define should have body");
-
-        let calls_under_body = smelt_fn_calls(body.syntax());
-        assert_eq!(
-            calls_under_body.len(),
-            1,
-            "expected exactly one SMELT_FN_CALL inside DEFINE_BODY"
+            !parse.errors.is_empty(),
+            "Phase 5b: smelt.fn.* inside define body must produce parse errors"
         );
     }
 
@@ -7526,7 +7284,10 @@ LIMIT 100
 
     #[test]
     fn parses_single_passing_clause() {
-        let input = "SELECT smelt.fn.session_rollup(src) PASSING metrics AS (SUM(revenue)) FROM t";
+        // Phase 5b: smelt.fn.* is rejected; use smelt.functions.* instead.
+        // PASSING clauses are still supported on smelt.functions.* calls.
+        let input =
+            "SELECT smelt.functions.session_rollup(src) PASSING metrics AS (SUM(revenue)) FROM t";
         let (parse, file) = parse_file_text(input);
         assert!(
             parse.errors.is_empty(),
@@ -7534,8 +7295,8 @@ LIMIT 100
             parse.errors
         );
 
-        let calls = smelt_fn_calls(file.syntax());
-        assert_eq!(calls.len(), 1, "expected one SMELT_FN_CALL");
+        let calls = smelt_path_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected one SMELT_PATH_CALL");
 
         let passing: Vec<PassingClause> = calls[0].passing_clauses().collect();
         assert_eq!(passing.len(), 1, "expected one PASSING_CLAUSE");
@@ -7558,7 +7319,9 @@ LIMIT 100
 
     #[test]
     fn parses_multiple_passing_clauses() {
-        let input = "SELECT smelt.fn.foo(src) PASSING a AS (x + 1) PASSING b AS (y * 2) FROM t";
+        // Phase 5b: smelt.fn.* is rejected; use smelt.functions.* instead.
+        let input =
+            "SELECT smelt.functions.foo(src) PASSING a AS (x + 1) PASSING b AS (y * 2) FROM t";
         let (parse, file) = parse_file_text(input);
         assert!(
             parse.errors.is_empty(),
@@ -7566,8 +7329,8 @@ LIMIT 100
             parse.errors
         );
 
-        let calls = smelt_fn_calls(file.syntax());
-        assert_eq!(calls.len(), 1, "expected one SMELT_FN_CALL");
+        let calls = smelt_path_calls(file.syntax());
+        assert_eq!(calls.len(), 1, "expected one SMELT_PATH_CALL");
 
         let passing: Vec<PassingClause> = calls[0].passing_clauses().collect();
         assert_eq!(passing.len(), 2, "expected two PASSING_CLAUSEs");
@@ -7645,11 +7408,11 @@ LIMIT 100
             }
         }
 
-        // Also verify that smelt.fn.* calls (if any) from this input are absent.
-        let smelt_calls = smelt_fn_calls(file.syntax());
+        // Phase 5b: smelt.fn.* is rejected, so no path calls either.
+        let smelt_path = smelt_path_calls(file.syntax());
         assert!(
-            smelt_calls.is_empty(),
-            "no smelt.fn.* calls should be present in this input"
+            smelt_path.is_empty(),
+            "no smelt.functions.* calls should be present in this input"
         );
     }
 
@@ -7672,9 +7435,12 @@ LIMIT 100
             parse.errors
         );
 
-        // No SMELT_FN_CALL nodes — so no PASSING_CLAUSE should be created.
-        let smelt_calls = smelt_fn_calls(file.syntax());
-        assert!(smelt_calls.is_empty(), "my_func is not a smelt.fn.* call");
+        // No SMELT_PATH_CALL nodes — so no PASSING_CLAUSE should be created.
+        let smelt_calls = smelt_path_calls(file.syntax());
+        assert!(
+            smelt_calls.is_empty(),
+            "my_func is not a smelt.functions.* call"
+        );
 
         // No PASSING_CLAUSE nodes anywhere in the tree.
         let clauses = passing_clauses_of(file.syntax());
@@ -7687,7 +7453,8 @@ LIMIT 100
     #[test]
     fn error_recovery_malformed_passing_body() {
         // PASSING metrics AS followed immediately by FROM (missing body expression).
-        let input = "SELECT smelt.fn.foo(src) PASSING metrics AS FROM t";
+        // Phase 5b: use smelt.functions.* instead of smelt.fn.*
+        let input = "SELECT smelt.functions.foo(src) PASSING metrics AS FROM t";
         let (parse, file) = parse_file_text(input);
 
         // The parser should emit an error but not panic.
@@ -7857,28 +7624,18 @@ LIMIT 100
         );
     }
 
-    // ---- Phase 44b: CTE body as bare smelt.fn.* call ----
+    // ---- Phase 44b → Phase 5b: CTE body smelt.fn.* rejection ----
 
     #[test]
-    fn cte_body_accepts_bare_smelt_fn_call() {
-        // Phase 44b TDD test: a CTE body that is a bare `smelt.fn.*` call with
-        // PASSING clauses must parse without any "Expected SELECT, WITH, or
-        // VALUES in CTE" error.
-        let sql = "WITH base AS (\n    smelt.fn.session_rollup(source, u, ts)\n    PASSING metrics AS (COUNT(*))\n)\nSELECT * FROM base";
+    fn cte_body_smelt_fn_call_is_rejected() {
+        // Phase 5b: a CTE body with a bare `smelt.fn.*` call must produce
+        // parse errors. Use smelt.functions.* instead.
+        let sql =
+            "WITH base AS (\n    smelt.fn.session_rollup(source, u, ts)\n)\nSELECT * FROM base";
         let result = parse(sql);
-        // Must not contain "Expected SELECT, WITH, or VALUES in CTE"
-        for err in &result.errors {
-            assert!(
-                !err.message
-                    .contains("Expected SELECT, WITH, or VALUES in CTE"),
-                "Parser should accept smelt.fn call as CTE body, got error: {}",
-                err.message
-            );
-        }
         assert!(
-            result.errors.is_empty(),
-            "Expected no parse errors, got: {:?}",
-            result.errors
+            !result.errors.is_empty(),
+            "Phase 5b: smelt.fn.* as CTE body must produce parse errors"
         );
     }
 
@@ -8115,5 +7872,20 @@ LIMIT 100
              use smelt.sources.raw.events instead"
         );
         let _ = File::cast(parse.syntax()).expect("parser must yield FILE even on legacy source");
+    }
+
+    // ===== Phase 5b: smelt.fn.* call syntax removal =====
+
+    #[test]
+    fn legacy_smelt_fn_call_now_rejected() {
+        // Phase 5b: `smelt.fn.foo(x)` must produce at least one parse error
+        // after the smelt.fn.* parser arm is removed. Before Phase 5b,
+        // this parses successfully as a SMELT_FN_CALL node.
+        let sql = "SELECT smelt.fn.foo(x) AS r";
+        let result = parse(sql);
+        assert!(
+            !result.errors.is_empty(),
+            "smelt.fn.foo(x) must produce parse errors after Phase 5b; got zero errors"
+        );
     }
 }

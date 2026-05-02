@@ -1,5 +1,5 @@
 #![cfg(feature = "duckdb")]
-//! Phase 57 — end-to-end execution tests for `smelt.fn.*` and
+//! Phase 57 — end-to-end execution tests for `smelt.functions.*` and
 //! `smelt.as_struct()`.
 //!
 //! These tests stage a hermetic project under a `TempDir`, shell out to the
@@ -111,7 +111,7 @@ default_materialization: view
     let order_margin_sql = "---
 materialization: table
 ---
-SELECT order_id, smelt.fn.safe_divide(revenue, cost) AS margin
+SELECT order_id, smelt.functions.safe_divide(revenue, cost) AS margin
 FROM smelt.models.raw_orders
 ORDER BY order_id
 ";
@@ -334,7 +334,7 @@ default_materialization: view
     let order_margin_sql = "---
 materialization: table
 ---
-SELECT order_id, smelt.fn.safe_divide(revenue, cost) AS margin
+SELECT order_id, smelt.functions.safe_divide(revenue, cost) AS margin
 FROM smelt.models.raw_orders
 ORDER BY order_id
 ";

@@ -97,7 +97,8 @@ fn add_margin_body_checks_ok() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT order_id, margin FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src =
+        "SELECT order_id, margin FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[
         ("order_id", "BIGINT"),
@@ -147,7 +148,7 @@ fn bare_column_resolves_from_tableexpr_schema() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT margin FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src = "SELECT margin FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[
         ("order_id", "BIGINT"),
@@ -188,7 +189,7 @@ fn missing_column_at_call_site() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT margin FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src = "SELECT margin FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     // Missing revenue — cost still present.
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("cost", "DECIMAL(18, 2)")]);
@@ -245,7 +246,7 @@ fn param_shadows_column_emits_warning() {
          AS (SELECT user_id FROM source)\n";
     let orders_path = root.join("models").join("events.sql");
     let model_path = root.join("models").join("uses_f.sql");
-    let model_src = "SELECT * FROM smelt.fn.f('abc', smelt.models.events) AS e\n";
+    let model_src = "SELECT * FROM smelt.functions.f('abc', smelt.models.events) AS e\n";
 
     let orders_sql = orders_model_sql(&[("user_id", "BIGINT"), ("event_type", "TEXT")]);
 
@@ -308,7 +309,7 @@ fn qualified_access_escapes_shadow() {
          AS (SELECT source.user_id FROM source)\n";
     let orders_path = root.join("models").join("events.sql");
     let model_path = root.join("models").join("uses_g.sql");
-    let model_src = "SELECT * FROM smelt.fn.g('abc', smelt.models.events) AS e\n";
+    let model_src = "SELECT * FROM smelt.functions.g('abc', smelt.models.events) AS e\n";
 
     let orders_sql = orders_model_sql(&[("user_id", "BIGINT"), ("event_type", "TEXT")]);
 
@@ -367,7 +368,7 @@ fn row_requirement_satisfied_by_superset_schema() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src = "SELECT * FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[
         ("order_id", "BIGINT"),
@@ -420,7 +421,7 @@ fn row_requirement_missing_column_errors_at_call_site() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src = "SELECT * FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     // Missing `cost` — only revenue present.
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("revenue", "DECIMAL(18, 2)")]);
@@ -475,7 +476,7 @@ fn row_requirement_wrong_type_errors_at_call_site() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src = "SELECT * FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     // `revenue` is Text — violates the Numeric constraint.
     let orders_sql = orders_model_sql(&[
@@ -524,7 +525,7 @@ fn row_tail_allows_extra_columns() {
          -> TableExpr AS (SELECT source.*, revenue AS r2 FROM source)\n";
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("tail_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.add_revenue(smelt.models.orders) AS m\n";
+    let model_src = "SELECT * FROM smelt.functions.add_revenue(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[
         ("revenue", "DECIMAL(18, 2)"),
@@ -573,7 +574,7 @@ fn row_tail_anonymous_allows_any_extras() {
          -> TableExpr AS (SELECT source.* FROM source)\n";
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("tail_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.anon_tail(smelt.models.orders) AS m\n";
+    let model_src = "SELECT * FROM smelt.functions.anon_tail(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[
         ("revenue", "DECIMAL(18, 2)"),
@@ -623,7 +624,7 @@ fn row_requirement_at_tier1_function_body_still_checks_on_expansion() {
          -> TableExpr AS (SELECT source.*, missing_col AS x FROM source)\n";
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("report.sql");
-    let model_src = "SELECT * FROM smelt.fn.with_body_bug(smelt.models.orders) AS m\n";
+    let model_src = "SELECT * FROM smelt.functions.with_body_bug(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[("revenue", "DECIMAL(18, 2)"), ("cost", "DECIMAL(18, 2)")]);
 
@@ -706,7 +707,7 @@ fn sessionize_body_types_clean() {
     let fn_path = root.join("functions").join("sessionize.sql");
     let events_path = root.join("models").join("events.sql");
     let model_path = root.join("models").join("sessions_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.sessionize(\
+    let model_src = "SELECT * FROM smelt.functions.sessionize(\
          smelt.models.events, \
          user_col => user_id, \
          ts_col => event_time\
@@ -832,7 +833,7 @@ fn sessionize_windowexpr_in_body_accepted() {
     let fn_path = root.join("functions").join("sessionize.sql");
     let events_path = root.join("models").join("events.sql");
     let model_path = root.join("models").join("sessions_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.sessionize(\
+    let model_src = "SELECT * FROM smelt.functions.sessionize(\
          smelt.models.events, \
          user_col => user_id, \
          ts_col => event_time\
@@ -883,7 +884,7 @@ fn sessionize_missing_ts_col_on_source_errors() {
          )\n";
     let events_path = root.join("models").join("events.sql");
     let model_path = root.join("models").join("sessions_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.sessionize_v(smelt.models.events) AS s\n";
+    let model_src = "SELECT * FROM smelt.functions.sessionize_v(smelt.models.events) AS s\n";
 
     // Missing `ts` — only user_id present.
     let events_sql = orders_model_sql(&[("user_id", "TEXT")]);
@@ -932,7 +933,7 @@ fn sessionize_default_gap_applied_when_omitted() {
     let fn_path = root.join("functions").join("sessionize.sql");
     let events_path = root.join("models").join("events.sql");
     let model_path = root.join("models").join("sessions_report.sql");
-    let model_src = "SELECT * FROM smelt.fn.sessionize(\
+    let model_src = "SELECT * FROM smelt.functions.sessionize(\
          smelt.models.events, \
          user_col => user_id, \
          ts_col => event_time\
@@ -988,7 +989,8 @@ fn margin_report_explicit_columns_after_return_schema_inference() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let orders_path = root.join("models").join("orders.sql");
     let model_path = root.join("models").join("margin_report.sql");
-    let model_src = "SELECT order_id, margin FROM smelt.fn.add_margin(smelt.models.orders) AS m\n";
+    let model_src =
+        "SELECT order_id, margin FROM smelt.functions.add_margin(smelt.models.orders) AS m\n";
 
     let orders_sql = orders_model_sql(&[
         ("order_id", "BIGINT"),
@@ -1050,7 +1052,7 @@ fn margin_report_explicit_columns_after_return_schema_inference() {
 }
 
 // =====================================================================
-// Phase 18 — Nested smelt.fn.* call chain: add_margin → sessionize
+// Phase 18 — Nested smelt.functions.* call chain: add_margin → sessionize
 // =====================================================================
 
 #[test]
@@ -1069,8 +1071,8 @@ fn nested_smelt_fn_call_session_id_in_scope() {
 
     let orders_sql =
         "SELECT CAST(NULL AS DECIMAL(18,2)) AS revenue, CAST(NULL AS DECIMAL(18,2)) AS cost\n";
-    let pipeline_sql = "SELECT session_id FROM smelt.fn.sessionize( \
-       smelt.fn.add_margin(smelt.models.orders), \
+    let pipeline_sql = "SELECT session_id FROM smelt.functions.sessionize( \
+       smelt.functions.add_margin(smelt.models.orders), \
        user_col => CAST('' AS VARCHAR), \
        ts_col => CAST('2020-01-01' AS TIMESTAMP) \
      ) AS s\n";

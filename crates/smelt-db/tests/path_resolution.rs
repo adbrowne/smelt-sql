@@ -140,7 +140,7 @@ smelt.define path_sub(
     // resolve cleanly and we see no body-level UnknownIdentifier.
     let caller_path = root.join("models").join("uses_path_sub.sql");
     let caller_src = "\
-SELECT * FROM smelt.fn.path_sub(
+SELECT * FROM smelt.functions.path_sub(
     smelt.models.events,
     user_col,
     ts_col

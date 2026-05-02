@@ -49,7 +49,7 @@ fn tableexpr_arg_from_cte() {
     let fn_path = root.join("functions").join("add_margin.sql");
     let model_path = root.join("models").join("uses_cte.sql");
     let model_src = "WITH x AS (SELECT CAST(100 AS DECIMAL(18,2)) AS revenue, CAST(30 AS DECIMAL(18,2)) AS cost) \
-        SELECT margin FROM smelt.fn.add_margin(x)\n";
+        SELECT margin FROM smelt.functions.add_margin(x)\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -85,7 +85,7 @@ fn tableexpr_arg_from_derived_table() {
         CAST(NULL AS DECIMAL(18, 2)) AS revenue, \
         CAST(NULL AS DECIMAL(18, 2)) AS cost\n";
     // Phase 4: use path form (smelt.ref() is removed).
-    let model_src = "SELECT margin FROM smelt.fn.add_margin(\
+    let model_src = "SELECT margin FROM smelt.functions.add_margin(\
         (SELECT revenue, cost FROM smelt.models.rev_cost)\
     )\n";
 
@@ -116,7 +116,7 @@ fn tableexpr_arg_inline_subquery() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("add_margin.sql");
     let model_path = root.join("models").join("uses_inline_sub.sql");
-    let model_src = "SELECT margin FROM smelt.fn.add_margin(\
+    let model_src = "SELECT margin FROM smelt.functions.add_margin(\
         (SELECT CAST(100 AS DECIMAL(18,2)) AS revenue, CAST(30 AS DECIMAL(18,2)) AS cost)\
     )\n";
 
@@ -143,7 +143,7 @@ fn tableexpr_arg_unrecognised_shape_errors_clearly() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("add_margin.sql");
     let model_path = root.join("models").join("uses_literal.sql");
-    let model_src = "SELECT * FROM smelt.fn.add_margin(42)\n";
+    let model_src = "SELECT * FROM smelt.functions.add_margin(42)\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -191,7 +191,7 @@ fn tableexpr_arg_from_smelt_ref_still_works() {
         CAST(NULL AS DECIMAL(18, 2)) AS revenue, \
         CAST(NULL AS DECIMAL(18, 2)) AS cost\n";
     // Phase 4: use path form (smelt.ref() is removed).
-    let model_src = "SELECT margin FROM smelt.fn.add_margin(smelt.models.orders)\n";
+    let model_src = "SELECT margin FROM smelt.functions.add_margin(smelt.models.orders)\n";
 
     let (db, ws, files) = build_db(
         root,

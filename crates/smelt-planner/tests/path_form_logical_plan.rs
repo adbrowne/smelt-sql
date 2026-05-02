@@ -7,9 +7,8 @@
 //!   `LogicalNode::FunctionCall { transparent: true, body: Some(_) }` node
 //!   when the callee is a `smelt.define`.
 //!
-//! Test 2: `smelt.fn.my_agg(...)` (legacy form) producing a
-//!   `FunctionCall { transparent: false, body: None }` continues to work as a
-//!   regression parity test.
+//! Test 2: `smelt.functions.my_agg(...)` (path form) calling a `smelt.extern`
+//!   produces a `FunctionCall { transparent: false, body: None }` node.
 
 use std::sync::Arc;
 
@@ -161,7 +160,7 @@ fn extern_call_constructs_blackbox_function_call() {
         project_root,
         &[(
             "models/uses_extern.sql",
-            "smelt.extern my_agg(col)\nSELECT smelt.fn.my_agg(col) FROM t\n",
+            "smelt.extern my_agg(col)\nSELECT smelt.functions.my_agg(col) FROM t\n",
         )],
     );
 
@@ -173,7 +172,7 @@ fn extern_call_constructs_blackbox_function_call() {
     let plan = smelt_db::logical_plan(&db, ws, model_file).expect("plan should be Some");
 
     let call =
-        first_function_call(&plan).expect("expected a FunctionCall for legacy smelt.fn.my_agg");
+        first_function_call(&plan).expect("expected a FunctionCall for smelt.functions.my_agg");
     assert!(
         !call.transparent,
         "smelt.extern my_agg should produce transparent=false; got: {call:?}"

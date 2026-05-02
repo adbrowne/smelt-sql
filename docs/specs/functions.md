@@ -214,7 +214,6 @@ This section captures the load-bearing rationale behind the surface and semantic
 - **`smelt.as_struct` is partially landed.** The grammar parses, the diagnostic `AsStructUnsupportedBackend` is wired, but per research §16 #19 the full design is deferred to post-v1 alongside struct row polymorphism (`Expr<Struct<{…, ..r}>>`). Strategies 1 (CTE rename) and 2 (typed `TableExpr<{…}>` parameter) are the recommended v1 paths; `smelt.as_struct` should be treated as "design sketch, available but not finalised" until Step 8 of the smelt-functions plan revisits it.
 - **`joins:` and `provenance:` parsing is partial.** The keys are recognised in frontmatter and gated by `unstable_schema: true`; structured-map shape and the `ProvenanceMismatch` / `JoinsMismatch` validation phase land in Phase 51 of the smelt-functions plan. Until that lands, declaring these properties is unstable in both surface and behaviour.
 - **End-to-end `smelt build` execution of `smelt.<path>(...)` function calls is incomplete.** Phases 56–57 of `docs/plans/20260422-smelt-functions.md` cover the codegen integration that finalises function expansion at build time. LSP-time checking and `--show-plan` work today; the full build-and-execute path is in progress.
-- **`smelt.<path>` function call diagnostics cover only `smelt.fn.*` form.** Phase 3 of the smelt-path migration added `SmeltPathCall` to the parser and LSP completion/goto-def. However, the type-checking system (`smelt_fn_call_diagnostics_for_file`, `function_body_check`) still operates on `SmeltFnCall` nodes only. Extending it to `SmeltPathCall` (so `smelt.functions.add_margin(source => ...)` produces the same diagnostics as `smelt.fn.add_margin(...)`) is deferred to a follow-on phase.
 - **Frontmatter validation depth.** Unknown keys currently emit `FrontmatterParseError` at Warning severity, which means typos like `deterministc: true` are silently ignored beyond a warning. Whether this should escalate to Error is open.
 - **Workspace-wide vs. directory-scoped name uniqueness.** The implementation today applies `DuplicateFunctionDefinition` workspace-wide. The research originally framed it directory-scoped; the workspace rule is stricter and matches the single canonical-namespace doctrine, but the spec author should confirm this is intended before treating it as final.
 
@@ -222,12 +221,12 @@ This section captures the load-bearing rationale behind the surface and semantic
 
 ### Code
 
-- `crates/smelt-parser/src/parser.rs` — `parse_smelt_define`, `parse_smelt_extern`, `parse_smelt_fn_call`, `parse_passing_clause`, `parse_smelt_as_struct`, `at_smelt_*_trigger`
-- `crates/smelt-parser/src/syntax_kind.rs` — `SMELT_DEFINE`, `SMELT_EXTERN`, `SMELT_FN_CALL`, `CALL_PATH`, `PASSING_CLAUSE`, `PASSING_NAME`, `PASSING_BODY`, `SMELT_AS_STRUCT_CALL`, `EXCEPT_COL_LIST`
-- `crates/smelt-parser/src/ast.rs` — `SmeltDefine`, `SmeltExtern`, `SmeltFnCall` AST wrappers
+- `crates/smelt-parser/src/parser.rs` — `parse_smelt_define`, `parse_smelt_extern`, `parse_smelt_path_form`, `parse_passing_clause`, `parse_smelt_as_struct`, `at_smelt_*_trigger`
+- `crates/smelt-parser/src/syntax_kind.rs` — `SMELT_DEFINE`, `SMELT_EXTERN`, `SMELT_PATH_CALL`, `CALL_PATH`, `PASSING_CLAUSE`, `PASSING_NAME`, `PASSING_BODY`, `SMELT_AS_STRUCT_CALL`, `EXCEPT_COL_LIST`
+- `crates/smelt-parser/src/ast.rs` — `SmeltDefine`, `SmeltExtern`, `SmeltPathCall` AST wrappers
 - `crates/smelt-types/src/signatures.rs` — `FunctionSig`, `Tier`, `ParamSpec`, `BackendSet`, `extract_signature`, `extract_extern_signature`, `extract_function_signatures`, `parse_frontmatter_backends`
 - `crates/smelt-db/src/lib.rs::DiagnosticCode` — every diagnostic code listed in Surface
-- `crates/smelt-db/src/function_body_check.rs` — body checking (`check_function_body`, `check_smelt_fn_call`), Tier dispatch (`is_tier2_function`, `check_tier3_return_type`), `PASSING` validation, frame-stack construction
+- `crates/smelt-db/src/function_body_check.rs` — body checking (`check_function_body`, `check_smelt_path_call`), Tier dispatch (`is_tier2_function`, `check_tier3_return_type`), `PASSING` validation, frame-stack construction
 - `crates/smelt-db/src/functions.rs` — function registry / lookup
 - `crates/smelt-db/src/backends.rs` — `infer_body_backends`, `apply_narrow_rule`, `resolve_backends`
 - `crates/smelt-db/src/provenance_validator.rs` — `ProvenanceMismatch` / `JoinsMismatch` checks (Phase 51)

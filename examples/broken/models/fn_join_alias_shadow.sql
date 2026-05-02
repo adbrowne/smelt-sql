@@ -16,7 +16,7 @@ smelt.define shadow_join_local(name: Expr<Text>, orders: TableExpr<{order_id: Bi
 )
 
 SELECT *
-FROM smelt.fn.shadow_join_local(
+FROM smelt.functions.shadow_join_local(
   'hi',
   smelt.models.fn_join_alias_shadow_other
 ) AS m

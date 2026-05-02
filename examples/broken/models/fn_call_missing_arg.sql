@@ -3,4 +3,4 @@
 -- call-path span.
 smelt.define takes_two(a: Expr<Integer>, b: Expr<Integer>) -> Expr<Integer> AS (a + b)
 
-SELECT smelt.fn.takes_two(1) AS r
+SELECT smelt.functions.takes_two(1) AS r

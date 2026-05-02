@@ -68,7 +68,7 @@ fn event_hour_types_clean() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("event_hour.sql");
     let model_path = root.join("models").join("event_report.sql");
-    let model_src = "SELECT smelt.fn.event_hour(e) AS hour \
+    let model_src = "SELECT smelt.functions.event_hour(e) AS hour \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
@@ -111,7 +111,7 @@ fn struct_missing_declared_field_errors() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("event_hour.sql");
     let model_path = root.join("models").join("event_report.sql");
-    let model_src = "SELECT smelt.fn.event_hour(e) AS hour \
+    let model_src = "SELECT smelt.functions.event_hour(e) AS hour \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
@@ -148,7 +148,7 @@ fn struct_extra_fields_bind_named_row_var() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("event_hour.sql");
     let model_path = root.join("models").join("event_report.sql");
-    let model_src = "SELECT smelt.fn.event_hour(e) AS hour \
+    let model_src = "SELECT smelt.functions.event_hour(e) AS hour \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
@@ -238,7 +238,7 @@ fn spread_in_body_expands_to_explicit_fields() {
          CAST(NULL AS BIGINT)\
          )\n";
 
-    let model_src = "SELECT smelt.fn.wrap_event(e) AS result \
+    let model_src = "SELECT smelt.functions.wrap_event(e) AS result \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
@@ -283,7 +283,7 @@ fn row_var_unification_is_local() {
     let root1 = PathBuf::from("/fake/project1");
     let fn_path1 = root1.join("functions").join("event_hour.sql");
     let model_path1 = root1.join("models").join("report1.sql");
-    let model1_src = "SELECT smelt.fn.event_hour(e) AS hour \
+    let model1_src = "SELECT smelt.functions.event_hour(e) AS hour \
                       FROM smelt.sources.source.events AS e\n";
 
     let (db1, ws1, files1) = build_db(
@@ -319,7 +319,7 @@ fn row_var_unification_is_local() {
     let root2 = PathBuf::from("/fake/project2");
     let fn_path2 = root2.join("functions").join("event_hour.sql");
     let model_path2 = root2.join("models").join("report2.sql");
-    let model2_src = "SELECT smelt.fn.event_hour(e) AS hour \
+    let model2_src = "SELECT smelt.functions.event_hour(e) AS hour \
                       FROM smelt.sources.source.events AS e\n";
 
     let (db2, ws2, files2) = build_db(

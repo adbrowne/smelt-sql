@@ -102,11 +102,11 @@ fn build_fn_body_map_extracts_safe_divide_body() {
     );
 }
 
-// ─── Test 2: end-to-end registry wiring expands a smelt.fn.* call ────────────
+// ─── Test 2: end-to-end registry wiring expands a smelt.functions.* call ────────────
 
 #[test]
 fn smelt_fn_call_expanded_via_registry_wiring() {
-    let model_sql = "SELECT smelt.fn.safe_divide(revenue, cost) AS ratio FROM main.orders";
+    let model_sql = "SELECT smelt.functions.safe_divide(revenue, cost) AS ratio FROM main.orders";
     let tmp = stage_workspace(&[
         ("functions/safe_divide.sql", SAFE_DIVIDE_BODY),
         ("models/uses_safe_divide.sql", model_sql),
@@ -150,8 +150,8 @@ fn smelt_fn_call_expanded_via_registry_wiring() {
         compiled.sql
     );
     assert!(
-        !compiled.sql.contains("smelt.fn.safe_divide"),
-        "smelt.fn.safe_divide call should be replaced; got: {}",
+        !compiled.sql.contains("smelt.functions.safe_divide"),
+        "smelt.functions.safe_divide call should be replaced; got: {}",
         compiled.sql
     );
 }
@@ -160,7 +160,7 @@ fn smelt_fn_call_expanded_via_registry_wiring() {
 
 #[test]
 fn compiler_registry_set_function_bodies_propagates_to_all_targets() {
-    let model_sql = "SELECT smelt.fn.safe_divide(a, b) AS r FROM main.t";
+    let model_sql = "SELECT smelt.functions.safe_divide(a, b) AS r FROM main.t";
     let tmp = stage_workspace(&[
         ("functions/safe_divide.sql", SAFE_DIVIDE_BODY),
         ("models/uses.sql", model_sql),
@@ -208,8 +208,8 @@ fn compiler_registry_set_function_bodies_propagates_to_all_targets() {
             sql
         );
         assert!(
-            !sql.contains("smelt.fn.safe_divide"),
-            "{} target should not still contain smelt.fn.safe_divide; got: {}",
+            !sql.contains("smelt.functions.safe_divide"),
+            "{} target should not still contain smelt.functions.safe_divide; got: {}",
             label,
             sql
         );

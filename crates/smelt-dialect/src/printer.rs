@@ -11,7 +11,7 @@
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
-use smelt_parser::ast::{SmeltAsStructCall, SmeltFnCall, SmeltPathCall, SmeltPathRef};
+use smelt_parser::ast::{SmeltAsStructCall, SmeltPathCall, SmeltPathRef};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall};
 
@@ -88,52 +88,6 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                         let except = call.except_columns();
                         if let Some(sql) = emitter(&alias, &except) {
                             out.push_str(&sql);
-                            return;
-                        }
-                    }
-                }
-            }
-            print_children(node, ctx, out);
-        }
-        SyntaxKind::SMELT_FN_CALL => {
-            if let Some(ref expander) = ctx.smelt_fn {
-                if let Some(call) = SmeltFnCall::cast(node.clone()) {
-                    // Extract the leaf function name (last segment after smelt.fn.)
-                    let segments = call.call_path().map(|p| p.segments()).unwrap_or_default();
-                    if let Some(fn_name) = segments.last().cloned() {
-                        // Extract positional arg SQL strings by printing each arg through ctx
-                        let positional_sqls: Vec<String> = call
-                            .arg_list()
-                            .map(|al| {
-                                al.positional_args()
-                                    .into_iter()
-                                    .map(|arg| {
-                                        let mut s = String::new();
-                                        print_node(arg.syntax(), ctx, &mut s);
-                                        s
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        // Extract named args as (name, sql) pairs
-                        let named_sqls: Vec<(String, String)> = call
-                            .arg_list()
-                            .map(|al| {
-                                al.named_params()
-                                    .filter_map(|np| {
-                                        let name = np.name()?;
-                                        let expr = np.value_expr()?;
-                                        let mut s = String::new();
-                                        print_node(expr.syntax(), ctx, &mut s);
-                                        Some((name, s))
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if let Some(expanded) = expander(&fn_name, positional_sqls, named_sqls) {
-                            // Re-parse the expanded SQL so smelt.ref() etc. in the body get rewritten.
-                            let reparsed = smelt_parser::parse(&expanded);
-                            print_node(&reparsed.syntax(), ctx, out);
                             return;
                         }
                     }

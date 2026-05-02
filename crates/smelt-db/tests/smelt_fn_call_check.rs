@@ -1,5 +1,5 @@
 //! Phase 6 (smelt-functions) — Call-site expansion and single-level frame
-//! trace for `smelt.fn.<name>(...)` invocations.
+//! trace for `smelt.functions.<name>(...)` invocations.
 //!
 //! These integration tests verify that:
 //!   1. A correctly-typed call to `safe_divide` produces zero diagnostics.
@@ -10,7 +10,7 @@
 //!   4. Omitting a required positional argument emits `MissingArgument`.
 //!   5. A parameter with a default value is silently filled when no arg
 //!      is supplied.
-//!   6. An unresolved `smelt.fn.does_not_exist(...)` emits
+//!   6. An unresolved `smelt.functions.does_not_exist(...)` emits
 //!      `UnknownSmeltFn` at the call-path span.
 //!   7. The `functions_demo` example workspace stays clean end-to-end
 //!      (delegated to `smelt-cli --test example_diagnostics`).
@@ -70,7 +70,7 @@ fn safe_divide_call_types_correctly() {
     // Minimal model body: call `safe_divide` on two integer literals.
     // Integer widens into `Numeric`, which is the parameter constraint —
     // no diagnostic should fire.
-    let model_src = "SELECT smelt.fn.safe_divide(10, 2) AS r\n";
+    let model_src = "SELECT smelt.functions.safe_divide(10, 2) AS r\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -106,7 +106,7 @@ fn wrong_arg_type_error_at_call_site() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("safe_divide.sql");
     let model_path = root.join("models").join("bad_call.sql");
-    let model_src = "SELECT smelt.fn.safe_divide('not a number', 2) AS r\n";
+    let model_src = "SELECT smelt.functions.safe_divide('not a number', 2) AS r\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, SAFE_DIVIDE_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -149,12 +149,12 @@ fn wrong_arg_type_error_at_call_site() {
 
 #[test]
 fn named_args_bind_correctly() {
-    // TDD test 3: `smelt.fn.safe_divide(denominator => 2, numerator => 10)`
+    // TDD test 3: `smelt.functions.safe_divide(denominator => 2, numerator => 10)`
     // binds by name. Both args parse as Integer → Numeric, so no diagnostics.
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("safe_divide.sql");
     let model_path = root.join("models").join("named_call.sql");
-    let model_src = "SELECT smelt.fn.safe_divide(denominator => 2, numerator => 10) AS r\n";
+    let model_src = "SELECT smelt.functions.safe_divide(denominator => 2, numerator => 10) AS r\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, SAFE_DIVIDE_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -184,7 +184,7 @@ fn missing_required_arg_error() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("safe_divide.sql");
     let model_path = root.join("models").join("missing_arg.sql");
-    let model_src = "SELECT smelt.fn.safe_divide(10) AS r\n";
+    let model_src = "SELECT smelt.functions.safe_divide(10) AS r\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, SAFE_DIVIDE_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -211,7 +211,7 @@ fn default_value_fills_missing_arg() {
     let fn_src = "smelt.define add_default(x: Expr<Integer>, y: Expr<Integer> = 0) \
                   -> Expr<Integer> AS (x + y)\n";
     let model_path = root.join("models").join("uses_default.sql");
-    let model_src = "SELECT smelt.fn.add_default(5) AS r\n";
+    let model_src = "SELECT smelt.functions.add_default(5) AS r\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
     let model_file = files[1];
@@ -230,11 +230,11 @@ fn default_value_fills_missing_arg() {
 
 #[test]
 fn unknown_smelt_fn_error() {
-    // TDD test 6: calling `smelt.fn.does_not_exist(1)` emits exactly one
+    // TDD test 6: calling `smelt.functions.does_not_exist(1)` emits exactly one
     // `UnknownSmeltFn` diagnostic at the call-path span.
     let root = PathBuf::from("/fake/project");
     let model_path = root.join("models").join("unknown_call.sql");
-    let model_src = "SELECT smelt.fn.does_not_exist(1) AS r\n";
+    let model_src = "SELECT smelt.functions.does_not_exist(1) AS r\n";
 
     let (db, ws, files) = build_db(root, &[(model_path, model_src)]);
     let model_file = files[0];
@@ -255,7 +255,7 @@ fn unknown_smelt_fn_error() {
 #[test]
 fn e2e_example_diagnostics_clean() {
     // TDD test 7: the `functions_demo` example ships with a working
-    // `smelt.fn.safe_divide` call. This test proves the fixture in
+    // `smelt.functions.safe_divide` call. This test proves the fixture in
     // `examples/functions_demo/models/uses_safe_divide.sql` produces zero
     // call-site diagnostics when loaded directly. The broader coverage
     // (full example_diagnostics sweep) lives in smelt-cli.
@@ -304,11 +304,11 @@ fn e2e_example_diagnostics_clean() {
 #[test]
 fn nested_call_error_renders_all_frames() {
     // Phase 12 TDD test 1: a three-level chain
-    //   `outer_call(y) AS (smelt.fn.middle(y))`
-    //   `middle(z) AS (smelt.fn.inner_unary(z))`
+    //   `outer_call(y) AS (smelt.functions.middle(y))`
+    //   `middle(z) AS (smelt.functions.inner_unary(z))`
     //   `inner_unary(x) AS (x + undefined_var)`
     // produces exactly one `UnknownIdentifier` diagnostic at the model's
-    // `smelt.fn.outer_call(1)` call site whose `ExpansionFrames` payload
+    // `smelt.functions.outer_call(1)` call site whose `ExpansionFrames` payload
     // carries three frames — innermost-first (`inner_unary`) → outermost-last
     // (`outer_call`) — matching the renderer contract. Each frame also
     // carries a `decl_path` + `decl_range` so the LSP can attach
@@ -321,9 +321,9 @@ fn nested_call_error_renders_all_frames() {
     let model_path = root.join("models").join("chain_call.sql");
 
     let inner_src = "smelt.define inner_unary(x) AS (x + undefined_var)\n";
-    let middle_src = "smelt.define middle(z) AS (smelt.fn.inner_unary(z))\n";
-    let outer_src = "smelt.define outer_call(y) AS (smelt.fn.middle(y))\n";
-    let model_src = "SELECT smelt.fn.outer_call(1) AS r\n";
+    let middle_src = "smelt.define middle(z) AS (smelt.functions.inner_unary(z))\n";
+    let outer_src = "smelt.define outer_call(y) AS (smelt.functions.middle(y))\n";
+    let model_src = "SELECT smelt.functions.outer_call(1) AS r\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -389,7 +389,7 @@ fn single_level_call_unchanged() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("safe_divide.sql");
     let model_path = root.join("models").join("single_bad_call.sql");
-    let model_src = "SELECT smelt.fn.safe_divide('bad_text', 1) AS r\n";
+    let model_src = "SELECT smelt.functions.safe_divide('bad_text', 1) AS r\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, SAFE_DIVIDE_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -422,9 +422,9 @@ fn frame_stack_only_innermost_rendered() {
     let outer_path = root.join("functions").join("outer_fn.sql");
     let inner_src = "smelt.define inner_fn(x: Expr<Numeric>) -> Expr<Numeric> AS (x + 1)\n";
     let outer_src =
-        "smelt.define outer_fn(y: Expr<Numeric>) -> Expr<Numeric> AS (smelt.fn.inner_fn(y))\n";
+        "smelt.define outer_fn(y: Expr<Numeric>) -> Expr<Numeric> AS (smelt.functions.inner_fn(y))\n";
     let model_path = root.join("models").join("nested.sql");
-    let model_src = "SELECT smelt.fn.outer_fn('text') AS r\n";
+    let model_src = "SELECT smelt.functions.outer_fn('text') AS r\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -484,7 +484,7 @@ fn extern_call_typed_like_builtin() {
         "smelt.extern regex_match(text: Expr<Text>, pattern: Expr<Text>) -> Expr<Boolean>\n";
     // Correct types: two Text literals. The checker must not emit any
     // diagnostic, and must NOT try to re-walk the body (externs have none).
-    let model_src = "SELECT smelt.fn.regex_match('abc', 'a.*') AS r\n";
+    let model_src = "SELECT smelt.functions.regex_match('abc', 'a.*') AS r\n";
 
     let (db, ws, files) = build_db(root, &[(ext_path, ext_src), (model_path, model_src)]);
     let model_file = files[1];
@@ -587,7 +587,7 @@ fn passing_clause_binds_to_named_parameter() {
     let model_path = root.join("models").join("filtered.sql");
     // Call with a TableExpr positional arg and PASSING for pred.
     let model_src =
-        "SELECT * FROM smelt.fn.with_filter(smelt.models.orders) PASSING pred AS (TRUE)\n";
+        "SELECT * FROM smelt.functions.with_filter(smelt.models.orders) PASSING pred AS (TRUE)\n";
 
     let (db, ws, files) = build_db(
         root,
@@ -622,7 +622,7 @@ fn passing_clause_name_mismatch_errors() {
     let fn_path = root.join("functions").join("with_filter.sql");
     let model_path = root.join("models").join("bad_passing_name.sql");
     let model_src =
-        "SELECT * FROM smelt.fn.with_filter(smelt.models.orders) PASSING wrong_name AS (TRUE)\n";
+        "SELECT * FROM smelt.functions.with_filter(smelt.models.orders) PASSING wrong_name AS (TRUE)\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, WITH_FILTER_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -666,7 +666,7 @@ fn passing_clause_type_checked_same_as_inline() {
     let fn_path = root.join("functions").join("with_filter.sql");
     let model_path = root.join("models").join("bad_passing_type.sql");
     let model_src =
-        "SELECT * FROM smelt.fn.with_filter(smelt.models.orders) PASSING pred AS (123)\n";
+        "SELECT * FROM smelt.functions.with_filter(smelt.models.orders) PASSING pred AS (123)\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, WITH_FILTER_SRC), (model_path, model_src)]);
     let model_file = files[1];
@@ -699,7 +699,7 @@ fn default_fills_omitted_passing() {
          )\n";
     let model_path = root.join("models").join("uses_default_filter.sql");
     // No PASSING clause — `pred` should be filled by its default.
-    let model_src = "SELECT * FROM smelt.fn.with_default_filter(smelt.models.orders)\n";
+    let model_src = "SELECT * FROM smelt.functions.with_default_filter(smelt.models.orders)\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);
     let model_file = files[1];
@@ -740,7 +740,7 @@ smelt.define outer_wrapper(\
     metrics: SelectItems<Agg> = ()\
 ) -> TableExpr AS (\
     WITH base AS (\
-        smelt.fn.inner_agg(source)\
+        smelt.functions.inner_agg(source)\
         PASSING metrics AS (metrics)\
     )\
     SELECT * FROM base\
@@ -824,7 +824,7 @@ smelt.define bad_outer(\
     source: TableExpr\
 ) -> TableExpr AS (\
     WITH base AS (\
-        smelt.fn.inner_agg(source)\
+        smelt.functions.inner_agg(source)\
         PASSING metrics AS (42)\
     )\
     SELECT * FROM base\
@@ -891,7 +891,7 @@ smelt.define col_agg_fn(\
 )\n";
     // COUNT is Agg-kind so the kind check passes. `nonexistent_col` is not
     // a fragment param → column walk runs → FragmentColumnMissing fires.
-    let model_src = "SELECT * FROM smelt.fn.col_agg_fn(smelt.models.orders) \
+    let model_src = "SELECT * FROM smelt.functions.col_agg_fn(smelt.models.orders) \
          PASSING metrics AS (COUNT(nonexistent_col))\n";
 
     let (db, ws, files) = build_db(root, &[(fn_path, fn_src), (model_path, model_src)]);

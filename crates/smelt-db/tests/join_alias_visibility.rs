@@ -72,7 +72,7 @@ fn joined_alias_columns_visible_in_body() {
         LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT * FROM smelt.fn.enrich(smelt.models.orders)\n";
+    let model_src = "SELECT * FROM smelt.functions.enrich(smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[
         ("order_id", "BIGINT"),
@@ -123,7 +123,7 @@ fn joined_alias_shadow_warning() {
         LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT * FROM smelt.fn.shadow_join('hi', smelt.models.orders)\n";
+    let model_src = "SELECT * FROM smelt.functions.shadow_join('hi', smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("customer_id", "BIGINT")]);
     let dim_sql = orders_model_sql(&[("customer_id", "BIGINT"), ("customer_name", "VARCHAR")]);
@@ -174,7 +174,7 @@ fn joined_alias_missing_column_errors() {
         LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT * FROM smelt.fn.missing(smelt.models.orders)\n";
+    let model_src = "SELECT * FROM smelt.functions.missing(smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("customer_id", "BIGINT")]);
     let dim_sql = orders_model_sql(&[("customer_id", "BIGINT"), ("customer_name", "VARCHAR")]);
@@ -222,7 +222,7 @@ fn joined_alias_in_select_star_expansion() {
         LEFT JOIN smelt.models.dim_customer AS dim_customer \
           ON orders.customer_id = dim_customer.customer_id\
     )\n";
-    let model_src = "SELECT customer_name FROM smelt.fn.g(smelt.models.orders)\n";
+    let model_src = "SELECT customer_name FROM smelt.functions.g(smelt.models.orders)\n";
 
     let orders_sql = orders_model_sql(&[("order_id", "BIGINT"), ("customer_id", "BIGINT")]);
     let dim_sql = orders_model_sql(&[("customer_id", "BIGINT"), ("customer_name", "VARCHAR")]);

@@ -3,4 +3,4 @@
 -- literal 'hello' is Text. Expected: ArgTypeMismatch at the call site.
 smelt.define mul_typed_local(x: Expr<Integer>, y: Expr<Integer>) AS (x * y)
 
-SELECT smelt.fn.mul_typed_local('hello', 1) AS r
+SELECT smelt.functions.mul_typed_local('hello', 1) AS r

@@ -58,7 +58,7 @@ fn with_hour_types_clean() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("with_hour.sql");
     let model_path = root.join("models").join("event_with_hour.sql");
-    let model_src = "SELECT smelt.fn.with_hour(e) AS ev \
+    let model_src = "SELECT smelt.functions.with_hour(e) AS ev \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
@@ -106,7 +106,7 @@ fn return_row_var_binds_to_param_row_var() {
     let root = PathBuf::from("/fake/project37b");
     let fn_path = root.join("functions").join("with_hour.sql");
     let model_path = root.join("models").join("event_with_hour.sql");
-    let model_src = "SELECT smelt.fn.with_hour(e) AS ev \
+    let model_src = "SELECT smelt.functions.with_hour(e) AS ev \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(
@@ -180,7 +180,7 @@ fn caller_sees_fully_resolved_return_type() {
     let root = PathBuf::from("/fake/project37c");
     let fn_path = root.join("functions").join("with_hour.sql");
     let model_path = root.join("models").join("event_with_hour.sql");
-    let model_src = "SELECT smelt.fn.with_hour(e) AS ev \
+    let model_src = "SELECT smelt.functions.with_hour(e) AS ev \
                      FROM smelt.sources.source.events AS e\n";
 
     let (db, ws, files) = build_db(

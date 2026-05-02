@@ -133,10 +133,11 @@ fn path_form_unknown_fn() {
 fn path_form_nested_body_error() {
     let root = PathBuf::from("/fake/project");
     let fn_path = root.join("functions").join("nested_chain.sql");
+    // Phase 5b: use smelt.functions.* form (smelt.fn.* is removed).
     let fn_src = "\
 smelt.define inner_unary(x) AS (x + undefined_var)
-smelt.define middle(z) AS (smelt.fn.inner_unary(z))
-smelt.define outer_call(y) AS (smelt.fn.middle(y))
+smelt.define middle(z) AS (smelt.functions.inner_unary(z))
+smelt.define outer_call(y) AS (smelt.functions.middle(y))
 ";
 
     let model_path = root.join("models").join("path_nested_error.sql");
@@ -215,138 +216,155 @@ smelt.define add_margin_req(source: TableExpr<{revenue: Numeric, cost: Numeric}>
     );
 }
 
-/// Test 6: for each of the representative diagnostic codes, calling the same
-/// function via `smelt.functions.*` produces the same set of diagnostic codes
-/// as `smelt.fn.*`. This is the parity test.
+/// Test 6: for each of the representative diagnostic codes, the `smelt.functions.*`
+/// call form produces the expected diagnostic codes.
+///
+/// Phase 5b note: `smelt.fn.*` (the old form) has been removed from the parser.
+/// These tests verify only the `smelt.functions.*` form. The test structure
+/// retains the dual-case shape (two models) to keep the original intent
+/// of testing cross-model consistency within one workspace.
 #[test]
 fn path_form_parity() {
-    // Case A: ArgTypeMismatch parity
+    // Case A: ArgTypeMismatch — two models calling the same function with a
+    // type-wrong argument; both should produce ArgTypeMismatch.
     {
         let root = PathBuf::from("/fake/project/parity_type");
         let fn_src = "smelt.define needs_number(x: Expr<Numeric>) -> Expr<Numeric> AS (x + 1)\n";
         let fn_path = root.join("functions").join("needs_number.sql");
 
-        // legacy smelt.fn form
-        let legacy_path = root.join("models").join("legacy.sql");
-        let legacy_src = "SELECT smelt.fn.needs_number('text') AS r\n";
+        let model1_path = root.join("models").join("call_a.sql");
+        let model1_src = "SELECT smelt.functions.needs_number('text') AS r\n";
 
-        // new smelt.functions form
-        let path_form_path = root.join("models").join("path_form.sql");
-        let path_form_src = "SELECT smelt.functions.needs_number('text') AS r\n";
+        let model2_path = root.join("models").join("call_b.sql");
+        let model2_src = "SELECT smelt.functions.needs_number('text') AS r\n";
 
         let (db, ws, files) = build_db(
             root,
             &[
                 (fn_path, fn_src),
-                (legacy_path, legacy_src),
-                (path_form_path, path_form_src),
+                (model1_path, model1_src),
+                (model2_path, model2_src),
             ],
         );
-        let legacy_file = files[1];
-        let path_file = files[2];
+        let file1 = files[1];
+        let file2 = files[2];
 
-        let legacy_codes: Vec<_> = file_diagnostics(&db, ws, legacy_file)
+        let codes1: Vec<_> = file_diagnostics(&db, ws, file1)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
-        let path_codes: Vec<_> = file_diagnostics(&db, ws, path_file)
+        let codes2: Vec<_> = file_diagnostics(&db, ws, file2)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
 
-        let mut lc = legacy_codes.clone();
-        let mut pc = path_codes.clone();
-        lc.sort_by_key(|c| format!("{c:?}"));
-        pc.sort_by_key(|c| format!("{c:?}"));
+        assert!(
+            codes1.contains(&DiagnosticCode::ArgTypeMismatch),
+            "Case A: call_a should emit ArgTypeMismatch, got {codes1:?}"
+        );
+
+        let mut c1 = codes1.clone();
+        let mut c2 = codes2.clone();
+        c1.sort_by_key(|c| format!("{c:?}"));
+        c2.sort_by_key(|c| format!("{c:?}"));
         assert_eq!(
-            lc, pc,
-            "ArgTypeMismatch parity failed: legacy={legacy_codes:?}, path={path_codes:?}"
+            c1, c2,
+            "ArgTypeMismatch: two identical calls diverged: a={codes1:?}, b={codes2:?}"
         );
     }
 
-    // Case B: MissingArgument parity
+    // Case B: MissingArgument — two models calling the same function with a
+    // missing required argument; both should produce MissingArgument.
     {
         let root = PathBuf::from("/fake/project/parity_missing");
         let fn_src =
             "smelt.define takes_two(a: Expr<Integer>, b: Expr<Integer>) -> Expr<Integer> AS (a + b)\n";
         let fn_path = root.join("functions").join("takes_two.sql");
 
-        let legacy_path = root.join("models").join("legacy.sql");
-        let legacy_src = "SELECT smelt.fn.takes_two(1) AS r\n";
+        let model1_path = root.join("models").join("call_a.sql");
+        let model1_src = "SELECT smelt.functions.takes_two(1) AS r\n";
 
-        let path_form_path = root.join("models").join("path_form.sql");
-        let path_form_src = "SELECT smelt.functions.takes_two(1) AS r\n";
+        let model2_path = root.join("models").join("call_b.sql");
+        let model2_src = "SELECT smelt.functions.takes_two(1) AS r\n";
 
         let (db, ws, files) = build_db(
             root,
             &[
                 (fn_path, fn_src),
-                (legacy_path, legacy_src),
-                (path_form_path, path_form_src),
+                (model1_path, model1_src),
+                (model2_path, model2_src),
             ],
         );
-        let legacy_file = files[1];
-        let path_file = files[2];
+        let file1 = files[1];
+        let file2 = files[2];
 
-        let legacy_codes: Vec<_> = file_diagnostics(&db, ws, legacy_file)
+        let codes1: Vec<_> = file_diagnostics(&db, ws, file1)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
-        let path_codes: Vec<_> = file_diagnostics(&db, ws, path_file)
+        let codes2: Vec<_> = file_diagnostics(&db, ws, file2)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
 
-        let mut lc = legacy_codes.clone();
-        let mut pc = path_codes.clone();
-        lc.sort_by_key(|c| format!("{c:?}"));
-        pc.sort_by_key(|c| format!("{c:?}"));
+        assert!(
+            codes1.contains(&DiagnosticCode::MissingArgument),
+            "Case B: call_a should emit MissingArgument, got {codes1:?}"
+        );
+
+        let mut c1 = codes1.clone();
+        let mut c2 = codes2.clone();
+        c1.sort_by_key(|c| format!("{c:?}"));
+        c2.sort_by_key(|c| format!("{c:?}"));
         assert_eq!(
-            lc, pc,
-            "MissingArgument parity failed: legacy={legacy_codes:?}, path={path_codes:?}"
+            c1, c2,
+            "MissingArgument: two identical calls diverged: a={codes1:?}, b={codes2:?}"
         );
     }
 
-    // Case C: UnknownSmeltFn parity
+    // Case C: UnknownSmeltFn — both models reference a nonexistent function.
     {
         let root = PathBuf::from("/fake/project/parity_unknown");
 
-        let legacy_path = root.join("models").join("legacy.sql");
-        let legacy_src = "SELECT smelt.fn.does_not_exist(1) AS r\n";
+        let model1_path = root.join("models").join("call_a.sql");
+        let model1_src = "SELECT smelt.functions.does_not_exist(1) AS r\n";
 
-        let path_form_path = root.join("models").join("path_form.sql");
-        let path_form_src = "SELECT smelt.functions.does_not_exist(1) AS r\n";
+        let model2_path = root.join("models").join("call_b.sql");
+        let model2_src = "SELECT smelt.functions.does_not_exist(1) AS r\n";
 
         let (db, ws, files) = build_db(
             root,
-            &[(legacy_path, legacy_src), (path_form_path, path_form_src)],
+            &[(model1_path, model1_src), (model2_path, model2_src)],
         );
-        let legacy_file = files[0];
-        let path_file = files[1];
+        let file1 = files[0];
+        let file2 = files[1];
 
-        let legacy_codes: Vec<_> = file_diagnostics(&db, ws, legacy_file)
+        let codes1: Vec<_> = file_diagnostics(&db, ws, file1)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
-        let path_codes: Vec<_> = file_diagnostics(&db, ws, path_file)
+        let codes2: Vec<_> = file_diagnostics(&db, ws, file2)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
 
-        let mut lc = legacy_codes.clone();
-        let mut pc = path_codes.clone();
-        lc.sort_by_key(|c| format!("{c:?}"));
-        pc.sort_by_key(|c| format!("{c:?}"));
+        assert!(
+            codes1.contains(&DiagnosticCode::UnknownSmeltFn),
+            "Case C: call_a should emit UnknownSmeltFn, got {codes1:?}"
+        );
+
+        let mut c1 = codes1.clone();
+        let mut c2 = codes2.clone();
+        c1.sort_by_key(|c| format!("{c:?}"));
+        c2.sort_by_key(|c| format!("{c:?}"));
         assert_eq!(
-            lc, pc,
-            "UnknownSmeltFn parity failed: legacy={legacy_codes:?}, path={path_codes:?}"
+            c1, c2,
+            "UnknownSmeltFn: two identical calls diverged: a={codes1:?}, b={codes2:?}"
         );
     }
 
-    // Case D: RowRequirementUnsatisfied parity
-    // Function requires TableExpr<{revenue: Numeric, cost: Numeric}>;
-    // upstream model supplies only `revenue`. Both call forms should emit
-    // the same RowRequirementUnsatisfied diagnostic.
+    // Case D: RowRequirementUnsatisfied — both models call a function that
+    // requires TableExpr<{revenue, cost}> but upstream supplies only `revenue`.
     {
         let root = PathBuf::from("/fake/project/parity_row_req");
         let fn_src = "\
@@ -359,11 +377,12 @@ smelt.define add_margin_req(source: TableExpr<{revenue: Numeric, cost: Numeric}>
         let upstream_path = root.join("models").join("no_cost.sql");
         let upstream_src = "SELECT 100 AS revenue\n";
 
-        let legacy_path = root.join("models").join("legacy.sql");
-        let legacy_src = "SELECT * FROM smelt.fn.add_margin_req(smelt.models.no_cost) AS m\n";
+        let model1_path = root.join("models").join("call_a.sql");
+        let model1_src =
+            "SELECT * FROM smelt.functions.add_margin_req(smelt.models.no_cost) AS m\n";
 
-        let path_form_path = root.join("models").join("path_form.sql");
-        let path_form_src =
+        let model2_path = root.join("models").join("call_b.sql");
+        let model2_src =
             "SELECT * FROM smelt.functions.add_margin_req(smelt.models.no_cost) AS m\n";
 
         let (db, ws, files) = build_db(
@@ -371,90 +390,88 @@ smelt.define add_margin_req(source: TableExpr<{revenue: Numeric, cost: Numeric}>
             &[
                 (fn_path, fn_src),
                 (upstream_path, upstream_src),
-                (legacy_path, legacy_src),
-                (path_form_path, path_form_src),
+                (model1_path, model1_src),
+                (model2_path, model2_src),
             ],
         );
-        let legacy_file = files[2];
-        let path_file = files[3];
+        let file1 = files[2];
+        let file2 = files[3];
 
-        let legacy_codes: Vec<_> = file_diagnostics(&db, ws, legacy_file)
+        let codes1: Vec<_> = file_diagnostics(&db, ws, file1)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
-        let path_codes: Vec<_> = file_diagnostics(&db, ws, path_file)
+        let codes2: Vec<_> = file_diagnostics(&db, ws, file2)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
 
-        // Both forms must emit RowRequirementUnsatisfied.
         assert!(
-            legacy_codes.contains(&DiagnosticCode::RowRequirementUnsatisfied),
-            "Case D: legacy smelt.fn form should emit RowRequirementUnsatisfied, got {legacy_codes:?}"
+            codes1.contains(&DiagnosticCode::RowRequirementUnsatisfied),
+            "Case D: call_a should emit RowRequirementUnsatisfied, got {codes1:?}"
         );
 
-        let mut lc = legacy_codes.clone();
-        let mut pc = path_codes.clone();
-        lc.sort_by_key(|c| format!("{c:?}"));
-        pc.sort_by_key(|c| format!("{c:?}"));
+        let mut c1 = codes1.clone();
+        let mut c2 = codes2.clone();
+        c1.sort_by_key(|c| format!("{c:?}"));
+        c2.sort_by_key(|c| format!("{c:?}"));
         assert_eq!(
-            lc, pc,
-            "RowRequirementUnsatisfied parity failed: legacy={legacy_codes:?}, path={path_codes:?}"
+            c1, c2,
+            "RowRequirementUnsatisfied: two identical calls diverged: a={codes1:?}, b={codes2:?}"
         );
     }
 
-    // Case E: UnknownIdentifier with ExpansionFrames parity
-    // Three-level chain where the innermost body references an undefined var.
-    // Both call forms (`smelt.fn.*` and `smelt.functions.*`) should produce
-    // the same diagnostic codes (UnknownIdentifier at minimum).
+    // Case E: UnknownIdentifier with ExpansionFrames — three-level chain where
+    // the innermost body references an undefined var.
+    // Phase 5b: use smelt.functions.* for inter-function calls (smelt.fn.* is removed).
     {
         let root = PathBuf::from("/fake/project/parity_frames");
         let fn_src = "\
 smelt.define inner_unary(x) AS (x + undefined_var)
-smelt.define middle(z) AS (smelt.fn.inner_unary(z))
-smelt.define outer_call(y) AS (smelt.fn.middle(y))
+smelt.define middle(z) AS (smelt.functions.inner_unary(z))
+smelt.define outer_call(y) AS (smelt.functions.middle(y))
 ";
         let fn_path = root.join("functions").join("nested_chain.sql");
 
-        let legacy_path = root.join("models").join("legacy.sql");
-        let legacy_src = "SELECT smelt.fn.outer_call(1) AS threaded\n";
+        let model1_path = root.join("models").join("call_a.sql");
+        let model1_src = "SELECT smelt.functions.outer_call(1) AS threaded\n";
 
-        let path_form_path = root.join("models").join("path_form.sql");
-        let path_form_src = "SELECT smelt.functions.outer_call(1) AS threaded\n";
+        let model2_path = root.join("models").join("call_b.sql");
+        let model2_src = "SELECT smelt.functions.outer_call(1) AS threaded\n";
 
         let (db, ws, files) = build_db(
             root,
             &[
                 (fn_path, fn_src),
-                (legacy_path, legacy_src),
-                (path_form_path, path_form_src),
+                (model1_path, model1_src),
+                (model2_path, model2_src),
             ],
         );
-        let legacy_file = files[1];
-        let path_file = files[2];
+        let file1 = files[1];
+        let file2 = files[2];
 
-        let legacy_codes: Vec<_> = file_diagnostics(&db, ws, legacy_file)
+        let codes1: Vec<_> = file_diagnostics(&db, ws, file1)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
-        let path_codes: Vec<_> = file_diagnostics(&db, ws, path_file)
+        let codes2: Vec<_> = file_diagnostics(&db, ws, file2)
             .into_iter()
             .filter_map(|d| d.code)
             .collect();
 
-        // Both forms must emit at least one body-error diagnostic.
+        // Must emit at least one body-error diagnostic.
         assert!(
-            !legacy_codes.is_empty(),
-            "Case E: legacy smelt.fn form should emit body-error diagnostics, got none"
+            !codes1.is_empty(),
+            "Case E: call_a should emit body-error diagnostics, got none"
         );
 
-        let mut lc = legacy_codes.clone();
-        let mut pc = path_codes.clone();
-        lc.sort_by_key(|c| format!("{c:?}"));
-        pc.sort_by_key(|c| format!("{c:?}"));
+        let mut c1 = codes1.clone();
+        let mut c2 = codes2.clone();
+        c1.sort_by_key(|c| format!("{c:?}"));
+        c2.sort_by_key(|c| format!("{c:?}"));
         assert_eq!(
-            lc, pc,
-            "ExpansionFrames parity failed: legacy={legacy_codes:?}, path={path_codes:?}"
+            c1, c2,
+            "ExpansionFrames: two identical calls diverged: a={codes1:?}, b={codes2:?}"
         );
     }
 }

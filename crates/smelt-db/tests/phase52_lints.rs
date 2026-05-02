@@ -52,7 +52,7 @@ fn get_diagnostics_single(content: &str) -> Vec<smelt_db::Diagnostic> {
 #[test]
 fn missing_provenance_pushdown_advisory() {
     let fn_file = "smelt.define my_func(src: TableExpr) -> TableExpr AS (SELECT * FROM src)";
-    let model_file = "SELECT * FROM smelt.fn.my_func(smelt.models.tbl) WHERE total > 100";
+    let model_file = "SELECT * FROM smelt.functions.my_func(smelt.models.tbl) WHERE total > 100";
 
     let (db, ws, handles) = make_db_with_files(
         &[
@@ -83,7 +83,7 @@ fn missing_provenance_pushdown_advisory() {
 fn provenance_present_no_advisory() {
     let fn_file = "---\nprovenance: { total: [src.total] }\n---\n\
                    smelt.define my_func(src: TableExpr) -> TableExpr AS (SELECT * FROM src)";
-    let model_file = "SELECT * FROM smelt.fn.my_func(smelt.models.tbl) WHERE total > 100";
+    let model_file = "SELECT * FROM smelt.functions.my_func(smelt.models.tbl) WHERE total > 100";
 
     let (db, ws, handles) = make_db_with_files(
         &[
