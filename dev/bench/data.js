@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777720183331,
+  "lastUpdate": 1777764529843,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14475,6 +14475,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.081136,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cc419a40c111651cc7441c9d02967c7253207b32",
+          "message": "smelt-loop findings: spec stubs, bug fixes, user docs, and medium-loop follow-up plan (#112)\n\n* agent-loop: medium-tier run findings (TB-5, DG-10)\n\nAdds results from the first medium-tier smelt-loop run (2026-05-03):\n\n- TB-5: smelt.functions.* path prefix not enforced — function resolution\n  uses name alone; wrong paths silently succeed and UnknownSmeltFn is\n  never emitted. Promoted to #1 in the triage shortlist; blocks the\n  call-path half of DG-10.\n- DG-10: guide/functions missing a call-path mapping table and any\n  WHERE/HAVING/CASE WHEN placement examples for Expr<Boolean> functions.\n- Rejected skill diff saved to tests/agent-loop/regression/cases/.\n- Medium fixture files committed under tests/agent-loop/fixtures/medium/.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): refine smelt-loop findings into spec-anchored phased plan\n\nRestructure the 2026-05-02 review-only findings document into an\nexecutable plan: Phase 1 authors spec stubs (cli.md, seeds.md,\nsmelt_yml.md) and corrects two known-bad function path examples;\nPhases 2-5 implement TB-5, TB-2, TB-1, TB-4 against those specs;\nPhase 6 closes all DG items in user docs. TB-3 deferred pending\ndesign decision.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs: author cli, seeds, smelt_yml spec stubs; correct function path examples\n\nPhase 1 of docs/plans/20260502-smelt-loop-findings.md.\n\nNew stubs:\n- docs/specs/cli.md: --version (TB-4), --verbose (TB-1), --show-plan,\n  --select, --dry-run truth-table; TB-3 open question recorded.\n- docs/specs/seeds.md: filename->table mapping, two-pass type inference\n  (DuckDB runtime vs compile-time), TB-2 known divergence + CAST\n  workaround. Surface uses smelt.<path> form per architecture.md;\n  divergence with current resolver (smelt.models.<name>) flagged.\n- docs/specs/smelt_yml.md: top-level keys, defaults, unknown-key\n  warning, unstable_schema gate. Documents actual default\n  materialization (view) per crates/smelt-core/src/config.rs, not\n  the plan's incorrect 'table' default.\n\nSpec corrections:\n- functions.md: random/x.sql declares helper -> smelt.random.helper(...)\n  (filename stem is not a path component); add boolean-position\n  placement sentence + WHERE smelt.functions.is_shipped(status) example.\n- architecture.md: matching random/x.sql example fix at line 99.\n- incremental_models.md: document materialization fallback chain\n  (frontmatter -> models.<name> -> default_materialization -> view).\n- types.md: extend §5 with MIN/MAX, SUM(Double|Float), SUM(Decimal),\n  COUNT(expr), and COALESCE(agg, literal) non-nullability rule.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* fix(smelt-db): enforce path-prefix validation for smelt.<path>() calls, emit UnknownSmeltFn on mismatch\n\nPhase 2 of docs/plans/20260502-smelt-loop-findings.md.\n\nThe spec rule (functions.md, architecture.md): a smelt.<path>(...) call's\ndirectory segments must match the declaring file's workspace-relative\ndirectory. The filename stem is not a path component. The implementation\npreviously resolved by name alone — wrong-path calls silently succeeded.\n\nAdds path_prefix_validator closure in lib.rs (both function_body and\nsmelt_fn_call diagnostic paths) and a check in\nfunction_body_check.rs::check_smelt_path_call after sig_lookup succeeds.\nBuiltins are exempt — their declaring file is a Rust constant.\n\nNew TDD tests in crates/smelt-db/tests/path_prefix_enforcement.rs cover\nwrong-prefix, file-stem-in-path, correct-path negative, and\nname-not-declared regression.\n\nUpdates 17 examples/broken/models/fn_*.sql fixtures to use\nsmelt.models.<name> for inline-defined functions (the fixtures live in\nmodels/ — calling them via smelt.functions.<name> was wrong under the\nnew rule). fn_call_unknown.sql intentionally retains\nsmelt.functions.does_not_exist to keep firing UnknownSmeltFn.\n\nAdds the call-path mapping table to docs/specs/functions.md, closing the\nDG-10 call-path half.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* fix(smelt-db): infer DATE and TIMESTAMP types for seed CSV columns at compile time\n\nPhase 3 of docs/plans/20260502-smelt-loop-findings.md.\n\nExtends crates/smelt-core/src/seeds.rs::infer_type_from_csv_values to\nrecognise YYYY-MM-DD and YYYY-MM-DD HH:MM:SS shapes, emitting\nDataType::Date and DataType::Timestamp { with_timezone: false } to\nmatch DuckDB's read_csv_auto runtime output. Check order is now\nBoolean -> Date -> Timestamp -> Integer -> Double -> Text.\n\nRecognition is shape-based with no calendar validation:\n- Date: YYYY-MM-DD with month 1-12, day 1-31.\n- Timestamp: YYYY-MM-DD HH:MM:SS with optional fractional seconds.\n- T separator (2025-01-01T08:00:00) falls back to Text (spec choice).\n- Timezone suffixes (Z, +00, -05) fall back to Text (spec choice).\n\nTests added in seeds.rs::tests cover Date/Timestamp recognition,\nfree-form Text fallback, T-separator and TZ-suffix policy.\ncrates/smelt-db/tests/seed_temporal_inference.rs exercises the\ninferred types through the Salsa data plane.\n\ndocs/specs/seeds.md updated: TB-2 moved from Known Divergences to\nSemantics; Decimal-to-Double divergence documented as deliberate;\nshape-based detection rules in Semantics §5.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* fix(smelt-cli): wire --verbose to log compiled SQL per model before execution\n\nPhase 4 of docs/plans/20260502-smelt-loop-findings.md.\n\nThe --verbose flag was wired through to crates/smelt-cli/src/commands/run.rs\nand backbuild.rs, but used tracing::debug! to emit compiled SQL. With the\ndefault RUST_LOG (no env var set), debug-level logs are filtered out and\n--verbose produced no output — TB-1.\n\nReplace each `if args.verbose { debug!(...) }` with println! so output\nappears regardless of log level. Format: `-- {model_name}` followed by\nthe compiled SQL string, emitted immediately before backend execution.\n\nNew integration test crates/smelt-cli/tests/verbose_flag.rs covers:\n- verbose run emits SELECT + model names on stdout,\n- non-verbose run is silent,\n- verbose run with empty selector (zero models executed) is silent.\n\ndocs/specs/cli.md updated: TB-1 removed from Known Divergences; stdout\nchannel pinned in §\"smelt build --verbose\"; the `-- <model>` prefix\nformat documented.\n\nNote: backbuild.rs full-refresh path has no verbose hook today.\ndocs/specs/cli.md §\"smelt build --verbose\" contracts smelt build only;\nextending the contract to smelt backbuild is a follow-up.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* fix(smelt-cli): add --version flag\n\nPhase 5 of docs/plans/20260502-smelt-loop-findings.md.\n\nAdds clap version attribute to the root Cli struct using\nenv!(\"CARGO_PKG_VERSION\"). Both `smelt --version` and `smelt -V`\nnow print \"smelt 0.3.1\" and exit 0.\n\nNew tests in crates/smelt-cli/tests/version_flag.rs cover both flag\nforms.\n\ndocs/specs/cli.md: TB-4 removed from Known Divergences.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs: close all DG items from smelt-loop findings\n\nPhase 6 of docs/plans/20260502-smelt-loop-findings.md.\n\nUpdates docs-site to close 10 documentation gaps:\n\n- guide/seeds.md: DG-1 + DG-5 (two-pass type inference, narrowed\n  to TIMESTAMPTZ/DECIMAL after Phase 3); DG-7 (explicit\n  seeds/raw_orders.csv -> smelt.models.raw_orders example);\n  CAST workaround; smelt table as inspection tool.\n- reference/cli.md: DG-2 + DG-6 (smelt build flag truth-table);\n  DG-3 (no verbose output for up-to-date models); top-level\n  flags table including --version (Phase 5).\n- getting-started/quickstart.md: DG-4 (smelt.yml keys + defaults\n  callout).\n- reference/language.md: DG-8 (aggregate return types — extends\n  existing subsection with portability rationale + spec link).\n- reference/smelt-yml.md, guide/materializations.md: DG-9\n  (default materialization is view, not table).\n- guide/functions.md: DG-10 (file-location -> call-path mapping\n  table; WHERE smelt.functions.is_shipped(status) example for\n  boolean-position use).\n\nmkdocs build is clean (modulo a pre-existing\n#backends-frontmatter warning unrelated to this phase).\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 6 commit sha d4a02e4\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* agent-loop: medium-tier 5x run findings + skill polish\n\nMedium tier ran 5 iterations of /smelt-loop after the\n20260502-smelt-loop-findings plan landed. All 5 builds passed\n14/14. Three skill diffs applied:\n\n- Stuck-points: note that smelt table reports UNKNOWN for\n  function-fed columns despite a Tier 3 -> Expr<T> annotation\n  (workaround: cross-check with duckdb DESCRIBE).\n- Iteration discipline: pointer to guide/functions for the\n  call-path rule + smelt build --show-plan models/<m>.sql as the\n  fastest way to confirm a call resolves before a full build.\n- Iteration discipline: Expr<Boolean> composes inside CASE WHEN\n  / SUM(CASE WHEN ...) without extra cast; Expr<Double> forces\n  materialized column to DOUBLE.\n- Validation example: copy-pasteable expected-schema check via\n  DuckDB DESCRIBE.\n\nThe loop also surfaced TOOL_BUGs and DOCS_GAPs that need code/spec\nfollow-up; these are tracked in the next plan rather than absorbed\ninto the skill.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): medium-loop follow-up findings — TB-A/B/C, docs gaps, harness fix\n\n3 tool bugs (build-path path-prefix, function return type propagation, SUM\ninference) and 4 doc/harness gaps surfaced by 5 medium-tier smelt-loop runs.\nAll 5 iterations passed eval but taught agents the wrong call-path form;\nTB-A fix and fixture update land together in Phase 1.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* fix(smelt-db/cli): enforce path-prefix validation on the build path; update medium fixture and skill to canonical no-stem call form\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 1 commit b207d41\n\n* fix(smelt-db): propagate smelt.define declared return type into model schema; fix SUM(function-call) type inference\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 2 commit b31a0ff\n\n* docs: smelt table reference entry, functions guide --show-plan tip, harness validate.py fix, skill cleanup\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 3 commit 428feeb\n\n* docs(skill): smelt-app-builder improvements from 3 loop iterations\n\n- Fix wrong default materialization claim (view, not table) and advise always being explicit\n- Add smelt table output format example for type-checking workflow\n- Add \"all N rows must appear\" completeness check note (GROUP BY+COALESCE vs LEFT JOIN from dimension)\n- Add seed column aliasing gotcha (names locked to CSV headers, alias in staging)\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-03T09:27:20+10:00",
+          "tree_id": "691d66a59187a92d97c37d05e7314657864385b8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/cc419a40c111651cc7441c9d02967c7253207b32"
+        },
+        "date": 1777764528395,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 30.722663,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 29.571274000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.528967,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.34045800000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003954,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 741.098731,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 1.224131,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.932082,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.824426,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.857171,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 801.788504,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.993189999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.55281,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.379473,
             "unit": "ms"
           }
         ]
