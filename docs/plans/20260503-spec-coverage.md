@@ -306,15 +306,15 @@ For each spec, after drafting:
 
 | Spec | Status |
 |------|--------|
-| `models.md` | pending |
-| `project_config.md` | pending |
-| `seeds.md` | pending |
-| `sources.md` | pending |
-| `cli.md` | pending |
-| `model_selection.md` | pending |
-| `testing.md` | pending |
-| `datagen.md` | pending |
-| `schema_evolution.md` | pending |
-| `python_models.md` | pending |
-| `lsp.md` | pending |
-| `data_catalog.md` | pending |
+| `models.md` | done (416e49b) |
+| `project_config.md` | done (b33d92f) |
+| `seeds.md` | done (a0cdd47) |
+| `sources.md` | done (a0cdd47) |
+| `cli.md` | done (a1b17f0) |
+| `model_selection.md` | done (a1b17f0) |
+| `testing.md` | done (b94b05f) |
+| `datagen.md` | done (b94b05f) |
+| `schema_evolution.md` | done (f55e5e0) |
+| `python_models.md` | done (f55e5e0) |
+| `lsp.md` | done (f55e5e0) |
+| `data_catalog.md` | done (f55e5e0) |
