@@ -53,12 +53,12 @@ materialization: table
 SELECT
     CAST(o.order_id AS INTEGER) AS order_id,
     ...
-FROM smelt.source('raw.orders') o
-LEFT JOIN smelt.ref('seed_order_statuses') s ON o.status_code = s.status_code
+FROM smelt.sources.raw.orders o
+LEFT JOIN smelt.models.seed_order_statuses s ON o.status_code = s.status_code
 ```
 
-- Reference seeds and other models with `smelt.ref('name')`.
-- Reference declared sources with `smelt.source('schema.table')`.
+- Reference seeds and other models with `smelt.models.<name>` (seeds are first-class ref targets — name = filename minus `.csv`).
+- Reference declared sources with `smelt.sources.<schema>.<table>`.
 - Materializations: `table` (default for marts), `view`, `incremental` — see `smelt docs show guide/materializations`.
 
 ## Build loop
@@ -109,7 +109,7 @@ sources:
           - { name: order_timestamp, type: VARCHAR }
 ```
 
-Then reference with `smelt.source('raw.orders')`.
+Then reference with `smelt.sources.raw.orders`.
 
 **Parquet caveat:** the bundled DuckDB cannot auto-fetch the parquet extension (HTTP 404 from `extensions.duckdb.org`). If your spec's raw data is parquet, **materialize it into DuckDB tables before running smelt** — write a tiny Python script:
 
@@ -126,7 +126,7 @@ con.execute("CREATE OR REPLACE TABLE raw.orders AS SELECT * FROM read_parquet('o
 
 If `smelt build` fails, work through these before changing approach:
 
-- **"Unknown ref / source"** → run `smelt docs show concepts/project-structure`. Confirm seed CSV is under `seeds/` and the model frontmatter `name:` matches what other models call via `smelt.ref()`. Seed names = seed filename minus `.csv`.
+- **"Unknown ref / source"** → run `smelt docs show concepts/project-structure`. Confirm seed CSV is under `seeds/` and the model frontmatter `name:` matches what other models call via `smelt.models.<name>`. Seed names = seed filename minus `.csv`.
 - **YAML frontmatter parse error** → the `---` fences must be on their own lines, with valid YAML between. No tabs.
 - **Type errors on aggregates** → `SUM`/`COUNT` infer as non-null. If your downstream model assumes nullable for `LEFT JOIN`-fed sums, wrap in `COALESCE(SUM(x), 0)`.
 - **`smelt diff` reports phantom nullability changes after a clean build** → known issue; safe to ignore for app correctness, but don't use `smelt diff` as a CI gate yet.
