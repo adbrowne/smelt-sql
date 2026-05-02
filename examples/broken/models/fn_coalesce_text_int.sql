@@ -3,4 +3,4 @@
 -- `T`. Passing a Text arg and an Integer arg violates the variable's
 -- consistency constraint and yields an `ArgTypeMismatch` diagnostic from
 -- the `unify_call` built-in branch.
-SELECT smelt.functions.COALESCE('text', 1) AS r
+SELECT smelt.models.COALESCE('text', 1) AS r

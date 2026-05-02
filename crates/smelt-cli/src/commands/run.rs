@@ -517,12 +517,42 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // the project has no functions so legacy projects compile byte-for-byte
     // identically to the pre-Phase-56 codepath (the `Option<Arc<FnBodyMap>>`
     // field stays `None`).
+    let workspace =
+        smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
     {
-        let workspace =
-            smelt_db::Workspace::try_get(&type_db).expect("workspace not initialised by init_db");
         let fn_bodies = smelt_cli::build_fn_body_map(&type_db, workspace);
         if !fn_bodies.is_empty() {
             compilers.set_function_bodies_all(fn_bodies);
+        }
+    }
+
+    // Path-prefix enforcement (spec: `docs/specs/functions.md` §"Function call
+    // syntax"): the filename stem is NOT a path component. Run file_diagnostics
+    // on every model file and fail on any UnknownSmeltFn diagnostic, which the
+    // LSP emits for stem-included or otherwise wrong-prefix call paths.
+    {
+        let mut fn_path_errors: Vec<String> = Vec::new();
+        for model in &all_models {
+            let Some(src_file) = type_db.source_file(&model.path) else {
+                continue;
+            };
+            let diags = smelt_db::file_diagnostics(&type_db, workspace, src_file);
+            for diag in diags {
+                if diag.code == Some(smelt_db::DiagnosticCode::UnknownSmeltFn) {
+                    fn_path_errors.push(format!("model '{}': {}", model.name, diag.message));
+                }
+            }
+        }
+        if !fn_path_errors.is_empty() {
+            for err in &fn_path_errors {
+                eprintln!("error: {err}");
+            }
+            return Err(anyhow::anyhow!(
+                "Unknown smelt function call(s) in {} model(s) — the filename stem \
+                 is not a path component; see `smelt docs show concepts/functions`.\n{}",
+                fn_path_errors.len(),
+                fn_path_errors.join("\n")
+            ));
         }
     }
 
@@ -873,7 +903,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                     if args.verbose {
-                        debug!("Transformed SQL:\n{}", compiled.sql);
+                        // Use println! (not tracing::debug!) so the SQL surfaces
+                        // without requiring RUST_LOG=debug. Stdout matches the
+                        // tracing formatter's default channel; the spec
+                        // (`docs/specs/cli.md` §"`--verbose`") fixes per-model
+                        // emission immediately before execution.
+                        println!("-- {}", model_name);
+                        println!("{}", compiled.sql);
                     }
 
                     let partition_values = generate_partition_values(
@@ -944,7 +980,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                 if args.verbose {
-                    debug!("Compiled SQL:\n{}", compiled.sql);
+                    // See the incremental path above: println! is required so
+                    // --verbose emits without a RUST_LOG override.
+                    println!("-- {}", model_name);
+                    println!("{}", compiled.sql);
                 }
 
                 executor::execute_model(backend, &compiled, schema, args.show_results)

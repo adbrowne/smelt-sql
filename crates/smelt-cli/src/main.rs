@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "smelt")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Modern data transformation framework", long_about = None)]
 struct Cli {
     #[command(subcommand)]

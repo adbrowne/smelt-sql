@@ -14,7 +14,7 @@ smelt.define filter_source(
 )
 
 SELECT *
-FROM smelt.functions.filter_source(
+FROM smelt.models.filter_source(
     source => smelt.models.fn_fragment_col_missing_other,
     filters => nonexistent > 0
 ) AS t

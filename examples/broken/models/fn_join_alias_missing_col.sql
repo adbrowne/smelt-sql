@@ -17,6 +17,6 @@ smelt.define join_alias_missing_local(orders: TableExpr<{order_id: BigInt}>) -> 
 )
 
 SELECT *
-FROM smelt.functions.join_alias_missing_local(
+FROM smelt.models.join_alias_missing_local(
   smelt.models.fn_join_alias_missing_col_other
 ) AS m

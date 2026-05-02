@@ -63,10 +63,29 @@ smelt.extern <name>(<param-list>) -> <Type> [;]
 smelt.<path>(<arg-list>)
 ```
 
-- `<path>` is the workspace-relative directory of the declaring file (segments separated by `.`) joined with the function name. Examples: a `smelt.define session_rollup(...)` declared in `functions/patterns/x.sql` is called as `smelt.functions.patterns.session_rollup(...)`; a `smelt.define helper(...)` declared in `random/x.sql` is called as `smelt.random.x.helper(...)`. The same `smelt.<path>` resolution rule that locates models, seeds, and sources locates functions — see `architecture.md` §"Resolution".
+- `<path>` is the workspace-relative directory of the declaring file (segments separated by `.`) joined with the function name. The filename stem is **not** a path component. Examples: a `smelt.define session_rollup(...)` declared in `functions/patterns/x.sql` is called as `smelt.functions.patterns.session_rollup(...)`; a `smelt.define helper(...)` declared in `random/x.sql` is called as `smelt.random.helper(...)`. The same `smelt.<path>` resolution rule that locates models, seeds, and sources locates functions — see `architecture.md` §"Resolution".
 - Arguments may be positional or named with `param => value` (PostgreSQL/Oracle convention).
 - Named-argument syntax does **not** apply to variadic positions.
 - Externs are called by their **bare** declared name (e.g. `read_parquet(x)`), not via `smelt.<path>`. Built-ins are likewise called by bare name. The bare-name namespace is workspace-wide; the declaring path of an extern is irrelevant to the call surface (see `architecture.md` §"Externs are flat").
+
+#### Boolean-position placement
+
+A `smelt.<path>(...)` call whose return type is `Expr<Boolean>` is valid in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression. Splice-context kind ceilings (Semantics §7 in `types.md`) still apply — a function whose body is `Agg`-kinded is rejected in `WHERE`/`ON`/`GROUP BY` even if the declared return type is `Expr<Boolean>`. Example:
+
+```sql
+-- functions/orders.sql declares is_shipped(status TEXT) -> Expr<Boolean>
+SELECT *
+FROM smelt.models.orders
+WHERE smelt.functions.is_shipped(status)
+```
+
+File-location → call-path mapping (path-prefix enforcement is normative; a wrong-prefix call emits `UnknownSmeltFn`):
+
+| Filesystem location | Declared name | Call path |
+|---|---|---|
+| `functions/status.sql` | `is_shipped` | `smelt.functions.is_shipped(...)` |
+| `functions/patterns/x.sql` | `session_rollup` | `smelt.functions.patterns.session_rollup(...)` |
+| `utils/math.sql` | `safe_divide` | `smelt.utils.safe_divide(...)` |
 
 ### `PASSING` clauses
 
@@ -158,6 +177,7 @@ These rules are normative.
 13. **`PASSING` parses without type information.** The trigger rule (one-token lookahead after `)`) does not require knowing the callee's parameter list. Name validation, sort compatibility, and binding all run after parsing in the type-checker.
 14. **Externs treated as atomic.** `smelt.extern` calls are checked against their declared signature exactly like built-ins. The planner treats them as atomic nodes (see `planner_integration.md`).
 15. **Error recovery.** `smelt.define`, `smelt.extern`, `smelt.test`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `smelt.test`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
+16. **Declared return type is authoritative for call-site typing.** When the type checker encounters a `smelt.<path>(...)` call, it looks up the function's declared return type. A `-> <Type>` annotation yields a concrete call-expression type only when the annotation resolves to a specific concrete type (`Concrete(T)` in the type constraint system) or to `Numeric` (which widens to `Double`). Polymorphic constraints (`Ordered`, `Any`) and absent return types (Tier 1/2 functions) all produce `Unknown` at the call site. The schema of any model that projects such a call reflects this rule: a column whose source expression is a `smelt.<path>(...)` call inherits the resolved type or `Unknown`. Downstream aggregate functions (`SUM`, `AVG`, etc.) apply their standard return-type rules to the resolved type — for example, `SUM(Double) → Double`.
 
 ### Interactions with adjacent specs
 

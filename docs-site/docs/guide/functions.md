@@ -73,10 +73,49 @@ SELECT
 FROM smelt.models.orders
 ```
 
-For namespace-qualified names (e.g. if the function file uses a subdirectory):
+A function's call path is derived from the workspace-relative directory of the file it is declared in, joined with the declared name. The filename stem itself is **not** part of the call path. The mapping is enforced — calling a function under the wrong path is an `UnknownSmeltFn` diagnostic.
+
+| Filesystem location | Declared name | Call path |
+|---|---|---|
+| `functions/safe_divide.sql` | `safe_divide` | `smelt.functions.safe_divide(...)` |
+| `functions/status.sql` | `is_shipped` | `smelt.functions.is_shipped(...)` |
+| `functions/patterns/x.sql` | `session_rollup` | `smelt.functions.patterns.session_rollup(...)` |
+| `utils/math.sql` | `safe_divide` | `smelt.utils.safe_divide(...)` |
+
+Renaming a function or moving its file changes the call path, the same way moving a model does.
+
+### Verifying function calls
+
+Before doing a full `smelt build`, confirm that a function call expands correctly using `--show-plan`:
+
+```bash
+smelt build --show-plan models/<model>.sql
+```
+
+The `ExpandedCall` node in the plan output shows the inlined function body with argument substitution already applied. This is faster than a full build and catches wrong-path errors (such as `UnknownSmeltFn`) without touching the database.
+
+Note that `--show-plan` requires a positional model file path — there is no project-wide show-plan mode. See [`smelt build`](../reference/cli.md#smelt-build) in the CLI reference for details.
+
+### Declared return types and model schemas
+
+For typed functions (those with a `-> ReturnType` annotation), smelt uses the declared return type as the column type in downstream models. `smelt table <model>` reflects this — a column fed by a `-> Expr<Double>` call shows as `DOUBLE`. Downstream aggregates also use the declared type: `SUM` over a `-> Expr<Double>` call infers as `DOUBLE`, not `BIGINT`.
+
+### Calling in boolean positions
+
+A function whose declared return type is `Expr<Boolean>` can be used in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression.
 
 ```sql
-SELECT smelt.functions.analytics.safe_divide(a, b)
+-- functions/status.sql
+smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
+  status = 'shipped' OR status = 'delivered'
+)
+```
+
+```sql
+-- models/shipped_orders.sql
+SELECT *
+FROM smelt.models.orders
+WHERE smelt.functions.is_shipped(status)
 ```
 
 ### Named arguments

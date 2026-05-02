@@ -1172,6 +1172,36 @@ pub fn function_body_diagnostics_for_file(
         None
     };
 
+    // TB-5: see the parallel closure in `smelt_fn_call_diagnostics_for_file`.
+    // This is the body-cascade variant — when a Tier 2 body contains a
+    // `smelt.<dir>.<name>(...)` call, we need to enforce the same path-prefix
+    // rule. Builds an identical validator over the workspace's files.
+    let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
+        for f in &files {
+            let sigs = file_signature_inputs(db, *f);
+            if !sigs.iter().any(|s| s.name == name) {
+                continue;
+            }
+            let abs_path = f.path(db);
+            let proj_root = f.project_root(db);
+            let Ok(rel) = abs_path.strip_prefix(proj_root) else {
+                continue;
+            };
+            let file_dir_segments: Vec<String> = rel
+                .parent()
+                .map(|p| {
+                    p.components()
+                        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if file_dir_segments == dir_segments {
+                return true;
+            }
+        }
+        false
+    };
+
     let nested_handler = |call: &smelt_parser::ast::SmeltPathCall,
                           nested_ctx: &TypeContext,
                           nested_text: &str|
@@ -1189,6 +1219,7 @@ pub fn function_body_diagnostics_for_file(
             &default_type_lookup,
             &table_ref_schema_lookup,
             &|_: &smelt_parser::ast::SmeltPathCall| None,
+            &path_prefix_validator,
         )
     };
 
@@ -2221,6 +2252,41 @@ pub fn smelt_fn_call_diagnostics_for_file(
     let smelt_path_schema_lookup =
         |_call: &smelt_parser::ast::SmeltPathCall| -> Option<Vec<(String, TypedColumn)>> { None };
 
+    // TB-5: validates that a `smelt.<dir>.<name>(...)` call path's directory
+    // segments equal the workspace-relative directory of the file declaring
+    // a function with `name`. Returns `true` iff some workspace file at
+    // exactly that directory declares the function.
+    //
+    // Spec rule (`functions.md` §"Function call syntax"): the file stem is
+    // *not* a path component. So a function declared in `functions/status.sql`
+    // is callable as `smelt.functions.is_shipped(...)`, not
+    // `smelt.functions.status.is_shipped(...)`.
+    let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
+        for f in &files {
+            let sigs = file_signature_inputs(db, *f);
+            if !sigs.iter().any(|s| s.name == name) {
+                continue;
+            }
+            let abs_path = f.path(db);
+            let proj_root = f.project_root(db);
+            let Ok(rel) = abs_path.strip_prefix(proj_root) else {
+                continue;
+            };
+            let file_dir_segments: Vec<String> = rel
+                .parent()
+                .map(|p| {
+                    p.components()
+                        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if file_dir_segments == dir_segments {
+                return true;
+            }
+        }
+        false
+    };
+
     // Phase 17: resolve a parameter's default-value expression by
     // re-parsing the declaring file and walking to the matching
     // PARAM node. Returns the inferred `DataType` of the default
@@ -2266,6 +2332,7 @@ pub fn smelt_fn_call_diagnostics_for_file(
             &default_type_lookup,
             &table_ref_schema_lookup,
             &smelt_path_schema_lookup,
+            &path_prefix_validator,
         ));
     }
     out

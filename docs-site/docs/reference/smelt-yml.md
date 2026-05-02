@@ -84,6 +84,9 @@ The `default_materialization` field and per-model `materialization` field accept
 1. SQL file frontmatter (`materialization:` in the model file)
 2. `smelt.yml` per-model config (`models.<name>.materialization`)
 3. `smelt.yml` top-level `default_materialization`
+4. Built-in default: `view`
+
+When `materialization` is omitted at every level, a model is materialized as a `view`. See the [Materializations guide](../guide/materializations.md) for when to override this.
 
 ---
 

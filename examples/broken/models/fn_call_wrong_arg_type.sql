@@ -3,4 +3,4 @@
 -- diagnostic, anchored at the `'text'` argument span.
 smelt.define needs_number(x: Expr<Numeric>) -> Expr<Numeric> AS (x + 1)
 
-SELECT smelt.functions.needs_number('text') AS r
+SELECT smelt.models.needs_number('text') AS r

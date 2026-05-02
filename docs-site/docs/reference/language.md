@@ -228,7 +228,7 @@ EXTRACT(WEEK FROM date_col)          -- returns BIGINT
 
 ## Aggregate result types
 
-smelt's type inferencer assigns the following return types to aggregates. Knowing the exact widening rules matters when a downstream column or test expects a specific type — `COUNT(*)` is a frequent surprise because it returns `BIGINT` rather than `INTEGER`.
+smelt assigns canonical return types to aggregates so the same model writes the same output schema on every backend — `SUM(integer)` gives you `BIGINT` whether you target DuckDB or PostgreSQL, even though the engines disagree natively. Knowing the exact widening rules matters when a downstream column or test expects a specific type; `COUNT(*)` is a frequent surprise because it returns `BIGINT` rather than `INTEGER`.
 
 | Aggregate | Argument type | Result type | Nullable |
 |---|---|---|---|
@@ -254,6 +254,8 @@ smelt's type inferencer assigns the following return types to aggregates. Knowin
     ```
 
 - **Cast `COUNT` if a downstream column expects `INTEGER`.** `CAST(COUNT(*) AS INTEGER)` is safe up to `2^31 - 1` rows; above that, leave it as `BIGINT`.
+
+See [`docs/specs/types.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/specs/types.md) §5 for the normative rules and [`docs/type_semantics.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/type_semantics.md) for backend divergence notes.
 
 ## Multi-dialect features
 

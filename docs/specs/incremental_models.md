@@ -35,6 +35,8 @@ FROM smelt.models.orders
 GROUP BY order_date, customer_id
 ```
 
+`materialization` is optional. When omitted from frontmatter, the model falls back to the per-model entry in `smelt.yml` (`models.<name>.materialization`), and finally to the project-level `default_materialization` key (whose own default is `view`). Incremental models must resolve to `materialization: table` — declaring `incremental:` on a non-table materialization is a configuration error or a warning depending on the resolved kind (see `smelt-yml.md`).
+
 ### `smelt.yml` (project-level overrides)
 
 Frontmatter wins over `smelt.yml` when both set the same field.

@@ -96,7 +96,7 @@ models:
 default_materialization: view
 ```
 
-If no materialization is specified anywhere, the default is `view`.
+When `materialization` is omitted in the SQL frontmatter, in `models.<name>` of `smelt.yml`, **and** at the project-level `default_materialization` key, a model is materialized as a `view` — that is the built-in fallback. See [`smelt.yml` reference](../reference/smelt-yml.md#materialization-types) for the precedence chain.
 
 !!! tip
     A common pattern is to set `default_materialization: view` in `smelt.yml`, then override specific models to `table` where performance matters. This keeps development fast while ensuring production-critical models are materialized.

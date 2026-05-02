@@ -33,9 +33,11 @@ smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
 )
 ```
 
-Call them in your models as `smelt.functions.<path>.<name>(...)`. For example,
-`smelt.functions.revenue.safe_revenue(o.amount)` if the file is
-`functions/revenue.sql`.
+Call them in your models as `smelt.functions.<name>(...)`. The filename stem is
+**not** a path component — the path contains only the directory segments, not the
+stem. For example, `smelt.functions.safe_revenue(o.amount)` for a function
+`safe_revenue` declared in `functions/revenue.sql` (directory `functions/`,
+stem `revenue` is excluded from the call path).
 
 Rules for v1 functions (things that work today):
 - Parameters must be `Expr<T>` sorts (scalar expressions only — no `TableExpr` or `PASSING` in this fixture).
@@ -77,8 +79,14 @@ One row per customer — all 5 customers, even those with no shipped orders. Col
 
 ## How to know you are done
 
-Run `python ../validate.py` from inside your project directory. It checks both the
-output table contents **and** that a `functions/` directory with at least one
+The harness runs `validate.py` automatically after you finish — you do not need to invoke it manually. To self-check, query the output tables directly:
+
+```bash
+duckdb my-project.duckdb -c "SELECT COUNT(*) FROM stg_orders"
+duckdb my-project.duckdb -c "DESCRIBE int_orders_by_day"
+```
+
+The validator also checks that a `functions/` directory with at least one
 `smelt.define` declaration exists and is called from your models.
 
 ## Hints
@@ -89,6 +97,7 @@ output table contents **and** that a `functions/` directory with at least one
 - Build the seeds → one staging model → `smelt build` first, then layer in the functions.
 - After defining a function, run `smelt build --show-plan models/stg_orders.sql` to confirm the
   call expands correctly before doing a full build.
-- `smelt.functions.<path>.<name>` — the path mirrors the directory and file structure under
-  `functions/`. A function `safe_revenue` in `functions/revenue.sql` is called as
-  `smelt.functions.revenue.safe_revenue(...)`.
+- `smelt.functions.<name>` — the path uses only the directory segments under
+  `functions/`, **not** the filename stem. A function `safe_revenue` in
+  `functions/revenue.sql` is called as `smelt.functions.safe_revenue(...)`, not
+  `smelt.functions.revenue.safe_revenue(...)`. Including the stem is an error.

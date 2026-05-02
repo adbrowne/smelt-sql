@@ -9,6 +9,7 @@ Place CSV files in the `seeds/` directory (configurable via `seed_paths` in `sme
 ```
 my_project/
   seeds/
+    raw_orders.csv
     raw/
       users.csv
       transactions.csv
@@ -19,7 +20,15 @@ my_project/
   smelt.yml
 ```
 
-In this example, `seeds/raw/users.csv` is loaded as the table `raw.users`.
+The path of a CSV under `seed_paths` determines both the qualified table name written to the database and the reference you use in models:
+
+| Filesystem location | Loaded as | Reference in models |
+|---|---|---|
+| `seeds/raw_orders.csv` | `<target_schema>.raw_orders` | `smelt.models.raw_orders` |
+| `seeds/raw/users.csv` | `raw.users` | `smelt.sources.raw.users` |
+| `seeds/raw/events.csv` | `raw.events` | `smelt.sources.raw.events` |
+
+Top-level seeds land in the active target's `schema:` (default `main`) and are addressed as `smelt.models.<name>` — the same call surface as a SQL model. Subdirectory seeds become their own schema and are addressed as `smelt.sources.<schema>.<name>`. The architectural target is to address every seed uniformly under `smelt.seeds.<path>`; this is documented in [`docs/specs/seeds.md`](https://github.com/adbrowne/smelt-sql/blob/main/docs/specs/seeds.md) and is being migrated to.
 
 ## CSV format
 
@@ -36,9 +45,9 @@ user_id,user_name,signup_date
 
 smelt infers column types from the data. The table is created (or replaced) each time you run the seed command.
 
-## Type inference
+## Column type inference
 
-Two type-inference passes operate on every seed CSV — and they don't always agree.
+Two type-inference passes operate on every seed CSV. They agree on the shapes both can recognise, and disagree on shapes only one can.
 
 ### At runtime (DuckDB)
 
@@ -57,19 +66,30 @@ Seeds are loaded with DuckDB's `read_csv_auto()`. DuckDB samples the file and as
 
 ### At compile time (smelt LSP / `smelt table`)
 
-smelt's own inferencer (used for diagnostics, completions, and `smelt table`) is simpler and only recognises four types: `BOOLEAN`, `INTEGER`, `DOUBLE`, and `TEXT`. It samples the first 10 rows. Date- and timestamp-shaped columns that DuckDB recognises as `DATE`/`TIMESTAMP` show up as `TEXT` in `smelt table` output.
+smelt's own inferencer (used for diagnostics, completions, and `smelt table`) samples the first 10 data rows and recognises `BOOLEAN`, `INTEGER`, `DOUBLE`, `DATE` (`YYYY-MM-DD`-shaped values), `TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`-shaped, optional fractional seconds), and `Text`. Anything it cannot classify falls back to `Text`.
 
-This divergence means a seed column may **load as `DATE`** at runtime but **show as `TEXT`** in your editor. The conservative fix is to cast explicitly in the first staging model that consumes the seed:
+The compile-time and runtime inferencers agree on the recognised types — `BOOLEAN`, `DATE`, `TIMESTAMP`, `INTEGER`, `DOUBLE`. The two pass-disagreements you can hit in practice:
+
+- **`TIMESTAMP WITH TIME ZONE` columns.** The compile-time inferencer never emits the with-zone variant; a column whose values include `2025-01-01 12:00:00+00` falls back to `Text` even when DuckDB would store it as `TIMESTAMPTZ`.
+- **`DECIMAL`-shaped columns.** DuckDB sometimes types a bounded numeric as `DECIMAL(p,s)`; the compile-time inferencer always emits `Double` for any parseable-as-`f64` column.
+
+When the two disagree, the compile-time inferencer is the one your editor uses for type-checking downstream models. The conservative fix is to cast explicitly in the first staging model that consumes the seed:
 
 ```sql
 SELECT
-  CAST(order_date AS DATE) AS order_date,
   CAST(amount AS DECIMAL(10, 2)) AS amount,
+  CAST(event_ts AS TIMESTAMP WITH TIME ZONE) AS event_ts,
   ...
 FROM smelt.models.raw_orders
 ```
 
-To see what DuckDB actually inferred for a seed after `smelt seed` or `smelt build`:
+To inspect what smelt's type-checker thinks the columns are (the canonical compile-time view):
+
+```bash
+smelt table raw_orders
+```
+
+To see what DuckDB actually inferred at runtime after `smelt seed` or `smelt build`:
 
 ```bash
 duckdb my-project.duckdb -c 'DESCRIBE raw_orders'
@@ -136,7 +156,19 @@ smelt seed --target spark
 
 ## Referencing seeds in models
 
-Seeds in the top-level seed directory (not in subdirectories) are available as `smelt.models.<name>` targets, just like SQL models:
+A top-level seed file `seeds/raw_orders.csv` is referenced as `smelt.models.raw_orders` — the same call surface as a SQL model:
+
+```sql
+-- models/orders_summary.sql
+SELECT
+  order_date,
+  COUNT(*) AS order_count,
+  SUM(amount) AS total_amount
+FROM smelt.models.raw_orders
+GROUP BY 1
+```
+
+A subdirectory seed file `seeds/raw/users.csv` is referenced as `smelt.sources.raw.users`:
 
 ```sql
 SELECT
@@ -148,10 +180,10 @@ JOIN smelt.models.category_hierarchy AS ch
   ON p.category_code = ch.category_code
 ```
 
-Here `category_hierarchy` is a seed CSV (`seeds/category_hierarchy.csv`). smelt resolves its column types from the CSV headers and data, so you get full type inference and LSP diagnostics for seed columns.
+smelt resolves column types from the CSV headers and data, so you get full type inference and LSP diagnostics for seed columns either way.
 
 !!! note
-    Only top-level seeds (files directly in the seed directory, not in subdirectories) are available as `smelt.models.<name>` targets. Subdirectory seeds are loaded into their respective schemas and accessed via `smelt.sources.<name>`.
+    Top-level seeds (files directly in the seed directory) are available as `smelt.models.<name>`. Subdirectory seeds are loaded into the schema named after the parent directory and accessed via `smelt.sources.<schema>.<name>`.
 
 ## When to use seeds
 
