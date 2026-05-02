@@ -535,6 +535,14 @@ smelt table [OPTIONS] <MODEL_NAME>
 | `--project-dir` | path | `.` | Path to smelt project root |
 | `--format` | string | `table` | Output format: `table` (human-readable) or `json` |
 
+**Type caveat:** The types shown by `smelt table` are smelt's **compile-time inferred types** — they are derived from the SQL source without executing the model. They may differ from the physical column types that DuckDB stores after a `smelt build`. To see the physical DuckDB column types after building, use:
+
+```bash
+duckdb my-project.duckdb -c 'DESCRIBE <model>'
+```
+
+**Typed functions:** For columns whose values come from typed `smelt.define` calls — functions annotated with a `-> Expr<T>` return type — `smelt table` correctly reflects the declared return type. For example, a column fed by a `-> Expr<Double>` function shows as `DOUBLE` in `smelt table` output, and downstream aggregates (such as `SUM`) also use that declared type for their inferred result.
+
 **Examples:**
 
 ```bash

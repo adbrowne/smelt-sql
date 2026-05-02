@@ -84,6 +84,22 @@ A function's call path is derived from the workspace-relative directory of the f
 
 Renaming a function or moving its file changes the call path, the same way moving a model does.
 
+### Verifying function calls
+
+Before doing a full `smelt build`, confirm that a function call expands correctly using `--show-plan`:
+
+```bash
+smelt build --show-plan models/<model>.sql
+```
+
+The `ExpandedCall` node in the plan output shows the inlined function body with argument substitution already applied. This is faster than a full build and catches wrong-path errors (such as `UnknownSmeltFn`) without touching the database.
+
+Note that `--show-plan` requires a positional model file path — there is no project-wide show-plan mode. See [`smelt build`](../reference/cli.md#smelt-build) in the CLI reference for details.
+
+### Declared return types and model schemas
+
+For typed functions (those with a `-> ReturnType` annotation), smelt uses the declared return type as the column type in downstream models. `smelt table <model>` reflects this — a column fed by a `-> Expr<Double>` call shows as `DOUBLE`. Downstream aggregates also use the declared type: `SUM` over a `-> Expr<Double>` call infers as `DOUBLE`, not `BIGINT`.
+
 ### Calling in boolean positions
 
 A function whose declared return type is `Expr<Boolean>` can be used in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression.

@@ -79,8 +79,14 @@ One row per customer — all 5 customers, even those with no shipped orders. Col
 
 ## How to know you are done
 
-Run `python ../validate.py` from inside your project directory. It checks both the
-output table contents **and** that a `functions/` directory with at least one
+The harness runs `validate.py` automatically after you finish — you do not need to invoke it manually. To self-check, query the output tables directly:
+
+```bash
+duckdb my-project.duckdb -c "SELECT COUNT(*) FROM stg_orders"
+duckdb my-project.duckdb -c "DESCRIBE int_orders_by_day"
+```
+
+The validator also checks that a `functions/` directory with at least one
 `smelt.define` declaration exists and is called from your models.
 
 ## Hints
