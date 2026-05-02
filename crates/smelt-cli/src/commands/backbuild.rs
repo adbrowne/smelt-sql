@@ -394,7 +394,11 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
                 .with_context(|| format!("Failed to compile model: {}", plan.model_name))?;
 
             if args.verbose {
-                debug!("Compiled SQL:\n{}", compiled.sql);
+                // Use println! (not tracing::debug!) so the SQL surfaces
+                // without requiring RUST_LOG=debug. See the matching block
+                // in `run.rs` and `docs/specs/cli.md` §"`--verbose`".
+                println!("-- {}", plan.model_name);
+                println!("{}", compiled.sql);
             }
 
             let partition_values = generate_partition_values(

@@ -32,7 +32,7 @@ Convenience command: `smelt seed` followed by `smelt run` against the same proje
 
 | Flag | Status | Behaviour |
 |------|--------|-----------|
-| `--verbose` / `-v` | Implemented (see Known Divergence TB-1) | Logs the compiled SQL for each model immediately before execution. A run where every model is up-to-date and skipped produces no extra `--verbose` output, because no model executes. |
+| `--verbose` / `-v` | Implemented | Logs the compiled SQL for each model immediately before execution. A run where every model is up-to-date and skipped produces no extra `--verbose` output, because no model executes. |
 | `--show-plan` | Implemented | **Per-model**: requires a positional argument naming a model file path (e.g. `smelt build --show-plan models/marts/customers.sql`). Without the positional argument, the command errors. There is currently no project-wide `--show-plan` mode (see TB-3 below). |
 | `--select` / `-s` | Implemented | **Repeatable** flag. Supply each selector as its own `--select <value>`. Space-separated values inside a single `--select` are not parsed as multiple selectors (treated as a single literal selector that will not match anything). Selector grammar (model name, `tag:X`, `+X`, `X+`, `+X+`) is shared with `smelt run`. |
 | `--exclude` / `-e` | Implemented | Repeatable; same selector grammar as `--select`. |
@@ -47,7 +47,7 @@ Convenience command: `smelt seed` followed by `smelt run` against the same proje
 
 The contract:
 
-1. For each model that the run actually executes, emit the compiled SQL string to stdout (or stderr — the reference doc fixes the channel) immediately before the backend executes it.
+1. For each model that the run actually executes, emit the compiled SQL string to **stdout** immediately before the backend executes it. The emission is prefixed with a comment line `-- <model_name>` so consumers piping stdout (e.g. `smelt build --verbose | tee compiled.sql`) get a syntactically valid SQL transcript.
 2. The emission is **per executed model**, not per discovered model. Models skipped because they are already materialised and unchanged produce no `--verbose` output.
 3. The non-`--verbose` summary line (`smelt: built N model(s) in T s`) is unchanged by the flag — `--verbose` adds output, it does not replace.
 
@@ -81,7 +81,6 @@ This is a stub spec; the CLI surface is large and the deep design rationale will
 
 ## Known Divergences / Open Questions
 
-- **TB-1 — `smelt build --verbose` is wired but does not log compiled SQL.** `--help` advertises the flag; the `--verbose` value is parsed but not threaded through to per-model execution, so a clean rebuild produces no extra output. Tracked in `docs/plans/20260502-smelt-loop-findings.md` Phase 4. The Surface contract above is the target behaviour the fix must produce.
 - **TB-3 — No project-wide compile-only flag.** `smelt build --dry-run` is rejected by clap; `smelt build --show-plan` requires a positional model-file argument. There is no single command to "compile every model and show the plan without executing." Two candidate resolutions (open question):
   1. Extend `--show-plan` to accept "no positional argument means whole project," emitting a graph + per-node plan.
   2. Add a fresh `smelt build --dry-run` that mirrors `smelt run --dry-run` semantics but spans the seed→run lifecycle.

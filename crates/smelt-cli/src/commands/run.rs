@@ -873,7 +873,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                     if args.verbose {
-                        debug!("Transformed SQL:\n{}", compiled.sql);
+                        // Use println! (not tracing::debug!) so the SQL surfaces
+                        // without requiring RUST_LOG=debug. Stdout matches the
+                        // tracing formatter's default channel; the spec
+                        // (`docs/specs/cli.md` §"`--verbose`") fixes per-model
+                        // emission immediately before execution.
+                        println!("-- {}", model_name);
+                        println!("{}", compiled.sql);
                     }
 
                     let partition_values = generate_partition_values(
@@ -944,7 +950,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
                 if args.verbose {
-                    debug!("Compiled SQL:\n{}", compiled.sql);
+                    // See the incremental path above: println! is required so
+                    // --verbose emits without a RUST_LOG override.
+                    println!("-- {}", model_name);
+                    println!("{}", compiled.sql);
                 }
 
                 executor::execute_model(backend, &compiled, schema, args.show_results)
