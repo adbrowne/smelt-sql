@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777711214380,
+  "lastUpdate": 1777711216837,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -18791,6 +18791,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.52061201873693,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "572ae33455a92cca0fd3f8fdd6105e991a4c633b",
+          "message": "agent-loop: small-tier 5x run findings + skill polish\n\nTwo skill edits applied during the run (loops 1 and 4):\n- correct false `--dry-run --verbose` advice; add `--show-plan` and\n  `smelt table <model>` as the verification-of-inferred-types entrypoint\n- state the default materialization explicitly; promote the no-pandas\n  duckdb validation snippet next to the install gotchas\n\nPlan doc accumulates 4 TOOL_BUG and 9 DOCS_GAP findings (with a triage\nshortlist) for end-of-loop review; small fixture has converged.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-05-02T18:37:14+10:00",
+          "tree_id": "6b559c08b168262793d96a53c381303bbb30fa8f",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/572ae33455a92cca0fd3f8fdd6105e991a4c633b"
+        },
+        "date": 1777711215992,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.284273324060138,
             "unit": "MB/s"
           }
         ]
