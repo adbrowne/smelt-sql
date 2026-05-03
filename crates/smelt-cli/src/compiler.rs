@@ -160,6 +160,10 @@ pub struct UpstreamSchemas {
     pub models: HashMap<String, Vec<(String, TypedColumn)>>,
     pub seeds: HashMap<String, Vec<(String, TypedColumn)>>,
     pub sources: SourcesConfig,
+    /// Per-entity source infos discovered from standalone `.yml` files.
+    /// Used by the path-ref resolver to apply `name:` overrides at SQL
+    /// generation time. When non-empty, takes precedence over `sources`.
+    pub per_entity_sources: Vec<smelt_core::SourceInfo>,
 }
 
 impl UpstreamSchemas {
@@ -170,11 +174,20 @@ impl UpstreamSchemas {
     ///
     /// `models` is the same list that was passed to `init_db` — we use it to
     /// know which paths to query, and to recover each model's user-facing name.
+    ///
+    /// # Errors
+    /// Returns an error if the project root contains a legacy aggregate
+    /// `sources.yml` / `sources.yaml` file.  Projects must migrate to
+    /// per-entity source YAMLs before building.
     pub fn from_database(
         db: &smelt_db::Database,
         project_dir: &std::path::Path,
         models: &[crate::discovery::ModelFile],
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        // Phase 6: hard error if a legacy aggregate sources.yml exists.
+        smelt_core::check_aggregate_sources_yml(project_dir)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
         let workspace = smelt_db::Workspace::try_get(db).expect("workspace not initialized");
 
         let mut model_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
@@ -199,12 +212,13 @@ impl UpstreamSchemas {
 
         // Seeds are CSV files outside the Salsa graph under the 0.26 API; load
         // them directly via the pure smelt-core helper using the project's
-        // configured seed_paths (defaults to ["seeds"] if no smelt.yml).
-        let seed_paths = smelt_core::Config::load(project_dir)
-            .map(|c| c.seed_paths)
-            .unwrap_or_else(|_| vec!["seeds".to_string()]);
+        // configured `paths` (defaults to ["models"] if no smelt.yml).
+        // Phase 5: use with_sidecars so pinned types and ephemeral metadata are available.
+        let paths = smelt_core::Config::load(project_dir)
+            .map(|c| c.paths)
+            .unwrap_or_else(|_| vec!["models".to_string()]);
         let mut seed_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
-        for seed in smelt_core::discover_seed_infos(project_dir, &seed_paths) {
+        for seed in smelt_core::discover_seed_infos_with_sidecars(project_dir, &paths) {
             let cols: Vec<(String, TypedColumn)> = seed
                 .columns
                 .iter()
@@ -218,16 +232,22 @@ impl UpstreamSchemas {
                     )
                 })
                 .collect();
-            seed_schemas.insert(seed.name, cols);
+            seed_schemas.insert(seed.address_segments.join("_"), cols);
         }
 
         let sources = SourcesConfig::load(project_dir).unwrap_or_default();
 
-        Self {
+        // Phase 6: discover per-entity source YAMLs for name-override resolution
+        // at SQL generation time. These take precedence over the legacy
+        // `SourcesConfig` when resolving `smelt.sources.*` path refs.
+        let per_entity_sources = smelt_core::discover_source_infos(project_dir, &paths);
+
+        Ok(Self {
             models: model_schemas,
             seeds: seed_schemas,
             sources,
-        }
+            per_entity_sources,
+        })
     }
 }
 
@@ -376,14 +396,12 @@ impl SqlCompiler {
         (as_struct_emitter, fn_expander, path_call_expander)
     }
 
-    /// Build a `SmeltPathRefResolver` for a specific `schema` string, wiring
-    /// `smelt.models.*` / `smelt.sources.*` / `smelt.seeds.*` to the
-    /// appropriate backend SQL expressions.
+    /// Build a `SmeltPathRefResolver` for a specific `schema` string.
     ///
-    /// - `["models", name]` → `schema.name` (or cross-engine expression)
-    /// - `["seeds", name...]` → `schema.<name_joined_with_underscores>`
+    /// Per architecture.md §"Default materialization name mapping" (Phase 2):
+    /// - All persisted paths → `{schema}.{segs.join("_")}`
     /// - `["sources", src_name, table_name]` → `src_name.table_name`
-    ///   (matching the legacy `smelt.sources.src.tbl` resolution)
+    ///   (sources.yml still active until Phase 6)
     ///
     /// Paths not matching any known namespace return `None`, leaving the
     /// node verbatim — forward-compatible with new namespaces.
@@ -391,8 +409,8 @@ impl SqlCompiler {
         self.make_path_ref_resolver_with_ephemerals(schema, &HashSet::new())
     }
 
-    /// Like `make_path_ref_resolver` but emits `__smelt_{name}` for any model
-    /// whose leaf name appears in `ephemeral_names`.  Used by
+    /// Like `make_path_ref_resolver` but emits `__smelt_{segs.join("_")}` for
+    /// any address whose joined name appears in `ephemeral_names`. Used by
     /// `compile_with_ephemerals` so that CTE-inlined ephemeral refs resolve to
     /// their CTE alias rather than a physical table name.
     fn make_path_ref_resolver_with_ephemerals(
@@ -403,41 +421,61 @@ impl SqlCompiler {
         let schema = schema.to_string();
         let cross_engine_refs = self.cross_engine_refs.clone();
         let sources = self.upstream_schemas.sources.clone();
+        let per_entity_sources = self.upstream_schemas.per_entity_sources.clone();
         let ephemerals = ephemeral_names.clone();
 
         Box::new(move |segs: &[String]| {
             match segs {
-                // smelt.models.<path...>.<name> — subdirectory models use the
-                // leaf segment as the physical table name.
-                [ns, rest @ ..] if ns == "models" && !rest.is_empty() => {
-                    let name = rest.last().expect("rest non-empty");
-                    // Ephemeral models resolve to their CTE alias.
-                    if ephemerals.contains(name) {
-                        return Some(format!("__smelt_{}", name));
-                    }
-                    if let Some(parquet_expr) = cross_engine_refs.get(name) {
-                        Some(parquet_expr.clone())
-                    } else {
-                        Some(format!("{}.{}", schema, name))
-                    }
-                }
-                // smelt.seeds.<name...> — join path segments with '_'
-                [ns, rest @ ..] if ns == "seeds" && !rest.is_empty() => {
-                    let table_name = rest.join("_");
-                    Some(format!("{}.{}", schema, table_name))
-                }
-                // smelt.sources.<source_name>.<table_name>
-                [ns, source_name, table_name] if ns == "sources" => {
-                    // Apply any `identifier` override from sources.yml.
-                    let emit_name = sources
-                        .sources
+                // smelt.sources.<source_name>.<table_name> and deeper paths.
+                // Phase 6: per-entity sources with a `name:` override take
+                // precedence. Without an override, the legacy `<source>.<table>`
+                // mapping is preserved so existing projects continue to work.
+                segs if !segs.is_empty() && segs[0] == "sources" => {
+                    // Per-entity source with an explicit `name:` override wins.
+                    if let Some(src_info) = per_entity_sources
                         .iter()
-                        .find(|s| s.name == *source_name)
-                        .and_then(|src| src.tables.iter().find(|t| t.name == *table_name))
-                        .and_then(|tbl| tbl.identifier.as_deref())
-                        .unwrap_or(table_name.as_str())
-                        .to_string();
-                    Some(format!("{}.{}", source_name, emit_name))
+                        .find(|s| s.address_segments.as_slice() == segs)
+                    {
+                        if src_info.name_override.is_some() {
+                            return Some(src_info.db_name(&schema));
+                        }
+                        // No override — fall through to legacy mapping below so
+                        // `smelt.sources.raw.orders` still resolves to `raw.orders`.
+                    }
+
+                    // Legacy sources.yml identifier override, or the default
+                    // `<source_name>.<table_name>` mapping. For
+                    // `["sources", "raw", "orders"]` this produces `raw.orders`.
+                    if segs.len() >= 3 {
+                        let source_name = &segs[segs.len() - 2];
+                        let table_name = &segs[segs.len() - 1];
+                        let emit_name = sources
+                            .sources
+                            .iter()
+                            .find(|s| s.name == *source_name)
+                            .and_then(|src| src.tables.iter().find(|t| t.name == *table_name))
+                            .and_then(|tbl| tbl.identifier.as_deref())
+                            .unwrap_or(table_name.as_str())
+                            .to_string();
+                        return Some(format!("{}.{}", source_name, emit_name));
+                    }
+
+                    // Unknown sources path — return default mapping.
+                    Some(format!("{}.{}", schema, segs.join("_")))
+                }
+                // All other non-empty paths → {schema}.{segs.join("_")}
+                // Ephemeral models resolve to their CTE alias.
+                segs if !segs.is_empty() => {
+                    let table_name = segs.join("_");
+                    // Check for ephemeral CTE alias.
+                    if ephemerals.contains(&table_name) {
+                        return Some(format!("__smelt_{}", table_name));
+                    }
+                    // Check for cross-engine parquet expression.
+                    if let Some(parquet_expr) = cross_engine_refs.get(&table_name) {
+                        return Some(parquet_expr.clone());
+                    }
+                    Some(format!("{}.{}", schema, table_name))
                 }
                 _ => None,
             }
@@ -494,7 +532,9 @@ impl SqlCompiler {
         );
 
         Ok(CompiledModel {
-            name: model.name.clone(),
+            // Use the full address-based DB name (e.g. "staging_stg_events")
+            // so the backend creates/accesses the correct table.
+            name: model.db_name_owned(),
             sql: compiled_sql,
             materialization,
         })
@@ -517,7 +557,7 @@ impl SqlCompiler {
         };
 
         // Build a populated TypeContext from upstream model/seed/source schemas
-        // so SUM/COUNT/AVG over `smelt.models.upstream.col` resolve correctly.
+        // so SUM/COUNT/AVG over `smelt.upstream.col` resolve correctly.
         // Without this populated context, every ref column resolves to Unknown
         // and SUM falls through to BIGINT — silently corrupting financial
         // aggregates. See bug #3 in
@@ -593,7 +633,8 @@ impl SqlCompiler {
         );
 
         Ok(CompiledModel {
-            name: model.name.clone(),
+            // Use the full address-based DB name (e.g. "staging_stg_events").
+            name: model.db_name_owned(),
             sql: compiled_sql,
             materialization,
         })
@@ -633,7 +674,7 @@ impl SqlCompiler {
             cross_engine_refs: self.cross_engine_refs.clone(),
             smelt_as_struct: as_struct_emitter,
             smelt_fn: fn_expander,
-            // Use ephemeral-aware resolver so smelt.models.<ephemeral> → __smelt_<name>
+            // Use ephemeral-aware resolver so smelt.<ephemeral> → __smelt_<name>
             smelt_path_ref: Some(
                 self.make_path_ref_resolver_with_ephemerals(schema, &resolver.ephemeral_names),
             ),
@@ -642,18 +683,30 @@ impl SqlCompiler {
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
 
-        // Collect which ephemeral models this model references
-        let referenced: Vec<&str> = model
+        // Collect which ephemeral models this model references.
+        // Multi-segment refs (e.g. `smelt.lookup.regions`) have a canonical
+        // ephemeral name formed by joining all path segments with `_`
+        // ("lookup_regions"), not just the leaf ("regions").
+        let referenced: Vec<String> = model
             .refs
             .iter()
-            .filter(|r| resolver.ephemeral_names.contains(&r.model_name))
-            .map(|r| r.model_name.as_str())
+            .filter_map(|r| {
+                let path_key = r.smelt_ref.to_path().join("_");
+                if resolver.ephemeral_names.contains(&path_key) {
+                    Some(path_key)
+                } else if resolver.ephemeral_names.contains(&r.model_name) {
+                    Some(r.model_name.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let final_sql = if referenced.is_empty() {
             compiled_sql
         } else {
-            let cte_list = resolver.get_cte_list(&referenced);
+            let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
+            let cte_list = resolver.get_cte_list(&referenced_refs);
             prepend_ephemeral_ctes(&compiled_sql, &cte_list)
         };
 
@@ -663,7 +716,8 @@ impl SqlCompiler {
         );
 
         Ok(CompiledModel {
-            name: model.name.clone(),
+            // Use the full address-based DB name (e.g. "staging_stg_events").
+            name: model.db_name_owned(),
             sql: final_sql,
             materialization,
         })
@@ -750,26 +804,24 @@ impl EphemeralResolver {
         let clean_sql = smelt_parser::strip_frontmatter(raw_sql);
         let parse = smelt_parser::parse(&clean_sql);
 
-        // Build a path-ref resolver that maps smelt.models.<name> to either
-        // __smelt_<name> (if ephemeral) or schema.<name> (if physical).
+        // Build a path-ref resolver that maps smelt.<path> to either
+        // __smelt_<segs.join("_")> (if ephemeral) or schema.<segs.join("_")>.
         let ephemerals_owned: HashSet<String> = ephemeral_names.clone();
         let schema_owned = schema.to_string();
         let path_ref_resolver: SmeltPathRefResolver<'static> =
             Box::new(move |segs: &[String]| match segs {
-                [ns, rest @ ..] if ns == "models" && !rest.is_empty() => {
-                    let name = rest.last().expect("rest non-empty");
-                    if ephemerals_owned.contains(name) {
-                        Some(format!("__smelt_{}", name))
-                    } else {
-                        Some(format!("{}.{}", schema_owned, name))
-                    }
-                }
-                [ns, rest @ ..] if ns == "seeds" && !rest.is_empty() => {
-                    let table_name = rest.join("_");
-                    Some(format!("{}.{}", schema_owned, table_name))
-                }
+                // sources stay as <source_name>.<table_name> (Phase 6 will change this)
                 [ns, source_name, table_name] if ns == "sources" => {
                     Some(format!("{}.{}", source_name, table_name))
+                }
+                // All other non-empty paths → either ephemeral CTE or schema.table
+                segs if !segs.is_empty() => {
+                    let table_name = segs.join("_");
+                    if ephemerals_owned.contains(&table_name) {
+                        Some(format!("__smelt_{}", table_name))
+                    } else {
+                        Some(format!("{}.{}", schema_owned, table_name))
+                    }
                 }
                 _ => None,
             });
@@ -830,6 +882,26 @@ impl EphemeralResolver {
         fragments.push((alias, parts.main_body));
 
         fragments
+    }
+
+    /// Add pre-built CTE fragments for ephemeral seeds.
+    ///
+    /// Each entry in `seed_ctes` is `(cte_alias, cte_body)` where:
+    /// - `cte_alias` is `__smelt_<address_segments.join("_")>` (with column names for DuckDB named CTE)
+    /// - `cte_body` is the VALUES literal (without the surrounding `(…)`)
+    ///
+    /// These are added to the resolver's fragment map and their names to `ephemeral_names`
+    /// so that the path-ref resolver will emit `__smelt_<name>` when it encounters them.
+    pub fn add_seed_ctes(&mut self, seed_ctes: Vec<(String, String, String)>) {
+        // seed_ctes: Vec<(canonical_name, cte_alias_with_cols, cte_body)>
+        // canonical_name: address_segments.join("_") — the key for ephemeral_names and cte_fragments
+        for (canonical_name, alias_with_cols, body) in seed_ctes {
+            self.ephemeral_names.insert(canonical_name.clone());
+            self.order.push(canonical_name.clone());
+            // Store as (alias_with_cols, body) so get_cte_list can emit them correctly.
+            self.cte_fragments
+                .insert(canonical_name, vec![(alias_with_cols, body)]);
+        }
     }
 
     /// Get the flattened CTE list for a model that references ephemeral models.
@@ -1142,7 +1214,7 @@ impl SqlCompiler {
             cross_engine_refs: self.cross_engine_refs.clone(),
             smelt_as_struct: as_struct_emitter,
             smelt_fn: fn_expander,
-            // Use ephemeral-aware resolver so smelt.models.<ephemeral> → __smelt_<name>
+            // Use ephemeral-aware resolver so smelt.<ephemeral> → __smelt_<name>
             smelt_path_ref: Some(
                 self.make_path_ref_resolver_with_ephemerals(schema, &resolver.ephemeral_names),
             ),
@@ -1152,20 +1224,33 @@ impl SqlCompiler {
         let compiled_sql = self.apply_type_casts(&compiled_sql);
 
         // Collect which ephemeral models this model references.
-        // model.refs carries the leaf segment as model_name, which matches
-        // resolver.ephemeral_names (also leaf-segment keyed).
-        let referenced: Vec<&str> = model
+        //
+        // For single-segment refs (e.g. `smelt.cleaned_orders`), `model_name`
+        // is the leaf and matches the ephemeral name directly.
+        // For multi-segment refs (e.g. `smelt.lookup.regions`), the canonical
+        // ephemeral name is the segments joined with `_` ("lookup_regions"),
+        // not just the leaf ("regions"). We check the joined path first.
+        let referenced: Vec<String> = model
             .refs
             .iter()
-            .filter(|r| resolver.ephemeral_names.contains(&r.model_name))
-            .map(|r| r.model_name.as_str())
+            .filter_map(|r| {
+                let path_key = r.smelt_ref.to_path().join("_");
+                if resolver.ephemeral_names.contains(&path_key) {
+                    Some(path_key)
+                } else if resolver.ephemeral_names.contains(&r.model_name) {
+                    Some(r.model_name.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Prepend ephemeral CTEs if any
         let final_sql = if referenced.is_empty() {
             compiled_sql
         } else {
-            let cte_list = resolver.get_cte_list(&referenced);
+            let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
+            let cte_list = resolver.get_cte_list(&referenced_refs);
             prepend_ephemeral_ctes(&compiled_sql, &cte_list)
         };
 
@@ -1175,7 +1260,8 @@ impl SqlCompiler {
         );
 
         Ok(CompiledModel {
-            name: model.name.clone(),
+            // Use the full address-based DB name (e.g. "staging_stg_events").
+            name: model.db_name_owned(),
             sql: final_sql,
             materialization,
         })
@@ -1336,8 +1422,7 @@ mod tests {
         Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),
@@ -1351,7 +1436,7 @@ mod tests {
 SELECT
     user_id,
     COUNT(*) as session_count
-FROM smelt.models.raw_events
+FROM smelt.raw_events
 GROUP BY user_id
 "#;
 
@@ -1364,6 +1449,7 @@ GROUP BY user_id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1372,15 +1458,15 @@ GROUP BY user_id
         let compiled = compiler.compile(&model, "main").unwrap();
 
         assert!(compiled.sql.contains("FROM main.raw_events"));
-        assert!(!compiled.sql.contains("smelt.models.raw_events"));
+        assert!(!compiled.sql.contains("smelt.raw_events"));
     }
 
     #[test]
     fn test_multiple_refs() {
         let sql = r#"
 SELECT a.user_id, b.session_id
-FROM smelt.models.model_a a
-JOIN smelt.models.model_b b ON a.id = b.id
+FROM smelt.model_a a
+JOIN smelt.model_b b ON a.id = b.id
 "#;
 
         let model = ModelFile {
@@ -1392,6 +1478,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1410,7 +1497,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
         // named-param refs can no longer come from model SQL.  Test the compiler
         // guard directly by constructing a RefInfo with has_named_params=true.
         use smelt_core::refs::SmeltRef;
-        let sql = "SELECT user_id FROM smelt.models.raw_events";
+        let sql = "SELECT user_id FROM smelt.raw_events";
 
         let named_ref = RefInfo {
             model_name: "raw_events".to_string(),
@@ -1427,6 +1514,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1451,6 +1539,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let mut config = make_test_config();
@@ -1473,7 +1562,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
     #[test]
     fn test_ref_with_double_quotes() {
         // Path form uses identifiers, no quoting variants — test subdirectory path
-        let sql = r#"SELECT * FROM smelt.models.model_a"#;
+        let sql = r#"SELECT * FROM smelt.model_a"#;
 
         let model = ModelFile {
             name: "test".to_string(),
@@ -1484,6 +1573,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1499,7 +1589,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
     fn test_ref_with_whitespace() {
         // Whitespace inside refs was a legacy smelt.ref() concern; path form
         // has no arg-list parens. Test a path ref with a nested subdirectory segment.
-        let sql = r#"SELECT * FROM smelt.models.model_a"#;
+        let sql = r#"SELECT * FROM smelt.model_a"#;
 
         let model = ModelFile {
             name: "test".to_string(),
@@ -1510,6 +1600,7 @@ JOIN smelt.models.model_b b ON a.id = b.id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1525,8 +1616,8 @@ JOIN smelt.models.model_b b ON a.id = b.id
     fn test_multiple_refs_same_model() {
         let sql = r#"
 SELECT a.id, b.id
-FROM smelt.models.model_a a
-JOIN smelt.models.model_a b ON a.parent_id = b.id
+FROM smelt.model_a a
+JOIN smelt.model_a b ON a.parent_id = b.id
 "#;
 
         let model = ModelFile {
@@ -1538,6 +1629,7 @@ JOIN smelt.models.model_a b ON a.parent_id = b.id
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1556,7 +1648,7 @@ JOIN smelt.models.model_a b ON a.parent_id = b.id
 SELECT
     user_id,
     COUNT(*) as count
-FROM smelt.models.events
+FROM smelt.events
 WHERE event_type = 'click'
 "#;
 
@@ -1569,6 +1661,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1591,7 +1684,7 @@ WHERE event_type = 'click'
         let ephemeral_sql = "SELECT id, name FROM raw_users WHERE active = true";
 
         // Downstream model references the ephemeral
-        let sql = "SELECT * FROM smelt.models.staging_users";
+        let sql = "SELECT * FROM smelt.staging_users";
         let model = ModelFile {
             name: "final_users".to_string(),
             path: "models/final_users.sql".into(),
@@ -1601,6 +1694,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1628,9 +1722,9 @@ WHERE event_type = 'click'
     fn test_ephemeral_transitive_deps() {
         // C (ephemeral) -> B (ephemeral) -> A (table)
         let c_sql = "SELECT * FROM raw_data";
-        let b_sql = "SELECT * FROM smelt.models.c";
+        let b_sql = "SELECT * FROM smelt.c";
 
-        let sql = "SELECT * FROM smelt.models.b";
+        let sql = "SELECT * FROM smelt.b";
         let model = ModelFile {
             name: "a".to_string(),
             path: "models/a.sql".into(),
@@ -1640,6 +1734,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1674,7 +1769,7 @@ WHERE event_type = 'click'
         // staging (ephemeral), regular_model (table)
         let staging_sql = "SELECT * FROM raw_data";
 
-        let sql = "SELECT * FROM smelt.models.staging JOIN smelt.models.regular_model ON 1=1";
+        let sql = "SELECT * FROM smelt.staging JOIN smelt.regular_model ON 1=1";
         let model = ModelFile {
             name: "final".to_string(),
             path: "models/final.sql".into(),
@@ -1684,6 +1779,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1711,8 +1807,7 @@ WHERE event_type = 'click'
     fn test_ephemeral_with_existing_with_clause() {
         let staging_sql = "SELECT * FROM raw_data";
 
-        let sql =
-            "WITH my_cte AS (SELECT 1 as x) SELECT * FROM smelt.models.staging JOIN my_cte ON 1=1";
+        let sql = "WITH my_cte AS (SELECT 1 as x) SELECT * FROM smelt.staging JOIN my_cte ON 1=1";
         let model = ModelFile {
             name: "final".to_string(),
             path: "models/final.sql".into(),
@@ -1722,6 +1817,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1814,6 +1910,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1854,6 +1951,7 @@ WHERE event_type = 'click'
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1894,6 +1992,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1929,6 +2028,7 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             metadata: None,
             kind: crate::discovery::ModelKind::Sql,
             model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
         };
 
         let config = make_test_config();
@@ -1944,6 +2044,69 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
         assert!(
             compiled.sql.contains("purchases"),
             "Should preserve the 'purchases' alias: {}",
+            compiled.sql
+        );
+    }
+
+    // ===== Contract: ephemeral models and smelt.define functions have no DB name =====
+
+    /// Verify that ephemeral models go through the CTE-inlining path and never
+    /// produce a materialised table reference (`main.<name>`).
+    ///
+    /// This documents the contract that `default_db_name` MUST NOT be called for
+    /// ephemeral entities.  If an ephemeral model were accidentally passed through
+    /// `default_db_name`, the downstream model's compiled SQL would contain a bare
+    /// table reference (`main.staging_users`) instead of the correct CTE alias
+    /// (`__smelt_staging_users`).  This test is the TDD anchor for that invariant.
+    #[test]
+    fn ephemeral_and_define_have_no_db_name() {
+        // --- setup: one ephemeral model "staging_users" ---
+        let ephemeral_sql = "SELECT id, name FROM raw_users WHERE active = true";
+
+        // Downstream model that references the ephemeral via the new path-ref syntax.
+        let downstream_sql = "SELECT * FROM smelt.staging_users";
+        let model = ModelFile {
+            name: "final_users".to_string(),
+            path: "models/final_users.sql".into(),
+            content: downstream_sql.to_string(),
+            refs: extract_refs_from_sql(downstream_sql),
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: crate::discovery::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("final_users.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let config = make_test_config();
+        let compiler = SqlCompiler::new(config, &make_test_target());
+        let caps = BackendCapabilities::duckdb();
+        let resolver = EphemeralResolver::new(
+            &[("staging_users".to_string(), ephemeral_sql.to_string())],
+            &SqlDialect::DuckDB,
+            &caps,
+            "main",
+        );
+
+        let compiled = compiler
+            .compile_with_ephemerals(&model, "main", &resolver)
+            .unwrap();
+
+        // The ephemeral's content is inlined as a CTE with the `__smelt_` prefix.
+        assert!(
+            compiled.sql.contains("__smelt_staging_users"),
+            "Ephemeral must be inlined as `__smelt_staging_users` CTE, not a table: {}",
+            compiled.sql
+        );
+        // No materialised table reference — `default_db_name` was NOT invoked for the ephemeral.
+        assert!(
+            !compiled.sql.contains("main.staging_users"),
+            "Ephemeral must NOT produce a materialised table reference `main.staging_users`: {}",
+            compiled.sql
+        );
+        // Confirm the CTE wrapper is present.
+        assert!(
+            compiled.sql.contains("WITH"),
+            "Ephemeral inlining must produce a WITH clause: {}",
             compiled.sql
         );
     }

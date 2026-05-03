@@ -11,6 +11,6 @@ SELECT
     category,
     os_name,
     product_id
-FROM smelt.models.sql_l1_68
+FROM smelt.sql_l1_68
 WHERE created_at >= '2024-01-01'
 

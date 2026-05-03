@@ -55,7 +55,7 @@ pub fn start_watcher(
         }
     }
 
-    let model_paths_config = state.config.model_paths.clone();
+    let paths_config = state.config.paths.clone();
 
     // Spawn a background thread to process file events
     // (notify uses std channels, not tokio)
@@ -74,14 +74,12 @@ pub fn start_watcher(
                         tracing::info!("File change detected, refreshing...");
                         let state = state.clone();
                         let project_dir = project_dir.clone();
-                        let model_paths = model_paths_config.clone();
+                        let paths = paths_config.clone();
 
                         // Use a tokio runtime handle to do async work
                         tokio::task::block_in_place(move || {
                             tokio::runtime::Handle::current().block_on(async {
-                                if let Err(e) =
-                                    refresh_state(&state, &project_dir, &model_paths).await
-                                {
+                                if let Err(e) = refresh_state(&state, &project_dir, &paths).await {
                                     tracing::error!("Failed to refresh state: {}", e);
                                 }
                             });
@@ -103,9 +101,9 @@ fn is_relevant_file(path: &Path) -> bool {
     matches!(ext, "sql" | "yml" | "yaml")
 }
 
-async fn refresh_state(state: &AppState, project_dir: &Path, model_paths: &[String]) -> Result<()> {
+async fn refresh_state(state: &AppState, project_dir: &Path, paths: &[String]) -> Result<()> {
     // Re-discover models from disk
-    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), model_paths.to_vec());
+    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), paths.to_vec());
     let models = discovery
         .discover_models()
         .with_context(|| "Failed to rediscover models")?;

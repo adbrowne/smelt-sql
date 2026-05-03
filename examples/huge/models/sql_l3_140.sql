@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT os_name, status, platform
-    FROM smelt.models.sql_l2_165
+    FROM smelt.sql_l2_165
     WHERE score >= 50
 ),
 aggregated AS (

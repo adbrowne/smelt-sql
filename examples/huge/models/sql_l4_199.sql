@@ -10,7 +10,7 @@ SELECT
     cohort_date,
     AVG(price) AS val_1,
     SUM(amount) AS val_2
-FROM smelt.models.sql_l3_130
+FROM smelt.sql_l3_130
 GROUP BY cohort_date
 HAVING COUNT(*) > 10
 

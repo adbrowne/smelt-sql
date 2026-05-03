@@ -10,7 +10,7 @@ SELECT
     rating,
     AVG(amount) AS val_1,
     COUNT(DISTINCT user_id) AS val_2
-FROM smelt.models.products
+FROM smelt.products
 GROUP BY rating
 HAVING COUNT(*) > 10
 

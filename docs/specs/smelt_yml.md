@@ -17,8 +17,7 @@ owners: [andrew]
 |-----|------|----------|---------|---------|
 | `name` | string | yes | — | Project name. Decorative; appears in run logs. |
 | `version` | integer | no | `1` | Schema version of the `smelt.yml` format. Optional to remove the trip-hazard where users wrote a semver string and got a parse error. Currently only `1` is meaningful. |
-| `model_paths` | list of strings | no | `["models"]` | Workspace-relative directories scanned for `.sql` and `.py` model files. |
-| `seed_paths` | list of strings | no | `["seeds"]` | Workspace-relative directories scanned for `.csv` seed files. |
+| `paths` | list of strings | no | `["models"]` | Workspace-relative directories scanned for project files (`.sql`, `.py`, `.csv`, `.yml`). Kind is determined by file format/content (`architecture.md` §"Resolution"), not by which directory the file lives in. |
 | `targets` | map of `<name>` → target object | yes | — | Named execution environments. The `--target` CLI flag selects one (default `dev`). |
 | `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts `table`, `view`, `ephemeral`, `materialized_view`, `test`. |
 | `models` | map of `<name>` → model-config object | no | `{}` | Per-model overrides keyed by model name. Each entry may declare `materialization`, `tags`, `target`, `incremental`, etc. |
@@ -67,7 +66,7 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 2. **`name` is decorative.** It appears in run logs but is not used as a schema name, table name, or namespace component. Renaming the project is safe.
 3. **`version: 1` is the only accepted value today.** Omitting `version` parses as `1`; supplying a string (`"0.1.0"`) is rejected with a deserialisation error so the user-mistake (mirroring `pyproject.toml`) surfaces clearly.
 4. **`default_materialization` is `view` by default.** This is the implementation default in `Config::default_materialization()`. Users who want every model materialised as a table must set `default_materialization: table` explicitly (or annotate per-model).
-5. **`seed_paths` defaults to `["seeds"]`.** Even when the project has no seeds, the loader looks for the `seeds/` directory and returns an empty list if it is absent — there is no error.
+5. **`paths` defaults to `["models"]` and is the single scan list.** Smelt walks every listed directory recursively, classifying each file by format/content (`.sql` bare-SELECT → model, `.sql` `smelt.define` → function, `.csv` → seed, `.yml` with sibling `.csv` → sidecar, `.yml` standalone → source). A listed directory that does not exist is silently skipped — no error.
 6. **`unstable_schema: true` opts in to gated keys.** The list of currently-gated keys is owned by the feature spec that introduces them (today: `joins:` and `provenance:` in `functions.md`). The flag itself is parsed by a small text-based helper (`parse_unstable_schema_flag`) so even malformed `smelt.yml` files can be probed for the gate.
 7. **Forward compatibility via warnings.** A new release that adds a top-level key produces a warning on older consumers, not an error — the old binary keeps working with the field absent. This invariant means tooling can read newer projects without crashing.
 
@@ -80,6 +79,8 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 **`unknown keys = warning, not error`.** The forward-compatibility invariant in Semantics §7 is the load-bearing reason. Strict-rejection of unknown keys forecloses staged rollouts (a new key cannot be authored in the project until every consumer recognises it). Warning-on-unknown lets new fields land in the parser ahead of every consumer recognising them, while still surfacing typos to the user.
 
 **Per-feature config lives in feature specs.** `incremental:` shape, function frontmatter keys (`deterministic`, `idempotent`, …), schema-evolution config, and the per-column `tests:` map are owned by their feature specs (`incremental_models.md`, `functions.md`, future `schema_evolution.md`). This spec lists only the top-level shape and the cross-feature precedence rules; otherwise, the page would have to be re-written every time a new key lands.
+
+**One scan list, not per-kind.** Earlier the config had `model_paths` and `seed_paths` as separate lists, with `sources.yml` declaring sources at the project root regardless. That conflated *where to look* with *what kind of thing is here* — yet `architecture.md` §"Resolution" already says kind is determined by file format/content, not by directory. Collapsing to a single `paths:` list aligns the config with the resolver's actual behaviour: the user picks where their project files live; smelt classifies them on read. Co-locating a `models/payments/seeds/lookup.csv` with the SQL that consumes it is now a layout choice rather than a config fight.
 
 ## Constraints & Invariants
 
@@ -98,13 +99,14 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 
 ## References
 
-- **Code**: `crates/smelt-core/src/config.rs` — `Config`, `Target`, `ModelConfig`, `Materialization`, `parse_unstable_schema_flag`, `parse_active_backends`. `default_model_paths`, `default_seed_paths`, `default_materialization` are the literal default-functions.
+- **Code**: `crates/smelt-core/src/config.rs` — `Config`, `Target`, `ModelConfig`, `Materialization`, `parse_unstable_schema_flag`, `parse_active_backends`, `parse_with_warnings`. The default functions are `default_paths` (for the unified `paths:` list) and `default_materialization`.
 - **Tests**: `crates/smelt-core/src/config.rs::tests` — round-trip tests for materialization defaults, version handling, target shape, validation rules.
 - **User docs**: `docs-site/docs/reference/smelt-yml.md` — per-key reference; `docs-site/docs/concepts/project-structure.md` — orientation page.
 - **Plans (history)**: `docs/plans/20260502-smelt-loop-findings.md` — the spec-authoring plan that produced this stub (DG-4 close).
 - **Related specs**:
-  - `architecture.md` — `smelt.yml` is the workspace marker; `model_paths` / `seed_paths` are scanned by the discovery layer.
+  - `architecture.md` — `smelt.yml` is the workspace marker; `paths:` is the directory list scanned by the discovery layer; kind-by-content is owned there.
   - `incremental_models.md` — `incremental:` shape on `models.<name>`.
   - `functions.md` — `unstable_schema: true` gates `joins:` and `provenance:` frontmatter.
-  - `seeds.md` — `seed_paths` and `targets.<name>.schema` jointly determine where seeds load.
+  - `seeds.md` — CSV parsing rules and `smelt seed` lifecycle; consumes `paths:` and `targets.<name>.schema`.
+  - `sources.md` — source declaration shape; consumes `paths:` for discovery.
   - `cli.md` — `--target` resolves against `targets`; `--project-dir` is the workspace root.

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cost, page_path, platform
-    FROM smelt.models.sql_l1_77
+    FROM smelt.sql_l1_77
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

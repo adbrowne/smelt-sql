@@ -293,6 +293,8 @@ pub fn discover_python_models(
                             .collect(),
                     },
                     model_id,
+                    // Python model address_segments are computed in discover_python_models.
+                    address_segments: Vec::new(),
                 });
             }
         }
@@ -454,8 +456,7 @@ def dynamic_model(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -539,8 +540,7 @@ def union_model(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -572,6 +572,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
         let model_b = ModelFile {
             name: "beta".to_string(),
@@ -582,6 +583,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
 
         let set1 = vec![model_a.clone(), model_b.clone()];
@@ -600,6 +602,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
         let model_b = ModelFile {
             name: "same_name".to_string(),
@@ -610,6 +613,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
 
         assert!(!models_equal(&[model_a], &[model_b]));
@@ -665,8 +669,7 @@ def model_two(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -777,8 +780,7 @@ def combined(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: model_config,
@@ -854,8 +856,7 @@ def circular_model(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: model_config,
@@ -911,8 +912,7 @@ def bad_model(project)
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -966,8 +966,7 @@ def bad_return(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -1021,8 +1020,7 @@ def bad_sql(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -1082,8 +1080,7 @@ def no_matches(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -1147,8 +1144,7 @@ def colliding(project):
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -1199,13 +1195,13 @@ def colliding(project):
                 }],
             },
             model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
+            address_segments: Vec::new(),
         };
 
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),
@@ -1240,13 +1236,13 @@ def colliding(project):
                 }],
             },
             model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
+            address_segments: Vec::new(),
         };
 
         let config = crate::config::Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: std::collections::HashMap::new(),
             default_materialization: crate::config::Materialization::View,
             models: std::collections::HashMap::new(),

@@ -4,5 +4,5 @@
 -- `WindowInScalarContext`. The diagnostic anchors at the offending
 -- `ROW_NUMBER() OVER (...) > 1` expression.
 SELECT *
-FROM smelt.models.events
+FROM smelt.events
 WHERE ROW_NUMBER() OVER (ORDER BY occurred_at) > 1

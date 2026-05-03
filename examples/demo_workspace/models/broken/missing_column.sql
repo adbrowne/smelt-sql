@@ -2,5 +2,5 @@
 SELECT
     user_id,
     nonexistent_col
-FROM smelt.models.staging.stg_users
+FROM smelt.staging.stg_users
 

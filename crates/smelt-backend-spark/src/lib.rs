@@ -10,6 +10,7 @@
 //! - Any PySpark-compatible environment
 
 use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::FromPyArrow;
 use async_trait::async_trait;
 use pyo3::prelude::*;
@@ -356,5 +357,88 @@ impl Backend for SparkBackend {
         let table_name = self.qualified_name(schema, table);
         self.py_execute_no_result(&sql::insert_overwrite(&table_name, sql, partition))
             .await
+    }
+
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+
+        let full_table_name = self.qualified_name(schema, name);
+
+        // Pre-validate nullability against the authoritative `arrow_schema`.
+        for batch in &batches {
+            for (col_idx, field) in arrow_schema.fields().iter().enumerate() {
+                if !field.is_nullable() {
+                    let array = batch.column(col_idx);
+                    if array.null_count() > 0 {
+                        let row = (0..array.len()).find(|&i| array.is_null(i)).unwrap_or(0);
+                        return Err(BackendError::null_in_non_nullable_column(
+                            schema,
+                            name,
+                            field.name().as_str(),
+                            row,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Write batches to a temporary Parquet file.
+        let tmp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| BackendError::execution_failed(full_table_name.clone(), e.to_string()))?;
+        let tmp_path = tmp_file
+            .path()
+            .to_str()
+            .ok_or_else(|| {
+                BackendError::execution_failed(
+                    full_table_name.clone(),
+                    "temp file path is not UTF-8",
+                )
+            })?
+            .to_string();
+
+        {
+            let file = File::create(tmp_file.path()).map_err(|e| {
+                BackendError::execution_failed(full_table_name.clone(), e.to_string())
+            })?;
+            let mut writer =
+                ArrowWriter::try_new(file, arrow_schema.clone(), None).map_err(|e| {
+                    BackendError::execution_failed(full_table_name.clone(), e.to_string())
+                })?;
+            for batch in &batches {
+                writer.write(batch).map_err(|e| {
+                    BackendError::execution_failed(full_table_name.clone(), e.to_string())
+                })?;
+            }
+            writer.close().map_err(|e| {
+                BackendError::execution_failed(full_table_name.clone(), e.to_string())
+            })?;
+        }
+
+        // Call the Python adapter to load the Parquet file as a Spark table.
+        let adapter = Python::attach(|py| self.adapter.clone_ref(py));
+        let full_table_name_clone = full_table_name.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Python::attach(|py| {
+                adapter
+                    .call_method1(py, "load_arrow_table", (&tmp_path, &full_table_name_clone))
+                    .map_err(|e| {
+                        BackendError::execution_failed(
+                            full_table_name_clone.clone(),
+                            format!("Spark load_arrow_table failed: {}", e),
+                        )
+                    })?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))?
     }
 }

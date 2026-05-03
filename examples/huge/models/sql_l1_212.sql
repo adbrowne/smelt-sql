@@ -10,8 +10,8 @@ SELECT
     cohort_date,
     channel,
     price
-FROM smelt.models.errors
+FROM smelt.errors
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.errors WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.errors WHERE event_type = 'purchase'
 )
 

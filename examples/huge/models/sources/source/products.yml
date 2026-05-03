@@ -1,0 +1,11 @@
+columns:
+- name: product_id
+  type: INTEGER
+- name: category
+  type: VARCHAR
+- name: price
+  type: DECIMAL
+- name: quantity
+  type: INTEGER
+- name: created_at
+  type: TIMESTAMP

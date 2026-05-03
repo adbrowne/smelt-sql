@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT cohort_date, profit, event_time
-    FROM smelt.models.sql_l2_61
+    FROM smelt.sql_l2_61
     WHERE is_active = true
 )
 SELECT
     b.cohort_date,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l2_235 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l2_235 j ON b.user_id = j.user_id
 GROUP BY b.cohort_date
 

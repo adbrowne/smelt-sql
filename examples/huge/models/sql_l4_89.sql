@@ -10,6 +10,6 @@ SELECT
     a.product_id,
     a.created_at,
     b.cohort_date
-FROM smelt.models.sql_l3_78 a
-INNER JOIN smelt.models.sql_l3_136 b ON a.user_id = b.user_id
+FROM smelt.sql_l3_78 a
+INNER JOIN smelt.sql_l3_136 b ON a.user_id = b.user_id
 

@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT ip_address, is_verified, product_id
-    FROM smelt.models.sql_l1_124
+    FROM smelt.sql_l1_124
     WHERE quantity > 0
 )
 SELECT
     b.ip_address,
     AVG(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l1_0 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l1_0 j ON b.user_id = j.user_id
 GROUP BY b.ip_address
 

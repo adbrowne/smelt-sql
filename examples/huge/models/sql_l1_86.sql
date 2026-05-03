@@ -11,6 +11,6 @@ SELECT
     campaign_id,
     cohort_date,
     status
-FROM smelt.models.errors
+FROM smelt.errors
 WHERE quantity > 0
 

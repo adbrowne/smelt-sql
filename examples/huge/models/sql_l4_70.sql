@@ -10,5 +10,5 @@ SELECT
     score,
     device_type,
     ROW_NUMBER() OVER (PARTITION BY score ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l3_60
+FROM smelt.sql_l3_60
 

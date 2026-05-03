@@ -31,7 +31,7 @@ FROM smelt.models.model_name(filter => condition, limit => n)
 
 ### smelt.sources
 
-Reference an external source table defined in `sources.yml`:
+Reference an external source table declared as a per-entity `.yml` under `paths:`:
 
 ```sql
 FROM smelt.sources.source.table

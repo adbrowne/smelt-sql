@@ -10,8 +10,8 @@ SELECT
     browser,
     plan_type,
     event_type
-FROM smelt.models.signups
+FROM smelt.signups
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.signups WHERE is_active = true
+    SELECT user_id FROM smelt.signups WHERE is_active = true
 )
 

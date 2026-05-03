@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT category, profit, product_id
-    FROM smelt.models.sql_l1_54
+    FROM smelt.sql_l1_54
     WHERE is_active = true
 ),
 aggregated AS (

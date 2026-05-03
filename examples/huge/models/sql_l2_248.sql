@@ -11,6 +11,6 @@ SELECT
     device_type,
     browser,
     campaign_id
-FROM smelt.models.sql_l1_24
+FROM smelt.sql_l1_24
 WHERE platform = 'web'
 

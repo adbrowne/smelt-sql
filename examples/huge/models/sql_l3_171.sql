@@ -10,8 +10,8 @@ SELECT
     is_active,
     discount,
     product_id
-FROM smelt.models.sql_l2_241
+FROM smelt.sql_l2_241
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_137 WHERE amount > 0
+    SELECT user_id FROM smelt.sql_l2_137 WHERE amount > 0
 )
 

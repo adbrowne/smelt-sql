@@ -1,0 +1,14 @@
+description: Raw event data used by functions_demo fixtures
+columns:
+- name: event_id
+  type: INTEGER
+  description: Unique event identifier
+- name: user_id
+  type: INTEGER
+  description: User who triggered event
+- name: event_type
+  type: VARCHAR
+  description: Type of event (page_view, click, etc.)
+- name: ts
+  type: TIMESTAMP
+  description: 'Event timestamp (Phase 36: used by event_hour struct param)'

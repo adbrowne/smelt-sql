@@ -344,6 +344,10 @@ impl TestWorkspace {
                         title: s.title,
                         kind: "quickfix".to_string(),
                     },
+                    CodeActionKind::PinSeedSchema(s) => HandlerCodeAction {
+                        title: s.title,
+                        kind: "quickfix".to_string(),
+                    },
                 };
                 actions.push(action);
             }

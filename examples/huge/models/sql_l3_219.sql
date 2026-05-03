@@ -6,9 +6,9 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT price, segment, os_name, 'source_0' AS source_tag FROM smelt.models.sql_l2_155
+SELECT price, segment, os_name, 'source_0' AS source_tag FROM smelt.sql_l2_155
 UNION ALL
-SELECT price, segment, os_name, 'source_1' AS source_tag FROM smelt.models.sql_l2_223
+SELECT price, segment, os_name, 'source_1' AS source_tag FROM smelt.sql_l2_223
 UNION ALL
-SELECT price, segment, os_name, 'source_2' AS source_tag FROM smelt.models.sql_l2_8
+SELECT price, segment, os_name, 'source_2' AS source_tag FROM smelt.sql_l2_8
 

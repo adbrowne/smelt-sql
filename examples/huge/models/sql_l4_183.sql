@@ -11,6 +11,6 @@ SELECT
     channel,
     plan_type,
     user_id
-FROM smelt.models.sql_l3_145
+FROM smelt.sql_l3_145
 WHERE score >= 50
 

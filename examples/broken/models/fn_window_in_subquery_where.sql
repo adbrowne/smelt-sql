@@ -3,5 +3,5 @@
 -- inside the scalar subquery is invalid and must be rejected with
 -- `WindowInScalarContext`.
 SELECT col
-FROM smelt.models.events
-WHERE col > (SELECT ROW_NUMBER() OVER (ORDER BY col) FROM smelt.models.events)
+FROM smelt.events
+WHERE col > (SELECT ROW_NUMBER() OVER (ORDER BY col) FROM smelt.events)

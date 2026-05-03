@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT status, region, transaction_id
-    FROM smelt.models.sql_l3_242
+    FROM smelt.sql_l3_242
     WHERE country = 'US'
 )
 SELECT
     b.status,
     SUM(quantity) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l3_175 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l3_175 j ON b.user_id = j.user_id
 GROUP BY b.status
 

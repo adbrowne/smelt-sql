@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT profit, os_name, device_type
-    FROM smelt.models.sql_l3_83
+    FROM smelt.sql_l3_83
     WHERE score >= 50
 )
 SELECT
     b.profit,
     SUM(revenue) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l3_83 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l3_83 j ON b.user_id = j.user_id
 GROUP BY b.profit
 

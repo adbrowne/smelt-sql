@@ -10,7 +10,7 @@ SELECT
     rating,
     COUNT(*) AS val_1,
     AVG(price) AS val_2
-FROM smelt.models.sql_l3_199
+FROM smelt.sql_l3_199
 GROUP BY rating
 HAVING COUNT(*) > 10
 

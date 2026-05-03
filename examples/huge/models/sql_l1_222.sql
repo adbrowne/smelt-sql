@@ -13,6 +13,6 @@ SELECT
     MIN(created_at) AS agg_2,
     COUNT(*) AS agg_3,
     MAX(created_at) AS agg_4
-FROM smelt.models.orders
+FROM smelt.orders
 GROUP BY referrer
 

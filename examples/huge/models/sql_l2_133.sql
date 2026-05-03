@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT transaction_id, platform, is_verified
-    FROM smelt.models.sql_l1_174
+    FROM smelt.sql_l1_174
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

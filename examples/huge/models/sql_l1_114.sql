@@ -13,6 +13,6 @@ SELECT
     MIN(created_at) AS agg_2,
     MAX(created_at) AS agg_3,
     SUM(quantity) AS agg_4
-FROM smelt.models.signups
+FROM smelt.signups
 GROUP BY rating
 

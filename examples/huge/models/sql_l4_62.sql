@@ -10,8 +10,8 @@ SELECT
     segment,
     duration_seconds,
     region
-FROM smelt.models.sql_l3_237
+FROM smelt.sql_l3_237
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l3_237 WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.sql_l3_237 WHERE event_type = 'purchase'
 )
 

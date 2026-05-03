@@ -1,0 +1,18 @@
+description: Product catalog
+columns:
+- name: product_id
+  type: INTEGER
+- name: product_name
+  type: VARCHAR
+- name: category_code
+  type: VARCHAR
+- name: brand_tier
+  type: VARCHAR
+- name: unit_price_cents
+  type: INTEGER
+- name: cost_cents
+  type: INTEGER
+- name: weight_grams
+  type: INTEGER
+- name: is_digital
+  type: BOOLEAN

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT device_type, is_verified, product_id
-    FROM smelt.models.sql_l2_138
+    FROM smelt.sql_l2_138
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

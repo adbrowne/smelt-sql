@@ -19,8 +19,8 @@ fn write_smelt_yml(dir: &Path, name: &str) {
     let yml = format!(
         "name: {name}\n\
          version: 1\n\
-         model_paths:\n  - models\n\
-         seed_paths:\n  - seeds\n\
+         paths:\n  - models\n\
+         \
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: view\n"
     );
@@ -62,7 +62,7 @@ fn test_verbose_build_logs_sql() {
         "verbose_logs_sql_ws",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.base\n"),
         ],
     );
 
@@ -106,7 +106,7 @@ fn test_non_verbose_build_no_sql() {
         "non_verbose_no_sql_ws",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.base\n"),
         ],
     );
 
@@ -149,7 +149,7 @@ fn test_verbose_no_models_executed_no_sql() {
         "verbose_no_exec_ws",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.base\n"),
         ],
     );
 

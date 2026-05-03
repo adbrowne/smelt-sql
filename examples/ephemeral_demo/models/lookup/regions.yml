@@ -1,0 +1,9 @@
+columns:
+  - name: region_id
+    type: INTEGER
+    nullable: false
+  - name: region_name
+    type: VARCHAR
+    nullable: true
+    description: "Human-readable region name"
+materialization: ephemeral

@@ -75,7 +75,7 @@ JOIN smelt.sources.raw.events e ON s.id = e.user_id
 fn path_refs_dependency_graph() {
     // `DependencyGraph::build_from_workspace` keys edges on path tuples.
     // We use the test_workspace fixture (which already contains `path_demo.sql`
-    // referencing `smelt.models.users` along with legacy `smelt.ref` /
+    // referencing `smelt.users` along with legacy `smelt.ref` /
     // `smelt.source` files).
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -104,16 +104,16 @@ fn path_refs_dependency_graph() {
 
     // Every dependency edge must be path-tuple keyed (Vec<String>), not a
     // bare model name. Look up the path-form fixture's dependency on
-    // `smelt.models.users` — it must appear as a path tuple
-    // `["models", "users"]` in the graph's edges.
+    // `smelt.users` — it must appear as a path tuple `["users"]` in the
+    // graph's edges (Phase 2: no namespace prefix in unified paths).
     let path_demo_key = vec!["models".to_string(), "path_demo".to_string()];
     let deps = graph
         .path_dependencies(&path_demo_key)
         .unwrap_or_else(|| panic!("path_demo not in path-tuple graph"));
 
-    let users_tuple = vec!["models".to_string(), "users".to_string()];
+    let users_tuple = vec!["users".to_string()];
     assert!(
         deps.iter().any(|d| d == &users_tuple),
-        "path_demo should depend on smelt.models.users — got {deps:#?}"
+        "path_demo should depend on smelt.users — got {deps:#?}"
     );
 }

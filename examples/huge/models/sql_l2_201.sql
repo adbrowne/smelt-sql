@@ -11,6 +11,6 @@ SELECT
     cohort_date,
     transaction_id,
     referrer
-FROM smelt.models.sql_l1_80
+FROM smelt.sql_l1_80
 WHERE created_at >= '2024-01-01'
 

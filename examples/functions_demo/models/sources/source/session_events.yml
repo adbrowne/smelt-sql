@@ -1,0 +1,8 @@
+description: Events laid out for sessionize — Phase 17 fixture
+columns:
+- name: session_user
+  type: VARCHAR
+  description: User identifier (as text for sessionize)
+- name: session_time
+  type: TIMESTAMP
+  description: Event timestamp used for session bucketing

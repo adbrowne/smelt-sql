@@ -11,6 +11,6 @@ SELECT
     revenue,
     duration_seconds,
     device_type
-FROM smelt.models.sql_l2_46
+FROM smelt.sql_l2_46
 WHERE status = 'active'
 

@@ -10,7 +10,7 @@ SELECT
     cost,
     COUNT(*) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.models.sql_l1_179
+FROM smelt.sql_l1_179
 GROUP BY cost
 HAVING COUNT(*) > 10
 

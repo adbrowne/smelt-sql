@@ -11,6 +11,6 @@ SELECT
     category,
     page_path,
     created_at
-FROM smelt.models.sql_l2_54
+FROM smelt.sql_l2_54
 WHERE platform = 'web'
 

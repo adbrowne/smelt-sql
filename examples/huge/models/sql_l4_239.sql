@@ -11,7 +11,7 @@ SELECT
     b.segment,
     c.tier,
     c.channel
-FROM smelt.models.sql_l3_56 a
-INNER JOIN smelt.models.sql_l3_5 b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.sql_l3_140 c ON a.user_id = c.user_id
+FROM smelt.sql_l3_56 a
+INNER JOIN smelt.sql_l3_5 b ON a.user_id = b.user_id
+LEFT JOIN smelt.sql_l3_140 c ON a.user_id = c.user_id
 

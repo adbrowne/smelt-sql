@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT email_domain, cohort_date, amount
-    FROM smelt.models.sql_l3_210
+    FROM smelt.sql_l3_210
     WHERE created_at >= '2024-01-01'
 )
 SELECT
     b.email_domain,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l3_210 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l3_210 j ON b.user_id = j.user_id
 GROUP BY b.email_domain
 

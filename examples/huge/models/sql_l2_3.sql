@@ -10,6 +10,6 @@ SELECT
     a.transaction_id,
     a.event_type,
     b.os_name
-FROM smelt.models.sql_l1_203 a
-LEFT JOIN smelt.models.sql_l1_214 b ON a.user_id = b.user_id
+FROM smelt.sql_l1_203 a
+LEFT JOIN smelt.sql_l1_214 b ON a.user_id = b.user_id
 

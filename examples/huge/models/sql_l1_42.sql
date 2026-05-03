@@ -10,6 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     COUNT(DISTINCT user_id) AS metric_1,
     SUM(amount) AS metric_2
-FROM smelt.models.orders
+FROM smelt.orders
 GROUP BY DATE_TRUNC('month', event_time)
 

@@ -1,7 +1,7 @@
 name: multi_engine
 version: 1
 
-model_paths:
+paths:
   - models
 
 targets:

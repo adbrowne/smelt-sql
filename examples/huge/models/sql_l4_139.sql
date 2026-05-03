@@ -10,6 +10,6 @@ SELECT
     a.status,
     a.page_path,
     b.is_verified
-FROM smelt.models.sql_l3_82 a
-INNER JOIN smelt.models.sql_l3_82 b ON a.user_id = b.user_id
+FROM smelt.sql_l3_82 a
+INNER JOIN smelt.sql_l3_82 b ON a.user_id = b.user_id
 

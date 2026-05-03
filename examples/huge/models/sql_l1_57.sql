@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_time, category, channel
-    FROM smelt.models.invoices
+    FROM smelt.invoices
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (

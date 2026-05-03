@@ -11,7 +11,7 @@ SELECT
     b.email_domain,
     c.os_name,
     c.duration_seconds
-FROM smelt.models.sql_l3_119 a
-INNER JOIN smelt.models.sql_l3_119 b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.sql_l3_119 c ON a.user_id = c.user_id
+FROM smelt.sql_l3_119 a
+INNER JOIN smelt.sql_l3_119 b ON a.user_id = b.user_id
+LEFT JOIN smelt.sql_l3_119 c ON a.user_id = c.user_id
 

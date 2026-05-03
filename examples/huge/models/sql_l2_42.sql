@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT revenue, event_date, cost
-    FROM smelt.models.sql_l1_193
+    FROM smelt.sql_l1_193
     WHERE amount > 0
 ),
 aggregated AS (

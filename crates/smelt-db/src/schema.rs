@@ -5,7 +5,7 @@
 pub enum RefKind {
     /// `.sql` file with a bare SELECT.
     Model,
-    /// `.csv` file under a `seed_paths` directory.
+    /// `.csv` file under a `paths` directory.
     Seed,
     /// `.yml` file declaring an external table.
     Source,

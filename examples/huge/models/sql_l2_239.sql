@@ -10,8 +10,8 @@ SELECT
     browser,
     campaign_id,
     session_id
-FROM smelt.models.sql_l1_17
+FROM smelt.sql_l1_17
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_17 WHERE country = 'US'
+    SELECT user_id FROM smelt.sql_l1_17 WHERE country = 'US'
 )
 

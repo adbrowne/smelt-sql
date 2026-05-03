@@ -14,7 +14,6 @@ my_project/
     safe_divide.sql
     sessionize.sql
   smelt.yml
-  sources.yml
 ```
 
 ### Basic syntax

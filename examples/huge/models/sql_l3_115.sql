@@ -10,8 +10,8 @@ SELECT
     email_domain,
     price,
     profit
-FROM smelt.models.sql_l2_185
+FROM smelt.sql_l2_185
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_248 WHERE country = 'US'
+    SELECT user_id FROM smelt.sql_l2_248 WHERE country = 'US'
 )
 

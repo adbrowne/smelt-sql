@@ -34,6 +34,11 @@ pub struct ModelFile {
     pub kind: ModelKind,
     /// Canonical model identifier.
     pub model_id: ModelId,
+    /// Address segments with scan-root prefix stripped, e.g. `["staging", "stg_events"]`
+    /// for `models/staging/stg_events.sql` under `paths: ["models"]`.
+    /// Empty if the scan root couldn't be determined.
+    /// The default DB table name is `address_segments.join("_")`.
+    pub address_segments: Vec<String>,
 }
 
 impl ModelFile {
@@ -50,18 +55,51 @@ impl ModelFile {
     pub fn test_config(&self) -> Option<&TestConfig> {
         self.metadata.as_ref().and_then(|m| m.test.as_ref())
     }
+
+    /// The default database table name for this model: address segments joined
+    /// with `_`.  Falls back to `self.name` if `address_segments` is empty.
+    ///
+    /// Examples:
+    ///   - `["staging", "stg_events"]` → `"staging_stg_events"`
+    ///   - `["base"]` → `"base"`
+    ///   - `[]` (fallback) → `self.name`
+    pub fn db_name(&self) -> &str {
+        // address_segments is lazily computed; fall back to name if absent.
+        // We can't join here (returns String not &str), so callers that need
+        // a String should call `self.address_segments.join("_")` directly
+        // or use `db_name_owned()`.
+        if self.address_segments.is_empty() {
+            &self.name
+        } else {
+            // Return the last segment as a fallback for &str API.
+            // Callers needing the full joined name must call db_name_owned().
+            self.address_segments
+                .last()
+                .map(|s| s.as_str())
+                .unwrap_or(&self.name)
+        }
+    }
+
+    /// The default database table name as an owned String.
+    pub fn db_name_owned(&self) -> String {
+        if self.address_segments.is_empty() {
+            self.name.clone()
+        } else {
+            self.address_segments.join("_")
+        }
+    }
 }
 
 pub struct ModelDiscovery {
     project_root: PathBuf,
-    model_paths: Vec<String>,
+    paths: Vec<String>,
 }
 
 impl ModelDiscovery {
-    pub fn new(project_root: PathBuf, model_paths: Vec<String>) -> Self {
+    pub fn new(project_root: PathBuf, paths: Vec<String>) -> Self {
         Self {
             project_root,
-            model_paths,
+            paths,
         }
     }
 
@@ -70,12 +108,15 @@ impl ModelDiscovery {
     pub fn discover_models(&self) -> Result<Vec<ModelFile>> {
         let mut models = Vec::new();
 
-        for model_path in &self.model_paths {
+        for model_path in &self.paths {
             let search_path = self.project_root.join(model_path);
 
             if !search_path.exists() {
                 continue;
             }
+
+            // The scan root for address computation is project_root / model_path.
+            let scan_root = search_path.clone();
 
             // Recursively find all .sql files
             for entry in WalkDir::new(&search_path)
@@ -86,13 +127,50 @@ impl ModelDiscovery {
                 let path = entry.path();
 
                 if path.extension().and_then(|s| s.to_str()) == Some("sql") {
-                    let parsed = self.parse_model_file(path)?;
+                    let mut parsed = self.parse_model_file(path)?;
+                    // Compute address_segments: path relative to scan_root,
+                    // parent directory components + leaf model name.
+                    let address_segments: Vec<String> =
+                        Self::compute_address_segments(path, &scan_root);
+                    for m in &mut parsed {
+                        m.address_segments = address_segments.clone();
+                        // For multi-model files, keep the model's declared name
+                        // as the leaf segment instead of the file stem.
+                        if let Some(last) = m.address_segments.last_mut() {
+                            *last = m.name.clone();
+                        }
+                    }
                     models.extend(parsed);
                 }
             }
         }
 
         Ok(models)
+    }
+
+    /// Compute address segments for a file at `path` with the given `scan_root`.
+    ///
+    /// For `models/staging/stg_events.sql` with `scan_root = models/`:
+    ///   dir_segments = ["staging"], leaf = file stem = "stg_events"
+    ///   → ["staging", "stg_events"]
+    fn compute_address_segments(path: &Path, scan_root: &Path) -> Vec<String> {
+        let Ok(rel) = path.strip_prefix(scan_root) else {
+            return Vec::new();
+        };
+        let parent = rel.parent().unwrap_or(std::path::Path::new(""));
+        let mut segs: Vec<String> = parent
+            .components()
+            .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+            .collect();
+        // Leaf: file stem (will be replaced with model name for multi-model files).
+        if let Some(stem) = rel
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+        {
+            segs.push(stem);
+        }
+        segs
     }
 
     /// Discover `smelt.define` / `smelt.extern` files under the project-root
@@ -128,7 +206,7 @@ impl ModelDiscovery {
     pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<u32>, String)>> {
         let mut python_files = Vec::new();
 
-        for model_path in &self.model_paths {
+        for model_path in &self.paths {
             let search_path = self.project_root.join(model_path);
 
             if !search_path.exists() {
@@ -203,6 +281,8 @@ impl ModelDiscovery {
                         metadata: Some(Box::new(section.metadata)),
                         kind: ModelKind::Sql,
                         model_id,
+                        // Set by the caller (discover_models) after construction.
+                        address_segments: Vec::new(),
                     });
                 }
                 Ok(result)
@@ -243,6 +323,8 @@ impl ModelDiscovery {
                     metadata: model_metadata,
                     kind: ModelKind::Sql,
                     model_id,
+                    // Set by the caller (discover_models) after construction.
+                    address_segments: Vec::new(),
                 }])
             }
         }

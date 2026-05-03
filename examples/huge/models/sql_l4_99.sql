@@ -10,7 +10,7 @@ SELECT
     score,
     COUNT(*) AS val_1,
     COUNT(DISTINCT user_id) AS val_2
-FROM smelt.models.sql_l3_159
+FROM smelt.sql_l3_159
 GROUP BY score
 HAVING COUNT(*) > 10
 

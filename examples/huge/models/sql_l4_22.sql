@@ -10,5 +10,5 @@ SELECT
     product_id,
     country,
     RANK() OVER (PARTITION BY product_id ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l3_24
+FROM smelt.sql_l3_24
 

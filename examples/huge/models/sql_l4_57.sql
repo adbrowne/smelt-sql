@@ -10,6 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     MIN(created_at) AS metric_1,
     AVG(price) AS metric_2
-FROM smelt.models.sql_l3_114
+FROM smelt.sql_l3_114
 GROUP BY DATE_TRUNC('month', event_time)
 

@@ -10,6 +10,6 @@ SELECT
     a.is_verified,
     a.duration_seconds,
     b.cost
-FROM smelt.models.sql_l2_69 a
-LEFT JOIN smelt.models.sql_l2_67 b ON a.user_id = b.user_id
+FROM smelt.sql_l2_69 a
+LEFT JOIN smelt.sql_l2_67 b ON a.user_id = b.user_id
 

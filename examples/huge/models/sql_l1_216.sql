@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT referrer, segment, device_type
-    FROM smelt.models.orders
+    FROM smelt.orders
     WHERE score >= 50
 ),
 aggregated AS (

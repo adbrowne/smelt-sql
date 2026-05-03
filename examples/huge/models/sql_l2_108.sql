@@ -10,7 +10,7 @@ SELECT
     platform,
     MAX(created_at) AS val_1,
     SUM(quantity) AS val_2
-FROM smelt.models.sql_l1_58
+FROM smelt.sql_l1_58
 GROUP BY platform
 HAVING COUNT(*) > 10
 

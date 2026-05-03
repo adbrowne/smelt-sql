@@ -6,7 +6,7 @@ WITH customer_metrics AS (
         order_count,
         total_revenue,
         total_net_revenue
-    FROM smelt.models.intermediate.int_customer_orders
+    FROM smelt.intermediate.int_customer_orders
 ),
 
 customer_quantiles AS (

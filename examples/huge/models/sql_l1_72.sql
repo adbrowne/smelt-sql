@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT product_id, rating, updated_at
-    FROM smelt.models.logs
+    FROM smelt.logs
     WHERE quantity > 0
 )
 SELECT
     b.product_id,
     SUM(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.models.logs j ON b.user_id = j.user_id
+INNER JOIN smelt.logs j ON b.user_id = j.user_id
 GROUP BY b.product_id
 

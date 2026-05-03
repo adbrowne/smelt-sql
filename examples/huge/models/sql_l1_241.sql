@@ -10,7 +10,7 @@ SELECT
     event_date,
     AVG(duration_seconds) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.models.invoices
+FROM smelt.invoices
 GROUP BY event_date
 HAVING COUNT(*) > 10
 

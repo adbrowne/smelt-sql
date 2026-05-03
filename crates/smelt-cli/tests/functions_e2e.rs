@@ -96,7 +96,7 @@ fn e2e_safe_divide_executes_against_duckdb() {
     let smelt_yml = format!(
         "name: e2e_safe_divide
 version: 1
-model_paths:
+paths:
   - models
 targets:
   dev:
@@ -112,7 +112,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT order_id, smelt.functions.safe_divide(revenue, cost) AS margin
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 ORDER BY order_id
 ";
 
@@ -184,9 +184,8 @@ fn e2e_as_struct_emits_executable_struct_literal() {
     let smelt_yml = format!(
         "name: e2e_as_struct
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   dev:
@@ -213,7 +212,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT smelt.as_struct(o EXCEPT customer_id) AS order_record
-FROM smelt.seeds.raw_orders o
+FROM smelt.raw_orders o
 ";
 
     write_workspace(
@@ -314,7 +313,7 @@ fn e2e_cross_target_function_call() {
     let smelt_yml = format!(
         "name: e2e_cross_target
 version: 1
-model_paths:
+paths:
   - models
 targets:
   dev:
@@ -335,7 +334,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT order_id, smelt.functions.safe_divide(revenue, cost) AS margin
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 ORDER BY order_id
 ";
 

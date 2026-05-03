@@ -10,5 +10,5 @@ SELECT
     discount,
     score,
     ROW_NUMBER() OVER (PARTITION BY discount ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l3_30
+FROM smelt.sql_l3_30
 

@@ -7,148 +7,116 @@ owners: [andrew]
 
 # Sources
 
-> **What this is.** A normative spec for `sources.yml` — the declaration of external tables not managed by smelt. Covers the file format, column type declarations, addressing, and the role of source declarations in type checking and LSP support.
+> **Scope.** Normative spec for source declarations: externally-managed tables that smelt does not load but can type-check and route in `FROM` positions. Sources share their YAML grammar with seed sidecars (`seeds.md`); this spec owns that shared grammar and the source-only semantics. This is a stub — sections are brief — but every section says something concrete.
 
 ## Surface
 
-### File location
+### What a source is
 
-`sources.yml` (or `sources.yaml`) at the project root, alongside `smelt.yml`. If neither file exists, smelt loads an empty source list (no error). `sources.yml` takes precedence if both exist.
+A **source** is an external table that already exists in the target database, populated by some pipeline outside smelt. Smelt declares the source's schema, type-checks references, surfaces the columns in the LSP, and routes `smelt.<path>` references to the underlying `<schema>.<table>` — but it never runs `CREATE TABLE` or `INSERT` for the source. `smelt seed` does not touch sources.
 
-### File format
+### Filesystem layout
+
+A source is declared by a `.yml` file under any directory listed in `smelt.yml::paths`. The file must **not** have a sibling `.csv` with the same stem in the same directory — that would make the YAML a seed sidecar instead (`architecture.md` §"Resolution").
+
+| File on disk (with `paths: ["models"]`) | Address |
+|---|---|
+| `models/sources/raw/users.yml` | `smelt.sources.raw.users` |
+| `models/external/api/orders.yml` | `smelt.external.api.orders` |
+
+The address path follows universal addressing (`architecture.md` §"Resolution"). The mapping from `smelt.<path>` to `<db_schema>.<db_table>` follows the default rule in `architecture.md` §"Default materialization name mapping" — `<target_schema>.<path-joined-by-_>` — unless the YAML provides a `name:` override (recommended whenever the external pipeline named the table differently).
+
+### Source YAML shape
 
 ```yaml
-version: 1          # required; only valid value is 1
-
-sources:
-  <schema_name>:
-    description: "optional schema description"
-    database: "optional database override"
-    schema: "optional schema override"
-    tables:
-      <table_name>:
-        identifier: "optional real table name"  # if the table's DB name differs
-        description: "optional table description"
-        columns:
-          - name: <column_name>
-            type: <SQL_TYPE>          # optional; see Supported types
-            description: "optional"
-            data_latency: "3 days"    # optional; for incremental safety analysis
+description: Raw user dimension; populated nightly by the CDC pipeline.
+columns:
+  - name: user_id
+    type: INTEGER
+    nullable: false
+    description: Surrogate key.
+  - name: user_name
+    type: VARCHAR
+  - name: signup_date
+    type: DATE
 ```
 
-### Top-level fields
+| Key | Required | Default | Meaning |
+|-----|----------|---------|---------|
+| `description` | no | absent | Free-text description, surfaced in LSP hover. |
+| `columns` | yes | — | Column declarations. Sources without a column list are not useful — type-checking has no contract to enforce. |
+| `columns[].name` | yes | — | Column name as it appears in the database. |
+| `columns[].type` | yes | — | Smelt `DataType` (`types.md`). Same vocabulary as model type-checking and seed sidecars. |
+| `columns[].nullable` | no | `true` | Whether the column may contain NULL in the upstream database. Type-checking respects this. |
+| `columns[].description` | no | absent | Free-text description, surfaced in LSP hover. |
+| `name` | no | derived | Override the database-side name. When present, must be a `<schema>.<table>` literal. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
+| `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
-| Key | Type | Required | Description |
-|-----|------|----------|-------------|
-| `version` | integer | yes | File format version. Only valid value: `1`. |
-| `sources` | map | yes | Map from schema name to source definition. |
+The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar / source YAML shape"). The only differences are: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path).
 
-### Source definition fields
+### Discovery and addressing
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `database` | string | Optional override for the database name. When absent, uses the target's configured database. |
-| `schema` | string | Optional override for the schema name. When absent, the map key is used as the schema name. |
-| `description` | string | Human-readable schema-level description. Surfaced in data catalog. |
-| `tables` | map | Map from table name to table definition. |
+Sources are discovered alongside every other project file by walking `paths:`. Resolution rules (`architecture.md` §"Resolution"):
 
-### Table definition fields
+- A `.yml` file with no sibling `.csv` of the same stem → source.
+- A `.yml` file with a sibling `.csv` → sidecar to that seed (not a source). See `seeds.md`.
+- Two files resolving to the same address (across scan paths) → workspace-load error.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `identifier` | string | The real table name in the database, if it differs from the map key. When absent, the map key is used as the table name. |
-| `description` | string | Human-readable table description. Surfaced in data catalog. |
-| `columns` | list | List of column definitions (optional; see Column declarations). |
+### LSP surface
 
-### Column definition fields
-
-| Key | Type | Required | Description |
-|-----|------|----------|-------------|
-| `name` | string | yes | Column name. |
-| `type` | string | no | SQL type (see Supported types). If omitted, smelt treats the column type as unknown and cannot type-check references to it. |
-| `description` | string | no | Column description. Surfaced in data catalog. |
-| `data_latency` | string | no | Late-arrival window for this column (e.g., `"3 days"`, `"0 hours"`). Used by incremental safety analysis. |
-
-### Supported column types
-
-```
-INTEGER   BIGINT    SMALLINT
-FLOAT     DOUBLE
-DECIMAL   DECIMAL(p,s)
-VARCHAR   TEXT      CHAR
-BOOLEAN
-DATE      TIMESTAMP
-JSON
-```
-
-Type strings are case-insensitive and parsed via `smelt-types::parse_type()`. Unrecognized type strings are silently treated as unknown (no error at load time; the column becomes untyped for checking purposes).
-
-### Reference syntax
-
-```sql
-FROM smelt.sources.<schema_name>.<table_name>
-```
-
-The `<schema_name>` and `<table_name>` must match the map keys in `sources.yml`, not the `identifier` or `schema` override values. Resolution uses the declared names, not the database names.
+- **Hover** on a `smelt.<path>` reference to a source → table description + column list with types and descriptions.
+- **Goto-definition** → opens the source `.yml`.
+- **Diagnostics** — references to columns not declared in the source YAML produce an "undeclared column" diagnostic, same as for any other typed table reference.
+- **No "Pin schema" code action.** Sources have no data file to infer from; the YAML is hand-written.
 
 ## Semantics
 
-### Loading
-
-`SourcesConfig::load()` looks for `sources.yml` first, then `sources.yaml`. If neither exists, an empty `SourcesConfig` is returned — no error. YAML parse errors are hard failures.
-
-### Source resolution
-
-`smelt.sources.<schema>.<table>` is resolved by:
-1. Finding the source with `name == <schema>`
-2. Within it, finding the table with `name == <table>`
-
-The `database`, `schema`, and `identifier` fields on the source/table definitions affect what SQL is generated (which physical table is read), but not how the reference is written in model SQL.
-
-### Column declarations are advisory
-
-Column declarations serve type checking, LSP completions, and diagnostics. They are not validated against the live database at load time or at run time. If the live table has a column not declared in `sources.yml`, smelt will not flag undeclared columns as errors (it only checks that referenced columns are declared if the source has columns declared at all). If the live table is missing a declared column, the error surfaces at query execution time, not at smelt compile time.
-
-### Type parsing failure is silent
-
-If a `type:` value is not recognized by `smelt-types::parse_type()`, the column's `data_type` is set to `None` — the column becomes untyped for purposes of type checking. No warning or error is emitted. This is a known divergence from the strict-type philosophy elsewhere.
+1. **Sources are never loaded.** `smelt seed`, `smelt build` (seed phase), and any other ingest path skip sources entirely. A `smelt seed --select <source-path>` invocation is a hard error ("not a seed").
+2. **Schema is the contract.** When a model references a source column, the smelt type-checker uses the YAML's declared type. A column not declared in the YAML is undeclared and produces a diagnostic, even if the column exists in the upstream database.
+3. **Smelt does not validate that the source exists.** A reference to a non-existent source surfaces only at execution time as a backend error. (A future implementation may add a `smelt verify` pass that checks every source against the live database; out of scope for this spec.)
+4. **Address-only references.** A source has no body for the planner to inspect — it is black-box, like an `extern`, but addressable by path rather than by bare name (`architecture.md` §"Two orthogonal axes").
+5. **Discovery and uniqueness.** A source's address is its workspace path under `paths:`, with the scan-root prefix stripped. The cross-path uniqueness rule (`architecture.md` §"Resolution") applies.
 
 ## Design
 
-**Declaration over discovery.** Sources are not auto-discovered from the live database. Users declare columns explicitly because: (a) smelt can function without a live connection (offline development, CI), (b) declared types represent the *intended* schema rather than whatever the ingestion pipeline happened to produce, and (c) declaration enables offline LSP diagnostics without a live connection.
+**Two concepts (seed and source), one YAML grammar.** Seeds and sources have different lifecycles — smelt loads a seed; an external pipeline owns a source — and that distinction is real to users. But every other concern overlaps: column types, descriptions, hover, goto-definition, future tests. Sharing the YAML grammar means one parser, one schema-resolution path, and one set of LSP affordances. The kind is determined structurally (sibling CSV present?), not by a configuration toggle. (Decided in the Q1 design discussion that produced this revision; alternatives — full unification under one "input" concept; sidecars only without standalone sources — were rejected as either too aggressive or as losing the lifecycle distinction.)
 
-**`smelt.sources` namespace shared with subdirectory seeds.** Subdirectory seeds (e.g., `seeds/raw/file.csv`) are loaded into the `raw` schema and are addressable as `smelt.sources.raw.file`. This is the same namespace as `sources.yml` declarations. Seeds and sources share addressing because they serve the same role from a model's perspective: inputs that smelt didn't create.
+**Per-entity YAML, not aggregate `sources.yml`.** The aggregate file violates universal addressing — every project entity should live at its addressed path. `models/sources/raw/users.yml` *is* `smelt.sources.raw.users`. Splitting the old `sources.yml` into per-entity files is a hard cut; pre-1.0 + the workspace's "no backward compatibility" doctrine means we don't ship a compat shim. A `smelt migrate` follow-up tool can mechanise the rewrite.
 
-**`identifier` for aliased tables.** The `identifier` field allows the logical name in smelt to differ from the physical table name. This is useful when ingestion tools create tables with auto-generated or environment-specific suffixes (e.g., `users_v2`) but models should reference a stable name.
+**Why `name:` is allowed on sources but not on seeds.** A seed's identity *is* its workspace path — smelt picks the database name. A source's identity is the external table the pipeline produces; smelt only declares it. The external name is not a function of the workspace layout, so the YAML must be able to override the default mapping. Disallowing `name:` for seeds keeps the "config falls out of structure" doctrine intact for the things smelt actually owns.
 
-**`data_latency` on columns.** Sources can carry late-arrival metadata per column for incremental safety analysis. A source column with `data_latency: "3 days"` signals that data for a given event time may arrive up to 3 days late, which informs the lookback calculation for incremental models that consume it.
+**`materialization:` not allowed on sources.** Sources are external by definition — there is no smelt-controlled materialization. A `materialization: ephemeral` source would mean "smelt should not assume this table exists" which is closer to a feature flag than a data shape, and we have no concrete need for it. If one emerges, the spec opens up.
 
 ## Constraints & Invariants
 
-1. **`sources.yml` is at the project root.** No multi-file sources, no per-directory sources files.
-2. **Sources are not materialized by smelt.** smelt never creates, modifies, or drops source tables. The user is responsible for ensuring sources exist before running models that reference them.
-3. **Source reference uses declared names, not physical names.** `smelt.sources.raw.users` refers to the source declared with key `users` in schema `raw`, regardless of `identifier`.
-4. **Column declarations are optional per table.** A table with no `columns:` list is valid; smelt treats all column references on it as having unknown type.
+1. A `.yml` file with no sibling `.csv` is a source; with a sibling `.csv` it is a sidecar. The kinds are disjoint.
+2. Sources are never loaded by `smelt seed` or `smelt build`.
+3. `materialization:` on a source YAML is a hard error.
+4. The source YAML grammar is a strict subset of the seed sidecar grammar plus the source-only `name:` override.
+5. The cross-path uniqueness rule (`architecture.md` §"Resolution") applies — a source's address is unique across all `paths:` roots.
+6. Aggregate `sources.yml` at the project root is no longer recognised; its presence produces a clear migration error.
 
 ## Known Divergences / Open Questions
 
-- **`database` and `schema` override fields undocumented in user guide.** `SourcesConfig` supports `database` and `schema` overrides at the source level, but `sources-yml.md` and `sources.md` do not mention them.
-- **`identifier` field undocumented in user guide.** The `identifier` table field is in the code but not in the user-facing reference page.
-- **Silent type parse failure.** Unrecognized type strings (`type: UNKNOWNTYPE`) produce no diagnostic and silently make the column untyped. Should emit a warning.
-- **`data_latency` undocumented in user guide.** The column field exists in the code and is used by incremental safety analysis but is not documented in `sources-yml.md`.
-- **`version` field is required per user docs but not validated.** The code does not validate that `version == 1` — any integer (or even absence of the field) is accepted without error.
+- **Source-existence verification.** A future `smelt verify` pass could check that every declared source exists in the target database with the declared columns. Out of scope here.
+- **Column-level tests on sources.** Same status as for seeds — deferred to the future `tests.md`. The shared YAML grammar grows uniformly.
+- **Co-location with seeds.** Worth noting: a `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems), since kind-by-content makes the directory layout independent of kind. Style guides may discourage mixing for readability; the resolver does not.
 
 ## References
 
-- **Code**:
-  - `crates/smelt-core/src/sources.rs` — `SourcesConfig`, `SourceDef`, `SourceTableDef`, `SourceColumnDef`, `SourcesConfig::load()`
-  - `crates/smelt-types/src/lib.rs` — `parse_type()`
+- **Code** (target after migration plan lands):
+  - `crates/smelt-core/src/sources.rs` — source discovery, YAML loader, `SourceInfo`.
+  - `crates/smelt-db/src/schema.rs` — source YAML → `ModelSchema` (shared with seed sidecars).
+  - `crates/smelt-lsp/src/lib.rs` — hover, goto-definition for source references.
 - **Tests**:
-  - `crates/smelt-core/src/sources.rs` (inline `#[cfg(test)]`) — data latency parsing, basic load
+  - `crates/smelt-core/tests/source_yaml.rs` — schema validation, `name:` override, kind tiebreaker against seed sidecars.
 - **User docs**:
-  - `docs-site/docs/guide/sources.md`
-  - `docs-site/docs/reference/sources-yml.md`
+  - `docs-site/docs/guide/sources.md` — user-facing source guide.
+  - `docs-site/docs/reference/sources-yml.md` — per-key YAML reference (to be reconciled with this spec by the migration plan).
+- **Plans (history)**: the migration plan implementing this spec is pending; see also `docs/plans/20260403-sources-yml-live-updates.md` for the prior incremental work on the aggregate `sources.yml` shape (now superseded).
 - **Related specs**:
-  - `seeds.md` — subdirectory seeds share the `smelt.sources` namespace
-  - `models.md` — `smelt.sources.<schema>.<table>` reference syntax
-  - `incremental_models.md` — `data_latency` used in batch safety analysis
+  - `architecture.md` §"Resolution" — kind-determination, sidecar tiebreaker, cross-path uniqueness.
+  - `architecture.md` §"Default materialization name mapping" — the rule the source `name:` override departs from.
+  - `seeds.md` — shares the YAML grammar; the load-side complement of this spec.
+  - `smelt_yml.md` — `paths:` key the discovery layer consumes.
+  - `types.md` — `DataType` vocabulary used by `columns[].type`.

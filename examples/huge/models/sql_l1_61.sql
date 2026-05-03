@@ -10,5 +10,5 @@ SELECT
     segment,
     os_name,
     LAG(amount, 1) OVER (PARTITION BY segment ORDER BY created_at) AS win_val
-FROM smelt.models.refunds
+FROM smelt.refunds
 

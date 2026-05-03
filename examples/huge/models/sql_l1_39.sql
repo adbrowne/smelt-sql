@@ -10,8 +10,8 @@ SELECT
     plan_type,
     device_type,
     is_active
-FROM smelt.models.sessions
+FROM smelt.sessions
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sessions WHERE platform = 'web'
+    SELECT user_id FROM smelt.sessions WHERE platform = 'web'
 )
 

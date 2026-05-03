@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT os_name, session_id, is_active
-    FROM smelt.models.shipments
+    FROM smelt.shipments
     WHERE country = 'US'
 )
 SELECT
     b.os_name,
     SUM(revenue) AS agg_val
 FROM base b
-INNER JOIN smelt.models.shipments j ON b.user_id = j.user_id
+INNER JOIN smelt.shipments j ON b.user_id = j.user_id
 GROUP BY b.os_name
 

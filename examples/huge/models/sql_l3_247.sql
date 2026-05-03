@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_time, score, plan_type
-    FROM smelt.models.sql_l2_120
+    FROM smelt.sql_l2_120
     WHERE category IS NOT NULL
 )
 SELECT
     b.event_time,
     MIN(created_at) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l2_16 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l2_16 j ON b.user_id = j.user_id
 GROUP BY b.event_time
 

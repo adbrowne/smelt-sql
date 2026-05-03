@@ -12,6 +12,6 @@ SELECT
     COUNT(*) AS agg_1,
     AVG(duration_seconds) AS agg_2,
     SUM(revenue) AS agg_3
-FROM smelt.models.sql_l1_164
+FROM smelt.sql_l1_164
 GROUP BY is_verified
 

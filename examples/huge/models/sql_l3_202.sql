@@ -10,8 +10,8 @@ SELECT
     rating,
     discount,
     browser
-FROM smelt.models.sql_l2_237
+FROM smelt.sql_l2_237
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_67 WHERE quantity > 0
+    SELECT user_id FROM smelt.sql_l2_67 WHERE quantity > 0
 )
 

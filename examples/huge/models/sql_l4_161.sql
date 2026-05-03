@@ -11,6 +11,6 @@ SELECT
     os_name,
     session_id,
     quantity
-FROM smelt.models.sql_l3_154
+FROM smelt.sql_l3_154
 WHERE category IS NOT NULL
 

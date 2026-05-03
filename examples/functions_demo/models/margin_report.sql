@@ -3,5 +3,5 @@
 -- `margin_tier3(revenue, cost)` takes two Expr<Numeric> args and returns
 -- Expr<Double> — the revenue and cost columns from `orders` satisfy Numeric.
 SELECT order_id, smelt.functions.margin_tier3(revenue, cost) AS margin
-FROM smelt.models.orders
+FROM smelt.orders
 

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT order_id, ip_address, profit
-    FROM smelt.models.sql_l3_65
+    FROM smelt.sql_l3_65
     WHERE amount > 0
 ),
 aggregated AS (

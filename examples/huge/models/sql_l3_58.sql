@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, created_at, discount
-    FROM smelt.models.sql_l2_214
+    FROM smelt.sql_l2_214
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

@@ -10,7 +10,7 @@ SELECT
     ROUND(SUM(total_revenue_cents) / 100.0, 2) AS total_revenue,
     SUM(conversions) AS total_conversions,
     ROUND(CAST(SUM(conversions) AS DOUBLE) / COUNT(DISTINCT visitor_id) * 100, 2) AS conversion_rate_pct
-FROM smelt.models.intermediate.int_visitor_daily
+FROM smelt.intermediate.int_visitor_daily
 GROUP BY country
 ORDER BY total_revenue DESC
 

@@ -10,7 +10,7 @@ SELECT
     email_domain,
     AVG(amount) AS val_1,
     AVG(price) AS val_2
-FROM smelt.models.sql_l1_223
+FROM smelt.sql_l1_223
 GROUP BY email_domain
 HAVING COUNT(*) > 10
 

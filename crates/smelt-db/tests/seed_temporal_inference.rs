@@ -27,6 +27,16 @@ fn project_seeds_infers_date_and_timestamp_columns() {
     )
     .unwrap();
 
+    // Phase 1 (`smelt_yml.md` Surface §"Top-level keys"): the unified
+    // `paths:` list is the single scan list. The default is `["models"]`,
+    // so a workspace whose seeds live under `seeds/` must declare it
+    // explicitly.
+    fs::write(
+        project_root.join("smelt.yml"),
+        "name: temporal_inference_fixture\nversion: 1\npaths:\n  - seeds\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n",
+    )
+    .unwrap();
+
     let mut db = Database::default();
     let project = db.set_project_input(project_root.clone(), String::new());
 

@@ -1,0 +1,14 @@
+description: Raw event data from application
+columns:
+- name: event_id
+  type: INTEGER
+  description: Unique event identifier
+- name: user_id
+  type: INTEGER
+  description: User who triggered event
+- name: event_time
+  type: TIMESTAMP
+  description: When event occurred
+- name: event_type
+  type: VARCHAR
+  description: Type of event (page_view, click, etc.)

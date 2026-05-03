@@ -14,5 +14,5 @@ SELECT
         WHEN amount > 100 THEN 'medium'
         ELSE 'low'
     END AS value_tier
-FROM smelt.models.logs
+FROM smelt.logs
 

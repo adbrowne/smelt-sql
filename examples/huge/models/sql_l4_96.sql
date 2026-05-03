@@ -10,8 +10,8 @@ SELECT
     segment,
     is_verified,
     referrer
-FROM smelt.models.sql_l3_105
+FROM smelt.sql_l3_105
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l3_105 WHERE score >= 50
+    SELECT user_id FROM smelt.sql_l3_105 WHERE score >= 50
 )
 

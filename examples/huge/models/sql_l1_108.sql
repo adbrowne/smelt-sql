@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, category, referrer
-    FROM smelt.models.orders
+    FROM smelt.orders
     WHERE category IS NOT NULL
 ),
 aggregated AS (

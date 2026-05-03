@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT is_verified, revenue, profit
-    FROM smelt.models.sql_l2_107
+    FROM smelt.sql_l2_107
     WHERE country = 'US'
 ),
 aggregated AS (

@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT profit, rating, ip_address
-    FROM smelt.models.errors
+    FROM smelt.errors
     WHERE platform = 'web'
 )
 SELECT
     b.profit,
     SUM(revenue) AS agg_val
 FROM base b
-INNER JOIN smelt.models.errors j ON b.user_id = j.user_id
+INNER JOIN smelt.errors j ON b.user_id = j.user_id
 GROUP BY b.profit
 

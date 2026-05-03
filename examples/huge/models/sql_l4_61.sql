@@ -11,6 +11,6 @@ SELECT
     segment,
     price,
     score
-FROM smelt.models.sql_l3_60
+FROM smelt.sql_l3_60
 WHERE score >= 50
 

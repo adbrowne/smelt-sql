@@ -11,7 +11,7 @@ SELECT
     b.quantity,
     c.os_name,
     c.browser
-FROM smelt.models.subscriptions a
-INNER JOIN smelt.models.subscriptions b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.subscriptions c ON a.user_id = c.user_id
+FROM smelt.subscriptions a
+INNER JOIN smelt.subscriptions b ON a.user_id = b.user_id
+LEFT JOIN smelt.subscriptions c ON a.user_id = c.user_id
 

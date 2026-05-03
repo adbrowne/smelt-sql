@@ -10,6 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     COUNT(DISTINCT user_id) AS metric_1,
     MAX(created_at) AS metric_2
-FROM smelt.models.sql_l2_231
+FROM smelt.sql_l2_231
 GROUP BY DATE_TRUNC('month', event_time)
 

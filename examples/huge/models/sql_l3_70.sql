@@ -10,6 +10,6 @@ SELECT
     updated_at,
     SUM(amount) AS agg_0,
     COUNT(DISTINCT user_id) AS agg_1
-FROM smelt.models.sql_l2_89
+FROM smelt.sql_l2_89
 GROUP BY updated_at
 

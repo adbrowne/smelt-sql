@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT tier, platform, revenue
-    FROM smelt.models.sql_l2_1
+    FROM smelt.sql_l2_1
     WHERE platform = 'web'
 ),
 aggregated AS (

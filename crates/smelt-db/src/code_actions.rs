@@ -3,6 +3,8 @@
 //! These functions are used by the LSP server and integration tests.
 //! They follow the pure function rule: no Salsa/LSP dependencies.
 
+use std::path::PathBuf;
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, Range};
 
 /// A suggested code action with title and replacement text.
@@ -38,6 +40,23 @@ pub struct YamlEditSuggestion {
     pub new_lines: Vec<String>,
 }
 
+/// A code action that creates a sidecar `.yml` next to a seed CSV file.
+///
+/// The `inferred_columns` list is in CSV header order. The LSP handler
+/// serialises this into YAML and writes it as a new file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinSeedSchemaSuggestion {
+    /// Human-readable title shown in the editor.
+    pub title: String,
+    /// Absolute path to the CSV file.
+    pub csv_path: PathBuf,
+    /// Absolute path where the sidecar `.yml` should be written.
+    pub sidecar_path: PathBuf,
+    /// Inferred columns: `(name, DataType)` pairs in CSV header order,
+    /// derived by running the full-CSV inferencer over the source file.
+    pub inferred_columns: Vec<(String, smelt_types::DataType)>,
+}
+
 /// All possible code action suggestions returned by the pure functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeActionKind {
@@ -47,6 +66,8 @@ pub enum CodeActionKind {
     CreateModel(CreateModelSuggestion),
     /// Edit the sources.yml file
     YamlEdit(YamlEditSuggestion),
+    /// Create a sidecar `.yml` for a seed CSV that has no schema declaration.
+    PinSeedSchema(PinSeedSchemaSuggestion),
 }
 
 /// Common SQL types offered when we can't infer the type.
@@ -183,6 +204,7 @@ pub fn generate_all_code_actions(
         DiagnosticCode::UndefinedModelRef => generate_create_model_action(diagnostic),
         DiagnosticCode::UndefinedSource => generate_add_source_action(diagnostic, sources_yml),
         DiagnosticCode::UndeclaredColumn => generate_add_column_action(diagnostic, sources_yml),
+        DiagnosticCode::MissingSeedSidecar => generate_pin_seed_schema_action(diagnostic),
         _ => vec![],
     }
 }
@@ -386,6 +408,38 @@ fn generate_add_column_action(diagnostic: &Diagnostic, sources_yml: &str) -> Vec
     } else {
         vec![]
     }
+}
+
+/// Generate a "Pin schema to sidecar YAML" code action for a
+/// `MissingSeedSidecar` diagnostic.
+///
+/// Reads the CSV from disk, runs the full inferencer (all rows, no limit),
+/// and returns a `PinSeedSchema` suggestion whose `inferred_columns` list
+/// the LSP handler serialises into YAML.
+fn generate_pin_seed_schema_action(diagnostic: &Diagnostic) -> Vec<CodeActionKind> {
+    let (csv_path, sidecar_path) = match &diagnostic.data {
+        Some(crate::DiagnosticData::MissingSeedSidecar {
+            csv_path,
+            sidecar_path,
+        }) => (csv_path.clone(), sidecar_path.clone()),
+        _ => return vec![],
+    };
+
+    // Read the CSV and infer types over all rows (no sample limit).
+    let inferred_columns = match smelt_core::read_csv(&csv_path) {
+        Err(_) => return vec![],
+        Ok((headers, rows_iter)) => {
+            let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
+            smelt_core::infer_columns(&rows, &headers, None)
+        }
+    };
+
+    vec![CodeActionKind::PinSeedSchema(PinSeedSchemaSuggestion {
+        title: "Pin schema to sidecar YAML".to_string(),
+        csv_path,
+        sidecar_path,
+        inferred_columns,
+    })]
 }
 
 /// A text edit: replace a range with new text.

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT rating, quantity, is_active
-    FROM smelt.models.sql_l3_22
+    FROM smelt.sql_l3_22
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

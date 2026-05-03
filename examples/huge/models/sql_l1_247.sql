@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_date, duration_seconds, is_verified
-    FROM smelt.models.campaigns
+    FROM smelt.campaigns
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

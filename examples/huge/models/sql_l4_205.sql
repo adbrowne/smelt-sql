@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cohort_date, is_verified, event_type
-    FROM smelt.models.sql_l3_148
+    FROM smelt.sql_l3_148
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (

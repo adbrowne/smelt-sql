@@ -47,6 +47,8 @@ Execute  (smelt-backend-*)  -- Send SQL to DuckDB / Spark / etc.
 
 **Execute** -- Each backend implementation handles DDL (CREATE TABLE AS, views, incremental inserts) and returns `ExecutionResult` with duration, row count, and optional data preview as Arrow `RecordBatch`.
 
+The `Backend` trait also exposes `load_table(schema, name, arrow_schema, batches)`, the cross-backend Arrow ingest path used by seed loading and any other "build a table from in-memory data" surface. DuckDB implements it via the `Appender` API's `append_record_batch` (zero-copy Arrow → DuckDB); Spark implements it by writing a temporary Parquet file and calling `createDataFrame(...).saveAsTable(...)`. The method validates nullability against the caller-supplied `arrow_schema` before touching the database — a NULL value in a column declared `nullable: false` returns a `BackendError::NullInNonNullableColumn` immediately.
+
 ---
 
 ## Crate Structure

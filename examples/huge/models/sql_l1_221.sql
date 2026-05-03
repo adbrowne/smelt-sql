@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT rating, country, updated_at
-    FROM smelt.models.orders
+    FROM smelt.orders
     WHERE country = 'US'
 ),
 aggregated AS (

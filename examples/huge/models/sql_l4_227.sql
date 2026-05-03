@@ -10,8 +10,8 @@ SELECT
     order_id,
     segment,
     event_time
-FROM smelt.models.sql_l3_81
+FROM smelt.sql_l3_81
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l3_152 WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.sql_l3_152 WHERE event_type = 'purchase'
 )
 

@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_type, page_path, campaign_id
-    FROM smelt.models.sql_l3_154
+    FROM smelt.sql_l3_154
     WHERE quantity > 0
 )
 SELECT
     b.event_type,
     SUM(quantity) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l3_229 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l3_229 j ON b.user_id = j.user_id
 GROUP BY b.event_type
 

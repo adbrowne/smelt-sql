@@ -25,6 +25,7 @@ fn model_file(name: &str, content: &str) -> ModelFile {
         metadata: None,
         kind: ModelKind::Sql,
         model_id: smelt_core::ModelId::from_path(format!("models/{}.sql", name).into()),
+        address_segments: vec![name.to_string()],
     }
 }
 
@@ -44,8 +45,7 @@ fn duckdb_config_and_target() -> (Config, Target) {
     let config = Config {
         name: "test".to_string(),
         version: 1,
-        model_paths: vec!["models".to_string()],
-        seed_paths: vec!["seeds".to_string()],
+        paths: vec!["models".to_string()],
         targets,
         default_materialization: Materialization::View,
         models: HashMap::new(),
@@ -80,6 +80,7 @@ fn upstream_with_model(model_name: &str, cols: Vec<(String, DataType)>) -> Arc<U
         models,
         seeds: HashMap::new(),
         sources: Default::default(),
+        per_entity_sources: Vec::new(),
     })
 }
 

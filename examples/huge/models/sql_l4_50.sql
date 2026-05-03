@@ -11,6 +11,6 @@ SELECT
     browser,
     revenue,
     event_date
-FROM smelt.models.sql_l3_217
+FROM smelt.sql_l3_217
 WHERE country = 'US'
 

@@ -10,7 +10,7 @@ SELECT
     email_domain,
     MAX(created_at) AS val_1,
     SUM(revenue) AS val_2
-FROM smelt.models.page_views
+FROM smelt.page_views
 GROUP BY email_domain
 HAVING COUNT(*) > 10
 

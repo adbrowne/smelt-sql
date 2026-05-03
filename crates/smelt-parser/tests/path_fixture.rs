@@ -42,5 +42,5 @@ fn test_workspace_path_form_parses() {
         "expected exactly one SMELT_PATH_REF in path_demo.sql, got {}",
         refs.len()
     );
-    assert_eq!(refs[0].segments(), vec!["models", "users"]);
+    assert_eq!(refs[0].segments(), vec!["users"]);
 }

@@ -18,5 +18,5 @@ SELECT
     -- just from sources.yml. (Bug #3 sub-case: B8.)
     o.gross_amount * o.qty AS line_revenue
 FROM smelt.sources.raw.orders AS o
-LEFT JOIN smelt.models.order_statuses AS s ON o.status_code = s.status_code
+LEFT JOIN smelt.order_statuses AS s ON o.status_code = s.status_code
 

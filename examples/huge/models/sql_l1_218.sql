@@ -10,6 +10,6 @@ SELECT
     a.platform,
     a.event_type,
     b.quantity
-FROM smelt.models.logs a
-INNER JOIN smelt.models.logs b ON a.user_id = b.user_id
+FROM smelt.logs a
+INNER JOIN smelt.logs b ON a.user_id = b.user_id
 

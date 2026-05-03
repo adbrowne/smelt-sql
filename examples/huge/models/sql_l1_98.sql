@@ -10,6 +10,6 @@ SELECT
     a.discount,
     a.quantity,
     b.created_at
-FROM smelt.models.clicks a
-LEFT JOIN smelt.models.clicks b ON a.user_id = b.user_id
+FROM smelt.clicks a
+LEFT JOIN smelt.clicks b ON a.user_id = b.user_id
 

@@ -10,7 +10,7 @@ SELECT
     cohort_date,
     MIN(created_at) AS val_1,
     AVG(duration_seconds) AS val_2
-FROM smelt.models.sql_l3_212
+FROM smelt.sql_l3_212
 GROUP BY cohort_date
 HAVING COUNT(*) > 10
 

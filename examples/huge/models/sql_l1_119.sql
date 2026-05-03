@@ -10,6 +10,6 @@ SELECT
     a.tier,
     a.revenue,
     b.channel
-FROM smelt.models.subscriptions a
-INNER JOIN smelt.models.subscriptions b ON a.user_id = b.user_id
+FROM smelt.subscriptions a
+INNER JOIN smelt.subscriptions b ON a.user_id = b.user_id
 

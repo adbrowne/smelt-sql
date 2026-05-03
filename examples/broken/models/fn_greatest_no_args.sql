@@ -2,4 +2,4 @@
 -- `GREATEST` is a variadic built-in requiring at least one argument. An
 -- empty call-list violates the `MissingArgs` arity check and yields a
 -- `MissingArgument` diagnostic from the `unify_call` built-in branch.
-SELECT smelt.models.GREATEST() AS r
+SELECT smelt.GREATEST() AS r

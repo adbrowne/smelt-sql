@@ -11,6 +11,6 @@ SELECT
     discount,
     email_domain,
     referrer
-FROM smelt.models.categories
+FROM smelt.categories
 WHERE platform = 'web'
 

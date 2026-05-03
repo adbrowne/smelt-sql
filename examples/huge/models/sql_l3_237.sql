@@ -11,6 +11,6 @@ SELECT
     country,
     profit,
     category
-FROM smelt.models.sql_l2_102
+FROM smelt.sql_l2_102
 WHERE quantity > 0
 

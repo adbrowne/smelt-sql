@@ -3,7 +3,7 @@ WITH cohort_base AS (
     SELECT
         customer_id,
         MIN(order_date) AS cohort_date
-    FROM smelt.models.intermediate.int_order_enriched
+    FROM smelt.intermediate.int_order_enriched
     GROUP BY customer_id
 ),
 
@@ -14,7 +14,7 @@ cohort_activity AS (
         o.order_date AS activity_date,
         CAST(o.order_date - cb.cohort_date AS INTEGER) AS days_since_cohort
     FROM cohort_base AS cb
-    INNER JOIN smelt.models.intermediate.int_order_enriched AS o
+    INNER JOIN smelt.intermediate.int_order_enriched AS o
         ON cb.customer_id = o.customer_id
 ),
 

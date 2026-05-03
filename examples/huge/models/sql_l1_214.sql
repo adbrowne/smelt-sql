@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT revenue, plan_type, region
-    FROM smelt.models.orders
+    FROM smelt.orders
     WHERE status = 'active'
 ),
 aggregated AS (

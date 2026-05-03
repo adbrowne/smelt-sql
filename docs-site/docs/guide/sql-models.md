@@ -59,7 +59,7 @@ For more on defining external sources, see [Sources](sources.md).
 
 ## Sources
 
-Use `smelt.sources.<name>` for external tables defined in `sources.yml`:
+Use `smelt.sources.<name>` for external tables declared as per-entity `.yml` files under `paths:`:
 
 ```sql
 SELECT * FROM smelt.sources.raw.users

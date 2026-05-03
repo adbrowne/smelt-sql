@@ -297,7 +297,9 @@ pub fn compile_whole_model_test(
     let parse = smelt_parser::parse(&clean);
     let file = AstFile::cast(parse.syntax()).ok_or("Failed to parse model SQL")?;
 
-    // Collect all smelt.models.<name> path refs and their text ranges (in reverse order for replacement)
+    // Collect all smelt.<path> refs and their text ranges (in reverse order for replacement).
+    // The CTE name is the path segments joined by "_" (e.g. smelt.users → "users",
+    // smelt.staging.orders → "staging_orders").
     let mut ref_replacements: Vec<(usize, usize, String)> = Vec::new();
     for path_ref in file
         .syntax()
@@ -305,20 +307,20 @@ pub fn compile_whole_model_test(
         .filter_map(smelt_parser::ast::SmeltPathRef::cast)
     {
         let segments = path_ref.segments();
-        if segments.first().map(|s| s.as_str()) == Some("models") {
-            if let Some(name) = segments.get(1).cloned() {
-                let range = path_ref.text_range();
-                let start: usize = range.start().into();
-                let end: usize = range.end().into();
-                ref_replacements.push((start, end, name));
-            }
+        if segments.is_empty() {
+            continue;
         }
+        let name = segments.join("_");
+        let range = path_ref.text_range();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        ref_replacements.push((start, end, name));
     }
 
     // Sort by start position descending so replacements don't shift offsets
     ref_replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
 
-    // Replace smelt.models.<name> with bare name in the SQL
+    // Replace smelt.<path> refs with bare CTE names in the SQL
     let mut result_sql = clean.clone();
     let mut ref_names: Vec<String> = Vec::new();
     for (start, end, name) in &ref_replacements {
@@ -628,7 +630,7 @@ SELECT * FROM b
     fn test_compile_whole_model_test() {
         let model_sql = r#"
 SELECT order_date, COUNT(*) AS order_count
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 GROUP BY order_date
 "#;
         let mut inputs = BTreeMap::new();
@@ -646,8 +648,8 @@ GROUP BY order_date
         let result = compile_whole_model_test(model_sql, &inputs, None).unwrap();
         assert!(result.contains("raw_orders AS"));
         assert!(result.contains("order_count"));
-        // smelt.models path refs should be replaced with bare model names
-        assert!(!result.contains("smelt.models"));
+        // smelt path refs should be replaced with bare model names
+        assert!(!result.contains("smelt.raw_orders"));
     }
 
     #[test]

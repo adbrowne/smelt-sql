@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT channel, campaign_id, region
-    FROM smelt.models.sql_l1_132
+    FROM smelt.sql_l1_132
     WHERE amount > 0
 ),
 aggregated AS (

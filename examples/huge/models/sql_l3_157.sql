@@ -10,8 +10,8 @@ SELECT
     device_type,
     cohort_date,
     created_at
-FROM smelt.models.sql_l2_103
+FROM smelt.sql_l2_103
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_135 WHERE quantity > 0
+    SELECT user_id FROM smelt.sql_l2_135 WHERE quantity > 0
 )
 

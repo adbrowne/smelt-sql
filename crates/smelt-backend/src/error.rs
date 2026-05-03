@@ -25,6 +25,15 @@ pub enum BackendError {
     #[error("Feature not supported by {dialect}: {feature}")]
     UnsupportedFeature { dialect: String, feature: String },
 
+    /// NULL value found in a column declared as NOT NULL (nullable: false).
+    #[error("NULL value in non-nullable column '{column}' at row {row} (table {schema}.{table})")]
+    NullInNonNullableColumn {
+        schema: String,
+        table: String,
+        column: String,
+        row: usize,
+    },
+
     /// Configuration error.
     #[error("Configuration error: {message}")]
     ConfigurationError { message: String },
@@ -63,6 +72,21 @@ impl BackendError {
         Self::UnsupportedFeature {
             dialect: dialect.into(),
             feature: feature.into(),
+        }
+    }
+
+    /// Create a NULL-in-non-nullable-column error.
+    pub fn null_in_non_nullable_column(
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        row: usize,
+    ) -> Self {
+        Self::NullInNonNullableColumn {
+            schema: schema.into(),
+            table: table.into(),
+            column: column.into(),
+            row,
         }
     }
 }

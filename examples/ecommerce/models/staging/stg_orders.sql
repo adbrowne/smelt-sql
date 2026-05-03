@@ -10,5 +10,5 @@ SELECT
     o.payment_method,
     o.discount_pct / 100.0 AS discount_rate
 FROM smelt.sources.raw.orders AS o
-LEFT JOIN smelt.seeds.order_statuses AS os ON o.status = os.status_code
+LEFT JOIN smelt.order_statuses AS os ON o.status = os.status_code
 

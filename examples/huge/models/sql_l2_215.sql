@@ -10,8 +10,8 @@ SELECT
     page_path,
     plan_type,
     browser
-FROM smelt.models.sql_l1_100
+FROM smelt.sql_l1_100
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_100 WHERE score >= 50
+    SELECT user_id FROM smelt.sql_l1_100 WHERE score >= 50
 )
 

@@ -1,0 +1,20 @@
+description: Customer dimension table
+columns:
+- name: customer_id
+  type: INTEGER
+- name: name_prefix
+  type: VARCHAR
+- name: birth_year
+  type: INTEGER
+- name: gender
+  type: VARCHAR
+- name: email_domain
+  type: VARCHAR
+- name: country
+  type: VARCHAR
+- name: city
+  type: VARCHAR
+- name: signup_date
+  type: VARCHAR
+- name: segment
+  type: VARCHAR

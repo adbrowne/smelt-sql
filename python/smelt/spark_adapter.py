@@ -57,6 +57,24 @@ class SparkAdapter:
         row = self.spark.sql(f"SELECT COUNT(*) AS cnt FROM {full_name}").collect()
         return row[0]["cnt"]
 
+    def load_arrow_table(self, parquet_path, full_table_name):
+        """Load a Parquet file written from Arrow batches into a Spark table.
+
+        Drops any existing table with the same name first, then reads the
+        Parquet file and saves as a managed table.
+
+        Args:
+            parquet_path: Local filesystem path to the Parquet file.
+            full_table_name: Fully-qualified table name, e.g. "catalog.schema.table".
+        """
+        # Drop the existing table if present.
+        if self.spark.catalog.tableExists(full_table_name):
+            self.spark.sql(f"DROP TABLE IF EXISTS {full_table_name}")
+
+        # Read the Parquet file and persist as a managed Spark table.
+        df = self.spark.read.parquet(parquet_path)
+        df.write.saveAsTable(full_table_name)
+
     def close(self):
         """Stop the Spark session."""
         self.spark.stop()

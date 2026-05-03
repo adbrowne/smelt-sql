@@ -10,7 +10,7 @@ SELECT
     country,
     COUNT(*) AS val_1,
     COUNT(DISTINCT user_id) AS val_2
-FROM smelt.models.refunds
+FROM smelt.refunds
 GROUP BY country
 HAVING COUNT(*) > 10
 

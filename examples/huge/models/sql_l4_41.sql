@@ -11,6 +11,6 @@ SELECT
     browser,
     segment,
     updated_at
-FROM smelt.models.sql_l3_148
+FROM smelt.sql_l3_148
 WHERE score >= 50
 

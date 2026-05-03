@@ -10,7 +10,7 @@ SELECT
     referrer,
     MAX(created_at) AS val_1,
     SUM(quantity) AS val_2
-FROM smelt.models.sql_l1_76
+FROM smelt.sql_l1_76
 GROUP BY referrer
 HAVING COUNT(*) > 10
 

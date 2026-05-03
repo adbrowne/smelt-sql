@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT user_id, status, page_path
-    FROM smelt.models.sql_l3_54
+    FROM smelt.sql_l3_54
     WHERE quantity > 0
 ),
 aggregated AS (

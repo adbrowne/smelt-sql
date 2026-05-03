@@ -11,6 +11,6 @@ SELECT
     discount,
     campaign_id,
     session_id
-FROM smelt.models.sql_l2_116
+FROM smelt.sql_l2_116
 WHERE country = 'US'
 

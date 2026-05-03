@@ -10,6 +10,6 @@ SELECT
     a.event_time,
     a.score,
     b.order_id
-FROM smelt.models.sql_l3_133 a
-INNER JOIN smelt.models.sql_l3_234 b ON a.user_id = b.user_id
+FROM smelt.sql_l3_133 a
+INNER JOIN smelt.sql_l3_234 b ON a.user_id = b.user_id
 

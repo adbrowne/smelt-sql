@@ -10,6 +10,6 @@ SELECT
     a.device_type,
     a.created_at,
     b.discount
-FROM smelt.models.subscriptions a
-LEFT JOIN smelt.models.subscriptions b ON a.user_id = b.user_id
+FROM smelt.subscriptions a
+LEFT JOIN smelt.subscriptions b ON a.user_id = b.user_id
 

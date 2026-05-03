@@ -10,5 +10,5 @@ SELECT
     status,
     referrer,
     RANK() OVER (PARTITION BY status ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l3_247
+FROM smelt.sql_l3_247
 

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, session_id, region
-    FROM smelt.models.sql_l3_238
+    FROM smelt.sql_l3_238
     WHERE score >= 50
 ),
 aggregated AS (

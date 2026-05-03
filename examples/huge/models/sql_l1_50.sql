@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT country, is_verified, browser
-    FROM smelt.models.errors
+    FROM smelt.errors
     WHERE platform = 'web'
 ),
 aggregated AS (

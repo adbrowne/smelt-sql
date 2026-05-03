@@ -1,7 +1,7 @@
 name: test_workspace
 version: 1
 
-model_paths:
+paths:
   - models
 
 targets:

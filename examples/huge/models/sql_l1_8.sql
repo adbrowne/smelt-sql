@@ -10,8 +10,8 @@ SELECT
     browser,
     updated_at,
     quantity
-FROM smelt.models.errors
+FROM smelt.errors
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.errors WHERE is_active = true
+    SELECT user_id FROM smelt.errors WHERE is_active = true
 )
 

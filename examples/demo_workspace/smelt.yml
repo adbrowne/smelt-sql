@@ -1,7 +1,7 @@
 name: demo_workspace
 version: 1
 
-model_paths:
+paths:
   - models/staging
   - models/intermediate
   - models/marts

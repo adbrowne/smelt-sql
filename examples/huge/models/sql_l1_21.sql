@@ -11,6 +11,6 @@ SELECT
     session_id,
     is_verified,
     quantity
-FROM smelt.models.shipments
+FROM smelt.shipments
 WHERE score >= 50
 

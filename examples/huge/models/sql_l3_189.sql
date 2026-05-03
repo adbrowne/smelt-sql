@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT created_at, country, session_id
-    FROM smelt.models.sql_l2_57
+    FROM smelt.sql_l2_57
     WHERE amount > 0
 ),
 aggregated AS (

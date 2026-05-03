@@ -10,5 +10,5 @@ SELECT
     cohort_date,
     quantity,
     LAG(amount, 1) OVER (PARTITION BY cohort_date ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l3_156
+FROM smelt.sql_l3_156
 

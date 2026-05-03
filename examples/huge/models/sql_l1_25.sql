@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cost, os_name, ip_address
-    FROM smelt.models.clicks
+    FROM smelt.clicks
     WHERE score >= 50
 ),
 aggregated AS (

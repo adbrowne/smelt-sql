@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT discount, event_time, rating
-    FROM smelt.models.sql_l3_205
+    FROM smelt.sql_l3_205
     WHERE quantity > 0
 )
 SELECT
     b.discount,
     AVG(duration_seconds) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l3_205 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l3_205 j ON b.user_id = j.user_id
 GROUP BY b.discount
 

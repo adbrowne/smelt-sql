@@ -10,8 +10,8 @@ SELECT
     user_id,
     cost,
     discount
-FROM smelt.models.sql_l1_189
+FROM smelt.sql_l1_189
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_14 WHERE status = 'active'
+    SELECT user_id FROM smelt.sql_l1_14 WHERE status = 'active'
 )
 

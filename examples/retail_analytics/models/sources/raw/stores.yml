@@ -1,0 +1,12 @@
+description: Store dimension table
+columns:
+- name: store_id
+  type: INTEGER
+- name: store_type
+  type: VARCHAR
+- name: region
+  type: VARCHAR
+- name: country
+  type: VARCHAR
+- name: store_size
+  type: VARCHAR

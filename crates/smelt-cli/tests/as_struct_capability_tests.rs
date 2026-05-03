@@ -80,9 +80,8 @@ fn project_active_backends_parses_targets_block() {
     let root = PathBuf::from("/fake/phase42_yml_parse");
     let smelt_yml = "name: phase42_yml_parse
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   prod:
@@ -123,9 +122,8 @@ smelt.define fn_default_backends(source: TableExpr) -> TableExpr AS (\n\
 
     let smelt_yml = "name: phase42_test4
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   prod:
@@ -175,9 +173,8 @@ smelt.define fn_explicit_clean(source: TableExpr) -> TableExpr AS (\n\
     // not surface the workspace's broader active set as a diagnostic.
     let smelt_yml = "name: phase42_test5
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   prod:
@@ -217,9 +214,8 @@ smelt.define fn_default_backends_ok(source: TableExpr) -> TableExpr AS (\n\
 
     let smelt_yml = "name: phase42_test4_clean
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   prod:

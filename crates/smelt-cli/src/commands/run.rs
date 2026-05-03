@@ -63,13 +63,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Discover seeds so they validate as `smelt.ref()` targets without a
     // sources.yml workaround (bug #2 in the 20260417 follow-up plan).
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    // Phase 5: use with_sidecars to pick up ephemeral materialization.
+    let seeds = smelt_core::discover_seed_infos_with_sidecars(&project_dir, &config.paths);
     if !seeds.is_empty() {
         info!("Discovered {} seed(s) as ref targets", seeds.len());
     }
 
     // 3. Discover models (SQL + Python)
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
@@ -112,8 +113,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     if models.is_empty() {
         return Err(anyhow::anyhow!(
-            "No models found in model paths: {}",
-            config.model_paths.join(", ")
+            "No models found in paths: {}",
+            config.paths.join(", ")
         ));
     }
 
@@ -450,7 +451,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .map(|name| (name.clone(), registry.target_config(name).schema.clone()))
         .collect();
 
-    let physical_graph = PhysicalGraphBuilder::new(
+    let mut physical_graph = PhysicalGraphBuilder::new(
         &graph,
         &transformations,
         time_range.clone(),
@@ -459,6 +460,32 @@ pub async fn run(args: RunArgs) -> Result<()> {
     )
     .build()
     .with_context(|| "Failed to build physical graph")?;
+
+    // Phase 5: inject ephemeral seed CTEs into the resolvers.
+    // For each ephemeral seed, read the CSV rows and build a VALUES CTE body.
+    {
+        let ephemeral_seeds: Vec<_> = seeds.iter().filter(|s| s.is_ephemeral()).collect();
+        if !ephemeral_seeds.is_empty() {
+            let mut seed_ctes: Vec<(String, String, String)> = Vec::new();
+            for seed in ephemeral_seeds {
+                // Read CSV rows for the VALUES body.
+                if let Ok((_headers, rows_iter)) = smelt_core::seeds::csv::read_csv(&seed.path) {
+                    let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
+                    let canonical_name = seed.address_segments.join("_");
+                    let col_names: Vec<&str> =
+                        seed.columns.iter().map(|(n, _)| n.as_str()).collect();
+                    // Build alias with column names for DuckDB named CTE:
+                    // __smelt_lookup_regions(region_id, region_name)
+                    let alias_with_cols =
+                        format!("__smelt_{}({})", canonical_name, col_names.join(", "));
+                    let cte_body =
+                        smelt_core::seeds::ephemeral::build_values_cte(&seed.columns, &rows);
+                    seed_ctes.push((canonical_name, alias_with_cols, cte_body));
+                }
+            }
+            physical_graph.add_ephemeral_seed_ctes_all_targets(seed_ctes);
+        }
+    }
 
     // Print planner summary
     let planner_summary = physical_graph.planner_summary();
@@ -510,7 +537,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         &type_db,
         &project_dir,
         &all_models,
-    ));
+    )?);
     compilers.set_upstream_schemas_all(upstream_schemas);
 
     // Wire `smelt.fn.*` function bodies through every compiler. Skipped when
@@ -626,6 +653,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }) {
         let model_name = &phys_node.name;
         let model = &phys_node.model_file;
+        // `db_table_name` is the qualified table name used for DB operations.
+        // For models in subdirectories, this is `segs.join("_")` (e.g.
+        // `staging_stg_events`), which matches the ref compiled by the SQL
+        // compiler (`main.staging_stg_events`). For flat models it equals
+        // `model_name`.
+        let db_table_name = model.db_name_owned();
         let backend = registry.get(&phys_node.target);
         let compiler = compilers.get(&phys_node.target);
         let schema = &registry.target_config(&phys_node.target).schema;
@@ -646,7 +679,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             );
 
             if use_alter {
-                if let Ok(true) = backend.table_exists(schema, model_name).await {
+                if let Ok(true) = backend.table_exists(schema, &db_table_name).await {
                     let inferred_columns = infer_deployed_columns(&type_db, model);
                     if !inferred_columns.is_empty() {
                         let (column_defaults, backfill_exprs) =
@@ -669,7 +702,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         match migration::check_and_migrate(
                             backend,
                             &file_store,
-                            model_name,
+                            &db_table_name,
                             &model.content,
                             schema,
                             &inferred_columns,
@@ -784,7 +817,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
                 executor::execute_plan_incremental(
                     backend,
-                    model_name,
+                    &db_table_name,
                     steps,
                     schema,
                     partition,
@@ -801,7 +834,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 // Cube split only (full refresh)
                 info!("Running model: {} (cube split)", model_name);
 
-                executor::execute_plan(backend, model_name, steps, schema, args.show_results)
+                executor::execute_plan(backend, &db_table_name, steps, schema, args.show_results)
                     .await
                     .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
@@ -1008,13 +1041,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
             let inferred_columns = infer_deployed_columns(&type_db, model);
             if !inferred_columns.is_empty() {
                 let existing_version = file_store
-                    .load_schema(model_name)
+                    .load_schema(&db_table_name)
                     .ok()
                     .flatten()
                     .map(|s| s.version);
                 if let Err(e) = migration::save_deployed_schema(
                     &file_store,
-                    model_name,
+                    &db_table_name,
                     &model.content,
                     &inferred_columns,
                     existing_version,

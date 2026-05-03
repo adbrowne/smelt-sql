@@ -10,7 +10,7 @@ SELECT
     ip_address,
     AVG(amount) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.models.sql_l3_180
+FROM smelt.sql_l3_180
 GROUP BY ip_address
 HAVING COUNT(*) > 10
 

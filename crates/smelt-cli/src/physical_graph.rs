@@ -73,6 +73,29 @@ impl PhysicalGraph {
             .unwrap_or_else(|| EMPTY.get_or_init(EphemeralResolver::empty))
     }
 
+    /// Inject ephemeral seed CTEs into all target ephemeral resolvers.
+    ///
+    /// Called after `build()` when ephemeral seeds have been discovered.
+    /// `seed_ctes` is a list of `(canonical_name, alias_with_cols, cte_body)` triples.
+    pub fn add_ephemeral_seed_ctes_all_targets(
+        &mut self,
+        seed_ctes: Vec<(String, String, String)>,
+    ) {
+        if seed_ctes.is_empty() {
+            return;
+        }
+        // Ensure there's a resolver for every target (create empty ones if needed).
+        let all_targets: Vec<String> = self.nodes.values().map(|n| n.target.clone()).collect();
+        let targets: std::collections::HashSet<String> = all_targets.into_iter().collect();
+        for target in targets {
+            let resolver = self
+                .ephemeral_resolvers
+                .entry(target)
+                .or_insert_with(EphemeralResolver::empty);
+            resolver.add_seed_ctes(seed_ctes.clone());
+        }
+    }
+
     /// Iterate over physical nodes in execution order.
     pub fn iter_in_order(&self) -> impl Iterator<Item = &PhysicalNode> {
         self.execution_order
@@ -173,6 +196,7 @@ fn apply_ref_redirects(model_file: &ModelFile, redirects: &HashMap<String, Strin
         parse_errors: model_file.parse_errors.clone(),
         metadata: model_file.metadata.clone(),
         kind: model_file.kind.clone(),
+        address_segments: model_file.address_segments.clone(),
     }
 }
 
@@ -413,6 +437,7 @@ impl<'a> PhysicalGraphBuilder<'a> {
                 parse_errors: Vec::new(),
                 metadata: None,
                 kind: ModelKind::Sql,
+                address_segments: vec![name.clone()],
             };
 
             // Insert synthetic node into execution order respecting dependencies.
@@ -630,6 +655,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: ModelKind::Sql,
+            address_segments: vec![name.to_string()],
         }
     }
 
@@ -651,8 +677,7 @@ mod tests {
         Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),

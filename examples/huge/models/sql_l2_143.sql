@@ -10,5 +10,5 @@ SELECT
     os_name,
     event_time,
     ROW_NUMBER() OVER (PARTITION BY os_name ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l1_137
+FROM smelt.sql_l1_137
 

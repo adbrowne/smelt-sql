@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT transaction_id, campaign_id, created_at
-    FROM smelt.models.sql_l2_205
+    FROM smelt.sql_l2_205
     WHERE amount > 0
 ),
 aggregated AS (

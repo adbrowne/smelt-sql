@@ -2,8 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use smelt_bench::model_gen::{generate_workspace, GraphSpec};
 
 fn bench_parse_simple(c: &mut Criterion) {
-    let sql =
-        "SELECT user_id, event_time, amount FROM smelt.models.events WHERE status = 'active'\n";
+    let sql = "SELECT user_id, event_time, amount FROM smelt.events WHERE status = 'active'\n";
 
     c.bench_function("parse_simple_sql", |b| {
         b.iter(|| {
@@ -15,7 +14,7 @@ fn bench_parse_simple(c: &mut Criterion) {
 fn bench_parse_complex(c: &mut Criterion) {
     let sql = r#"WITH filtered AS (
     SELECT user_id, event_time, amount, category
-    FROM smelt.models.events
+    FROM smelt.events
     WHERE status = 'active'
       AND event_time >= '2024-01-01'
 ),
@@ -40,7 +39,7 @@ SELECT
     a.avg_amount,
     ROW_NUMBER() OVER (PARTITION BY a.category ORDER BY a.total_amount DESC) AS rank_in_category
 FROM aggregated a
-INNER JOIN smelt.models.users u ON a.user_id = u.user_id
+INNER JOIN smelt.users u ON a.user_id = u.user_id
 WHERE u.is_active = true
 ORDER BY a.total_amount DESC
 LIMIT 1000

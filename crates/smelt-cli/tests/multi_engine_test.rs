@@ -47,8 +47,7 @@ fn make_config_with_targets(targets: HashMap<String, Target>) -> Config {
     Config {
         name: "test".to_string(),
         version: 1,
-        model_paths: vec!["models".to_string()],
-        seed_paths: vec!["seeds".to_string()],
+        paths: vec!["models".to_string()],
         targets,
         default_materialization: Materialization::View,
         models: HashMap::new(),
@@ -75,6 +74,7 @@ fn make_model_file(name: &str, sql: &str) -> ModelFile {
         metadata: None,
         kind: ModelKind::Sql,
         model_id: smelt_core::ModelId::from_path(format!("models/{}.sql", name).into()),
+        address_segments: vec![name.to_string()],
     }
 }
 
@@ -83,7 +83,7 @@ fn make_model_file(name: &str, sql: &str) -> ModelFile {
 #[test]
 fn test_logical_graph_cross_engine_edges() {
     let upstream_sql = "SELECT 1 as id, 'hello' as name";
-    let downstream_sql = "SELECT * FROM smelt.models.upstream_model";
+    let downstream_sql = "SELECT * FROM smelt.upstream_model";
 
     let models = vec![
         make_model_file("upstream_model", upstream_sql),
@@ -123,7 +123,7 @@ fn test_logical_graph_cross_engine_edges() {
 fn test_logical_graph_no_cross_engine_edges_same_target() {
     let models = vec![
         make_model_file("model_a", "SELECT 1 as id"),
-        make_model_file("model_b", "SELECT * FROM smelt.models.model_a"),
+        make_model_file("model_b", "SELECT * FROM smelt.model_a"),
     ];
 
     let mut targets = HashMap::new();
@@ -145,7 +145,7 @@ fn test_logical_graph_no_cross_engine_edges_same_target() {
 
 #[test]
 fn test_compiler_cross_engine_ref_emits_read_parquet() {
-    let sql = "SELECT * FROM smelt.models.spark_model";
+    let sql = "SELECT * FROM smelt.spark_model";
     let model = make_model_file("duckdb_consumer", sql);
 
     let mut targets = HashMap::new();
@@ -188,8 +188,8 @@ fn test_compiler_cross_engine_ref_emits_read_parquet() {
 fn test_compiler_cross_engine_mixed_refs() {
     let sql = r#"
 SELECT a.id, b.name
-FROM smelt.models.local_model a
-JOIN smelt.models.spark_model b ON a.id = b.id
+FROM smelt.local_model a
+JOIN smelt.spark_model b ON a.id = b.id
 "#;
     let model = make_model_file("mixed_consumer", sql);
 
@@ -335,7 +335,7 @@ async fn test_cross_engine_end_to_end_compile_and_execute() {
     visitors,
     sessions,
     ROUND(CAST(sessions AS DOUBLE) / CAST(visitors AS DOUBLE), 2) as session_rate
-FROM smelt.models.visitor_daily"#;
+FROM smelt.visitor_daily"#;
 
     let model = make_model_file("daily_metrics", model_sql);
 
@@ -451,7 +451,7 @@ fn test_multi_engine_example_parses() {
     let config: Config =
         serde_yaml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery.discover_models().unwrap();
 
     assert!(

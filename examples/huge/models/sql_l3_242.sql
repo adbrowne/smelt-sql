@@ -6,9 +6,9 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT quantity, channel, session_id, 'source_0' AS source_tag FROM smelt.models.sql_l2_42
+SELECT quantity, channel, session_id, 'source_0' AS source_tag FROM smelt.sql_l2_42
 UNION ALL
-SELECT quantity, channel, session_id, 'source_1' AS source_tag FROM smelt.models.sql_l2_175
+SELECT quantity, channel, session_id, 'source_1' AS source_tag FROM smelt.sql_l2_175
 UNION ALL
-SELECT quantity, channel, session_id, 'source_2' AS source_tag FROM smelt.models.sql_l2_33
+SELECT quantity, channel, session_id, 'source_2' AS source_tag FROM smelt.sql_l2_33
 

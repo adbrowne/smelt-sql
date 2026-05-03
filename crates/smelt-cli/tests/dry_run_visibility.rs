@@ -35,7 +35,7 @@ fn write_smelt_yml(dir: &Path, name: &str) {
     let yml = format!(
         "name: {name}\n\
          version: 1\n\
-         model_paths:\n  - models\n\
+         paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: view\n"
     );
@@ -83,9 +83,8 @@ fn dry_run_surfaces_unresolved_ref_errors() {
     let workspace = stage_workspace(
         &tmp,
         "broken_dry_run",
-        // Phase 4: use path form smelt.models.does_not_exist instead of
-        // smelt.models.does_not_exist — the legacy form now produces a parse error.
-        &[("bad.sql", "SELECT * FROM smelt.models.does_not_exist\n")],
+        // Use path form: smelt.does_not_exist (scan-root stripped, no "models" prefix).
+        &[("bad.sql", "SELECT * FROM smelt.does_not_exist\n")],
     );
 
     let output = run_dry_run(&workspace, true);
@@ -122,8 +121,8 @@ fn dry_run_prints_planned_sql_per_model() {
         "valid_dry_run",
         &[
             ("base.sql", "SELECT 1 AS x\n"),
-            // Phase 4: use path form instead of smelt.models.base.
-            ("derived.sql", "SELECT x + 1 AS y FROM smelt.models.base\n"),
+            // Use path form: smelt.base (scan-root stripped, no "models" prefix).
+            ("derived.sql", "SELECT x + 1 AS y FROM smelt.base\n"),
         ],
     );
 

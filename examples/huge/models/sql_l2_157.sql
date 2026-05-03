@@ -10,8 +10,8 @@ SELECT
     page_path,
     referrer,
     ip_address
-FROM smelt.models.sql_l1_127
+FROM smelt.sql_l1_127
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_63 WHERE score >= 50
+    SELECT user_id FROM smelt.sql_l1_63 WHERE score >= 50
 )
 

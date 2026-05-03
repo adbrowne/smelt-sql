@@ -11,7 +11,7 @@ SELECT
     b.referrer,
     c.os_name,
     c.cost
-FROM smelt.models.payments a
-INNER JOIN smelt.models.payments b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.payments c ON a.user_id = c.user_id
+FROM smelt.payments a
+INNER JOIN smelt.payments b ON a.user_id = b.user_id
+LEFT JOIN smelt.payments c ON a.user_id = c.user_id
 

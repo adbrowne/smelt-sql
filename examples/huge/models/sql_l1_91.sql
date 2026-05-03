@@ -10,6 +10,6 @@ SELECT
     a.platform,
     a.created_at,
     b.amount
-FROM smelt.models.signups a
-INNER JOIN smelt.models.signups b ON a.user_id = b.user_id
+FROM smelt.signups a
+INNER JOIN smelt.signups b ON a.user_id = b.user_id
 

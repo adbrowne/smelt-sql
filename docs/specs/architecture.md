@@ -45,7 +45,7 @@ Each crate has a single job; downstream crates depend on it but never the revers
 | `smelt-planner`        | sync               | Model-graph transforms; rule-based optimization              |
 | `smelt-lsp`            | async (tower-lsp)  | Thin async shell over sync Salsa queries                     |
 | `smelt-cli`            | async (entry point) | CLI surface, model discovery, dialect selection — async because the entry point drives the async execution stage |
-| `smelt-backend`        | async              | `Backend` trait, `ExecutionResult`                           |
+| `smelt-backend`        | async              | `Backend` trait (see "Backend trait surface" below), `ExecutionResult` |
 | `smelt-backend-duckdb` | async              | DuckDB execution                                             |
 | `smelt-backend-spark`  | async              | Spark execution                                              |
 | `smelt-state`          | sync               | `RunManifest`, `IntervalStore`, `FileStore`                  |
@@ -73,16 +73,18 @@ Every project-defined entity — model, function, seed, source, test — is addr
 - `smelt.<path>` — value reference (used in `FROM` position, as a `TableExpr`-typed argument, etc.)
 - `smelt.<path>(<args>)` — call (used for functions and parameterised models)
 
-The path is the workspace-relative directory joined with the entity's leaf name, segments separated by `.`. Examples (assuming the recommended layout):
+The path is the workspace-relative directory joined with the entity's leaf name, **with the matching `paths:` scan-root prefix stripped**, segments separated by `.`. Examples (assuming `paths: ["models"]` and the recommended layout):
 
-| Filesystem location                                       | Reference syntax                                  |
+| Filesystem location                                       | Reference syntax (scan-root stripped)             |
 |-----------------------------------------------------------|---------------------------------------------------|
-| `models/marts/customers.sql` (lone bare SELECT)           | `smelt.models.marts.customers`                    |
-| `models/marts/file.sql` containing `name: customers`      | `smelt.models.marts.customers`                    |
+| `models/marts/customers.sql` (lone bare SELECT)           | `smelt.marts.customers`                           |
+| `models/marts/file.sql` containing `name: customers`      | `smelt.marts.customers`                           |
 | `functions/patterns/x.sql` declaring `session_rollup`     | `smelt.functions.patterns.session_rollup(...)`    |
-| `seeds/raw/users.csv`                                     | `smelt.seeds.raw.users`                           |
-| `sources/raw/events.yml`                                  | `smelt.sources.raw.events`                        |
+| `seeds/raw/users.csv`                                     | `smelt.raw.users`                                 |
+| `sources/raw/events.yml`                                  | `smelt.raw.events`                                |
 | `tests/marts/customers.sql` declaring `customers_no_nulls` | `smelt.tests.marts.customers_no_nulls`           |
+
+Note: `functions/`, `sources/`, and `tests/` are discovered via their own dedicated scan paths and are **not** in the `paths:` list by default; their scan-root prefix is not stripped (they keep their full workspace-relative path as the address). Only directories listed in `paths:` have their prefix stripped.
 
 **Kind is determined by file format and content, not by syntactic prefix.** When the resolver reaches a path:
 
@@ -90,15 +92,44 @@ The path is the workspace-relative directory joined with the entity's leaf name,
 - A `.sql` file declaring `smelt.define <name>` → **function** (callable with arguments).
 - A `.sql` file declaring `smelt.test <name>` → **test** (executable assertion; addressable for tooling but **not** valid in `TableExpr` positions — using a `smelt.tests.*` path in `FROM` is a kind-mismatch error).
 - A `.csv` file → **seed**.
-- A `.yml` file declaring an external table → **source**.
+- A `.yml` file with **no** sibling `.csv` (same directory, same stem) → **source** (externally-managed table; smelt declares its schema, does not load it).
+- A `.yml` file **with** a sibling `.csv` (same directory, same stem) → **sidecar** to that seed; binds schema / column descriptions / `materialization` to the seed and is not itself an addressable entity.
 
 A `.sql` file may mix declaration kinds — a model with co-located tests, a function with co-located tests — provided names are unique within the file. A given path resolves to at most one kind. Names must be unique within a directory across all kinds — a `data/users.csv` and `data/users.sql` is a workspace-load error.
+
+**Address uniqueness is global across `paths:`.** When `smelt.yml::paths` lists multiple roots (e.g. `paths: ["models", "fixtures"]`), the scan-root prefix is stripped from each independently and addresses share a single namespace. Two files that resolve to the same `smelt.<path>` — e.g. `models/users.csv` and `fixtures/users.csv` — are a hard workspace-load error. The rule is "one path → one entity" regardless of which scan root the file lives under.
 
 **Externs are flat.** `smelt.extern` declarations register a bare name in the workspace-wide builtin/extern namespace and are *not* addressed via `smelt.<path>`. A `smelt.extern read_parquet(...)` declared in `functions/io/parquet.sql` is callable everywhere as `read_parquet(...)`. The path of the declaring file affects only navigation (jump-to-definition), never the call surface. This is the one documented exception to the universal addressing scheme; externs exist precisely to extend the bare-name builtin namespace, and a path-prefixed extern would defeat that purpose.
 
 **File kind is grammar, not location.** `data/foo.sql` containing a bare SELECT is a model addressable as `smelt.data.foo`; `random/x.sql` declaring `smelt.define helper(...)` is callable as `smelt.random.helper(...)` (the filename stem is not a path component). The recommended layout is convention; the resolver only cares about path and content.
 
 **Bare-model naming.** A `.sql` file may contain any number of bare-SELECT models. A file's *lone* bare SELECT takes its leaf name from the filename and **must not** declare `name:` in its frontmatter. In a file with two or more bare SELECTs, each bare SELECT **must** declare `name:` in its frontmatter; the filename ceases to register as a model name and becomes purely a container. The model's full path is the directory path joined with the leaf name. Names within a file must be unique across bare SELECTs, `smelt.define`s, `smelt.extern`s, and `smelt.test`s.
+
+### Default materialization name mapping
+
+A persisted entity addressed as `smelt.<path>` materialises by default at:
+
+- **Schema** = the active target's `schema:` (from `smelt.yml::targets.<name>.schema`, default `main`).
+- **Table** = address path joined with `_`. Underscores already in path components are preserved as-is (no escaping, since path components come from filesystem-safe identifiers already).
+
+| Address | Default DB location (target schema = `main`) |
+|---|---|
+| `smelt.users` | `main.users` |
+| `smelt.staging.orders` | `main.staging_orders` |
+| `smelt.payments.seeds.lookup.regions` | `main.payments_seeds_lookup_regions` |
+
+This rule provides the **default** DB location for every entity referenced by a path that needs to resolve to a table-like database object: models with `materialization: table` / `view` / `materialized_view`, seeds with `materialization: table`, and sources (which need a target name for `FROM`-clause emission even though smelt does not load them).
+
+It does **not** apply to entities that never resolve to a database object:
+
+- `smelt.define` functions (inlined; never persisted).
+- Ephemeral models / seeds (inlined as CTE / `VALUES`; never persisted).
+- Externs and built-ins (no path).
+
+Per-entity overrides are kind-specific:
+
+- **Sources** may override the default via the YAML `name:` key (`sources.md`) — the external pipeline names the table, smelt records it.
+- **Seeds and models** cannot override individually today; the rule is mandatory. A future configurable mapping (per-entity overrides, an analogue of dbt's `generate_schema_name` / `generate_alias_name`) lifts this restriction.
 
 ### Unified frontmatter rule
 
@@ -123,7 +154,7 @@ The model
 materialization: table
 ---
 SELECT revenue - cost AS margin
-FROM smelt.models.product_summary
+FROM smelt.product_summary
 ```
 
 is equivalent to the parameterised form
@@ -131,14 +162,14 @@ is equivalent to the parameterised form
 ```sql
 -- models/margins.sql
 smelt.define margins(
-    product_summary: TableExpr = smelt.models.product_summary
+    product_summary: TableExpr = smelt.product_summary
 ) -> TableExpr AS (
     SELECT revenue - cost AS margin
     FROM product_summary
 )
 ```
 
-(both are addressable as `smelt.models.margins`)
+(both are addressable as `smelt.margins` when `paths: ["models"]`)
 
 #### Two orthogonal axes
 
@@ -158,7 +189,7 @@ The taxonomy of current concepts:
 | Ephemeral model            | transparent  | inline (CTE)    | DAG-default             |
 | `smelt.define` function    | transparent  | inline (expansion) | explicit             |
 | `smelt.extern` / built-in  | black-box    | inline          | engine- / user-declared signature |
-| Source                     | black-box    | external        | schema from `sources.yml` or catalog |
+| Source                     | black-box    | external        | schema from per-entity source YAML or catalog |
 
 #### Normative rules
 
@@ -168,6 +199,18 @@ The taxonomy of current concepts:
 4. **The planner's optimization boundary aligns with transparency, not materialization.** The planner reasons across every transparent boundary — model-to-model and call-to-callee — and treats every black-box boundary (`smelt.extern`, built-ins, sources) as atomic. See `planner_integration.md` for how frontmatter properties drive that reasoning.
 
 The function half of the equivalence — `smelt.define` grammar, frontmatter keys, `PASSING`, `smelt.as_struct`, fragment-sort parameters, the cycle/recursion/overload rules — is specified in `functions.md` and is not duplicated here.
+
+### Backend trait surface
+
+The `Backend` trait is the contract every execution backend implements. The minimal surface every backend must provide:
+
+| Method | Purpose |
+|---|---|
+| `execute_sql(sql) -> RecordBatch[]` | Run an arbitrary SQL statement; return Arrow batches. The primary execution path. |
+| `drop_table_if_exists(schema, name)` / `drop_view_if_exists(schema, name)` | Type-aware drops. DuckDB rejects `DROP TABLE` against a view (and vice-versa); these helpers paper over that. |
+| `load_table(schema, name, arrow_schema, batches)` | Cross-backend Arrow ingest path. Used by seed loading and (future) any other "build a table from in-memory data" surface. DuckDB implements via `Appender`; Spark via `createDataFrame(...).saveAsTable(...)`. |
+
+Trait methods grow as new ingest / introspection paths land; the minimum a backend has to implement is the four above. The trait is `async`; backends are responsible for their own connection lifecycle.
 
 ### `Transformation` and `ExecutionStep` (planner output)
 

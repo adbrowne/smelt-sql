@@ -10,6 +10,6 @@ SELECT
     a.discount,
     a.plan_type,
     b.category
-FROM smelt.models.campaigns a
-INNER JOIN smelt.models.campaigns b ON a.user_id = b.user_id
+FROM smelt.campaigns a
+INNER JOIN smelt.campaigns b ON a.user_id = b.user_id
 

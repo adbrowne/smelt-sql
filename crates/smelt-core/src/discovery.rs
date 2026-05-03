@@ -40,21 +40,21 @@ impl ModelFile {
 
 pub struct ModelDiscovery {
     project_root: PathBuf,
-    model_paths: Vec<String>,
+    paths: Vec<String>,
 }
 
 impl ModelDiscovery {
-    pub fn new(project_root: PathBuf, model_paths: Vec<String>) -> Self {
+    pub fn new(project_root: PathBuf, paths: Vec<String>) -> Self {
         Self {
             project_root,
-            model_paths,
+            paths,
         }
     }
 
     pub fn discover_models(&self) -> Result<Vec<ModelFile>> {
         let mut models = Vec::new();
 
-        for model_path in &self.model_paths {
+        for model_path in &self.paths {
             let search_path = self.project_root.join(model_path);
 
             if !search_path.exists() {
@@ -78,8 +78,8 @@ impl ModelDiscovery {
 
         if models.is_empty() {
             return Err(anyhow!(
-                "No models found in model paths: {}",
-                self.model_paths.join(", ")
+                "No models found in paths: {}",
+                self.paths.join(", ")
             ));
         }
 

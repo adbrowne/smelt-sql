@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT campaign_id, is_active, segment
-    FROM smelt.models.sql_l3_176
+    FROM smelt.sql_l3_176
     WHERE category IS NOT NULL
 ),
 aggregated AS (

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT amount, rating, category
-    FROM smelt.models.sql_l3_116
+    FROM smelt.sql_l3_116
     WHERE is_active = true
 ),
 aggregated AS (

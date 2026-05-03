@@ -10,5 +10,5 @@ SELECT
     channel,
     country,
     LAG(amount, 1) OVER (PARTITION BY channel ORDER BY created_at) AS win_val
-FROM smelt.models.signups
+FROM smelt.signups
 

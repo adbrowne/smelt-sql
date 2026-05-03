@@ -11,5 +11,5 @@ SELECT
     p.weight_grams / 1000.0 AS weight_kg,
     CASE WHEN p.is_digital THEN 'Digital' ELSE 'Physical' END AS product_type
 FROM smelt.sources.raw.products AS p
-LEFT JOIN smelt.seeds.category_hierarchy AS ch ON p.category_code = ch.category_code
+LEFT JOIN smelt.category_hierarchy AS ch ON p.category_code = ch.category_code
 

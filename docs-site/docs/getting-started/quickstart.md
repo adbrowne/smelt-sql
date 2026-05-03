@@ -26,8 +26,7 @@ targets:
     | `name` | yes | — |
     | `version` | no | `1` |
     | `targets` | yes | — |
-    | `model_paths` | no | `["models"]` |
-    | `seed_paths` | no | `["seeds"]` |
+    | `paths` | no | `["models"]` |
     | `default_materialization` | no | `"view"` |
     | `unstable_schema` | no | `false` |
 

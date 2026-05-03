@@ -13,6 +13,6 @@ SELECT
     AVG(amount) AS agg_2,
     COUNT(*) AS agg_3,
     SUM(quantity) AS agg_4
-FROM smelt.models.sql_l3_79
+FROM smelt.sql_l3_79
 GROUP BY event_date
 

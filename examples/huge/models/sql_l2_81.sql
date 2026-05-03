@@ -10,7 +10,7 @@ SELECT
     event_type,
     AVG(amount) AS val_1,
     AVG(duration_seconds) AS val_2
-FROM smelt.models.sql_l1_88
+FROM smelt.sql_l1_88
 GROUP BY event_type
 HAVING COUNT(*) > 10
 

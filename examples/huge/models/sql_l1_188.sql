@@ -10,6 +10,6 @@ SELECT
     a.product_id,
     a.os_name,
     b.discount
-FROM smelt.models.clicks a
-INNER JOIN smelt.models.clicks b ON a.user_id = b.user_id
+FROM smelt.clicks a
+INNER JOIN smelt.clicks b ON a.user_id = b.user_id
 

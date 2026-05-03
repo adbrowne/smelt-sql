@@ -10,6 +10,6 @@ SELECT
     DATE_TRUNC('week', event_time) AS period,
     SUM(revenue) AS metric_1,
     SUM(quantity) AS metric_2
-FROM smelt.models.campaigns
+FROM smelt.campaigns
 GROUP BY DATE_TRUNC('week', event_time)
 

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT ip_address, segment, os_name
-    FROM smelt.models.sql_l1_47
+    FROM smelt.sql_l1_47
     WHERE quantity > 0
 ),
 aggregated AS (

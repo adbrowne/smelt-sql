@@ -1,0 +1,11 @@
+columns:
+- name: session_id
+  type: VARCHAR
+- name: user_id
+  type: INTEGER
+- name: duration_seconds
+  type: INTEGER
+- name: page_path
+  type: VARCHAR
+- name: created_at
+  type: TIMESTAMP

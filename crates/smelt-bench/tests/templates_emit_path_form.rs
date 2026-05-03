@@ -1,11 +1,13 @@
-//! Phase 2c — bench template tests: verify templates emit path syntax.
+//! Phase 2c — bench template tests: verify templates emit scan-root-stripped path syntax.
 //!
 //! Test 8: `sql_templates_emit_path_syntax`
 //!   - `generate_sql` must NOT produce `smelt.ref(` in its output.
-//!   - `generate_sql` MUST produce `smelt.models.` in its output.
+//!   - `generate_sql` must NOT produce `smelt.models.` in its output (old prefix form).
+//!   - `generate_sql` MUST produce `smelt.` in its output (scan-root-stripped form).
 //!
 //! Similarly for Python templates:
 //!   - `generate_python` must NOT produce `smelt.ref(` in any emitted string.
+//!   - `generate_python` must NOT produce `smelt.models.` in any emitted string.
 
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
@@ -34,11 +36,15 @@ fn sql_templates_emit_path_syntax() {
 
         assert!(
             !sql.contains("smelt.ref("),
-            "Template {i} must NOT contain 'smelt.ref(' (legacy form); got:\n{sql}"
+            "Template {i} must NOT contain 'smelt.ref(' (legacy call form); got:\n{sql}"
         );
         assert!(
-            sql.contains("smelt.models."),
-            "Template {i} must contain 'smelt.models.' (path form); got:\n{sql}"
+            !sql.contains("smelt.models."),
+            "Template {i} must NOT contain 'smelt.models.' (old prefixed form); got:\n{sql}"
+        );
+        assert!(
+            sql.contains("smelt."),
+            "Template {i} must contain 'smelt.' (scan-root-stripped path form); got:\n{sql}"
         );
     }
 }
@@ -92,11 +98,15 @@ fn python_templates_emit_path_syntax() {
 
         assert!(
             !py.contains("smelt.ref("),
-            "Python template {i} must NOT contain 'smelt.ref(' (legacy form); got:\n{py}"
+            "Python template {i} must NOT contain 'smelt.ref(' (legacy call form); got:\n{py}"
         );
         assert!(
-            py.contains("smelt.models."),
-            "Python template {i} must contain 'smelt.models.' (path form); got:\n{py}"
+            !py.contains("smelt.models."),
+            "Python template {i} must NOT contain 'smelt.models.' (old prefixed form); got:\n{py}"
+        );
+        assert!(
+            py.contains("smelt."),
+            "Python template {i} must contain 'smelt.' (scan-root-stripped path form); got:\n{py}"
         );
     }
 }

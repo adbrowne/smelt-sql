@@ -11,6 +11,6 @@ SELECT
     device_type,
     quantity,
     event_time
-FROM smelt.models.sql_l3_5
+FROM smelt.sql_l3_5
 WHERE quantity > 0
 

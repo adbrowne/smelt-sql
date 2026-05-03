@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT channel, is_verified, category
-    FROM smelt.models.sql_l2_143
+    FROM smelt.sql_l2_143
     WHERE status = 'active'
 ),
 aggregated AS (

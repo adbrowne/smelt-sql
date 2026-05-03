@@ -11,6 +11,6 @@ SELECT
     event_type,
     cohort_date,
     rating
-FROM smelt.models.sql_l2_151
+FROM smelt.sql_l2_151
 WHERE status = 'active'
 

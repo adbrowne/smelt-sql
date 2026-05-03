@@ -10,8 +10,8 @@ SELECT
     status,
     page_path,
     created_at
-FROM smelt.models.categories
+FROM smelt.categories
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.categories WHERE quantity > 0
+    SELECT user_id FROM smelt.categories WHERE quantity > 0
 )
 

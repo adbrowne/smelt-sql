@@ -10,8 +10,8 @@ SELECT
     duration_seconds,
     platform,
     order_id
-FROM smelt.models.sql_l2_200
+FROM smelt.sql_l2_200
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_31 WHERE is_active = true
+    SELECT user_id FROM smelt.sql_l2_31 WHERE is_active = true
 )
 

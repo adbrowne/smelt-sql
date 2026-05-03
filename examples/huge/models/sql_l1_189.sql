@@ -10,7 +10,7 @@ SELECT
     is_active,
     MIN(created_at) AS val_1,
     AVG(duration_seconds) AS val_2
-FROM smelt.models.clicks
+FROM smelt.clicks
 GROUP BY is_active
 HAVING COUNT(*) > 10
 

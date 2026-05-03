@@ -64,25 +64,33 @@ impl LogicalGraph {
             }
         }
 
-        // Build seed name set so `smelt.models.<seed>` validates without a
+        // Build seed name set so `smelt.<seed>` validates without a
         // sources.yml workaround. Mirrors `smelt-db::resolve_ref` (Phase 6),
         // which the CLI dependency validator was previously missing.
         let seed_set: HashSet<String> = seeds.iter().map(|s| s.name.clone()).collect();
 
         for model in models {
-            // Extract model-to-model deps from Path-form refs. Non-model
-            // paths (seeds, sources, functions) produce first segment ≠
-            // "models" and are skipped.
+            // Extract model-to-model deps from Path-form refs.
+            //
+            // Phase 2 (unified-paths): after scan-root stripping, model refs
+            // have the form `smelt.<leaf>` or `smelt.<dir>.<leaf>` — no
+            // "models" prefix. Exclude only known non-model namespaces:
+            //   - "sources" (smelt.sources.schema.table)
+            //   - "functions" (smelt.functions.fn_name(...))
+            //
+            // All other paths are potential model/seed deps; `validate()` will
+            // flag any that don't appear in nodes, sources, or seeds.
             let deps: Vec<String> = model
                 .refs
                 .iter()
                 .filter_map(|r| {
                     let path = r.smelt_ref.to_path();
-                    if path.first().map(|s| s.as_str()) == Some("models") && path.len() >= 2 {
-                        path.last().cloned()
-                    } else {
-                        None
+                    let first = path.first().map(|s| s.as_str());
+                    // Skip well-known non-model namespaces.
+                    if matches!(first, Some("sources") | Some("functions")) {
+                        return None;
                     }
+                    path.last().cloned()
                 })
                 .collect();
             let metadata = model.metadata.as_ref().map(|b| b.as_ref());
@@ -485,6 +493,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: ModelKind::Sql,
+            address_segments: vec![name.to_string()],
         }
     }
 
@@ -521,6 +530,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata,
             kind: ModelKind::Sql,
+            address_segments: vec![name.to_string()],
         }
     }
 
@@ -542,8 +552,7 @@ mod tests {
         Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),
@@ -684,6 +693,8 @@ mod tests {
             name: name.to_string(),
             path: format!("seeds/{}.csv", name).into(),
             columns: Vec::new(),
+            address_segments: vec![name.to_string()],
+            sidecar: None,
         }
     }
 

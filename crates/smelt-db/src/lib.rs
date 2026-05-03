@@ -54,7 +54,9 @@ pub use type_inference::{
 };
 
 // Source types re-exported from smelt-core
-pub use smelt_core::{SeedInfo, SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
+pub use smelt_core::{
+    SeedInfo, SourceColumn, SourceColumnDef, SourceDef, SourceInfo, SourceTableDef, SourcesConfig,
+};
 
 // ============================================================================
 // Salsa inputs
@@ -435,6 +437,11 @@ pub enum DiagnosticCode {
     /// at the path-form ref's text range. Introduced in Phase 2a of the
     /// smelt-`<path>` migration (architecture Surface §"Resolution").
     KindMismatch,
+    /// Emitted (Warning) for a seed CSV file that has no sibling `.yml`
+    /// sidecar. Schema is inferred at compile time from the first 100 rows
+    /// and may drift when the CSV changes. Resolve by adding a sidecar.
+    /// Introduced in Phase 7 of the seeds plan.
+    MissingSeedSidecar,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -471,6 +478,13 @@ pub enum DiagnosticData {
     /// `data` payload — the diagnostic's primary `message` and `range` are
     /// unaffected.
     ExpansionFrames(Vec<smelt_types::FrameInfo>),
+    /// Attached to `MissingSeedSidecar` diagnostics. Carries the CSV path
+    /// and the expected sidecar path so the code-action provider can create
+    /// the sibling `.yml` without re-deriving it from the diagnostic range.
+    MissingSeedSidecar {
+        csv_path: std::path::PathBuf,
+        sidecar_path: std::path::PathBuf,
+    },
 }
 
 /// Represents a diagnostic (error, warning, info)
@@ -678,10 +692,29 @@ pub fn project_active_backends(
 #[salsa::tracked]
 pub fn project_seeds(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SeedInfo>> {
     let project_root = project.root(db).clone();
-    let seed_paths = smelt_core::Config::load(&project_root)
-        .map(|c| c.seed_paths)
-        .unwrap_or_else(|_| vec!["seeds".to_string()]);
-    Arc::new(smelt_core::discover_seed_infos(&project_root, &seed_paths))
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+    // Phase 5: use with_sidecars so ephemeral materialization is tracked.
+    Arc::new(smelt_core::discover_seed_infos_with_sidecars(
+        &project_root,
+        &paths,
+    ))
+}
+
+/// Discover per-entity source YAML files for a project root.
+///
+/// Phase 6: sources live as standalone `.yml` files (no sibling `.csv`) under
+/// the project's `paths:` directories. The query is keyed on `ProjectInput`
+/// so it re-runs when `smelt.yml` changes (e.g. `paths:` updated) but not on
+/// every source file change (LSP restarts are acceptable for source changes).
+#[salsa::tracked]
+pub fn project_sources(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SourceInfo>> {
+    let project_root = project.root(db).clone();
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+    Arc::new(smelt_core::discover_source_infos(&project_root, &paths))
 }
 
 #[salsa::tracked]
@@ -1176,6 +1209,17 @@ pub fn function_body_diagnostics_for_file(
     // This is the body-cascade variant — when a Tier 2 body contains a
     // `smelt.<dir>.<name>(...)` call, we need to enforce the same path-prefix
     // rule. Builds an identical validator over the workspace's files.
+    //
+    // Phase 2 (unified-paths): strip the matching scan-root prefix from the
+    // file's directory so that a function in `models/fn.sql` is addressable
+    // as `smelt.fn_name()` (empty dir_segments) rather than requiring
+    // `smelt.models.fn_name()`.
+    let scan_roots_for_body: Vec<String> = {
+        let proj_root = file.project_root(db).clone();
+        smelt_core::Config::load(&proj_root)
+            .map(|c| c.paths)
+            .unwrap_or_default()
+    };
     let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
         for f in &files {
             let sigs = file_signature_inputs(db, *f);
@@ -1187,14 +1231,16 @@ pub fn function_body_diagnostics_for_file(
             let Ok(rel) = abs_path.strip_prefix(proj_root) else {
                 continue;
             };
-            let file_dir_segments: Vec<String> = rel
-                .parent()
-                .map(|p| {
-                    p.components()
-                        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let effective_dir = rel.parent().unwrap_or(std::path::Path::new(""));
+            // Strip the first matching scan-root prefix.
+            let stripped_dir = scan_roots_for_body
+                .iter()
+                .find_map(|sr| effective_dir.strip_prefix(sr.as_str()).ok())
+                .unwrap_or(effective_dir);
+            let file_dir_segments: Vec<String> = stripped_dir
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                .collect();
             if file_dir_segments == dir_segments {
                 return true;
             }
@@ -2124,10 +2170,13 @@ pub fn smelt_fn_call_diagnostics_for_file(
                         }
                         RefKind::Seed => {
                             // Seed columns come from `discover_seed_infos`;
-                            // reuse the legacy provider helper.
-                            let leaf = path.last().cloned().unwrap_or_default();
+                            // reuse the legacy provider helper.  The lookup
+                            // key is `address_segments.join("_")` which equals
+                            // `path.join("_")` since resolve_ref_path matches
+                            // seeds by address_segments == path.
+                            let key = path.join("_");
                             let provider = SalsaRefSchemaProvider::new(db, workspace);
-                            if let Some(cols) = provider.seed_columns(&leaf) {
+                            if let Some(cols) = provider.seed_columns(&key) {
                                 return Some(cols);
                             }
                         }
@@ -2237,11 +2286,12 @@ pub fn smelt_fn_call_diagnostics_for_file(
             // `smelt.<path>` value-form in JOIN position.
             if let Some(path_ref) = table_ref.smelt_path_ref() {
                 let segs = path_ref.segments();
-                let entity_name = segs.last().cloned().unwrap_or_default();
+                let model_name = segs.last().cloned().unwrap_or_default();
+                let seed_key = segs.join("_");
                 let provider = SalsaRefSchemaProvider::new(db, workspace);
                 return provider
-                    .resolved_columns(&entity_name)
-                    .or_else(|| provider.seed_columns(&entity_name));
+                    .resolved_columns(&model_name)
+                    .or_else(|| provider.seed_columns(&seed_key));
             }
 
             None
@@ -2261,6 +2311,17 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // *not* a path component. So a function declared in `functions/status.sql`
     // is callable as `smelt.functions.is_shipped(...)`, not
     // `smelt.functions.status.is_shipped(...)`.
+    //
+    // Phase 2 (unified-paths): strip the matching scan-root prefix from the
+    // file's directory so that a function in `models/fn.sql` under
+    // `paths: ["models"]` is addressable as `smelt.fn_name()` (empty
+    // dir_segments) rather than requiring `smelt.models.fn_name()`.
+    let scan_roots_for_call: Vec<String> = {
+        let proj_root = file.project_root(db).clone();
+        smelt_core::Config::load(&proj_root)
+            .map(|c| c.paths)
+            .unwrap_or_default()
+    };
     let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
         for f in &files {
             let sigs = file_signature_inputs(db, *f);
@@ -2272,14 +2333,16 @@ pub fn smelt_fn_call_diagnostics_for_file(
             let Ok(rel) = abs_path.strip_prefix(proj_root) else {
                 continue;
             };
-            let file_dir_segments: Vec<String> = rel
-                .parent()
-                .map(|p| {
-                    p.components()
-                        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let effective_dir = rel.parent().unwrap_or(std::path::Path::new(""));
+            // Strip the first matching scan-root prefix.
+            let stripped_dir = scan_roots_for_call
+                .iter()
+                .find_map(|sr| effective_dir.strip_prefix(sr.as_str()).ok())
+                .unwrap_or(effective_dir);
+            let file_dir_segments: Vec<String> = stripped_dir
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                .collect();
             if file_dir_segments == dir_segments {
                 return true;
             }
@@ -2658,7 +2721,7 @@ impl std::fmt::Debug for ResolvedRef {
 /// - `.sql` file declaring `smelt.define` → `Function`
 /// - `.sql` file with `materialization: test` (Phase 2a stand-in for
 ///   the future `smelt.test` declaration kind) → `Test`
-/// - `.csv` under a project's `seed_paths` → `Seed`
+/// - `.csv` under a project's `paths` → `Seed`
 /// - `.yml` declaring an external table → `Source`
 ///
 /// The tuple is matched against each workspace `SourceFile`'s path,
@@ -2677,27 +2740,38 @@ pub fn resolve_ref_path(
     for project in workspace.projects(db).iter().copied() {
         let project_root = project.root(db).clone();
 
-        // Seeds: project-configured seed_paths under <root>. We compare
-        // the leaf segment to the seed name (top-level CSVs only, per
-        // current `discover_seed_infos`).
-        if path.len() >= 2 && path[0] == "seeds" {
-            let leaf = path.last().expect("path non-empty").clone();
-            for seed in project_seeds(db, project).iter() {
-                if seed.name == leaf {
-                    return Some(ResolvedRef {
-                        kind: RefKind::Seed,
-                        source_file: None,
-                        path,
-                    });
-                }
+        // Seeds: match by address_segments (Phase 2 — no "seeds" prefix required).
+        // address_segments is the scan-root-stripped path tuple, so
+        // `smelt.data.users` matches a seed at `seeds/data/users.csv` under
+        // `paths: ["seeds"]` with address_segments = ["data", "users"].
+        for seed in project_seeds(db, project).iter() {
+            if seed.address_segments == path.as_slice() {
+                return Some(ResolvedRef {
+                    kind: RefKind::Seed,
+                    source_file: None,
+                    path,
+                });
             }
         }
 
-        // Sources: project-level `sources.yml`. Path tuple shape is
-        // `["sources", <source_name>, <table_name>]` *or* an arbitrary
-        // path under a `sources/` directory followed by the source +
-        // table; today we accept the canonical shape.
-        if path.len() >= 3 && path[0] == "sources" {
+        // Sources: Phase 6 per-entity YAML files. Each source has an
+        // `address_segments` tuple (scan-root-stripped path to stem).
+        // `smelt.sources.raw.users` → path = ["sources", "raw", "users"]
+        // which matches the `.yml` at `models/sources/raw/users.yml`.
+        for source in project_sources(db, project).iter() {
+            if source.address_segments == path.as_slice() {
+                return Some(ResolvedRef {
+                    kind: RefKind::Source,
+                    source_file: None,
+                    path,
+                });
+            }
+        }
+
+        // Legacy sources: project-level aggregate `sources.yml`. Used as a
+        // fallback for any projects not yet migrated to per-entity YAMLs.
+        // Kept until Phase 6 migration is complete across all callers.
+        if project_sources(db, project).is_empty() && path.len() >= 3 && path[0] == "sources" {
             let source_name = &path[path.len() - 2];
             let table_name = &path[path.len() - 1];
             if resolve_source(db, project, source_name.clone(), table_name.clone()).is_some() {
@@ -2740,7 +2814,17 @@ pub fn resolve_ref_path(
     None
 }
 
-/// Compute the path tuple for a SQL file relative to its project root.
+/// Compute the path tuple for a SQL file relative to its project root,
+/// stripping the matching `config.paths` scan-root prefix if one applies.
+///
+/// Algorithm:
+/// 1. Strip `project_root` to get `rel`.
+/// 2. Try each scan root from `config.paths`: if `rel` starts with the
+///    scan root, use the remainder as the parent path.
+/// 3. If no scan root matches (e.g. `functions/` with `paths: ["models"]`),
+///    fall back to using `rel.parent()` (original behaviour).
+/// 4. Build tuple from parent segments + leaf name (model name override as today).
+///
 /// Returns `None` if the file is not a descendant of the project root.
 fn file_path_tuple(
     project_root: &Path,
@@ -2749,7 +2833,20 @@ fn file_path_tuple(
     db: &dyn salsa::Database,
 ) -> Option<Vec<String>> {
     let rel = file_path.strip_prefix(project_root).ok()?;
-    let parent = rel.parent()?;
+
+    // Load scan roots from config.paths. If config can't be loaded, fall back
+    // to an empty list (triggering the "no scan root matches" path).
+    let scan_roots = smelt_core::Config::load(project_root)
+        .map(|c| c.paths)
+        .unwrap_or_default();
+
+    // Try each scan root. Use the first one that `rel` is under.
+    let effective_rel = scan_roots
+        .iter()
+        .find_map(|sr| rel.strip_prefix(sr.as_str()).ok())
+        .unwrap_or(rel);
+
+    let parent = effective_rel.parent()?;
     let mut tuple: Vec<String> = parent
         .components()
         .filter_map(|c| match c {
@@ -2844,6 +2941,32 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     let text = file.text(db);
     let project_root = file.project_root(db).clone();
     let project = find_project(db, workspace, &project_root);
+
+    // Phase 7: seed CSV without a sibling sidecar YAML emits a workspace
+    // warning. We check the file extension first so non-CSV files skip the
+    // disk check entirely.
+    if path.extension().is_some_and(|e| e == "csv") {
+        let sidecar_path = path.with_extension("yml");
+        if !sidecar_path.exists() {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: "Seed schema is inferred and may drift if the CSV changes — pin it"
+                    .to_string(),
+                range: Range {
+                    start: Position { line: 0, column: 0 },
+                    end: Position { line: 0, column: 0 },
+                },
+                code: Some(DiagnosticCode::MissingSeedSidecar),
+                data: Some(DiagnosticData::MissingSeedSidecar {
+                    csv_path: path.clone(),
+                    sidecar_path: sidecar_path.clone(),
+                }),
+            })
+            .accumulate(db);
+        }
+        // CSV files have no SQL content — skip all SQL-level checks.
+        return;
+    }
 
     // Parse errors
     let parse = parse_file(db, file);
@@ -3556,10 +3679,11 @@ impl SalsaRefSchemaProvider<'_> {
         // smelt.<path> value-form in FROM/JOIN position.
         if let Some(path_ref) = table_ref.smelt_path_ref() {
             let segs = path_ref.segments();
-            let entity_name = segs.last().cloned().unwrap_or_default();
+            let model_name = segs.last().cloned().unwrap_or_default();
+            let seed_key = segs.join("_");
             return self
-                .resolved_columns(&entity_name)
-                .or_else(|| self.seed_columns(&entity_name));
+                .resolved_columns(&model_name)
+                .or_else(|| self.seed_columns(&seed_key));
         }
 
         None
@@ -3668,10 +3792,11 @@ impl SalsaRefSchemaProvider<'_> {
                         if node.kind() == smelt_parser::SyntaxKind::SMELT_PATH_REF {
                             if let Some(path_ref) = SmeltPathRef::cast(node.clone()) {
                                 let segs = path_ref.segments();
-                                let entity_name = segs.last().cloned().unwrap_or_default();
+                                let model_name = segs.last().cloned().unwrap_or_default();
+                                let seed_key = segs.join("_");
                                 if let Some(cols) = self
-                                    .resolved_columns(&entity_name)
-                                    .or_else(|| self.seed_columns(&entity_name))
+                                    .resolved_columns(&model_name)
+                                    .or_else(|| self.seed_columns(&seed_key))
                                 {
                                     body_ctx.add_tableexpr_param(&param.name, &cols);
                                     break;
@@ -3767,7 +3892,7 @@ impl RefSchemaProvider for SalsaRefSchemaProvider<'_> {
         // projects in the workspace and look in each project's seeds.
         for project in self.workspace.projects(self.db).iter().copied() {
             for seed in project_seeds(self.db, project).iter() {
-                if seed.name == seed_name {
+                if seed.address_segments.join("_") == seed_name {
                     return Some(
                         seed.columns
                             .iter()
@@ -3978,15 +4103,20 @@ fn process_table_ref_pure(
 
     // `smelt.<path>` value-form references (SMELT_PATH_REF) in the
     // FROM clause. The path tuple is used to determine the entity name for
-    // schema lookup: the last segment of the path is tried as both a model
-    // name and a seed name.
+    // schema lookup: the full segments joined with "_" are used as the seed
+    // key, while the last segment is used for model lookup.
     if let Some(path_ref) = table_ref.smelt_path_ref() {
         let segments = path_ref.segments();
-        let entity_name = segments.last().cloned().unwrap_or_default();
+        let model_name = segments.last().cloned().unwrap_or_default();
+        let seed_key = segments.join("_");
         // Try seed first, then model.
-        if let Some(cols) = refs
-            .seed_columns(&entity_name)
-            .or_else(|| refs.resolved_columns(&entity_name))
+        if let Some((entity_name, cols)) = refs
+            .seed_columns(&seed_key)
+            .map(|c| (seed_key.clone(), c))
+            .or_else(|| {
+                refs.resolved_columns(&model_name)
+                    .map(|c| (model_name.clone(), c))
+            })
         {
             for (col_name, typed_col) in &cols {
                 ctx.add_model_column(&entity_name, col_name, typed_col.clone());
@@ -4001,8 +4131,8 @@ fn process_table_ref_pure(
             // and correctly validate qualified refs like `alias.col_name`
             // as well as bare alias references (e.g. `smelt.functions.f(e)`
             // where `e` is an alias for a source table).
-            let bind_to = table_ref.alias().unwrap_or_else(|| entity_name.clone());
-            ctx.add_alias(&bind_to, &entity_name);
+            let bind_to = table_ref.alias().unwrap_or_else(|| model_name.clone());
+            ctx.add_alias(&bind_to, &model_name);
         }
         return;
     }
@@ -4124,6 +4254,37 @@ fn bare_table_name(table_ref: &TableRef) -> Option<String> {
     idents.last().cloned()
 }
 
+/// Pure function: populate a `TypeContext` with column type information from
+/// Phase 6 per-entity `SourceInfo` records.
+///
+/// The source's identity in the TypeContext is `(schema, table)` where:
+///   schema = `address_segments[address_segments.len() - 2]` (e.g. "raw")
+///   table  = `address_segments[address_segments.len() - 1]` (e.g. "users")
+///
+/// This mirrors how `smelt.sources.raw.users` is resolved: the last two
+/// segments of the path are the schema and table.
+pub fn add_source_info_to_type_context(sources: &[SourceInfo], ctx: &mut TypeContext) {
+    for source in sources {
+        let segs = &source.address_segments;
+        if segs.len() < 2 {
+            continue; // degenerate address — skip
+        }
+        let schema_name = &segs[segs.len() - 2];
+        let table_name = &segs[segs.len() - 1];
+        for col in &source.columns {
+            ctx.add_source_column(
+                schema_name,
+                table_name,
+                &col.name,
+                TypedColumn {
+                    data_type: col.data_type.clone(),
+                    nullable: col.nullable,
+                },
+            );
+        }
+    }
+}
+
 #[salsa::tracked(cycle_initial = type_context_initial)]
 pub fn type_context(
     db: &dyn salsa::Database,
@@ -4131,9 +4292,20 @@ pub fn type_context(
     file: SourceFile,
 ) -> Arc<TypeContext> {
     let project_root = file.project_root(db).clone();
-    let sources = match find_project(db, workspace, &project_root) {
-        Some(p) => sources_config(db, p),
-        None => Arc::new(SourcesConfig::default()),
+    let project = find_project(db, workspace, &project_root);
+
+    // Phase 6: per-entity sources take precedence when present; fall back to
+    // the legacy aggregate `sources.yml` for projects not yet migrated.
+    let per_entity_sources: Arc<Vec<SourceInfo>> = project
+        .map(|p| project_sources(db, p))
+        .unwrap_or_else(|| Arc::new(Vec::new()));
+
+    let legacy_sources: Arc<SourcesConfig> = if per_entity_sources.is_empty() {
+        project
+            .map(|p| sources_config(db, p))
+            .unwrap_or_else(|| Arc::new(SourcesConfig::default()))
+    } else {
+        Arc::new(SourcesConfig::default())
     };
 
     let parse = parse_file(db, file);
@@ -4145,7 +4317,11 @@ pub fn type_context(
     };
 
     let provider = SalsaRefSchemaProvider::new(db, workspace);
-    let mut ctx = build_type_context(&ast, &sources, &provider);
+    let mut ctx = build_type_context(&ast, &legacy_sources, &provider);
+
+    // Phase 6: add per-entity source columns to the TypeContext.
+    // Source address_segments like ["sources", "raw", "users"] → schema="raw", table="users".
+    add_source_info_to_type_context(&per_entity_sources, &mut ctx);
 
     // Seed the workspace's `smelt.define` signatures so path-call type
     // inference can resolve declared return types when a SELECT projects a

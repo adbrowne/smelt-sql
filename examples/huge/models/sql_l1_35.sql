@@ -11,6 +11,6 @@ SELECT
     region,
     campaign_id,
     updated_at
-FROM smelt.models.clicks
+FROM smelt.clicks
 WHERE status = 'active'
 

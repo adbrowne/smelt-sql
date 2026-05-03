@@ -3,7 +3,7 @@ use super::graph_builder::{GraphSpec, ModelSpec, ModelType, SOURCE_NAMES};
 /// Generate smelt.yml content for the workspace.
 pub fn generate_smelt_yml(_spec: &GraphSpec, models: &[ModelSpec]) -> String {
     let mut yml = String::from(
-        "name: bench_workspace\nversion: 1\n\nmodel_paths:\n  - models\n\nseed_paths:\n  - seeds\n\ntargets:\n  dev:\n    type: duckdb\n    database: target/bench.duckdb\n    schema: main\n\ndefault_materialization: view\n\nmodels:\n",
+        "name: bench_workspace\nversion: 1\n\npaths:\n  - models\n\n\ntargets:\n  dev:\n    type: duckdb\n    database: target/bench.duckdb\n    schema: main\n\ndefault_materialization: view\n\nmodels:\n",
     );
 
     for model in models {

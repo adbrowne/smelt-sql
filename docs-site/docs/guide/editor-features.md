@@ -16,7 +16,7 @@ smelt validates your SQL continuously: undefined model references, undeclared co
 The diagnostics cover the full range of common errors:
 
 - **Undefined refs** -- referencing a model that doesn't exist
-- **Undeclared columns** -- using a column name not present in the upstream schema or `sources.yml`
+- **Undeclared columns** -- using a column name not present in the upstream schema or source `.yml`
 - **Parse errors** -- SQL syntax mistakes
 - **Type mismatches** -- operations on incompatible types
 
@@ -37,10 +37,10 @@ Go-to-definition works for:
 | Cursor position | Jumps to |
 |---|---|
 | `smelt.models.model_name` | The referenced model's SQL file |
-| `smelt.sources.schema.table` | The table entry in `sources.yml` |
+| `smelt.sources.schema.table` | The per-entity source `.yml` file |
 | CTE name in FROM/JOIN | The CTE definition in the WITH clause |
 | Table alias (e.g., `t` in `t.column`) | Where the alias is defined |
-| Column reference | The column's definition in the upstream SELECT or `sources.yml` |
+| Column reference | The column's definition in the upstream SELECT or source `.yml` |
 
 ![Jump to CTE definition](../assets/editor-features/05-cte-definition-jump.png)
 
