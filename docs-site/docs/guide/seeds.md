@@ -80,15 +80,22 @@ Empty cells are always `NULL`, regardless of the column type.
 - Decimal values with precision > 18: falls through to `DOUBLE`
 - Any other value that cannot be parsed as one of the above types
 
-If you need a specific type (for example `TIMESTAMP WITH TIME ZONE`), cast explicitly in the first staging model:
+If you need a specific type, cast explicitly in the first staging model:
 
 ```sql
 SELECT
-  CAST(amount AS DECIMAL(10, 2)) AS amount,
+  CAST(amount AS DOUBLE) AS amount,        -- inferred DECIMAL(p,s) → DOUBLE
+  CAST(order_id AS INTEGER) AS order_id,   -- inferred INTEGER, but explicit is safer
   CAST(event_ts AS TIMESTAMPTZ) AS event_ts,
   ...
 FROM smelt.raw_orders
 ```
+
+Common cases where the inferred type needs a cast:
+
+- **Money / price columns** (`29.99`, `100.00`) — inferred as `DECIMAL(p, s)`. Downstream `SUM` or `COALESCE` may return `DECIMAL(38, 2)` rather than `DOUBLE`. Cast to `DOUBLE` in staging if the spec requires it, or use `CAST(COALESCE(SUM(col), 0.0) AS DOUBLE)` in the mart.
+- **ISO-8601 timestamps** (`2025-01-10T08:00:00`) — inferred as `VARCHAR` (the `T` separator is not recognized). Cast to `TIMESTAMP` or `TIMESTAMPTZ` in staging.
+- **IDs stored as integers** — inferred as `INTEGER` when values fit in i64, which is usually correct. If joining to a column smelt infers as `BIGINT`, an explicit `CAST(id AS INTEGER)` removes the ambiguity.
 
 To inspect what smelt infers for a seed's columns:
 
