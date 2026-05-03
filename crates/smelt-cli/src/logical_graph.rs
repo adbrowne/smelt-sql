@@ -694,6 +694,7 @@ mod tests {
             path: format!("seeds/{}.csv", name).into(),
             columns: Vec::new(),
             address_segments: vec![name.to_string()],
+            sidecar: None,
         }
     }
 

@@ -5,13 +5,21 @@
 //! - `infer` — type inferencer producing `DataType` from CSV value samples
 //! - `arrow` — Arrow `RecordBatch` builder from parsed rows + inferred types
 //! - `error` — `SeedError` type
+//! - `sidecar` — sidecar YAML parsing (column declarations, materialization)
+//! - `validate` — validation of CSV data against a sidecar YAML
+//! - `ephemeral` — `VALUES (…)` CTE builder for ephemeral seeds
 
 pub mod arrow;
 pub mod csv;
+pub mod ephemeral;
 pub mod error;
 pub mod infer;
+pub mod sidecar;
+pub mod validate;
 
 pub use error::SeedError;
+pub use sidecar::{parse_sidecar, SeedMaterialization, SeedSidecar, SidecarColumn};
+pub use validate::{validate_against_sidecar, ValidationError};
 
 use infer::infer_columns;
 use smelt_types::DataType;
@@ -25,13 +33,33 @@ pub struct SeedInfo {
     pub name: String,
     /// Absolute path to the CSV file
     pub path: PathBuf,
-    /// Column names and inferred types from the CSV headers + data
+    /// Column names and inferred (or pinned from sidecar) types
     pub columns: Vec<(String, DataType)>,
     /// Full address segments from the scan-root to the leaf name (without
     /// extension). For `seeds/data/users.csv` under `paths: ["seeds"]`,
     /// this is `["data", "users"]`. For a top-level seed `seeds/users.csv`,
     /// this is `["users"]`.
     pub address_segments: Vec<String>,
+    /// Parsed sidecar YAML, if a sibling `.yml` file exists.
+    ///
+    /// `None` when no sidecar is present (full inference).
+    pub sidecar: Option<SeedSidecar>,
+}
+
+impl SeedInfo {
+    /// Returns `true` when this seed's materialization is `ephemeral`.
+    pub fn is_ephemeral(&self) -> bool {
+        self.sidecar
+            .as_ref()
+            .map(|sc| sc.materialization == SeedMaterialization::Ephemeral)
+            .unwrap_or(false)
+    }
+
+    /// The CTE alias name used when this seed is inlined as an ephemeral.
+    /// Follows the `__smelt_<address_segments.join("_")>` convention.
+    pub fn cte_alias(&self) -> String {
+        format!("__smelt_{}", self.address_segments.join("_"))
+    }
 }
 
 /// Discover seed CSV files in the project's configured paths and infer column types.
@@ -42,7 +70,30 @@ pub struct SeedInfo {
 /// `seeds/data/users.csv` under `paths: ["seeds"]`).
 ///
 /// `paths` is the unified `paths:` list from `smelt.yml`.
+///
+/// Sibling sidecar `.yml` files are silently ignored in this variant —
+/// use `discover_seed_infos_with_sidecars` when sidecar semantics matter.
 pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo> {
+    discover_seed_infos_impl(project_dir, paths, false)
+}
+
+/// Like `discover_seed_infos`, but also reads any sibling `.yml` sidecar file
+/// and stores the parsed `SeedSidecar` in `SeedInfo::sidecar`.
+///
+/// When a sidecar cannot be parsed (bad YAML, unknown type), the error is
+/// silently ignored and `sidecar` is `None` — the LSP will surface the error
+/// as a diagnostic via a separate code path.
+pub fn discover_seed_infos_with_sidecars(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo> {
+    discover_seed_infos_impl(project_dir, paths, true)
+}
+
+/// Internal implementation shared by `discover_seed_infos` and
+/// `discover_seed_infos_with_sidecars`.
+fn discover_seed_infos_impl(
+    project_dir: &Path,
+    paths: &[String],
+    read_sidecars: bool,
+) -> Vec<SeedInfo> {
     let mut seeds = Vec::new();
 
     for seed_path in paths {
@@ -79,12 +130,37 @@ pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo
                     .collect();
                 address_segments.push(name.clone());
 
-                let columns = infer_csv_columns(&path);
+                // Try to read the sidecar YAML (same stem, same directory, .yml extension).
+                let sidecar = if read_sidecars {
+                    let yml_path = path.with_extension("yml");
+                    if yml_path.exists() {
+                        parse_sidecar(&yml_path).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Use sidecar-pinned columns when available and valid;
+                // otherwise fall back to inference.
+                let columns = if let Some(sc) = &sidecar {
+                    if let Some(cols) = &sc.columns {
+                        // Reorder columns to match the CSV header order.
+                        infer_csv_columns_with_pins(&path, cols)
+                    } else {
+                        infer_csv_columns(&path)
+                    }
+                } else {
+                    infer_csv_columns(&path)
+                };
+
                 seeds.push(SeedInfo {
                     name,
                     path,
                     columns,
                     address_segments,
+                    sidecar,
                 });
             }
         }
@@ -105,6 +181,45 @@ fn infer_csv_columns(path: &Path) -> Vec<(String, DataType)> {
         Ok((headers, rows_iter)) => {
             let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
             infer_columns(&rows, &headers, Some(100))
+        }
+    }
+}
+
+/// Use sidecar-pinned column types. Returns columns in CSV header order,
+/// with pinned types applied; any header column not in the sidecar falls
+/// back to inference (should only happen during mismatch, which is caught
+/// at validation time separately).
+fn infer_csv_columns_with_pins(
+    path: &Path,
+    sidecar_cols: &[SidecarColumn],
+) -> Vec<(String, DataType)> {
+    match csv::read_csv(path) {
+        Err(_) => Vec::new(),
+        Ok((headers, rows_iter)) => {
+            let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
+            // Build a map from sidecar column name → DataType.
+            let pinned: std::collections::HashMap<&str, &DataType> = sidecar_cols
+                .iter()
+                .map(|c| (c.name.as_str(), &c.data_type))
+                .collect();
+
+            // For each header, use the pinned type if present, otherwise infer.
+            headers
+                .iter()
+                .enumerate()
+                .map(|(col_idx, header)| {
+                    if let Some(&dt) = pinned.get(header.as_str()) {
+                        (header.clone(), dt.clone())
+                    } else {
+                        // Fall back to infer for this column only.
+                        let values: Vec<_> = rows
+                            .iter()
+                            .filter_map(|r| r.fields.get(col_idx).and_then(|v| v.as_deref()))
+                            .collect();
+                        (header.clone(), infer::infer_type_from_values_pub(&values))
+                    }
+                })
+                .collect()
         }
     }
 }

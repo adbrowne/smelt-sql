@@ -200,11 +200,12 @@ impl UpstreamSchemas {
         // Seeds are CSV files outside the Salsa graph under the 0.26 API; load
         // them directly via the pure smelt-core helper using the project's
         // configured `paths` (defaults to ["models"] if no smelt.yml).
+        // Phase 5: use with_sidecars so pinned types and ephemeral metadata are available.
         let paths = smelt_core::Config::load(project_dir)
             .map(|c| c.paths)
             .unwrap_or_else(|_| vec!["models".to_string()]);
         let mut seed_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
-        for seed in smelt_core::discover_seed_infos(project_dir, &paths) {
+        for seed in smelt_core::discover_seed_infos_with_sidecars(project_dir, &paths) {
             let cols: Vec<(String, TypedColumn)> = seed
                 .columns
                 .iter()
@@ -639,18 +640,30 @@ impl SqlCompiler {
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
         let compiled_sql = self.apply_type_casts(&compiled_sql);
 
-        // Collect which ephemeral models this model references
-        let referenced: Vec<&str> = model
+        // Collect which ephemeral models this model references.
+        // Multi-segment refs (e.g. `smelt.lookup.regions`) have a canonical
+        // ephemeral name formed by joining all path segments with `_`
+        // ("lookup_regions"), not just the leaf ("regions").
+        let referenced: Vec<String> = model
             .refs
             .iter()
-            .filter(|r| resolver.ephemeral_names.contains(&r.model_name))
-            .map(|r| r.model_name.as_str())
+            .filter_map(|r| {
+                let path_key = r.smelt_ref.to_path().join("_");
+                if resolver.ephemeral_names.contains(&path_key) {
+                    Some(path_key)
+                } else if resolver.ephemeral_names.contains(&r.model_name) {
+                    Some(r.model_name.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let final_sql = if referenced.is_empty() {
             compiled_sql
         } else {
-            let cte_list = resolver.get_cte_list(&referenced);
+            let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
+            let cte_list = resolver.get_cte_list(&referenced_refs);
             prepend_ephemeral_ctes(&compiled_sql, &cte_list)
         };
 
@@ -826,6 +839,26 @@ impl EphemeralResolver {
         fragments.push((alias, parts.main_body));
 
         fragments
+    }
+
+    /// Add pre-built CTE fragments for ephemeral seeds.
+    ///
+    /// Each entry in `seed_ctes` is `(cte_alias, cte_body)` where:
+    /// - `cte_alias` is `__smelt_<address_segments.join("_")>` (with column names for DuckDB named CTE)
+    /// - `cte_body` is the VALUES literal (without the surrounding `(…)`)
+    ///
+    /// These are added to the resolver's fragment map and their names to `ephemeral_names`
+    /// so that the path-ref resolver will emit `__smelt_<name>` when it encounters them.
+    pub fn add_seed_ctes(&mut self, seed_ctes: Vec<(String, String, String)>) {
+        // seed_ctes: Vec<(canonical_name, cte_alias_with_cols, cte_body)>
+        // canonical_name: address_segments.join("_") — the key for ephemeral_names and cte_fragments
+        for (canonical_name, alias_with_cols, body) in seed_ctes {
+            self.ephemeral_names.insert(canonical_name.clone());
+            self.order.push(canonical_name.clone());
+            // Store as (alias_with_cols, body) so get_cte_list can emit them correctly.
+            self.cte_fragments
+                .insert(canonical_name, vec![(alias_with_cols, body)]);
+        }
     }
 
     /// Get the flattened CTE list for a model that references ephemeral models.
@@ -1148,20 +1181,33 @@ impl SqlCompiler {
         let compiled_sql = self.apply_type_casts(&compiled_sql);
 
         // Collect which ephemeral models this model references.
-        // model.refs carries the leaf segment as model_name, which matches
-        // resolver.ephemeral_names (also leaf-segment keyed).
-        let referenced: Vec<&str> = model
+        //
+        // For single-segment refs (e.g. `smelt.cleaned_orders`), `model_name`
+        // is the leaf and matches the ephemeral name directly.
+        // For multi-segment refs (e.g. `smelt.lookup.regions`), the canonical
+        // ephemeral name is the segments joined with `_` ("lookup_regions"),
+        // not just the leaf ("regions"). We check the joined path first.
+        let referenced: Vec<String> = model
             .refs
             .iter()
-            .filter(|r| resolver.ephemeral_names.contains(&r.model_name))
-            .map(|r| r.model_name.as_str())
+            .filter_map(|r| {
+                let path_key = r.smelt_ref.to_path().join("_");
+                if resolver.ephemeral_names.contains(&path_key) {
+                    Some(path_key)
+                } else if resolver.ephemeral_names.contains(&r.model_name) {
+                    Some(r.model_name.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Prepend ephemeral CTEs if any
         let final_sql = if referenced.is_empty() {
             compiled_sql
         } else {
-            let cte_list = resolver.get_cte_list(&referenced);
+            let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
+            let cte_list = resolver.get_cte_list(&referenced_refs);
             prepend_ephemeral_ctes(&compiled_sql, &cte_list)
         };
 

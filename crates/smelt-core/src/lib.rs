@@ -34,10 +34,12 @@ pub use refs::{extract_refs, RefInfo, SmeltRef};
 pub use seeds::{
     arrow::to_arrow_batches,
     csv::{read_csv, CsvRecord},
-    discover_seed_infos,
+    discover_seed_infos, discover_seed_infos_with_sidecars,
+    ephemeral::build_values_cte,
     error::SeedError,
     infer::infer_columns,
-    SeedInfo,
+    parse_sidecar, validate_against_sidecar, SeedInfo, SeedMaterialization, SeedSidecar,
+    SidecarColumn, ValidationError,
 };
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
 pub use sources::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig, SourcesError};

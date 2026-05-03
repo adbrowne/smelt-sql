@@ -73,6 +73,29 @@ impl PhysicalGraph {
             .unwrap_or_else(|| EMPTY.get_or_init(EphemeralResolver::empty))
     }
 
+    /// Inject ephemeral seed CTEs into all target ephemeral resolvers.
+    ///
+    /// Called after `build()` when ephemeral seeds have been discovered.
+    /// `seed_ctes` is a list of `(canonical_name, alias_with_cols, cte_body)` triples.
+    pub fn add_ephemeral_seed_ctes_all_targets(
+        &mut self,
+        seed_ctes: Vec<(String, String, String)>,
+    ) {
+        if seed_ctes.is_empty() {
+            return;
+        }
+        // Ensure there's a resolver for every target (create empty ones if needed).
+        let all_targets: Vec<String> = self.nodes.values().map(|n| n.target.clone()).collect();
+        let targets: std::collections::HashSet<String> = all_targets.into_iter().collect();
+        for target in targets {
+            let resolver = self
+                .ephemeral_resolvers
+                .entry(target)
+                .or_insert_with(EphemeralResolver::empty);
+            resolver.add_seed_ctes(seed_ctes.clone());
+        }
+    }
+
     /// Iterate over physical nodes in execution order.
     pub fn iter_in_order(&self) -> impl Iterator<Item = &PhysicalNode> {
         self.execution_order

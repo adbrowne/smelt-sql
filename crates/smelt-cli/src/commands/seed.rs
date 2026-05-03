@@ -65,16 +65,22 @@ pub async fn run_seed(args: SeedArgs) -> Result<()> {
     for s in &seeds {
         info!("Seeding: {}", s.qualified_name());
 
-        let result = seed::execute_seed(backend.as_ref(), s, args.show_results)
+        match seed::execute_seed(backend.as_ref(), s, args.show_results)
             .await
-            .with_context(|| format!("Failed to seed '{}'", s.qualified_name()))?;
-
-        info!(
-            "{} done ({} rows, {:?})",
-            result.qualified_name, result.row_count, result.duration
-        );
-
-        results.push(result);
+            .with_context(|| format!("Failed to seed '{}'", s.qualified_name()))?
+        {
+            None => {
+                // Ephemeral seed — nothing to load.
+                info!("{} skipped (ephemeral)", s.qualified_name());
+            }
+            Some(result) => {
+                info!(
+                    "{} done ({} rows, {:?})",
+                    result.qualified_name, result.row_count, result.duration
+                );
+                results.push(result);
+            }
+        }
     }
 
     // 7. Summary

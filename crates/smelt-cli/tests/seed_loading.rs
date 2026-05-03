@@ -55,7 +55,8 @@ mod duckdb_seed_loading {
         // Execute the seed — this must NOT use read_csv_auto
         let result = execute_seed(&backend, seed, false)
             .await
-            .expect("execute_seed");
+            .expect("execute_seed")
+            .expect("users seed is not ephemeral — should return Some(SeedResult)");
 
         // users.csv has 5 data rows (Alice through Eve)
         assert_eq!(result.row_count, 5, "expected 5 rows in users");

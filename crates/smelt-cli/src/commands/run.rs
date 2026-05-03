@@ -63,7 +63,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Discover seeds so they validate as `smelt.ref()` targets without a
     // sources.yml workaround (bug #2 in the 20260417 follow-up plan).
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
+    // Phase 5: use with_sidecars to pick up ephemeral materialization.
+    let seeds = smelt_core::discover_seed_infos_with_sidecars(&project_dir, &config.paths);
     if !seeds.is_empty() {
         info!("Discovered {} seed(s) as ref targets", seeds.len());
     }
@@ -450,7 +451,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .map(|name| (name.clone(), registry.target_config(name).schema.clone()))
         .collect();
 
-    let physical_graph = PhysicalGraphBuilder::new(
+    let mut physical_graph = PhysicalGraphBuilder::new(
         &graph,
         &transformations,
         time_range.clone(),
@@ -459,6 +460,32 @@ pub async fn run(args: RunArgs) -> Result<()> {
     )
     .build()
     .with_context(|| "Failed to build physical graph")?;
+
+    // Phase 5: inject ephemeral seed CTEs into the resolvers.
+    // For each ephemeral seed, read the CSV rows and build a VALUES CTE body.
+    {
+        let ephemeral_seeds: Vec<_> = seeds.iter().filter(|s| s.is_ephemeral()).collect();
+        if !ephemeral_seeds.is_empty() {
+            let mut seed_ctes: Vec<(String, String, String)> = Vec::new();
+            for seed in ephemeral_seeds {
+                // Read CSV rows for the VALUES body.
+                if let Ok((_headers, rows_iter)) = smelt_core::seeds::csv::read_csv(&seed.path) {
+                    let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
+                    let canonical_name = seed.address_segments.join("_");
+                    let col_names: Vec<&str> =
+                        seed.columns.iter().map(|(n, _)| n.as_str()).collect();
+                    // Build alias with column names for DuckDB named CTE:
+                    // __smelt_lookup_regions(region_id, region_name)
+                    let alias_with_cols =
+                        format!("__smelt_{}({})", canonical_name, col_names.join(", "));
+                    let cte_body =
+                        smelt_core::seeds::ephemeral::build_values_cte(&seed.columns, &rows);
+                    seed_ctes.push((canonical_name, alias_with_cols, cte_body));
+                }
+            }
+            physical_graph.add_ephemeral_seed_ctes_all_targets(seed_ctes);
+        }
+    }
 
     // Print planner summary
     let planner_summary = physical_graph.planner_summary();

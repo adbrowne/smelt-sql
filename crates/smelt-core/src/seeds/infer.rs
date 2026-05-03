@@ -48,6 +48,12 @@ pub fn infer_columns(
         .collect()
 }
 
+/// Public re-export of the private type inference function, for use in
+/// `mod.rs` when building `infer_csv_columns_with_pins`.
+pub fn infer_type_from_values_pub(values: &[&str]) -> DataType {
+    infer_type_from_values(values)
+}
+
 /// Infer a `DataType` from a sample of non-null CSV string values.
 ///
 /// Precedence: BOOLEAN → DATE → TIMESTAMP → INTEGER → DECIMAL → DOUBLE → VARCHAR

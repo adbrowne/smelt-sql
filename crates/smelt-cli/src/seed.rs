@@ -1,7 +1,13 @@
 use anyhow::{Context, Result};
 use smelt_backend::Backend;
 use smelt_core::resolver::default_db_name;
-use smelt_core::seeds::{arrow::to_arrow_batches, csv::read_csv, infer::infer_columns};
+use smelt_core::seeds::{
+    arrow::to_arrow_batches,
+    csv::read_csv,
+    infer::infer_columns,
+    sidecar::{parse_sidecar, SeedMaterialization, SeedSidecar},
+    validate::validate_against_sidecar,
+};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
@@ -19,6 +25,18 @@ pub struct SeedFile {
     pub address_segments: Vec<String>,
     /// Target schema (from `smelt.yml`).
     pub schema: String,
+    /// Parsed sidecar YAML, if present.
+    pub sidecar: Option<SeedSidecar>,
+}
+
+impl SeedFile {
+    /// Returns `true` when this seed has `materialization: ephemeral`.
+    pub fn is_ephemeral(&self) -> bool {
+        self.sidecar
+            .as_ref()
+            .map(|sc| sc.materialization == SeedMaterialization::Ephemeral)
+            .unwrap_or(false)
+    }
 }
 
 impl SeedFile {
@@ -31,6 +49,17 @@ impl SeedFile {
     /// Table name portion only (address segments joined with `_`).
     pub fn table_name(&self) -> String {
         self.address_segments.join("_")
+    }
+
+    /// Read and return the sidecar for this seed's CSV path, if one exists.
+    /// Silently returns None on parse failure.
+    fn read_sidecar_from_path(csv_path: &Path) -> Option<SeedSidecar> {
+        let yml = csv_path.with_extension("yml");
+        if yml.exists() {
+            parse_sidecar(&yml).ok()
+        } else {
+            None
+        }
     }
 }
 
@@ -88,11 +117,15 @@ pub fn discover_seeds(
                     .collect();
                 address_segments.push(name.clone());
 
+                // Read sidecar YAML if present.
+                let sidecar = SeedFile::read_sidecar_from_path(&path);
+
                 seeds.push(SeedFile {
                     name,
                     path,
                     address_segments,
                     schema: target_schema.to_string(),
+                    sidecar,
                 });
             }
         }
@@ -105,11 +138,39 @@ pub fn discover_seeds(
 }
 
 /// Execute a single seed file: create schema, drop existing table, load CSV.
+///
+/// Returns `None` when the seed is ephemeral (nothing to load).
+/// Returns `Some(SeedResult)` when the seed was loaded successfully.
+///
+/// Seeds with `materialization: view` or `materialized_view` produce a hard error.
 pub async fn execute_seed(
     backend: &dyn Backend,
     seed: &SeedFile,
     show_results: bool,
-) -> Result<SeedResult> {
+) -> Result<Option<SeedResult>> {
+    // Phase 5: check materialization before doing any work.
+    if let Some(sc) = &seed.sidecar {
+        match sc.materialization {
+            SeedMaterialization::Ephemeral => {
+                // Ephemeral seeds are inlined at compile time; no table to create.
+                return Ok(None);
+            }
+            SeedMaterialization::View => {
+                anyhow::bail!(
+                    "Seed '{}': materialization 'view' is not supported for seeds; use 'table' or 'ephemeral'",
+                    seed.qualified_name()
+                );
+            }
+            SeedMaterialization::MaterializedView => {
+                anyhow::bail!(
+                    "Seed '{}': materialization 'materialized_view' is not supported for seeds; use 'table' or 'ephemeral'",
+                    seed.qualified_name()
+                );
+            }
+            SeedMaterialization::Table => {} // default — fall through
+        }
+    }
+
     let start = Instant::now();
     let qualified = seed.qualified_name();
     let table = seed.table_name();
@@ -121,16 +182,54 @@ pub async fn execute_seed(
         .await
         .with_context(|| format!("Failed to create schema '{}'", seed.schema))?;
 
-    // 2. Parse CSV → infer types → produce Arrow batches → load via Backend::load_table.
-    //    Drop-if-exists is handled by Backend::load_table (see Phase 3 implementation).
+    // 2. Parse CSV → validate against sidecar → infer/pin types → produce Arrow batches.
     let (headers, rows_iter) = read_csv(&seed.path)
         .with_context(|| format!("Failed to parse CSV: {}", seed.path.display()))?;
     let rows: Vec<_> = rows_iter
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("CSV parse error in: {}", seed.path.display()))?;
 
-    // Runtime inference: use all rows (sample_limit = None).
-    let col_types = infer_columns(&rows, &headers, None);
+    // Phase 5: validate against sidecar (column-set match, nullable, type coercion).
+    if let Some(sc) = &seed.sidecar {
+        validate_against_sidecar(&seed.path, &headers, &rows, sc)
+            .with_context(|| format!("Sidecar validation failed for '{}'", qualified))?;
+    }
+
+    // Determine column types: sidecar-pinned if available, otherwise infer.
+    let col_types = if let Some(sc) = &seed.sidecar {
+        if let Some(cols) = &sc.columns {
+            // Build column order from CSV headers, using pinned types for known names.
+            let pinned: std::collections::HashMap<&str, &smelt_types::DataType> = cols
+                .iter()
+                .map(|c| (c.name.as_str(), &c.data_type))
+                .collect();
+            headers
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    if let Some(&dt) = pinned.get(h.as_str()) {
+                        (h.clone(), dt.clone())
+                    } else {
+                        // Fallback: infer this column from data.
+                        let vals: Vec<_> = rows
+                            .iter()
+                            .filter_map(|r| r.fields.get(i).and_then(|v| v.as_deref()))
+                            .collect();
+                        (
+                            h.clone(),
+                            smelt_core::seeds::infer::infer_type_from_values_pub(&vals),
+                        )
+                    }
+                })
+                .collect()
+        } else {
+            // No column declarations — runtime inference (all rows).
+            infer_columns(&rows, &headers, None)
+        }
+    } else {
+        // No sidecar — runtime inference (all rows).
+        infer_columns(&rows, &headers, None)
+    };
 
     let (arrow_schema, batches) = to_arrow_batches(&seed.path, &col_types, &rows)
         .with_context(|| format!("Failed to build Arrow batches for '{}'", qualified))?;
@@ -176,12 +275,12 @@ pub async fn execute_seed(
         }
     }
 
-    Ok(SeedResult {
+    Ok(Some(SeedResult {
         name: seed.name.clone(),
         qualified_name: qualified,
         row_count,
         duration: start.elapsed(),
-    })
+    }))
 }
 
 /// Filter seeds by selector patterns.
@@ -270,12 +369,14 @@ mod tests {
                 path: PathBuf::from("seeds/raw/users.csv"),
                 address_segments: vec!["raw".to_string(), "users".to_string()],
                 schema: "main".to_string(),
+                sidecar: None,
             },
             SeedFile {
                 name: "events".to_string(),
                 path: PathBuf::from("seeds/raw/events.csv"),
                 address_segments: vec!["raw".to_string(), "events".to_string()],
                 schema: "main".to_string(),
+                sidecar: None,
             },
         ];
 
@@ -292,12 +393,14 @@ mod tests {
                 path: PathBuf::from("seeds/raw/users.csv"),
                 address_segments: vec!["raw".to_string(), "users".to_string()],
                 schema: "main".to_string(),
+                sidecar: None,
             },
             SeedFile {
                 name: "users".to_string(),
                 path: PathBuf::from("seeds/staging/users.csv"),
                 address_segments: vec!["staging".to_string(), "users".to_string()],
                 schema: "main".to_string(),
+                sidecar: None,
             },
         ];
 
@@ -314,12 +417,14 @@ mod tests {
                 path: PathBuf::from("seeds/raw/users.csv"),
                 address_segments: vec!["raw".to_string(), "users".to_string()],
                 schema: "main".to_string(),
+                sidecar: None,
             },
             SeedFile {
                 name: "users".to_string(),
                 path: PathBuf::from("seeds/users.csv"),
                 address_segments: vec!["users".to_string()],
                 schema: "main".to_string(),
+                sidecar: None,
             },
         ];
 

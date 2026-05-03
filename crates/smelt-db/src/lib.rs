@@ -681,7 +681,11 @@ pub fn project_seeds(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec
     let paths = smelt_core::Config::load(&project_root)
         .map(|c| c.paths)
         .unwrap_or_else(|_| vec!["models".to_string()]);
-    Arc::new(smelt_core::discover_seed_infos(&project_root, &paths))
+    // Phase 5: use with_sidecars so ephemeral materialization is tracked.
+    Arc::new(smelt_core::discover_seed_infos_with_sidecars(
+        &project_root,
+        &paths,
+    ))
 }
 
 #[salsa::tracked]
