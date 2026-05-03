@@ -1,7 +1,7 @@
 ---
 feature: testing
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -32,7 +32,7 @@ test:
 ---
 ```
 
-Tests are discovered by the same `model_paths` scan as SQL models. They can be co-located in multi-section files alongside the models they test, or placed in a separate `tests/` directory listed in `model_paths`.
+Tests are discovered by the same `paths:` scan as SQL models. They can be co-located in multi-section files alongside the models they test, or placed in a separate `tests/` directory listed in `paths:`.
 
 ### `test:` frontmatter key
 
@@ -127,7 +127,7 @@ Each iteration uses a different random seed derived from the test's global seed.
 
 ## Design
 
-**Test-as-materialization.** Using `materialization: test` rather than a separate test file format means the parser, type checker, LSP, and model discovery system all handle test files uniformly. Tests are discovered by `model_paths`, not a separate `test_paths`. The tradeoff is that test models appear in `smelt explain` output and must be explicitly excluded from execution runs (they are never materialized by `smelt run`).
+**Test-as-materialization.** Using `materialization: test` rather than a separate test file format means the parser, type checker, LSP, and model discovery system all handle test files uniformly. Tests are discovered by the unified `paths:` scan, not a separate `test_paths`. The tradeoff is that test models appear in `smelt explain` output and must be explicitly excluded from execution runs (they are never materialized by `smelt run`).
 
 **Mock by dependency name.** Input mock data is keyed by the dependency's name (the model or CTE name), not by file path or address. This is consistent with `smelt.models.<name>` addressing and lets tests read naturally.
 

@@ -1,7 +1,7 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -15,7 +15,7 @@ owners: [andrew]
 
 ### File format
 
-A model is a `.sql` file discovered by recursively walking each directory listed in `model_paths` (default: `["models"]`). Files may be:
+A model is a `.sql` file discovered by recursively walking each directory listed in `paths:` (default: `["models"]`; see `smelt_yml.md`). Files may be:
 
 **Single-model** — the file contains one SQL query, optionally preceded by YAML frontmatter:
 
@@ -137,7 +137,7 @@ External sources are referenced using `smelt.sources.<schema>.<table>` (see `sou
 
 ### Model discovery
 
-smelt recursively walks each path in `model_paths` (resolved relative to the project root), following symlinks, and collects all `.sql` files. Files are parsed independently — multi-model files yield multiple `ModelFile` entries, one per section.
+smelt recursively walks each path in `paths:` (resolved relative to the project root), following symlinks, and collects all `.sql` files. Files are parsed independently — multi-model files yield multiple `ModelFile` entries, one per section.
 
 Model names must be unique across the project. If two models produce the same name (e.g., `models/users.sql` and `models/archive/users.sql`), behavior is undefined (last writer wins in the current implementation).
 

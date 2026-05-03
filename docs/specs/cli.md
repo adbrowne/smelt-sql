@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -121,7 +121,7 @@ A single `smelt build` performs these steps, in order:
 
 1. **Load** `smelt.yml` from `--project-dir`. Fail if absent.
 2. **Validate** that the requested `--target` exists in the config.
-3. **Discover** seed CSVs (under all `seed_paths`), `sources.yml`, SQL models, Python models, and `smelt.define` function files.
+3. **Discover** all project files under `paths:` and the dedicated scan paths (functions, sources, tests). The resolver classifies each file by format and content per `architecture.md` §"Resolution": `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone in `sources/`) become seed sidecars or sources respectively.
 4. **Seed** — for each CSV file (in deterministic sorted order):
    - Drop any existing table or view with the same qualified name.
    - `CREATE TABLE <schema>.<name> AS SELECT * FROM read_csv_auto('<path>')`.

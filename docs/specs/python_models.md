@@ -1,7 +1,7 @@
 ---
 feature: python_models
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -13,7 +13,7 @@ owners: [andrew]
 
 ### File format
 
-Python model files are `.py` files in any `model_paths` directory. A file must import and use the `@model` decorator from the smelt Python SDK:
+Python model files are `.py` files in any directory listed under `paths:` (see `smelt_yml.md`). A file must import and use the `@model` decorator from the smelt Python SDK:
 
 ```python
 from smelt import model
