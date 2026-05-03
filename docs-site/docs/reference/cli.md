@@ -142,7 +142,7 @@ Seed the database with CSV files and then run all models. This is a convenience 
 
 1. **Load `smelt.yml`** and validate the requested `--target` exists.
 2. **Discover** seed CSVs (under `seed_paths`), sources (`sources.yml`, optional), SQL models, Python models, and `smelt.define` function files.
-3. **Seed** — for each CSV, drop any existing table/view of the same qualified name, then `CREATE TABLE … AS SELECT * FROM read_csv_auto(...)`. Seeds are loaded sequentially in deterministic (sorted) order. Schemas are auto-created.
+3. **Seed** — for each CSV, smelt's own parser reads and type-infers the file, converts the rows to typed Arrow batches, and loads them via `Backend::load_table`. Seeds are loaded sequentially in deterministic (sorted) order. Schemas are auto-created.
 4. **Plan** — build the logical graph from discovered models, apply planner rules, and produce the physical execution graph. Models are executed in topological order so each model's upstreams are materialised first.
 5. **Run** — for each model, materialise according to its `materialization` (`table`, `view`, `materialized_view`, or inlined for `ephemeral`). Backends that support it use `CREATE OR REPLACE TABLE` / `CREATE OR REPLACE VIEW` for atomic replacement.
 

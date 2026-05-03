@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use smelt_backend::Backend;
 use smelt_core::resolver::default_db_name;
+use smelt_core::seeds::{arrow::to_arrow_batches, csv::read_csv, infer::infer_columns};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
@@ -120,44 +121,33 @@ pub async fn execute_seed(
         .await
         .with_context(|| format!("Failed to create schema '{}'", seed.schema))?;
 
-    // 2. Drop existing object (if any). Use the backend's type-aware drop
-    //    helpers so we don't trip over a name collision between a prior
-    //    Table and a prior View (bug #6 — same root cause as bug #1:
-    //    DuckDB rejects `DROP TABLE IF EXISTS` against a View, and vice
-    //    versa).
-    backend
-        .drop_view_if_exists(&seed.schema, &table)
-        .await
-        .with_context(|| format!("Failed to drop view '{}'", qualified))?;
-    backend
-        .drop_table_if_exists(&seed.schema, &table)
-        .await
-        .with_context(|| format!("Failed to drop table '{}'", qualified))?;
+    // 2. Parse CSV → infer types → produce Arrow batches → load via Backend::load_table.
+    //    Drop-if-exists is handled by Backend::load_table (see Phase 3 implementation).
+    let (headers, rows_iter) = read_csv(&seed.path)
+        .with_context(|| format!("Failed to parse CSV: {}", seed.path.display()))?;
+    let rows: Vec<_> = rows_iter
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("CSV parse error in: {}", seed.path.display()))?;
 
-    // 3. Load CSV using DuckDB's read_csv_auto
-    let abs_path = seed
-        .path
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve path: {}", seed.path.display()))?;
-    let path_str = abs_path.display().to_string().replace('\'', "''");
+    // Runtime inference: use all rows (sample_limit = None).
+    let col_types = infer_columns(&rows, &headers, None);
 
-    let create_sql = format!(
-        "CREATE TABLE {} AS SELECT * FROM read_csv_auto('{}')",
-        qualified, path_str
-    );
+    let (arrow_schema, batches) = to_arrow_batches(&seed.path, &col_types, &rows)
+        .with_context(|| format!("Failed to build Arrow batches for '{}'", qualified))?;
+
     backend
-        .execute_sql(&create_sql)
+        .load_table(&seed.schema, &table, arrow_schema, batches)
         .await
-        .with_context(|| format!("Failed to load CSV into '{}'", qualified))?;
+        .with_context(|| format!("Failed to load table '{}'", qualified))?;
 
-    // 4. Get row count
+    // 3. Get row count
     let count_sql = format!("SELECT COUNT(*) AS cnt FROM {}", qualified);
-    let batches = backend
+    let count_batches = backend
         .execute_sql(&count_sql)
         .await
         .with_context(|| format!("Failed to count rows in '{}'", qualified))?;
 
-    let row_count = if let Some(batch) = batches.first() {
+    let row_count = if let Some(batch) = count_batches.first() {
         use arrow::array::Array;
         let col = batch.column(0);
         if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int64Array>() {
@@ -171,7 +161,7 @@ pub async fn execute_seed(
         0
     };
 
-    // 5. Show preview if requested
+    // 4. Show preview if requested
     if show_results {
         let preview_sql = format!("SELECT * FROM {} LIMIT 5", qualified);
         let preview = backend

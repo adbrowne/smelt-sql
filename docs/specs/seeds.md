@@ -161,7 +161,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 
 ## Known Divergences / Open Questions
 
-- **Implementation lags spec.** This revision specifies the target shape. Today's implementation still uses DuckDB's `read_csv_auto`, the aggregate `sources.yml`, the `seed_paths` config knob, and the subdirectory-becomes-schema rule. A follow-up plan in `docs/plans/` migrates the implementation; until it lands, the implementation surface diverges from this spec on every Surface-section item.
+- **Implementation lags spec (partial).** The CSV parser, type inferencer, Arrow batch builder, and `Backend::load_table` wiring are implemented (Phase 4 of `docs/plans/20260503-unified-paths-and-loading.md`). The remaining divergences are: aggregate `sources.yml` still active (Phase 6), sidecar YAML pinning and ephemeral materialization (Phase 5), `smelt seed` lifecycle steps 1–2 and 4–7 (Phase 5), LSP affordances (Phase 7).
 - **Drift diagnostic between CSV and pinned YAML.** The "Re-pin schema from CSV" LSP code action is in scope here, but the diagnostic that surfaces drift (column added/removed, inferred type drift) is implementation-deferred to the LSP plan.
 - **Ephemeral seed size limits.** A 100k-row CSV declared `materialization: ephemeral` would generate a `VALUES` literal of dangerous size. A future row-count threshold (warn, then error) is open; today's spec leaves the choice to the user.
 - **Tests on seed columns.** The shared YAML does not yet support `tests:`. Tests on seed/source/model columns will land together when `tests.md` exists.
@@ -170,8 +170,8 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 
 ## References
 
-- **Code** (target after migration plan lands):
-  - `crates/smelt-core/src/seeds.rs` — `discover_seeds`, sidecar YAML loader, type inferencer, `SeedFile`/`SeedInfo`.
+- **Code** (as of Phase 4):
+  - `crates/smelt-core/src/seeds/` — module directory: `csv.rs` (strict reader), `infer.rs` (type inferencer), `arrow.rs` (Arrow batch builder), `error.rs` (`SeedError`), `mod.rs` (`discover_seed_infos`, `SeedInfo`).
   - `crates/smelt-cli/src/seed.rs` — `smelt seed` orchestration.
   - `crates/smelt-cli/src/commands/seed.rs` — CLI entry.
   - `crates/smelt-backend-duckdb/src/lib.rs` — `Backend::load_table` via Appender.

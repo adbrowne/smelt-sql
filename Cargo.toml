@@ -61,3 +61,5 @@ indexmap = { version = "2", features = ["serde"] }
 pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py39"] }
 # Property-based testing
 proptest = "1.4"
+# CSV parsing (strict tokenisation / quoting)
+csv = "1.3"

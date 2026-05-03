@@ -1,3 +1,19 @@
+//! Seed discovery and CSV type inference for smelt.
+//!
+//! Submodules:
+//! - `csv` — strict CSV reader (comma delimiter, double-quote quoting, BOM-stripping)
+//! - `infer` — type inferencer producing `DataType` from CSV value samples
+//! - `arrow` — Arrow `RecordBatch` builder from parsed rows + inferred types
+//! - `error` — `SeedError` type
+
+pub mod arrow;
+pub mod csv;
+pub mod error;
+pub mod infer;
+
+pub use error::SeedError;
+
+use infer::infer_columns;
 use smelt_types::DataType;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -78,149 +94,19 @@ pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo
     seeds
 }
 
-/// Parse CSV headers and infer column types from the first few data rows.
-fn infer_csv_columns(path: &Path) -> Vec<(String, DataType)> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-
-    let mut lines = content.lines();
-
-    let headers_line = match lines.next() {
-        Some(l) => l,
-        None => return Vec::new(),
-    };
-
-    let headers: Vec<String> = headers_line
-        .split(',')
-        .map(|h| h.trim().to_string())
-        .collect();
-
-    // Collect first 10 data rows for type inference
-    let data_rows: Vec<Vec<&str>> = lines
-        .take(10)
-        .map(|l| l.split(',').collect::<Vec<_>>())
-        .collect();
-
-    headers
-        .into_iter()
-        .enumerate()
-        .map(|(i, header)| {
-            let values: Vec<&str> = data_rows
-                .iter()
-                .filter_map(|row| row.get(i).copied())
-                .filter(|v| !v.trim().is_empty())
-                .collect();
-            let dtype = infer_type_from_csv_values(&values);
-            (header, dtype)
-        })
-        .collect()
-}
-
-/// Infer a SQL type from a sample of CSV string values.
+/// Parse CSV headers and infer column types from the first 100 data rows.
 ///
-/// The order of checks matters and intentionally matches DuckDB's
-/// `read_csv_auto()` precedence: Boolean → Date → Timestamp → Integer →
-/// Double → Text. Temporal checks come before Integer because we want a
-/// column of `2025-01-01`-shaped values to be `Date`, not text-of-integers
-/// — a bare `2025` would not match the `YYYY-MM-DD` shape, but ordering
-/// the temporal checks first makes the policy obvious.
-fn infer_type_from_csv_values(values: &[&str]) -> DataType {
-    if values.is_empty() {
-        return DataType::Text;
+/// Uses the spec-compliant inferencer (via `infer_columns` with
+/// `sample_limit = Some(100)`) for consistent behaviour with the runtime path.
+fn infer_csv_columns(path: &Path) -> Vec<(String, DataType)> {
+    // Use the strict csv reader; fall back to empty on any error (LSP tolerance).
+    match csv::read_csv(path) {
+        Err(_) => Vec::new(),
+        Ok((headers, rows_iter)) => {
+            let rows: Vec<_> = rows_iter.filter_map(|r| r.ok()).collect();
+            infer_columns(&rows, &headers, Some(100))
+        }
     }
-
-    // Boolean: all values are true/false (case-insensitive)
-    if values
-        .iter()
-        .all(|v| matches!(v.to_lowercase().as_str(), "true" | "false"))
-    {
-        return DataType::Boolean;
-    }
-
-    // Date: every value matches `YYYY-MM-DD` (4-digit year, 1-12 month,
-    // 1-31 day). Matches DuckDB's `read_csv_auto()` DATE recognition for
-    // ISO-formatted dates.
-    if values.iter().all(|v| looks_like_date(v.trim())) {
-        return DataType::Date;
-    }
-
-    // Timestamp: every value matches `YYYY-MM-DD HH:MM:SS` (optionally
-    // with fractional seconds). The compile-time inferencer never emits
-    // `with_timezone: true` because the ISO-without-zone shape we accept
-    // here has no timezone information.
-    if values.iter().all(|v| looks_like_timestamp(v.trim())) {
-        return DataType::Timestamp {
-            with_timezone: false,
-        };
-    }
-
-    // Integer: all values parse as i64
-    if values.iter().all(|v| v.parse::<i64>().is_ok()) {
-        return DataType::Integer;
-    }
-
-    // Double: all values parse as f64
-    if values.iter().all(|v| v.parse::<f64>().is_ok()) {
-        return DataType::Double;
-    }
-
-    // Default to Text
-    DataType::Text
-}
-
-/// `true` when `s` is shaped like `YYYY-MM-DD` with plausible field
-/// ranges. Does not validate calendar correctness (Feb 30 passes); the
-/// goal is to match what DuckDB's `read_csv_auto()` types as `DATE` for
-/// the columns smelt's compile-time inferencer cares about.
-fn looks_like_date(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 {
-        return false;
-    }
-    parse_fixed_uint(parts[0], 4)
-        .filter(|y| (1000..=9999).contains(y))
-        .and(parse_fixed_uint(parts[1], 2).filter(|m| (1..=12).contains(m)))
-        .and(parse_fixed_uint(parts[2], 2).filter(|d| (1..=31).contains(d)))
-        .is_some()
-}
-
-/// `true` when `s` is shaped like `YYYY-MM-DD HH:MM:SS` (optionally with a
-/// fractional-seconds tail like `.123`). Mirrors `looks_like_date`'s
-/// permissive range checks: the goal is shape-recognition, not calendar
-/// validation.
-fn looks_like_timestamp(s: &str) -> bool {
-    let (date_part, time_part) = match s.split_once(' ') {
-        Some(parts) => parts,
-        None => return false,
-    };
-    if !looks_like_date(date_part) {
-        return false;
-    }
-    // Strip optional fractional-seconds tail (".123", ".123456", etc.).
-    let time_core = time_part
-        .split_once('.')
-        .map(|(h, _)| h)
-        .unwrap_or(time_part);
-    let time_parts: Vec<&str> = time_core.split(':').collect();
-    if time_parts.len() != 3 {
-        return false;
-    }
-    parse_fixed_uint(time_parts[0], 2)
-        .filter(|h| *h <= 23)
-        .and(parse_fixed_uint(time_parts[1], 2).filter(|m| *m <= 59))
-        .and(parse_fixed_uint(time_parts[2], 2).filter(|sec| *sec <= 59))
-        .is_some()
-}
-
-/// Parse `s` as a non-negative integer, requiring `expected_len` ASCII
-/// digits and nothing else. Returns `None` on length mismatch, leading
-/// sign, embedded whitespace, or non-digit characters.
-fn parse_fixed_uint(s: &str, expected_len: usize) -> Option<u32> {
-    if s.len() != expected_len || !s.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    s.parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -266,7 +152,12 @@ mod tests {
         let col_map: std::collections::HashMap<_, _> = seeds[0].columns.iter().cloned().collect();
         assert_eq!(col_map["id"], DataType::Integer);
         assert_eq!(col_map["score"], DataType::Integer);
-        assert_eq!(col_map["ratio"], DataType::Double);
+        // 0.5 and 1.5 → DECIMAL(2,1) within cap
+        assert!(
+            matches!(col_map["ratio"], DataType::Decimal { .. }),
+            "ratio should be Decimal, got {:?}",
+            col_map["ratio"]
+        );
     }
 
     #[test]
@@ -278,8 +169,6 @@ mod tests {
 
     #[test]
     fn test_seed_date_column_infers_as_date() {
-        // TB-2 — a seed CSV column shaped like YYYY-MM-DD must infer as
-        // `DataType::Date`, matching DuckDB's `read_csv_auto()` behaviour.
         let tmp = TempDir::new().unwrap();
         let seeds_dir = tmp.path().join("seeds");
         fs::create_dir_all(&seeds_dir).unwrap();
@@ -299,8 +188,6 @@ mod tests {
 
     #[test]
     fn test_seed_timestamp_column_infers_as_timestamp() {
-        // TB-2 — a seed CSV column shaped like YYYY-MM-DD HH:MM:SS must
-        // infer as `DataType::Timestamp { with_timezone: false }`.
         let tmp = TempDir::new().unwrap();
         let seeds_dir = tmp.path().join("seeds");
         fs::create_dir_all(&seeds_dir).unwrap();
@@ -325,10 +212,6 @@ mod tests {
 
     #[test]
     fn test_seed_text_column_infers_as_text() {
-        // Regression guard — free-form strings still infer as Text after
-        // the temporal inferencers are added. Strings that are *almost*
-        // dates but not actually dates (out-of-range fields, wrong shape)
-        // must remain Text rather than be coerced into Date/Timestamp.
         let tmp = TempDir::new().unwrap();
         let seeds_dir = tmp.path().join("seeds");
         fs::create_dir_all(&seeds_dir).unwrap();
@@ -343,16 +226,11 @@ mod tests {
         let col_map: std::collections::HashMap<_, _> = seeds[0].columns.iter().cloned().collect();
         assert_eq!(col_map["note_id"], DataType::Integer);
         assert_eq!(col_map["body"], DataType::Text);
-        // Out-of-range month/day → not a Date; falls back to Text.
         assert_eq!(col_map["almost_date"], DataType::Text);
     }
 
     #[test]
     fn test_seed_t_separator_timestamp_falls_back_to_text() {
-        // Spec promise (seeds.md Semantics §5): the compile-time inferencer
-        // recognises `YYYY-MM-DD HH:MM:SS` (space separator) only. ISO-8601
-        // `T`-separated timestamps fall back to Text and require an explicit
-        // CAST in a downstream model.
         let tmp = TempDir::new().unwrap();
         let seeds_dir = tmp.path().join("seeds");
         fs::create_dir_all(&seeds_dir).unwrap();
@@ -369,10 +247,6 @@ mod tests {
 
     #[test]
     fn test_seed_tz_suffix_timestamp_falls_back_to_text() {
-        // Spec promise (seeds.md Semantics §5): the compile-time inferencer
-        // never emits TIMESTAMP WITH TIME ZONE. Columns containing zone
-        // information (Z suffix, +00 / -05 offset, named zone) fall back to
-        // Text.
         let tmp = TempDir::new().unwrap();
         let seeds_dir = tmp.path().join("seeds");
         fs::create_dir_all(&seeds_dir).unwrap();
