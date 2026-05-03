@@ -437,6 +437,11 @@ pub enum DiagnosticCode {
     /// at the path-form ref's text range. Introduced in Phase 2a of the
     /// smelt-`<path>` migration (architecture Surface §"Resolution").
     KindMismatch,
+    /// Emitted (Warning) for a seed CSV file that has no sibling `.yml`
+    /// sidecar. Schema is inferred at compile time from the first 100 rows
+    /// and may drift when the CSV changes. Resolve by adding a sidecar.
+    /// Introduced in Phase 7 of the seeds plan.
+    MissingSeedSidecar,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -473,6 +478,13 @@ pub enum DiagnosticData {
     /// `data` payload — the diagnostic's primary `message` and `range` are
     /// unaffected.
     ExpansionFrames(Vec<smelt_types::FrameInfo>),
+    /// Attached to `MissingSeedSidecar` diagnostics. Carries the CSV path
+    /// and the expected sidecar path so the code-action provider can create
+    /// the sibling `.yml` without re-deriving it from the diagnostic range.
+    MissingSeedSidecar {
+        csv_path: std::path::PathBuf,
+        sidecar_path: std::path::PathBuf,
+    },
 }
 
 /// Represents a diagnostic (error, warning, info)
@@ -2929,6 +2941,32 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     let text = file.text(db);
     let project_root = file.project_root(db).clone();
     let project = find_project(db, workspace, &project_root);
+
+    // Phase 7: seed CSV without a sibling sidecar YAML emits a workspace
+    // warning. We check the file extension first so non-CSV files skip the
+    // disk check entirely.
+    if path.extension().is_some_and(|e| e == "csv") {
+        let sidecar_path = path.with_extension("yml");
+        if !sidecar_path.exists() {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: "Seed schema is inferred and may drift if the CSV changes — pin it"
+                    .to_string(),
+                range: Range {
+                    start: Position { line: 0, column: 0 },
+                    end: Position { line: 0, column: 0 },
+                },
+                code: Some(DiagnosticCode::MissingSeedSidecar),
+                data: Some(DiagnosticData::MissingSeedSidecar {
+                    csv_path: path.clone(),
+                    sidecar_path: sidecar_path.clone(),
+                }),
+            })
+            .accumulate(db);
+        }
+        // CSV files have no SQL content — skip all SQL-level checks.
+        return;
+    }
 
     // Parse errors
     let parse = parse_file(db, file);

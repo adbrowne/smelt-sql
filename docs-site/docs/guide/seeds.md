@@ -180,6 +180,51 @@ GROUP BY 1
 
 smelt resolves column types from the CSV headers and data, so you get full type inference and LSP diagnostics for seed columns.
 
+## LSP affordances
+
+The smelt language server provides editor support for seed files:
+
+### Missing sidecar warning
+
+When you add a CSV file to your project without a sibling `.yml` sidecar, the language server emits a workspace warning:
+
+```
+Seed schema is inferred and may drift if the CSV changes — pin it
+```
+
+This warning appears at the top of the CSV file in your editor's Problems panel. Inferred schemas are computed from the first 100 rows at compile time; if the CSV later gains new columns or the data changes type, the LSP's understanding can silently drift. Pinning the schema with a sidecar eliminates that risk.
+
+The warning disappears as soon as a sibling `.yml` file exists.
+
+### "Pin schema to sidecar YAML" code action
+
+When a CSV file has no sidecar, the language server offers a quick-fix code action: **"Pin schema to sidecar YAML"**.
+
+Applying the action:
+1. Reads the entire CSV file (all rows, not just the 100-row compile-time sample)
+2. Runs the type inferencer over every row
+3. Writes a sibling `<name>.yml` next to the CSV with `columns:` and `type:` entries
+
+The resulting file looks like:
+
+```yaml
+columns:
+  - name: user_id
+    type: INTEGER
+  - name: email
+    type: TEXT
+  - name: signup_date
+    type: DATE
+```
+
+You can then edit this file to add `description:` annotations, adjust types, or set `materialization: ephemeral`. smelt uses the pinned types instead of re-inferring from the CSV on every build.
+
+The action is only offered when no sidecar exists. If a sidecar already exists and you need to update the column declarations, edit the `.yml` file directly.
+
+### Hover on seed references
+
+Hovering over a `smelt.<seed-address>` reference in a SQL model shows the seed's column names and inferred (or pinned) types. If a sidecar YAML is present, the pinned types are shown instead of the inferred ones.
+
 ## When to use seeds
 
 Seeds work well for:

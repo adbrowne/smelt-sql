@@ -1061,6 +1061,7 @@ impl Backend {
                 DbCode::MissingProvenancePushdownAdvisory => "missing-provenance-pushdown-advisory",
                 DbCode::ExternFragmentParamUnsupported => "extern-fragment-param-unsupported",
                 DbCode::KindMismatch => "kind-mismatch",
+                DbCode::MissingSeedSidecar => "missing-seed-sidecar",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -1112,6 +1113,16 @@ impl Backend {
                 serde_json::json!({
                     "kind": "expansion-frames",
                     "frames": frames_json,
+                })
+            }
+            DbData::MissingSeedSidecar {
+                csv_path,
+                sidecar_path,
+            } => {
+                serde_json::json!({
+                    "kind": "missing-seed-sidecar",
+                    "csvPath": csv_path,
+                    "sidecarPath": sidecar_path,
                 })
             }
         });
@@ -2577,6 +2588,47 @@ impl LanguageServer for Backend {
                             ..Default::default()
                         }));
                     }
+                    CAK::PinSeedSchema(suggestion) => {
+                        // Build the sidecar YAML content from inferred columns.
+                        let mut yaml_content = String::from("columns:\n");
+                        for (name, dtype) in &suggestion.inferred_columns {
+                            yaml_content
+                                .push_str(&format!("  - name: {}\n    type: {}\n", name, dtype));
+                        }
+
+                        let sidecar_uri = Url::from_file_path(&suggestion.sidecar_path)
+                            .unwrap_or_else(|_| uri.clone());
+
+                        let document_changes = vec![
+                            DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                                uri: sidecar_uri.clone(),
+                                options: None,
+                                annotation_id: None,
+                            })),
+                            DocumentChangeOperation::Edit(TextDocumentEdit {
+                                text_document: OptionalVersionedTextDocumentIdentifier {
+                                    uri: sidecar_uri,
+                                    version: None,
+                                },
+                                edits: vec![OneOf::Left(TextEdit {
+                                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                                    new_text: yaml_content,
+                                })],
+                            }),
+                        ];
+
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: suggestion.title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                document_changes: Some(DocumentChanges::Operations(
+                                    document_changes,
+                                )),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
                 }
             }
         }
@@ -3607,6 +3659,68 @@ impl LanguageServer for Backend {
                                     "**Source: {}**\n\n⚠️ *Undefined source*",
                                     qualified_name
                                 );
+
+                                return Ok(Some(Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value: content,
+                                    }),
+                                    range: None,
+                                }));
+                            }
+                        }
+                    }
+                }
+
+                // Check smelt.<path> seed refs — path segments match address_segments
+                for path_ref in file
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::SmeltPathRef::cast)
+                {
+                    let segments = path_ref.segments();
+                    // Skip refs already handled as models or sources
+                    let first = segments.first().map(|s| s.as_str());
+                    if first == Some("models") || first == Some("sources") {
+                        continue;
+                    }
+                    let range = path_ref.text_range();
+                    let start: usize = range.start().into();
+                    let end: usize = range.end().into();
+
+                    if cursor_offset >= start && cursor_offset <= end {
+                        let project_root = file_project_root(&db, &effective_path);
+                        let project = lookup_project(&db, &project_root);
+                        if let Some(proj) = project {
+                            let seeds = smelt_db::project_seeds(&db, proj);
+                            if let Some(seed) = seeds
+                                .iter()
+                                .find(|s| s.address_segments == segments.as_slice())
+                            {
+                                let qualified_name = segments.join(".");
+                                let mut content = format!("**Seed: {}**\n\n", qualified_name);
+
+                                if seed.columns.is_empty() {
+                                    content.push_str("*(No column definitions)*\n");
+                                } else {
+                                    content.push_str("Columns:\n");
+                                    for (col_name, dtype) in &seed.columns {
+                                        content.push_str(&format!("- `{}` ({})", col_name, dtype));
+                                        // Include description from sidecar if present
+                                        if let Some(ref sidecar) = seed.sidecar {
+                                            if let Some(ref cols) = sidecar.columns {
+                                                if let Some(sc) =
+                                                    cols.iter().find(|c| &c.name == col_name)
+                                                {
+                                                    if let Some(ref desc) = sc.description {
+                                                        content.push_str(&format!(" - {}", desc));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        content.push('\n');
+                                    }
+                                }
 
                                 return Ok(Some(Hover {
                                     contents: HoverContents::Markup(MarkupContent {
