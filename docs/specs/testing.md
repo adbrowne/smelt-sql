@@ -98,7 +98,7 @@ Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`. If
 
 ### Whole-model tests
 
-When `target_cte` is absent, the entire model SQL is compiled with mock data substituted for all `smelt.models.<name>` and `smelt.sources.<name>` references named in `inputs`. Dependencies not listed in `inputs` are replaced with empty CTEs (zero rows).
+When `target_cte` is absent, the entire model SQL is compiled with mock data substituted for every `smelt.<path>` reference named in `inputs`. Dependencies not listed in `inputs` are replaced with empty CTEs (zero rows).
 
 ### CTE-level tests
 
@@ -129,7 +129,7 @@ Each iteration uses a different random seed derived from the test's global seed.
 
 **Test-as-materialization.** Using `materialization: test` rather than a separate test file format means the parser, type checker, LSP, and model discovery system all handle test files uniformly. Tests are discovered by the unified `paths:` scan, not a separate `test_paths`. The tradeoff is that test models appear in `smelt explain` output and must be explicitly excluded from execution runs (they are never materialized by `smelt run`).
 
-**Mock by dependency name.** Input mock data is keyed by the dependency's name (the model or CTE name), not by file path or address. This is consistent with `smelt.models.<name>` addressing and lets tests read naturally.
+**Mock by dependency name.** Input mock data is keyed by the dependency's `smelt.<path>` address (or, for CTE-level tests, the CTE name), not by some other handle. The keys mirror the addresses that appear in the SQL body, so tests read naturally without an extra lookup table.
 
 **Set comparison by default.** `check_order: false` is the safe default. Most models do not produce ordered output, and ordering in SQL is non-deterministic unless an `ORDER BY` is present. Requiring `check_order: true` explicitly for ordered output avoids brittle tests that depend on DuckDB's internal sort order.
 
@@ -142,7 +142,7 @@ Each iteration uses a different random seed derived from the test's global seed.
 1. **Tests run in-memory on DuckDB.** No connection to the project's configured target is made during `smelt test`.
 2. **Test models are never materialized by `smelt run` or `smelt build`.** `materialization: test` models are excluded from execution runs. They cannot have `incremental` config or `target` overrides.
 3. **`expect` is required.** A test with no `expect` rows is invalid.
-4. **`inputs` keys are dependency names.** For whole-model tests: names of `smelt.models.<name>` or `smelt.sources.<name>` references. For CTE tests: names of upstream CTEs the target CTE depends on.
+4. **`inputs` keys are dependency addresses.** For whole-model tests: the `smelt.<path>` form used in the SQL body. For CTE tests: names of upstream CTEs the target CTE depends on.
 5. **Column comparison uses only `expect` columns.** Extra actual columns are never treated as failure.
 
 ## Known Divergences / Open Questions

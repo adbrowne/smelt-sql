@@ -1,7 +1,7 @@
 ---
 feature: scoping
 status: experimental
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -63,7 +63,7 @@ Bare-name resolution inside a `smelt.define` body proceeds in this order, and st
 1. **Function parameters** (the function's declared parameter list).
 2. **CTE columns** for any CTE in scope at the reference site (a `WITH name AS (...)` binding earlier in the body).
 3. **FROM-scope columns** contributed by `TableExpr` parameters in scope. A bare column resolves only when **exactly one** `TableExpr` exposes a column of that name; ties are reported as ambiguity (currently surfaced as `UnknownIdentifier` with a hint until a dedicated `AmbiguousColumn` code lands — see Known Divergences).
-4. **Upstream model and source schemas** reachable through `TableExpr`-parameter values (e.g. when a `TableExpr` is bound to `smelt.models.m`, columns of model `m` are reachable through SQL FROM resolution against the bound argument; the same applies to seeds and sources resolved via `smelt.<path>`).
+4. **Upstream model and source schemas** reachable through `TableExpr`-parameter values (e.g. when a `TableExpr` is bound to a `smelt.<path>` referent, the resolved entity's columns are reachable through SQL FROM resolution against the bound argument; this applies uniformly to models, seeds, and sources).
 
 A qualified reference (`alias.column`) skips step 1 and resolves against the named alias's schema directly. This is the explicit escape hatch when a parameter shadows a desired column.
 
@@ -165,7 +165,7 @@ This section captures the load-bearing rationale behind the scoping rules above.
 
 ## Known Divergences / Open Questions
 
-- **Bare-column resolution from JOIN aliases inside `TableExpr` bodies.** When a `TableExpr` is provided by the caller as a complex expression (e.g. `smelt.models.a JOIN smelt.models.b ON …`), the body's bare-column resolution depends on the alias surface that survives the join. Phase 45 of `docs/plans/20260422-smelt-functions.md` covers the remaining work; until it lands, prefer explicit CTE renames inside the body.
+- **Bare-column resolution from JOIN aliases inside `TableExpr` bodies.** When a `TableExpr` is provided by the caller as a complex expression (e.g. `smelt.a JOIN smelt.b ON …`), the body's bare-column resolution depends on the alias surface that survives the join. Phase 45 of `docs/plans/20260422-smelt-functions.md` covers the remaining work; until it lands, prefer explicit CTE renames inside the body.
 - **CTE alpha-renaming is deferred** (research §16 #12). When a body CTE name collides with one introduced by an expansion frame, v1 emits a collision diagnostic rather than alpha-renaming. This is a hygiene gap, not a soundness gap; see `expansion.md` (when authored) for the planned v2 fix.
 - **`smelt.as_struct(...)`** as a no-overlap escape hatch is partially landed: the grammar parses and `AsStructUnsupportedBackend` is wired, but the full semantic finalisation (Step 8 of the smelt-functions plan, alongside struct row polymorphism) is post-v1. Treat Strategy 3 as design-sketch in v1.
 - **Ambiguous bare-column references** (a name reachable through two `TableExpr` parameters) currently surface as `UnknownIdentifier` with a hint rather than a dedicated `AmbiguousColumn` code. Whether to mint a distinct code is open.

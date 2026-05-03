@@ -1,7 +1,7 @@
 ---
 feature: model_selection
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -59,13 +59,13 @@ Both flags are repeatable. Each instance adds one selector to the set.
 
 ### Graph traversal
 
-`+` prefix (upstream): includes the target model(s) and every model they transitively depend on, following `smelt.models.<name>` and `smelt.sources.<name>` references.
+`+` prefix (upstream): includes the target model(s) and every model they transitively depend on, following every `smelt.<path>` reference (whether the resolved entity is a model, seed, or source).
 
 `+` suffix (downstream): includes the target model(s) and every model that transitively depends on them.
 
 `+name+` is the union of both traversal directions starting from `name`.
 
-Seeds are included in upstream traversal when a model references a seed via `smelt.models.<seed_name>`. Ephemeral models are included in traversal even though they are not materialized.
+Seeds are included in upstream traversal when a model references a seed via `smelt.<path>`. Ephemeral models are included in traversal even though they are not materialized.
 
 **No depth limit.** Upstream and downstream traversal are unbounded — they walk the entire reachable subgraph, not just N levels.
 

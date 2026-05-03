@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -68,6 +68,15 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 - **Goto-definition** → opens the source `.yml`.
 - **Diagnostics** — references to columns not declared in the source YAML produce an "undeclared column" diagnostic, same as for any other typed table reference.
 - **No "Pin schema" code action.** Sources have no data file to infer from; the YAML is hand-written.
+
+### Diagnostic codes (owned by this spec)
+
+The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catalogue but defers the trigger contract here. (Diagnostic ownership is a per-spec rule that a future `diagnostics.md` registry will formalise; the rule today is "diagnostic codes live with the feature that owns them.")
+
+| Code | Severity | Trigger |
+|---|---|---|
+| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry). |
+| `SourceTypeError` | Error | A `columns[].type` value is not a recognised smelt `DataType` (`types.md`). |
 
 ## Semantics
 

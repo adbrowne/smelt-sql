@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-04-27
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -31,11 +31,11 @@ incremental:
 ---
 
 SELECT order_date, customer_id, SUM(amount) AS total
-FROM smelt.models.orders
+FROM smelt.orders
 GROUP BY order_date, customer_id
 ```
 
-`materialization` is optional. When omitted from frontmatter, the model falls back to the per-model entry in `smelt.yml` (`models.<name>.materialization`), and finally to the project-level `default_materialization` key (whose own default is `view`). Incremental models must resolve to `materialization: table` — declaring `incremental:` on a non-table materialization is a configuration error or a warning depending on the resolved kind (see `smelt-yml.md`).
+`materialization` is optional. When omitted from frontmatter, the model falls back to the per-model entry in `smelt.yml` (`models.<name>.materialization`), and finally to the project-level `default_materialization` key (whose own default is `view`). Incremental models must resolve to `materialization: table` — declaring `incremental:` on a non-table materialization is a configuration error or a warning depending on the resolved kind (see `smelt_yml.md`).
 
 ### `smelt.yml` (project-level overrides)
 

@@ -22,7 +22,7 @@ from smelt import model
 def combined_events(project):
     sources = project.find_models(tag="source")
     unions = "\nUNION ALL\n".join(
-        f"SELECT * FROM smelt.models.{m.name}" for m in sources
+        f"SELECT * FROM smelt.{m.name}" for m in sources
     )
     return f"""
 --- name: combined_events ---
@@ -101,7 +101,7 @@ Python model functions are evaluated at **compile time** — during `smelt build
 
 ### Model name derivation
 
-The model name is the Python function name, exactly. A function named `daily_revenue` produces a model named `daily_revenue`, addressable as `smelt.models.daily_revenue` in other models.
+The model name is the Python function name, exactly. A function named `daily_revenue` produces a model named `daily_revenue`, addressable as `smelt.daily_revenue` (universal `smelt.<path>` form per `architecture.md` §"Resolution") in other models.
 
 If a returned SQL string includes a `--- name: X ---` frontmatter header, that name is used instead of the function name. This allows a single Python function to return SQL with an explicit model name.
 

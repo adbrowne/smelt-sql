@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Models
 
-> **What this is.** A normative spec for SQL model files — the core unit of computation in smelt. Covers file format, YAML frontmatter schema, model naming, materialization modes, and the `smelt.models.<name>` reference surface.
+> **What this is.** A normative spec for SQL model files — the core unit of computation in smelt. Covers file format, YAML frontmatter schema, model naming, materialization modes, and the `smelt.<path>` reference surface as it applies to models. The universal addressing scheme is defined in `architecture.md` §"Resolution".
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 
@@ -26,7 +26,7 @@ tags: [revenue, core]
 ---
 
 SELECT order_date, SUM(amount) AS revenue
-FROM smelt.models.orders
+FROM smelt.orders
 GROUP BY 1
 ```
 
@@ -42,7 +42,7 @@ SELECT * FROM smelt.sources.raw.orders WHERE status != 'cancelled'
 materialization: table
 ---
 SELECT DATE(order_time) AS order_date, SUM(amount) AS revenue
-FROM smelt.models.staging_orders
+FROM smelt.staging_orders
 GROUP BY 1
 ```
 
@@ -106,20 +106,22 @@ Under `columns:`, each key is a column name and each value is an object with:
 
 ### Reference syntax
 
-Within model SQL, other models are referenced using `smelt.models.<name>`:
+Within model SQL, every project-defined entity — model, seed, source — is referenced using the universal `smelt.<path>` form (see `architecture.md` §"Resolution"). The path is the entity's workspace location with the matching `paths:` scan-root prefix stripped:
 
 ```sql
-FROM smelt.models.upstream_model
-FROM smelt.models.my_seed       -- seeds are valid ref targets
+FROM smelt.upstream_model         -- model at models/upstream_model.sql
+FROM smelt.staging.cleaned        -- model at models/staging/cleaned.sql
+FROM smelt.my_seed                -- seed at seeds/my_seed.csv (seeds are valid ref targets)
+FROM smelt.sources.raw.events     -- source at sources/raw/events.yml
 ```
 
-Named parameter syntax is parsed but **not executed at runtime**:
+Models can also be invoked as parameterised functions when they declare `TableExpr` parameters (`architecture.md` §"Models as functions"). Named-argument syntax binds parameters by name; bare `smelt.<path>` (without parens) is shorthand for the DAG-default binding:
 
 ```sql
-FROM smelt.models.events(filter => date > '2024-01-01', limit => 1000)
+FROM smelt.events(filter => date > '2024-01-01', limit => 1000)
 ```
 
-External sources are referenced using `smelt.sources.<schema>.<table>` (see `sources.md`).
+Calling a non-parameterised model with arguments, or omitting required parameters of a parameterised model without DAG defaults, is a hard error.
 
 ### Constraint violations
 
@@ -143,7 +145,7 @@ Model names must be unique across the project. If two models produce the same na
 
 ### Ephemeral inlining
 
-An `ephemeral` model's SQL is substituted as a CTE at each point a downstream model references it via `smelt.models.<name>`. The ephemeral model itself is never materialized. If multiple downstream models reference the same ephemeral, each gets an independent copy of the CTE; there is no shared materialization.
+An `ephemeral` model's SQL is substituted as a CTE at each point a downstream model references it via `smelt.<path>`. The ephemeral model itself is never materialized. If multiple downstream models reference the same ephemeral, each gets an independent copy of the CTE; there is no shared materialization.
 
 Transitive ephemeral chains are resolved: if `a` references ephemeral `b`, which references ephemeral `c`, then `a` gets both `b` and `c` as CTEs.
 
@@ -175,7 +177,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 **`deny_unknown_fields`.** Strict field validation catches typos before execution. The alternative — silently ignoring unknown keys — hides configuration mistakes and makes frontmatter edits feel non-deterministic. The error message from `serde` names the offending field, which is sufficient for the user to correct it.
 
-**Named parameters parsed but deferred.** `smelt.models.name(filter => ...)` syntax is parsed to avoid breaking the grammar if/when it is implemented. It is not executed today. The note in user docs is the authoritative statement of current status.
+**Named parameters parsed but deferred.** `smelt.<path>(filter => ...)` syntax is parsed to avoid breaking the grammar if/when full parameterised-model execution is implemented (see `architecture.md` §"Models as functions"). DAG-defaulted bare references work today; parameter-binding overrides at call sites are pre-execution. The note in user docs is the authoritative statement of current status.
 
 ## Constraints & Invariants
 
@@ -191,7 +193,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **`test` mode missing from materializations user guide.** `docs-site/docs/guide/materializations.md` documents four materialization types; `test` is absent. It is documented only in the testing guide. Should be added to materializations page.
 - **Duplicate model names undefined.** If `models/users.sql` and `models/archive/users.sql` both exist, the current implementation uses last-discovery order with no diagnostic. The spec mandates uniqueness; the implementation should emit an error.
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
-- **Named parameter syntax in `smelt.models.<name>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
+- **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
 
 ## References

@@ -1,7 +1,7 @@
 ---
 feature: functions
 status: experimental
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -75,7 +75,7 @@ A `smelt.<path>(...)` call whose return type is `Expr<Boolean>` is valid in any 
 ```sql
 -- functions/orders.sql declares is_shipped(status TEXT) -> Expr<Boolean>
 SELECT *
-FROM smelt.models.orders
+FROM smelt.orders
 WHERE smelt.functions.is_shipped(status)
 ```
 
