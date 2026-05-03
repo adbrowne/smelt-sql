@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777766805604,
+  "lastUpdate": 1777819069619,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14663,6 +14663,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.177632,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c58defb33744b49e8de6fe5ccbc789c733c70ae0",
+          "message": "spec(seeds): backend-portable loading and unified config (#113)\n\n* spec(seeds): rewrite for backend-portable loading and unified config\n\nMajor spec revision covering the design discussion in this branch:\n\n- Two concepts (seed/source) stay distinct by lifecycle but share the\n  YAML schema-declaration shape; one file per entity at its addressed\n  path. Aggregate sources.yml is removed.\n- smelt.yml::seed_paths is dropped. CSVs and standalone YAMLs are\n  picked up wherever they live under the renamed paths: scan list.\n- Address = smelt.<path-under-scan-root>; default DB location is\n  <target_schema>.<path-joined-with-underscore>. No more\n  subdirectory-becomes-schema mapping. Configurable name mapping is a\n  future follow-up (Known Divergences).\n- Smelt owns CSV parsing and type inference; DuckDB's read_csv_auto is\n  out. csv crate for tokenisation, smelt-owned inferencer producing\n  Arrow batches; backends consume via Backend::load_table(...).\n- Strict CSV defaults: comma, double-quote, header required, empty\n  cell -> NULL always. No per-seed override surface in v1.\n- Type set: BOOLEAN, INTEGER, DECIMAL(p,s) capped at (18,4), DOUBLE,\n  DATE, TIMESTAMP (no TZ), VARCHAR. Detection order documented; 100\n  rows compile-time, whole file runtime.\n- Sidecar YAML for type pinning; column-set mismatch / coerce-fail /\n  NULL-in-non-nullable are hard errors (no silent NULL substitution).\n- materialization: ephemeral splices VALUES at compile time; table is\n  default. view/materialized_view deferred.\n- LSP \"Pin schema to sidecar YAML\" code action; warning diagnostic on\n  CSVs without a sidecar.\n- Tests on seed columns deferred to the future tests spec.\n- Hard-cut migration (no compat shim) — pre-1.0 + workspace policy.\n\nThe implementation lags this spec on every Surface item; the migration\nplan is a follow-up. This commit is spec-only.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec(seeds,sources,architecture,smelt_yml): split cross-cutting rules\n\nRefactor the seeds-spec rewrite so each cross-cutting decision lives\nin exactly one place, with seeds.md focused on seed-specific content.\n\narchitecture.md:\n- Resolution: extend the kind-determination table with the .yml\n  sidecar tiebreaker (sibling .csv with same stem -> sidecar; no\n  sibling -> source).\n- Resolution: add address uniqueness across paths: roots — two files\n  resolving to the same address (regardless of which scan root) is a\n  hard workspace-load error.\n- New \"Default materialization name mapping\" subsection: schema =\n  target schema, table = address path joined by _. Applies to models,\n  seeds, sources; does not apply to functions/ephemeral/externs.\n  Sources may override via YAML name:; seeds/models cannot.\n- New \"Backend trait surface\" subsection listing the canonical methods\n  including load_table(schema, name, arrow_schema, batches) for the\n  cross-backend Arrow ingest path.\n\nsmelt_yml.md:\n- Collapse model_paths and seed_paths into a single paths: key\n  (default [\"models\"]). Discovery walks every listed directory and\n  classifies files by content per architecture.md §Resolution.\n- Add design rationale for the unification and a Known Divergence for\n  the implementation lag.\n\nsources.md (new stub):\n- Owns the shared YAML grammar (description, columns, nullable).\n- Defines source-only semantics: never loaded, schema-as-contract,\n  no materialization key, name: override allowed.\n- References architecture.md for resolver, default DB-name mapping.\n\nseeds.md (slimmed):\n- Removes the YAML grammar (now in sources.md), the cross-path\n  collision rule (now in architecture.md), the default DB-name\n  mapping (now in architecture.md), and the Backend trait method\n  declaration (now in architecture.md).\n- Keeps CSV format details, type inference rules, smelt seed CLI,\n  ephemeral semantics, and seed-specific LSP tooling (Pin schema\n  code action, missing-sidecar warning).\n\ncli.md:\n- Update related-specs reference from model_paths/seed_paths to paths.\n\nThis is a spec-only refactor; no implementation changes.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: unified paths and backend-portable loading\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* config: collapse model_paths/seed_paths into single paths key\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: record phase 1 commit sha\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan(phase-2): add compiler.rs to scope, document SQL-ref sweep, fix architecture.md table note\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan(phase-2): clarify sources/functions exemptions from SQL-ref migration\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* core: kind-by-content resolver and default db-name mapping (path-joined-by-_)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 2 done (aacb8d1)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* backend: add load_table(schema, name, arrow_schema, batches) on Backend trait\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 3 done (1d03b59)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* seeds: smelt-owned csv parser and inferencer; load via Backend::load_table\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 4 done (4d04eb9)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* seeds: sidecar pinning, hard errors on coerce/nullable, ephemeral materialization\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 5 done (4e0bd13)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* sources: per-entity YAMLs, name-override, drop aggregate sources.yml\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 6 done (3dfd35b)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* lsp: missing-sidecar warning and Pin-schema code action for seeds\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 7 done (80236ec)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs: reconcile user docs and specs with migrated paths/sources/seeds\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* plan: mark Phase 8 done (2cae6f1)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* fix(clippy): remove unnecessary u8 cast and use &Path instead of &PathBuf\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* fix(test-compiler): handle unified-path smelt refs (not just smelt.models.*)\n\ncompile_whole_model_test was only replacing smelt.models.<name> refs with\nmock CTEs. With unified paths:, models addressed as smelt.<name> (single\nsegment) were not replaced, causing DuckDB schema-not-found errors at\ntest time. Now replaces any smelt.<path> ref using segments joined by \"_\"\nas the CTE name.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-03T19:07:14+10:00",
+          "tree_id": "22e8dea33a4ec7ab7323de9e725bfbf9cddd28e6",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c58defb33744b49e8de6fe5ccbc789c733c70ae0"
+        },
+        "date": 1777819068475,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.274688,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.882906999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.637988,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.418188,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0028250000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9777557.489188,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 13.478163,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 13.097655,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 12.965298,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.8063509999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9814154.91626,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.43803,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.92143,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.501958,
             "unit": "ms"
           }
         ]
