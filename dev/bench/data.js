@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777766803875,
+  "lastUpdate": 1777766805604,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19160,6 +19160,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.00771143975551,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "de8c36bf581eaf7e74f9ad62eefe3ef02eaab5af",
+          "message": "docs: mark all 12 spec-coverage plan items done\n\nAll phases complete: models, project_config, seeds, sources, cli,\nmodel_selection, testing, datagen, schema_evolution, python_models, lsp,\ndata_catalog.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-03T10:04:38+10:00",
+          "tree_id": "8ffd6cef6561bdbae01d6db6065f03ce9173f687",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/de8c36bf581eaf7e74f9ad62eefe3ef02eaab5af"
+        },
+        "date": 1777766805189,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.39075305790904,
             "unit": "MB/s"
           }
         ]
