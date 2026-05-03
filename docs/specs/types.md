@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-04-28
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -201,6 +201,18 @@ A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.defi
 | `[1, 'hello']` | `Unknown` (array) | `TypeMismatch` |
 | `SELECT 1 UNION SELECT 'a'` | `Unknown` per column | `TypeMismatch` |
 | Window function in `WHERE` | flagged | `WindowInScalarContext` |
+
+## Design
+
+This section captures the load-bearing rationale behind the type system's shape and the alternatives that were considered and rejected.
+
+**Strict-by-default, no implicit cross-family coercion.** The Semantics §"Strict-by-default doctrine" rule — `42 + '3'` is a `TypeMismatch`, not a silent string-to-int coercion — is the single most user-visible decision in the type system. It is doctrine because every alternative we considered traded near-term ergonomics for far-more-expensive long-term debugging. *Implicit coercion across families* (the SQL-92 / MySQL shape) was rejected because it lets schema drift hide for months: a column that quietly turns from `INTEGER` to `VARCHAR` upstream still type-checks downstream and silently corrupts joins. *Configurable strictness* (a `--strict` flag, or per-project lenient mode) was rejected because once strict diagnostics are optional, large projects negotiate them away and the framework loses its strongest correctness lever. The strict rule is paid back in two ways: the LSP offers one-click `CAST` quick-fixes, and committed code has a single, documented, mechanical answer to "why did this expression infer `Unknown`?".
+
+**Single `DataType` vocabulary across all backends.** `DataType` is one enum in one crate (`smelt-types`); backend-specific names (`HUGEINT`, `STRING`, `TIMESTAMPTZ`) parse into the enum on input, and `to_backend_sql()` is the only path that emits an engine-specific name. *Per-backend type vocabularies* (one `DataType` for DuckDB, another for Spark, another for Postgres) was rejected because cross-backend reasoning — incremental models that read DuckDB and write Spark, function signatures portable across engines, type-aware diagnostics in the LSP — would require a translation layer at every boundary, and translation layers are where correctness goes to die. The trade-off is that adding an engine-native type that no other backend supports requires either a new `DataType` variant (semi-permanent) or a `<backend>.<type>(...)` opt-in (the `postgres.sum(...)` shape from §"Canonical built-in returns"). That cost is paid by the few projects that need it, not by the ecosystem as a whole.
+
+**Engine-alias normalisation is a parser concern, not an inference concern.** The aliases `INT`, `INT4`, `STRING`, `BOOL`, `BYTEA`, `TIMESTAMPTZ` are normalised on input by `crates/smelt-types/src/parse.rs`; type inference operates only on canonical `DataType` values. *Carrying alias spellings through inference* was rejected because it doubles the surface every inference rule has to handle ("does `Integer + Int` unify? does `Text + String` round-trip?") with no semantic value — every such pair is the same type. Normalising at the boundary keeps the inference rules clean and means the test surface for type inference doesn't have to enumerate alias permutations.
+
+**Local, bidirectional checking; no global constraint solver.** Each function call's row-variable unification, generic binding, and constraint discharge happens at the call site (§"Bidirectional checking", §"Generics inference"). *Global constraint propagation* (a Hindley-Milner-style solver across the whole workspace) was rejected because workspaces grow to thousands of models and millions of inferred columns, and global solvers do not survive that scale gracefully — incremental recompilation in particular suffers, since one edit can invalidate constraints far away. Local checking means the LSP's "what's the type of this expression?" question always has a fast answer, and parameterised functions feel like local reasoning ("what does `T` bind to here?") not deep magic. The trade-off is that callers must annotate `smelt.define` signatures whose generics cannot be inferred locally — a price we accept (the function form is `smelt.extern` / built-ins; user-defined `smelt.define` is monomorphic in v1).
 
 ## Constraints & Invariants
 
