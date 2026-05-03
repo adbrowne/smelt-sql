@@ -178,6 +178,30 @@ FROM smelt.raw_orders
 GROUP BY 1
 ```
 
+Seeds and SQL models share the same flat namespace — there is no `smelt.models.*` prefix. A seed at `seeds/raw_orders.csv` and a model at `models/stg_orders.sql` are both referenced as `smelt.raw_orders` and `smelt.stg_orders` respectively.
+
+### Joining seeds together
+
+A common staging pattern joins two seeds to enrich a fact table with dimension attributes:
+
+```sql
+-- models/stg_orders.sql
+---
+name: stg_orders
+materialization: table
+---
+SELECT
+  o.order_id,
+  o.order_date,
+  o.amount,
+  c.name AS customer_name,
+  c.country
+FROM smelt.raw_orders o
+LEFT JOIN smelt.raw_customers c ON o.customer_id = c.customer_id
+```
+
+Column names in the output must match what the spec requires. Seed column names are locked to CSV headers — alias them in the staging model if the spec uses different names (e.g. CSV has `name`, spec requires `customer_name`).
+
 smelt resolves column types from the CSV headers and data, so you get full type inference and LSP diagnostics for seed columns.
 
 ## LSP affordances
