@@ -153,7 +153,7 @@ Optional run-state tracking with gap detection is planned (Phase 5 of the increm
 - **Per-column `data_latency` not implemented.** Plan calls for declaring `data_latency` on upstream sources for late-arriving data; not yet available.
 - **MERGE strategy is DuckDB-only-future.** `BackendCapabilities.supports_merge` is `true` for DuckDB / Spark / PostgreSQL, but the planner emits `DeleteInsert` for all three today. A Spark MERGE pathway is in the plan but unbuilt.
 - **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+incremental, incremental-only — Phase 1 of the incremental plan unified `IncrementalConfig` but the CLI dispatch is still tri-modal. Should converge.
-- **Granularity conversion boilerplate.** A duplicate `Granularity` enum existed in `smelt-optimizer/src/types.rs` and was reconciled with `smelt-core`; check for residual conversion code in `main.rs` (lines around 669–683 in the plan reference) when next touching this area.
+- **Granularity conversion boilerplate.** A duplicate `Granularity` enum existed in `smelt-planner/src/types.rs` and was reconciled with `smelt-core`; check for residual conversion code in `main.rs` (lines around 669–683 in the plan reference) when next touching this area.
 - **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is planned but opt-in.
 - **Schema evolution is unspecified.** A `partition_column` rename or an output schema change has no defined handling today.
 - **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for incremental models that consume metrics.
@@ -164,15 +164,15 @@ Optional run-state tracking with gap detection is planned (Phase 5 of the increm
   - `crates/smelt-core/src/config.rs` — `IncrementalConfig`, `Granularity`, `Weekday`
   - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, `ModelMetadata`
   - `crates/smelt-core/src/sources.rs` — `SourceColumnDef` (future home of `data_latency`)
-  - `crates/smelt-optimizer/src/rules/incremental.rs` — detection + safety checks
-  - `crates/smelt-optimizer/src/types.rs` — safety-override types
+  - `crates/smelt-planner/src/rules/incremental.rs` — detection + safety checks
+  - `crates/smelt-planner/src/types.rs` — safety-override types
   - `crates/smelt-cli/src/transformer.rs` — `inject_time_filter()`
   - `crates/smelt-cli/src/executor.rs` — `execute_model_incremental()`, `execute_plan_incremental()`
   - `crates/smelt-cli/src/main.rs` — CLI dispatch (incremental paths around the `run` / `backbuild` subcommands)
   - `crates/smelt-backend/src/lib.rs` — `Backend::delete_partitions()`, `Backend::insert_into_from_query()`
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
-- **Tests**: 17 optimizer unit tests in `crates/smelt-optimizer/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; 7 optimizer integration tests; 13 metadata tests
+- **Tests**: 17 optimizer unit tests in `crates/smelt-planner/src/rules/incremental.rs`; CLI integration tests in `crates/smelt-cli/tests/incremental_*.rs`; 7 optimizer integration tests; 13 metadata tests
 - **User docs**: [`docs-site/docs/guide/incremental-models.md`](../../docs-site/docs/guide/incremental-models.md), [`docs-site/docs/guide/materializations.md`](../../docs-site/docs/guide/materializations.md)
 - **Plans (history)**:
   - [`docs/plans/20260322-incremental-model-support.md`](../plans/20260322-incremental-model-support.md) — comprehensive plan; many phases still open
