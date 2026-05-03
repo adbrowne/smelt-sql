@@ -61,7 +61,7 @@ A smelt workspace is rooted at a directory containing `smelt.yml`. **Directory l
 | `functions/`   | `.sql` files containing `smelt.define` declarations.                              |
 | `seeds/`       | Static `.csv` inputs.                                                             |
 | `sources/`     | Per-source `.yml` declarations (schemas for external tables).                     |
-| `tests/`       | `.sql` files containing `smelt.test` declarations (any number per file).         |
+| `tests/`       | `.sql` files containing `materialization: test` models (any number per file).    |
 | `smelt.yml`    | Project-level configuration (backend selection, feature flags such as `unstable_schema`). |
 
 A project may rename or reorganise these freely (`staging/`, `marts/`, `external/`, etc.). The kind of an entity is determined by the file's *format and content*, not by the name of its containing directory.
@@ -84,20 +84,20 @@ The path is the workspace-relative directory joined with the entity's leaf name,
 | `functions/patterns/x.sql` declaring `session_rollup`     | `smelt.functions.patterns.session_rollup(...)`    |
 | `seeds/raw/users.csv`                                     | `smelt.raw.users`                                 |
 | `sources/raw/events.yml`                                  | `smelt.raw.events`                                |
-| `tests/marts/customers.sql` declaring `customers_no_nulls` | `smelt.tests.marts.customers_no_nulls`           |
+| `tests/marts/customers.sql` (lone `materialization: test` model)        | `smelt.tests.marts.customers`                     |
+| `tests/marts/file.sql` containing `name: customers_no_nulls` + `materialization: test` | `smelt.tests.marts.customers_no_nulls` |
 
 Note: `functions/`, `sources/`, and `tests/` are discovered via their own dedicated scan paths and are **not** in the `paths:` list by default; their scan-root prefix is not stripped (they keep their full workspace-relative path as the address). Only directories listed in `paths:` have their prefix stripped.
 
 **Kind is determined by file format and content, not by syntactic prefix.** When the resolver reaches a path:
 
-- A `.sql` file with a bare SELECT (or one of multiple named bare SELECTs) → **model** (DAG-defaulted, `TableExpr`-valued).
+- A `.sql` file with a bare SELECT (or one of multiple named bare SELECTs) → **model** (DAG-defaulted, `TableExpr`-valued). Tests are a model kind: a bare SELECT carrying `materialization: test` in its frontmatter is a **test** model — addressable for tooling but **not** valid in `TableExpr` positions, since a test never produces a database object (`testing.md`).
 - A `.sql` file declaring `smelt.define <name>` → **function** (callable with arguments).
-- A `.sql` file declaring `smelt.test <name>` → **test** (executable assertion; addressable for tooling but **not** valid in `TableExpr` positions — using a `smelt.tests.*` path in `FROM` is a kind-mismatch error).
 - A `.csv` file → **seed**.
 - A `.yml` file with **no** sibling `.csv` (same directory, same stem) → **source** (externally-managed table; smelt declares its schema, does not load it).
 - A `.yml` file **with** a sibling `.csv` (same directory, same stem) → **sidecar** to that seed; binds schema / column descriptions / `materialization` to the seed and is not itself an addressable entity.
 
-A `.sql` file may mix declaration kinds — a model with co-located tests, a function with co-located tests — provided names are unique within the file. A given path resolves to at most one kind. Names must be unique within a directory across all kinds — a `data/users.csv` and `data/users.sql` is a workspace-load error.
+A `.sql` file may mix declaration kinds — a model with co-located tests (each declared via `materialization: test`), a function with co-located tests — provided names are unique within the file. A given path resolves to at most one kind. Names must be unique within a directory across all kinds — a `data/users.csv` and `data/users.sql` is a workspace-load error.
 
 **Address uniqueness is global across `paths:`.** When `smelt.yml::paths` lists multiple roots (e.g. `paths: ["models", "fixtures"]`), the scan-root prefix is stripped from each independently and addresses share a single namespace. Two files that resolve to the same `smelt.<path>` — e.g. `models/users.csv` and `fixtures/users.csv` — are a hard workspace-load error. The rule is "one path → one entity" regardless of which scan root the file lives under.
 
@@ -105,7 +105,7 @@ A `.sql` file may mix declaration kinds — a model with co-located tests, a fun
 
 **File kind is grammar, not location.** `data/foo.sql` containing a bare SELECT is a model addressable as `smelt.data.foo`; `random/x.sql` declaring `smelt.define helper(...)` is callable as `smelt.random.helper(...)` (the filename stem is not a path component). The recommended layout is convention; the resolver only cares about path and content.
 
-**Bare-model naming.** A `.sql` file may contain any number of bare-SELECT models. A file's *lone* bare SELECT takes its leaf name from the filename and **must not** declare `name:` in its frontmatter. In a file with two or more bare SELECTs, each bare SELECT **must** declare `name:` in its frontmatter; the filename ceases to register as a model name and becomes purely a container. The model's full path is the directory path joined with the leaf name. Names within a file must be unique across bare SELECTs, `smelt.define`s, `smelt.extern`s, and `smelt.test`s.
+**Bare-model naming.** A `.sql` file may contain any number of bare-SELECT models. A file's *lone* bare SELECT takes its leaf name from the filename and **must not** declare `name:` in its frontmatter. In a file with two or more bare SELECTs, each bare SELECT **must** declare `name:` in its frontmatter; the filename ceases to register as a model name and becomes purely a container. The model's full path is the directory path joined with the leaf name. Names within a file must be unique across bare SELECTs (including `materialization: test` ones), `smelt.define`s, and `smelt.extern`s.
 
 ### Default materialization name mapping
 
@@ -135,7 +135,7 @@ Per-entity overrides are kind-specific:
 
 ### Unified frontmatter rule
 
-A YAML frontmatter block (between `---` fences) attaches to the **immediately following declaration**: a model `SELECT`, a `smelt.define`, a `smelt.extern`, or a `smelt.test`. Each declaration may carry its own block; there is no file-level frontmatter, and no inheritance across declarations in the same file. (Research §16 #22.)
+A YAML frontmatter block (between `---` fences) attaches to the **immediately following declaration**: a model `SELECT` (including a test, declared via `materialization: test` on the SELECT's frontmatter), a `smelt.define`, or a `smelt.extern`. Each declaration may carry its own block; there is no file-level frontmatter, and no inheritance across declarations in the same file. (Research §16 #22.)
 
 The frontmatter parser is shared across all four declaration kinds; the parsing contract is identical. Property semantics differ — per-feature key catalogues live in the relevant feature spec:
 
@@ -299,7 +299,7 @@ This section captures the load-bearing rationale behind the pipeline, the crate 
 
 **Single addressing scheme `smelt.<path>` for all project-defined entities.** Earlier shapes used kind-specific prefixes — `smelt.ref('m')` for models, `smelt.source('raw.x')` for sources, `smelt.fn.<path>(...)` for functions, with externs flat. That asymmetry forced users to know an entity's kind before referencing it, conflated the *what* with the *where*, and made cross-kind refactors (a seed promoted to a model, a model factored as a parameterised function) churn every callsite. Collapsing every project-defined entity into `smelt.<path>` makes resolution uniform: the path locates the entity, the file format/content determines the kind, and the resolver dispatches accordingly. A reader who *wants* the kind-signal at the callsite gets it for free if the project follows the recommended layout (`smelt.sources.raw.events` reads as "this is a source"); a reader who doesn't can name their directory whatever they like. Externs remain the documented exception (flat, ambient, callable by bare name) because their job is to extend the built-in namespace — a path-prefixed extern would defeat the ergonomics that motivate them. (Research §16 #22; addressing redesigned 2026-05-01.)
 
-**Directory layout is user-chosen; kind is determined by file format/content.** The recommended `models/` / `functions/` / `seeds/` / `sources/` layout is convention, not spec-mandated structure. Forcing kind-by-directory was rejected because it forecloses meaningful per-project organisation — a project that prefers `staging/` / `marts/` / `external/` should not have to fight the framework. Forcing kind-by-syntactic-prefix was rejected for the addressing-scheme reason above. The resolver examines the file at a given path — bare SELECT → model, `smelt.define` → function, `.csv` → seed, source `.yml` → source, `smelt.test` → test — which means a user can refactor across kinds without changing call sites, and `smelt.yml` stays as project-level configuration rather than a directory-type registry. The spec mandates only that `smelt.yml` exists at the workspace root.
+**Directory layout is user-chosen; kind is determined by file format/content.** The recommended `models/` / `functions/` / `seeds/` / `sources/` layout is convention, not spec-mandated structure. Forcing kind-by-directory was rejected because it forecloses meaningful per-project organisation — a project that prefers `staging/` / `marts/` / `external/` should not have to fight the framework. Forcing kind-by-syntactic-prefix was rejected for the addressing-scheme reason above. The resolver examines the file at a given path — bare SELECT → model (a SELECT carrying `materialization: test` is a test model), `smelt.define` → function, `.csv` → seed, source `.yml` → source — which means a user can refactor across kinds without changing call sites, and `smelt.yml` stays as project-level configuration rather than a directory-type registry. The spec mandates only that `smelt.yml` exists at the workspace root.
 
 A consequence worth naming: multi-team or multi-domain workspaces can co-locate everything for a domain — sources, seeds, tests, and models — under a single directory tree (`payments/`, `inventory/`, `support/`), with the namespace falling out of the path automatically. The kind-axis and the domain-axis stay independent. A kind-by-directory rule would have collapsed them, forcing every team to scatter their entities across `models/payments/`, `seeds/payments/`, `tests/payments/` instead of holding `payments/` together.
 
@@ -327,7 +327,6 @@ These are normative and must be upheld across all features.
 
 Update as part of any plan that touches architecture.
 
-- **`smelt.test` declaration semantics are pre-spec.** This spec introduces `smelt.test` as a top-level declaration kind so tests can live alongside models, but defers the assertion semantics (does a non-empty result mean fail? are there severity tiers? how do parameterised tests work?) to a future `tests.md` feature spec.
 - **Namespace decoupled from directory path is future work.** Today `smelt.<path>` is the literal workspace-relative directory path. A future extension could let projects declare a namespace alias (per-directory `package.yml`, top-level `smelt.yml` mapping, or a `smelt.package <name>` declaration at file scope) so deeply nested directories can present a flatter namespace — useful when an organisation's filesystem hierarchy is richer than the desired call-surface depth (e.g., `models/teams/payments/marts/balances.sql` exposed as `smelt.payments.balances`). Deferred until concrete need emerges; the literal-path rule is the default and removes one layer of indirection.
 - **LSP dialect diagnostics are planned but not implemented.** `smelt-dialect` is in place; the LSP does not yet emit "QUALIFY will be rewritten" hints. Add to a future plan.
 - **`smelt-check` crate not yet extracted.** The Salsa purity rule is currently upheld by convention; nothing prevents a regression. Once `smelt-check` is extracted, it becomes structurally enforced.

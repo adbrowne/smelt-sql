@@ -17,19 +17,18 @@ A `.sql` file is a sequence of top-level **items**. Each item is one of:
 
 - A `smelt.define` declaration.
 - A `smelt.extern` declaration.
-- A bare model `SELECT`.
-- A `smelt.test` declaration (declaration shape and assertion semantics owned by `testing.md`; this spec covers only the parsing-contract sharing).
+- A bare model `SELECT` (a SELECT carrying `materialization: test` is a test model — declaration shape and assertion semantics owned by `testing.md`).
 
 Each item may be preceded by an optional YAML **frontmatter** block (`---` … `---`). Frontmatter attaches to the immediately following declaration; there is no file-level frontmatter scope. (Research §16 #22.)
 
 Rules:
 
 - Items are separated by whitespace only — no separator token.
-- A file may contain **any number** of bare model `SELECT`s. The naming rule (lone-anonymous OR all-named via frontmatter `name:`, never mixed) is specified in `architecture.md` §"Project layout — Bare-model naming".
-- A file may contain **zero or more** `smelt.define`, `smelt.extern`, and `smelt.test` items, interleaved freely with each other and with bare model `SELECT`s.
-- All declared names within a file (bare-SELECT names, `smelt.define`s, `smelt.extern`s, `smelt.test`s) must be unique.
+- A file may contain **any number** of bare model `SELECT`s (test or otherwise). The naming rule (lone-anonymous OR all-named via frontmatter `name:`, never mixed) is specified in `architecture.md` §"Project layout — Bare-model naming".
+- A file may contain **zero or more** `smelt.define` and `smelt.extern` items, interleaved freely with each other and with bare model `SELECT`s.
+- All declared names within a file (bare-SELECT names, `smelt.define`s, `smelt.extern`s) must be unique.
 - File **kind** is a property of each declaration, not of the file (architecture spec, "Resolution"). The directory containing the file contributes to the entity's `smelt.<path>` namespace — e.g. `functions/patterns/session_rollup.sql` declaring `session_rollup` produces the call path `smelt.functions.patterns.session_rollup`. Externs are flat and ambient: their declaring path affects navigation only, never the call surface (see `architecture.md` §"Externs are flat").
-- A trailing `;` after a `smelt.define`, `smelt.extern`, or `smelt.test` declaration is allowed but optional.
+- A trailing `;` after a `smelt.define` or `smelt.extern` declaration is allowed but optional.
 
 ### `smelt.define` grammar
 
@@ -127,7 +126,7 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 | `provenance` | structured map (shape TBD) | absent | Declared column-provenance map. Gated behind `smelt.yml: unstable_schema: true`. |
 | `backends.<name>.emit` | string | declared name | (`smelt.extern` only) Backend-specific emitted name. |
 
-Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all four declaration kinds (model `SELECT`, `smelt.define`, `smelt.extern`, `smelt.test`).
+Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all three declaration kinds (model `SELECT` — including `materialization: test` test models — `smelt.define`, and `smelt.extern`).
 
 ### Diagnostic codes
 
@@ -176,7 +175,7 @@ These rules are normative.
 12. **Frontmatter attachment.** Each frontmatter block attaches to the immediately following declaration. Each declaration may carry its own. There is no file-level frontmatter and no frontmatter inheritance across declarations.
 13. **`PASSING` parses without type information.** The trigger rule (one-token lookahead after `)`) does not require knowing the callee's parameter list. Name validation, sort compatibility, and binding all run after parsing in the type-checker.
 14. **Externs treated as atomic.** `smelt.extern` calls are checked against their declared signature exactly like built-ins. The planner treats them as atomic nodes (see `planner_integration.md`).
-15. **Error recovery.** `smelt.define`, `smelt.extern`, `smelt.test`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `smelt.test`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
+15. **Error recovery.** `smelt.define`, `smelt.extern`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
 16. **Declared return type is authoritative for call-site typing.** When the type checker encounters a `smelt.<path>(...)` call, it looks up the function's declared return type. A `-> <Type>` annotation yields a concrete call-expression type only when the annotation resolves to a specific concrete type (`Concrete(T)` in the type constraint system) or to `Numeric` (which widens to `Double`). Polymorphic constraints (`Ordered`, `Any`) and absent return types (Tier 1/2 functions) all produce `Unknown` at the call site. The schema of any model that projects such a call reflects this rule: a column whose source expression is a `smelt.<path>(...)` call inherits the resolved type or `Unknown`. Downstream aggregate functions (`SUM`, `AVG`, etc.) apply their standard return-type rules to the resolved type — for example, `SUM(Double) → Double`.
 
 ### Interactions with adjacent specs
