@@ -322,6 +322,7 @@ These are normative and must be upheld across all features.
 5. **`smelt-dialect` is lightweight.** No Arrow / Tokio / DuckDB dependencies. The LSP and CLI link it freely; backends do not flow back through it.
 6. **No circular crate dependencies.** The dependency graph in the Surface table is total order modulo `smelt-types` (root) and `smelt-backend-*` (leaves).
 7. **Parser produces a usable CST on invalid input.** No panics, no aborts, no truncated trees on syntax errors.
+8. **Unknown-key doctrine: user-authored content is strict; project-level config is lenient with warnings.** Frontmatter on a model `SELECT`, a `smelt.define`, or a `smelt.extern`, plus type annotations and per-entity source / seed-sidecar YAML, are user-authored under direct review and reject unknown keys (`deny_unknown_fields`) so typos surface immediately. Project-level configuration in `smelt.yml` is reviewed less often, edited cross-team, and read by tools that pre-date keys they encounter; it warns on unknown top-level keys instead of erroring, so forward-compatible configs work across smelt versions. Per-feature specs that catalogue keys (`models.md`, `smelt_yml.md`, `functions.md`, `sources.md`) reference this doctrine rather than restating the rule.
 
 ## Known Divergences / Open Questions
 

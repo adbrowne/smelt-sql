@@ -71,7 +71,7 @@ Seeds are included in upstream traversal when a model references a seed via `sme
 
 ### Tag matching
 
-A model matches `tag:X` if tag `X` appears in its effective tag set (the merged union of `smelt.yml` model config tags and frontmatter tags — see `models.md`). Tag matching is case-sensitive.
+A model matches `tag:X` if tag `X` appears in its effective tag set (the merged union of `smelt.yml` model config tags and frontmatter tags — see `models.md` §"Tag merging" for the merge rule and the case-sensitivity contract).
 
 If no model in the project has the given tag, the selector matches nothing (no error). The resulting working set may be empty.
 
@@ -97,7 +97,7 @@ A `ModelName` selector that names a model not in the project matches nothing (no
 2. **Union of selectors, not intersection.** Multiple `--select` flags produce a union.
 3. **Exclusion is applied after all inclusion expansions.** An excluded model cannot be re-included by a separate `--select`.
 4. **No-match is not an error.** A selector that matches no models produces no error; the working set may become empty.
-5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`.
+5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`. The case-sensitivity contract is owned by `models.md` §"Tag merging"; this rule cross-references it.
 
 ## Known Divergences / Open Questions
 

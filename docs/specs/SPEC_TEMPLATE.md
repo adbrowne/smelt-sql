@@ -5,6 +5,27 @@ last_reviewed: YYYY-MM-DD
 owners: [andrew]
 ---
 
+<!--
+Frontmatter rules:
+- `feature`: short slug matching the filename stem (e.g. `incremental_models`).
+- `status`: one of `experimental`, `stable`, `deprecated`.
+  - `experimental` (default for new specs): the surface may break; pre-1.0.
+  - `stable`: the surface is committed; breaking changes require a deprecation cycle.
+    Today only `architecture.md` is `stable` — it pins load-bearing invariants the
+    rest of the spec set depends on.
+  - `deprecated`: the spec describes a feature being phased out. Cross-references
+    should mark the replacement.
+- `last_reviewed`: YYYY-MM-DD of the last substantive review (drift audit, sweep,
+  or rewrite). Bump on any non-trivial edit.
+- `owners`: GitHub handles or names of people responsible for keeping the spec
+  current.
+
+References blocks (the bottom-of-spec section) use **flat bullets** under the
+`- **Code**:` / `- **Tests**: ` / `- **User docs**:` / `- **Plans (history)**:` /
+`- **Related specs**:` headings — not nested sub-headings — to keep cross-spec
+parsing scripts simple.
+-->
+
 # <Feature Title>
 
 > **What this is.** A normative spec for `<feature>`. This is the canonical answer to "how does `<feature>` work?". Behavior changes start here, then propagate to plans, code, and user docs.

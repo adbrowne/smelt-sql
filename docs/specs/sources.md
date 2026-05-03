@@ -52,7 +52,7 @@ columns:
 | `name` | no | derived | Override the database-side name. When present, must be a `<schema>.<table>` literal. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
 | `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
-The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar / source YAML shape"). The only differences are: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path).
+The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML — seed-specific keys"). The only differences are: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path).
 
 ### Discovery and addressing
 
