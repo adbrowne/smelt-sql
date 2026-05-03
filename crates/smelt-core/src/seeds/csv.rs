@@ -12,7 +12,7 @@
 
 pub use super::error::SeedError;
 use csv::ReaderBuilder;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A single parsed data row from a CSV seed file.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +134,7 @@ pub fn read_csv(
 /// The check is intentionally simple: if the first line (up to the first LF
 /// or CRLF) contains a `\t` and no `,` outside of double-quoted regions, it's
 /// very likely a tab-delimited file and we return `WrongDelimiter`.
-fn detect_wrong_delimiter(data: &[u8], path: &PathBuf) -> Result<(), SeedError> {
+fn detect_wrong_delimiter(data: &[u8], path: &Path) -> Result<(), SeedError> {
     // Find end of first line.
     let first_line_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
     let first_line = &data[..first_line_end];
@@ -170,7 +170,7 @@ fn detect_wrong_delimiter(data: &[u8], path: &PathBuf) -> Result<(), SeedError> 
         // Find the first tab char for the error message.
         let found = '\t';
         return Err(SeedError::WrongDelimiter {
-            path: path.clone(),
+            path: path.to_path_buf(),
             found,
         });
     }

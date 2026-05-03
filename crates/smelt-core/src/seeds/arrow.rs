@@ -74,7 +74,7 @@ fn smelt_type_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Boolean => ArrowDataType::Boolean,
         DataType::Integer => ArrowDataType::Int64,
         DataType::Decimal { precision, scale } => {
-            ArrowDataType::Decimal128(*precision as u8, *scale as i8)
+            ArrowDataType::Decimal128(*precision, *scale as i8)
         }
         DataType::Double => ArrowDataType::Float64,
         DataType::Date => ArrowDataType::Date32,
