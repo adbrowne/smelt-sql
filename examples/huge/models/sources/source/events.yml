@@ -1,0 +1,19 @@
+columns:
+- name: event_id
+  type: INTEGER
+- name: user_id
+  type: INTEGER
+- name: event_type
+  type: VARCHAR
+- name: event_time
+  type: TIMESTAMP
+- name: event_date
+  type: DATE
+- name: amount
+  type: DECIMAL
+- name: category
+  type: VARCHAR
+- name: platform
+  type: VARCHAR
+- name: session_id
+  type: VARCHAR

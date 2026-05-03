@@ -1,0 +1,17 @@
+description: Transaction events with timestamps and amounts
+columns:
+- name: transaction_id
+  type: INTEGER
+  description: Unique transaction identifier
+- name: user_id
+  type: INTEGER
+  description: User who made the transaction
+- name: amount
+  type: DECIMAL(10,2)
+  description: Transaction amount
+- name: transaction_timestamp
+  type: TIMESTAMP
+  description: When the transaction occurred
+- name: transaction_type
+  type: VARCHAR
+  description: Type of transaction (purchase, refund, etc.)

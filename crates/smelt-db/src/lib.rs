@@ -54,7 +54,9 @@ pub use type_inference::{
 };
 
 // Source types re-exported from smelt-core
-pub use smelt_core::{SeedInfo, SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig};
+pub use smelt_core::{
+    SeedInfo, SourceColumn, SourceColumnDef, SourceDef, SourceInfo, SourceTableDef, SourcesConfig,
+};
 
 // ============================================================================
 // Salsa inputs
@@ -686,6 +688,21 @@ pub fn project_seeds(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec
         &project_root,
         &paths,
     ))
+}
+
+/// Discover per-entity source YAML files for a project root.
+///
+/// Phase 6: sources live as standalone `.yml` files (no sibling `.csv`) under
+/// the project's `paths:` directories. The query is keyed on `ProjectInput`
+/// so it re-runs when `smelt.yml` changes (e.g. `paths:` updated) but not on
+/// every source file change (LSP restarts are acceptable for source changes).
+#[salsa::tracked]
+pub fn project_sources(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SourceInfo>> {
+    let project_root = project.root(db).clone();
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+    Arc::new(smelt_core::discover_source_infos(&project_root, &paths))
 }
 
 #[salsa::tracked]
@@ -2725,11 +2742,24 @@ pub fn resolve_ref_path(
             }
         }
 
-        // Sources: project-level `sources.yml`. Path tuple shape is
-        // `["sources", <source_name>, <table_name>]` *or* an arbitrary
-        // path under a `sources/` directory followed by the source +
-        // table; today we accept the canonical shape.
-        if path.len() >= 3 && path[0] == "sources" {
+        // Sources: Phase 6 per-entity YAML files. Each source has an
+        // `address_segments` tuple (scan-root-stripped path to stem).
+        // `smelt.sources.raw.users` → path = ["sources", "raw", "users"]
+        // which matches the `.yml` at `models/sources/raw/users.yml`.
+        for source in project_sources(db, project).iter() {
+            if source.address_segments == path.as_slice() {
+                return Some(ResolvedRef {
+                    kind: RefKind::Source,
+                    source_file: None,
+                    path,
+                });
+            }
+        }
+
+        // Legacy sources: project-level aggregate `sources.yml`. Used as a
+        // fallback for any projects not yet migrated to per-entity YAMLs.
+        // Kept until Phase 6 migration is complete across all callers.
+        if project_sources(db, project).is_empty() && path.len() >= 3 && path[0] == "sources" {
             let source_name = &path[path.len() - 2];
             let table_name = &path[path.len() - 1];
             if resolve_source(db, project, source_name.clone(), table_name.clone()).is_some() {
@@ -4186,6 +4216,37 @@ fn bare_table_name(table_ref: &TableRef) -> Option<String> {
     idents.last().cloned()
 }
 
+/// Pure function: populate a `TypeContext` with column type information from
+/// Phase 6 per-entity `SourceInfo` records.
+///
+/// The source's identity in the TypeContext is `(schema, table)` where:
+///   schema = `address_segments[address_segments.len() - 2]` (e.g. "raw")
+///   table  = `address_segments[address_segments.len() - 1]` (e.g. "users")
+///
+/// This mirrors how `smelt.sources.raw.users` is resolved: the last two
+/// segments of the path are the schema and table.
+pub fn add_source_info_to_type_context(sources: &[SourceInfo], ctx: &mut TypeContext) {
+    for source in sources {
+        let segs = &source.address_segments;
+        if segs.len() < 2 {
+            continue; // degenerate address — skip
+        }
+        let schema_name = &segs[segs.len() - 2];
+        let table_name = &segs[segs.len() - 1];
+        for col in &source.columns {
+            ctx.add_source_column(
+                schema_name,
+                table_name,
+                &col.name,
+                TypedColumn {
+                    data_type: col.data_type.clone(),
+                    nullable: col.nullable,
+                },
+            );
+        }
+    }
+}
+
 #[salsa::tracked(cycle_initial = type_context_initial)]
 pub fn type_context(
     db: &dyn salsa::Database,
@@ -4193,9 +4254,20 @@ pub fn type_context(
     file: SourceFile,
 ) -> Arc<TypeContext> {
     let project_root = file.project_root(db).clone();
-    let sources = match find_project(db, workspace, &project_root) {
-        Some(p) => sources_config(db, p),
-        None => Arc::new(SourcesConfig::default()),
+    let project = find_project(db, workspace, &project_root);
+
+    // Phase 6: per-entity sources take precedence when present; fall back to
+    // the legacy aggregate `sources.yml` for projects not yet migrated.
+    let per_entity_sources: Arc<Vec<SourceInfo>> = project
+        .map(|p| project_sources(db, p))
+        .unwrap_or_else(|| Arc::new(Vec::new()));
+
+    let legacy_sources: Arc<SourcesConfig> = if per_entity_sources.is_empty() {
+        project
+            .map(|p| sources_config(db, p))
+            .unwrap_or_else(|| Arc::new(SourcesConfig::default()))
+    } else {
+        Arc::new(SourcesConfig::default())
     };
 
     let parse = parse_file(db, file);
@@ -4207,7 +4279,11 @@ pub fn type_context(
     };
 
     let provider = SalsaRefSchemaProvider::new(db, workspace);
-    let mut ctx = build_type_context(&ast, &sources, &provider);
+    let mut ctx = build_type_context(&ast, &legacy_sources, &provider);
+
+    // Phase 6: add per-entity source columns to the TypeContext.
+    // Source address_segments like ["sources", "raw", "users"] → schema="raw", table="users".
+    add_source_info_to_type_context(&per_entity_sources, &mut ctx);
 
     // Seed the workspace's `smelt.define` signatures so path-call type
     // inference can resolve declared return types when a SELECT projects a

@@ -42,5 +42,9 @@ pub use seeds::{
     SidecarColumn, ValidationError,
 };
 pub use selector::{parse_selector, SelectionMethod, Selector, SelectorParseError};
-pub use sources::{SourceColumnDef, SourceDef, SourceTableDef, SourcesConfig, SourcesError};
+pub use sources::{
+    check_aggregate_sources_yml, discover_source_infos, parse_source_yaml, SourceColumn,
+    SourceColumnDef, SourceDef, SourceError, SourceInfo, SourceTableDef, SourcesConfig,
+    SourcesError,
+};
 pub use text::{extract_snippet, text_range_to_line_col};

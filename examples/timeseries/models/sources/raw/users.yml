@@ -1,0 +1,8 @@
+description: Raw user data
+columns:
+- name: user_id
+  type: INTEGER
+- name: user_name
+  type: VARCHAR
+- name: signup_date
+  type: DATE

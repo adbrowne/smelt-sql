@@ -1,19 +1,322 @@
-use crate::config::DataLatency;
+//! Per-entity source YAML loading for smelt.
+//!
+//! Phase 6: sources are now discovered from the filesystem as standalone `.yml`
+//! files (no sibling `.csv`). The old aggregate `sources.yml` at the project
+//! root is no longer supported — its presence is a hard error.
+//!
+//! References: docs/specs/sources.md §"Source YAML shape" and §"Filesystem layout"
+
+use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
 use smelt_types::{parse_type, DataType};
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
+use walkdir::WalkDir;
 
-/// Sources configuration from sources.yml
-/// Supports nested object format like dbt:
-/// ```yaml
-/// sources:
-///   raw:
-///     tables:
-///       users:
-///         columns: [...]
-/// ```
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Information about a single source discovered from a per-entity `.yml` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInfo {
+    /// Absolute path to the `.yml` file on disk.
+    pub path: PathBuf,
+    /// Address segments stripped from scan-root to stem.
+    ///
+    /// For `models/sources/raw/users.yml` under `paths: ["models"]` this is
+    /// `["sources", "raw", "users"]`.
+    pub address_segments: Vec<String>,
+    /// Declared columns (required on sources).
+    pub columns: Vec<SourceColumn>,
+    /// Optional free-text description.
+    pub description: Option<String>,
+    /// Optional `name: <schema>.<table>` override for the database table name.
+    /// When `None`, the default mapping `<target_schema>.<address_segments.join("_")>`
+    /// is used.
+    pub name_override: Option<String>,
+}
+
+impl SourceInfo {
+    /// Returns the fully-qualified database name for this source.
+    ///
+    /// If `name_override` is set, it is returned verbatim.
+    /// Otherwise the default mapping applies:
+    /// `<target_schema>.<address_segments.join("_")>`.
+    pub fn db_name(&self, target_schema: &str) -> String {
+        if let Some(ref ov) = self.name_override {
+            ov.clone()
+        } else {
+            format!("{}.{}", target_schema, self.address_segments.join("_"))
+        }
+    }
+}
+
+/// A single column declared in a source YAML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceColumn {
+    pub name: String,
+    pub data_type: DataType,
+    /// Whether NULL values are permitted (default: `true`).
+    pub nullable: bool,
+    pub description: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors from parsing or discovering source YAML files.
+#[derive(Debug, Error)]
+pub enum SourceError {
+    #[error("I/O error reading {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("YAML parse error in {path}: {message}")]
+    YamlParse { path: PathBuf, message: String },
+
+    #[error("Sources must declare `columns:`")]
+    MissingColumns,
+
+    #[error("`materialization:` is not allowed on a source — use a seed sidecar for seeds")]
+    MaterializationForbidden,
+
+    #[error("Unknown type '{type_str}' in source column '{column}'")]
+    UnknownType { type_str: String, column: String },
+
+    #[error("`name:` must be in `<schema>.<table>` format, got '{0}'")]
+    InvalidNameOverride(String),
+}
+
+// ---------------------------------------------------------------------------
+// Internal deserialization helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawSourceYaml {
+    /// Optional description.
+    #[serde(default)]
+    description: Option<String>,
+
+    /// Columns declaration (required on sources).
+    #[serde(default)]
+    columns: Option<Vec<RawColumn>>,
+
+    /// Optional `name: schema.table` override.
+    #[serde(default)]
+    name: Option<String>,
+
+    /// Presence of this key is a hard error on source YAMLs.
+    #[serde(default)]
+    materialization: Option<serde_yaml::Value>,
+}
+
+#[derive(Deserialize)]
+struct RawColumn {
+    name: String,
+    #[serde(rename = "type", default)]
+    type_str: Option<String>,
+    #[serde(default = "default_nullable")]
+    nullable: bool,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+fn default_nullable() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Parse a single source YAML file from disk.
+///
+/// The returned `SourceInfo` has `address_segments` computed from the file
+/// stem only (no scan-root stripping). Callers that need the full address
+/// should use [`discover_source_infos`] instead.
+///
+/// # Errors
+/// - `SourceError::Io` — file cannot be read.
+/// - `SourceError::YamlParse` — YAML is malformed.
+/// - `SourceError::MissingColumns` — `columns:` key is absent.
+/// - `SourceError::MaterializationForbidden` — `materialization:` key present.
+/// - `SourceError::UnknownType` — a column type string is unrecognised.
+/// - `SourceError::InvalidNameOverride` — `name:` is not `<schema>.<table>`.
+pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
+    let text = std::fs::read_to_string(path).map_err(|e| SourceError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    let raw: RawSourceYaml = serde_yaml::from_str(&text).map_err(|e| SourceError::YamlParse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+
+    // `materialization:` is forbidden on sources.
+    if raw.materialization.is_some() {
+        return Err(SourceError::MaterializationForbidden);
+    }
+
+    // `columns:` is required.
+    let raw_cols = raw.columns.ok_or(SourceError::MissingColumns)?;
+
+    // Validate `name:` format.
+    if let Some(ref n) = raw.name {
+        if !n.contains('.') || n.starts_with('.') || n.ends_with('.') {
+            return Err(SourceError::InvalidNameOverride(n.clone()));
+        }
+    }
+
+    // Parse columns.
+    let columns = raw_cols
+        .into_iter()
+        .map(|c| {
+            let data_type = match &c.type_str {
+                None => DataType::Text, // default when no type given
+                Some(ts) => parse_type(ts).map_err(|_| SourceError::UnknownType {
+                    type_str: ts.clone(),
+                    column: c.name.clone(),
+                })?,
+            };
+            Ok(SourceColumn {
+                name: c.name,
+                data_type,
+                nullable: c.nullable,
+                description: c.description,
+            })
+        })
+        .collect::<Result<Vec<_>, SourceError>>()?;
+
+    // Derive address_segments from the file stem (single segment for direct calls).
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(SourceInfo {
+        path: path.to_path_buf(),
+        address_segments: vec![stem],
+        columns,
+        description: raw.description,
+        name_override: raw.name,
+    })
+}
+
+/// Walk all `paths` under `project_root`, find standalone `.yml` files (those
+/// without a same-stem `.csv` sibling), parse them as sources, and return the
+/// results. Files that fail to parse are silently skipped (errors surfaced via
+/// diagnostics by the Salsa layer).
+///
+/// The `address_segments` field is populated with the full scan-root-stripped
+/// path tuple (e.g. `["sources", "raw", "users"]` for
+/// `models/sources/raw/users.yml` under `paths: ["models"]`).
+pub fn discover_source_infos(project_dir: &Path, paths: &[String]) -> Vec<SourceInfo> {
+    let mut sources = Vec::new();
+
+    for scan_root in paths {
+        let root_dir = project_dir.join(scan_root);
+        if !root_dir.exists() {
+            continue;
+        }
+
+        // Collect all files grouped by directory for sibling detection.
+        let mut by_dir: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+            std::collections::HashMap::new();
+        for entry in WalkDir::new(&root_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let p = entry.path().to_path_buf();
+            let dir = p.parent().unwrap_or(Path::new("")).to_path_buf();
+            by_dir.entry(dir).or_default().push(p);
+        }
+
+        for files in by_dir.values() {
+            for file_path in files {
+                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext != "yml" && ext != "yaml" {
+                    continue;
+                }
+
+                let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+                // Skip sidecar: if a same-stem CSV exists in the same dir, skip.
+                let has_csv_sibling = files.iter().any(|p| {
+                    p.extension().and_then(|e| e.to_str()) == Some("csv")
+                        && p.file_stem().and_then(|s| s.to_str()) == Some(stem)
+                });
+                if has_csv_sibling {
+                    continue;
+                }
+
+                // Parse the source YAML.
+                let mut info = match parse_source_yaml(file_path) {
+                    Ok(i) => i,
+                    Err(_) => continue, // surface via diagnostics
+                };
+
+                // Recompute address_segments with the full scan-root-stripped path.
+                let rel = file_path
+                    .strip_prefix(&root_dir)
+                    .expect("file is under root_dir");
+                let parent = rel.parent().unwrap_or(Path::new(""));
+                let mut address_segments: Vec<String> = parent
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                address_segments.push(stem.to_string());
+                info.address_segments = address_segments;
+
+                sources.push(info);
+            }
+        }
+    }
+
+    sources.sort_by(|a, b| a.address_segments.cmp(&b.address_segments));
+    sources
+}
+
+/// Check whether an aggregate `sources.yml` or `sources.yaml` exists at the
+/// project root and return an error if so.
+///
+/// This is the migration guard: any project that still has an aggregate
+/// sources file gets a clear error directing them to the per-entity layout.
+pub fn check_aggregate_sources_yml(project_root: &Path) -> Result<(), WorkspaceLoadError> {
+    let yml = project_root.join("sources.yml");
+    let yaml = project_root.join("sources.yaml");
+
+    if yml.exists() {
+        return Err(WorkspaceLoadError::AggregateSourcesYmlNotSupported { path: yml });
+    }
+    if yaml.exists() {
+        return Err(WorkspaceLoadError::AggregateSourcesYmlNotSupported { path: yaml });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Legacy types — kept for backward compatibility with the aggregate loader.
+// These are still used by the CLI compiler, temporal, backfill, etc.
+// until they are also migrated in later phases.
+// ---------------------------------------------------------------------------
+
+use crate::config::DataLatency;
+use std::collections::HashMap;
+
+/// Sources configuration from the legacy aggregate sources.yml.
+/// Still used by CLI code paths that haven't been migrated to per-entity YAMLs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourcesConfig {
     pub sources: Vec<SourceDef>,
@@ -171,7 +474,7 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct RawColumn {
+        struct RawColumn2 {
             name: String,
             #[serde(default, rename = "type")]
             type_str: Option<String>,
@@ -181,7 +484,7 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
             data_latency: Option<DataLatency>,
         }
 
-        let raw = RawColumn::deserialize(deserializer)?;
+        let raw = RawColumn2::deserialize(deserializer)?;
 
         // Parse type string into DataType if present
         let data_type = raw.type_str.as_ref().and_then(|s| parse_type(s).ok());
@@ -193,6 +496,18 @@ impl<'de> Deserialize<'de> for SourceColumnDef {
             data_latency: raw.data_latency,
         })
     }
+}
+
+#[derive(Debug, Error)]
+pub enum SourcesError {
+    #[error("Failed to load sources file: {path}\n{source}")]
+    LoadError {
+        path: std::path::PathBuf,
+        source: anyhow::Error,
+    },
+
+    #[error("Failed to parse sources YAML: {0}")]
+    ParseError(#[from] serde_yaml::Error),
 }
 
 #[cfg(test)]
@@ -237,16 +552,4 @@ sources:
         let amount = table.columns.iter().find(|c| c.name == "amount").unwrap();
         assert!(amount.data_latency.is_none());
     }
-}
-
-#[derive(Debug, Error)]
-pub enum SourcesError {
-    #[error("Failed to load sources file: {path}\n{source}")]
-    LoadError {
-        path: std::path::PathBuf,
-        source: anyhow::Error,
-    },
-
-    #[error("Failed to parse sources YAML: {0}")]
-    ParseError(#[from] serde_yaml::Error),
 }

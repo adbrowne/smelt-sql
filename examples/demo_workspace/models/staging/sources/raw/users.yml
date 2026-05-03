@@ -1,0 +1,14 @@
+description: Raw user data from the application database
+columns:
+- name: user_id
+  type: INTEGER
+  description: Unique user identifier
+- name: email
+  type: VARCHAR
+  description: User email address
+- name: signup_date
+  type: DATE
+  description: Date the user signed up
+- name: plan_type
+  type: VARCHAR
+  description: Subscription plan (free, pro, enterprise)

@@ -1,0 +1,16 @@
+description: Product dimension table
+columns:
+- name: product_id
+  type: INTEGER
+- name: category
+  type: VARCHAR
+- name: subcategory
+  type: VARCHAR
+- name: brand_tier
+  type: VARCHAR
+- name: unit_price_cents
+  type: INTEGER
+- name: weight_grams
+  type: INTEGER
+- name: is_digital
+  type: BOOLEAN

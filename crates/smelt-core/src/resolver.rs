@@ -70,6 +70,27 @@ pub enum WorkspaceLoadError {
     /// I/O error while walking the filesystem.
     #[error("I/O error while walking paths: {0}")]
     Io(#[from] std::io::Error),
+    /// An aggregate `sources.yml` / `sources.yaml` was found at the project
+    /// root, which is no longer supported. Sources must be per-entity `.yml`
+    /// files placed under one of the project's `paths:` directories.
+    ///
+    /// Migration: for each `sources.<schema>.tables.<table>`, create a file
+    /// at `<paths[0]>/sources/<schema>/<table>.yml` with the same columns.
+    #[error(
+        "Aggregate sources file not supported: {}\n\
+         \n\
+         Sources must now be per-entity YAML files placed under one of the project's\n\
+         `paths:` directories (e.g. `models/sources/raw/users.yml`).\n\
+         \n\
+         Migration: for each `sources.<schema>.tables.<table>` entry, create:\n\
+           <paths[0]>/sources/<schema>/<table>.yml\n\
+         with a `columns:` key and the same column definitions.",
+        path.display()
+    )]
+    AggregateSourcesYmlNotSupported {
+        /// Path to the offending aggregate file.
+        path: PathBuf,
+    },
 }
 
 /// Classify a single file by its format and content.

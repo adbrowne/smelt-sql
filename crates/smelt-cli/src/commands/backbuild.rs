@@ -286,7 +286,7 @@ pub async fn backbuild(args: BackbuildArgs) -> Result<()> {
             &type_db,
             &project_dir,
             &all_models,
-        ));
+        )?);
         compilers.set_upstream_schemas_all(upstream_schemas);
 
         // Wire `smelt.fn.*` function bodies through every compiler. Skipped

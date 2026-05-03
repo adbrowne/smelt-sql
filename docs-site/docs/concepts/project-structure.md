@@ -11,7 +11,7 @@ my-project/
 │   ├── staging/         # Raw data cleanup
 │   ├── intermediate/    # Business logic
 │   └── marts/           # Final analytical tables
-├── sources.yml          # Aggregate source definitions (legacy; per-entity .yml preferred)
+│   └── sources/         # Per-entity source YAMLs (no sibling .csv)
 ├── tests/               # Model test files
 │   ├── test_user_activity.sql
 │   └── test_cohort_sizes.sql
@@ -96,30 +96,30 @@ A persisted entity addressed as `smelt.<path>` materialises in the database at:
 
 This does **not** apply to functions (inlined), ephemeral models/seeds (CTE), or externs (no path).
 
-## sources.yml
+## Per-entity source YAMLs
 
-Source definitions declare external tables that your models read from. Defining sources enables schema validation and LSP support (type checking, autocompletion).
+Source definitions declare external tables that your models read from. Enabling schema validation and LSP support (type checking, autocompletion).
+
+Each source is a single `.yml` file placed anywhere under `paths:` — its address is its path from the scan root. A `.yml` with no sibling `.csv` of the same stem is a source; a `.yml` alongside a same-stem `.csv` is a seed sidecar.
 
 ```yaml
-version: 1
-
-sources:
-  raw:
-    tables:
-      page_views:
-        description: Raw page view events
-        columns:
-          - name: user_id
-            type: INTEGER
-          - name: url
-            type: VARCHAR
-          - name: viewed_at
-            type: TIMESTAMP
+# models/sources/raw/page_views.yml
+description: Raw page view events
+columns:
+  - name: user_id
+    type: INTEGER
+  - name: url
+    type: VARCHAR
+  - name: viewed_at
+    type: TIMESTAMP
 ```
 
 Models reference sources with `smelt.sources.raw.page_views`.
 
-For full configuration options, see the [sources configuration reference](../reference/sources-yml.md).
+For full configuration options, see the [source YAML reference](../reference/sources-yml.md).
+
+!!! note "Migration from `sources.yml`"
+    The old aggregate `sources.yml` format is no longer supported. Split each table entry into its own `.yml` file under your `paths:` directory. A project with a root-level `sources.yml` will error at build time with a migration message.
 
 ## models/ Directory
 

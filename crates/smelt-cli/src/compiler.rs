@@ -160,6 +160,10 @@ pub struct UpstreamSchemas {
     pub models: HashMap<String, Vec<(String, TypedColumn)>>,
     pub seeds: HashMap<String, Vec<(String, TypedColumn)>>,
     pub sources: SourcesConfig,
+    /// Per-entity source infos discovered from standalone `.yml` files.
+    /// Used by the path-ref resolver to apply `name:` overrides at SQL
+    /// generation time. When non-empty, takes precedence over `sources`.
+    pub per_entity_sources: Vec<smelt_core::SourceInfo>,
 }
 
 impl UpstreamSchemas {
@@ -170,11 +174,20 @@ impl UpstreamSchemas {
     ///
     /// `models` is the same list that was passed to `init_db` — we use it to
     /// know which paths to query, and to recover each model's user-facing name.
+    ///
+    /// # Errors
+    /// Returns an error if the project root contains a legacy aggregate
+    /// `sources.yml` / `sources.yaml` file.  Projects must migrate to
+    /// per-entity source YAMLs before building.
     pub fn from_database(
         db: &smelt_db::Database,
         project_dir: &std::path::Path,
         models: &[crate::discovery::ModelFile],
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        // Phase 6: hard error if a legacy aggregate sources.yml exists.
+        smelt_core::check_aggregate_sources_yml(project_dir)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
         let workspace = smelt_db::Workspace::try_get(db).expect("workspace not initialized");
 
         let mut model_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
@@ -224,11 +237,17 @@ impl UpstreamSchemas {
 
         let sources = SourcesConfig::load(project_dir).unwrap_or_default();
 
-        Self {
+        // Phase 6: discover per-entity source YAMLs for name-override resolution
+        // at SQL generation time. These take precedence over the legacy
+        // `SourcesConfig` when resolving `smelt.sources.*` path refs.
+        let per_entity_sources = smelt_core::discover_source_infos(project_dir, &paths);
+
+        Ok(Self {
             models: model_schemas,
             seeds: seed_schemas,
             sources,
-        }
+            per_entity_sources,
+        })
     }
 }
 
@@ -402,23 +421,47 @@ impl SqlCompiler {
         let schema = schema.to_string();
         let cross_engine_refs = self.cross_engine_refs.clone();
         let sources = self.upstream_schemas.sources.clone();
+        let per_entity_sources = self.upstream_schemas.per_entity_sources.clone();
         let ephemerals = ephemeral_names.clone();
 
         Box::new(move |segs: &[String]| {
             match segs {
-                // smelt.sources.<source_name>.<table_name> — keep sources
-                // dispatch unchanged until Phase 6 removes sources.yml.
-                [ns, source_name, table_name] if ns == "sources" => {
-                    // Apply any `identifier` override from sources.yml.
-                    let emit_name = sources
-                        .sources
+                // smelt.sources.<source_name>.<table_name> and deeper paths.
+                // Phase 6: per-entity sources with a `name:` override take
+                // precedence. Without an override, the legacy `<source>.<table>`
+                // mapping is preserved so existing projects continue to work.
+                segs if !segs.is_empty() && segs[0] == "sources" => {
+                    // Per-entity source with an explicit `name:` override wins.
+                    if let Some(src_info) = per_entity_sources
                         .iter()
-                        .find(|s| s.name == *source_name)
-                        .and_then(|src| src.tables.iter().find(|t| t.name == *table_name))
-                        .and_then(|tbl| tbl.identifier.as_deref())
-                        .unwrap_or(table_name.as_str())
-                        .to_string();
-                    Some(format!("{}.{}", source_name, emit_name))
+                        .find(|s| s.address_segments.as_slice() == segs)
+                    {
+                        if src_info.name_override.is_some() {
+                            return Some(src_info.db_name(&schema));
+                        }
+                        // No override — fall through to legacy mapping below so
+                        // `smelt.sources.raw.orders` still resolves to `raw.orders`.
+                    }
+
+                    // Legacy sources.yml identifier override, or the default
+                    // `<source_name>.<table_name>` mapping. For
+                    // `["sources", "raw", "orders"]` this produces `raw.orders`.
+                    if segs.len() >= 3 {
+                        let source_name = &segs[segs.len() - 2];
+                        let table_name = &segs[segs.len() - 1];
+                        let emit_name = sources
+                            .sources
+                            .iter()
+                            .find(|s| s.name == *source_name)
+                            .and_then(|src| src.tables.iter().find(|t| t.name == *table_name))
+                            .and_then(|tbl| tbl.identifier.as_deref())
+                            .unwrap_or(table_name.as_str())
+                            .to_string();
+                        return Some(format!("{}.{}", source_name, emit_name));
+                    }
+
+                    // Unknown sources path — return default mapping.
+                    Some(format!("{}.{}", schema, segs.join("_")))
                 }
                 // All other non-empty paths → {schema}.{segs.join("_")}
                 // Ephemeral models resolve to their CTE alias.

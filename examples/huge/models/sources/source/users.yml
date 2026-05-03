@@ -1,0 +1,13 @@
+columns:
+- name: user_id
+  type: INTEGER
+- name: email_domain
+  type: VARCHAR
+- name: created_at
+  type: TIMESTAMP
+- name: is_active
+  type: BOOLEAN
+- name: country
+  type: VARCHAR
+- name: plan_type
+  type: VARCHAR

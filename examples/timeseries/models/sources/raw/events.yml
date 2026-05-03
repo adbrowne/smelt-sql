@@ -1,0 +1,13 @@
+description: Raw event data
+columns:
+- name: event_id
+  type: INTEGER
+- name: user_id
+  type: INTEGER
+- name: event_type
+  type: VARCHAR
+- name: event_timestamp
+  type: TIMESTAMP
+- name: properties
+  type: VARCHAR
+  description: JSON-encoded event properties

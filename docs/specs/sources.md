@@ -98,10 +98,8 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 
 ## Known Divergences / Open Questions
 
-- **Implementation lags spec.** The current implementation reads aggregate `sources.yml` from the project root, addresses sources as `smelt.sources.<schema>.<name>` regardless of file location, and has no concept of per-entity source YAMLs. The migration plan that lands the new resolver also lands sources; until then, the implementation diverges from this spec.
 - **Source-existence verification.** A future `smelt verify` pass could check that every declared source exists in the target database with the declared columns. Out of scope here.
 - **Column-level tests on sources.** Same status as for seeds — deferred to the future `tests.md`. The shared YAML grammar grows uniformly.
-- **`name:` override.** Specified, but the implementation has no parser for it today. Lands with the migration plan.
 - **Co-location with seeds.** Worth noting: a `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems), since kind-by-content makes the directory layout independent of kind. Style guides may discourage mixing for readability; the resolver does not.
 
 ## References

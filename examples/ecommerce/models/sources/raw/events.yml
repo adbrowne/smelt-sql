@@ -1,0 +1,12 @@
+description: Raw page-level clickstream events
+columns:
+- name: event_id
+  type: INTEGER
+- name: visitor_id
+  type: VARCHAR
+- name: event_type
+  type: VARCHAR
+- name: event_timestamp
+  type: TIMESTAMP
+- name: page_url
+  type: VARCHAR

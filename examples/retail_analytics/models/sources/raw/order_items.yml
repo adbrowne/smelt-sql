@@ -1,0 +1,18 @@
+description: Order line items fact table
+columns:
+- name: order_item_id
+  type: INTEGER
+- name: order_id
+  type: INTEGER
+- name: product_id
+  type: INTEGER
+- name: quantity
+  type: INTEGER
+- name: unit_price_cents
+  type: INTEGER
+- name: return_flag
+  type: BOOLEAN
+- name: return_reason
+  type: VARCHAR
+- name: item_date
+  type: VARCHAR

@@ -1,0 +1,13 @@
+columns:
+- name: id
+  type: INTEGER
+- name: user_id
+  type: INTEGER
+- name: amount
+  type: DECIMAL
+- name: status
+  type: VARCHAR
+- name: created_at
+  type: TIMESTAMP
+- name: event_date
+  type: DATE
