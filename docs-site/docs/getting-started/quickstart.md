@@ -49,7 +49,7 @@ order_id,order_date,customer_id,amount
 3,2025-01-02,100,19.99
 ```
 
-Seeds become tables that can be referenced with `smelt.models.<name>`.
+Seeds become tables that can be referenced with `smelt.<name>`.
 
 ## 3. Write a model
 
@@ -70,7 +70,7 @@ SELECT
   DATE(order_date) as order_day,
   COUNT(*) as order_count,
   SUM(amount) as total_amount
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 GROUP BY 1
 ```
 
