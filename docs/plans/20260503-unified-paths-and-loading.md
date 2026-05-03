@@ -78,7 +78,7 @@ The implementation today still uses `model_paths` + `seed_paths`, an aggregate r
 | 4     | done     | 4d04eb9 | 2026-05-03 |
 | 5     | done     | 4e0bd13 | 2026-05-03 |
 | 6     | done     | 3dfd35b | 2026-05-03 |
-| 7     | pending  |        |      |
+| 7     | done     | 80236ec | 2026-05-03 |
 | 8     | pending  |        |      |
 
 ---
