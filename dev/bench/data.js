@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777819072199,
+  "lastUpdate": 1777822067292,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14757,6 +14757,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.501958,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fa13175303d0fb1c94c962d59ea9a49729f5c296",
+          "message": "skill + docs: fix smelt ref syntax and add DECIMAL/DOUBLE gotcha (#114)\n\n* skill(smelt-app-builder): fix ref syntax and add DECIMAL/DOUBLE gotcha\n\n- Replace `model_paths`/`seed_paths` with unified `paths:` in smelt.yml skeleton\n- Fix all `smelt.models.<name>` examples to correct flat `smelt.<name>` syntax\n- Add DECIMAL vs DOUBLE note: COALESCE(SUM(col), 0.0) returns DECIMAL(38,2),\n  not DOUBLE — use CAST(... AS DOUBLE) if the spec requires it\n\nCaught by two consecutive smelt-loop runs on the small fixture.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(quickstart): fix seed reference syntax to use flat smelt.<name>\n\nThe quickstart used `smelt.models.<name>` which is incorrect — seeds and\nmodels share a flat namespace addressed as `smelt.<name>` with no\nintermediate segment. This was caught by two smelt-loop runs where agents\nhad to cross-reference guide/seeds to correct the quickstart example.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(sql-models): fix ref syntax to flat smelt.<name>, add aggregate type gotchas\n\n- Replace all `smelt.models.*` references with correct flat `smelt.<name>` syntax\n- Update References section to explain the flat namespace explicitly\n- Add \"Aggregate type gotchas\" section covering COUNT(*) → BIGINT and\n  COALESCE(SUM, 0.0) → DECIMAL(38,2) patterns with explicit CAST fixes\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(seeds): add flat namespace callout and multi-seed JOIN example\n\n- Explicitly state that seeds and SQL models share the same flat smelt.<name>\n  namespace — no smelt.models.* prefix anywhere\n- Add \"Joining seeds together\" subsection with a worked staging model that\n  LEFT JOINs two seeds, covering the column-alias pattern when CSV headers\n  differ from the spec's required output names\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* skill(smelt-app-builder): clarify smelt build minimal output means success\n\nA no-op rebuild prints nothing; a successful first build prints only\n\"built N model(s) in Xs\". Add a one-liner so agents don't mistake\nsilence for failure.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* skill(smelt-app-builder): add JOIN type mismatch note, Expr<Boolean> in WHERE\n\n- JOIN predicate type mismatch: CSV integer IDs inferred as DOUBLE can cause\n  smelt type errors; explains when to add CAST (only on actual error, not\n  defensively)\n- Expr<Boolean>: document that it works in WHERE, CASE WHEN, and aggregates —\n  previously only CASE WHEN was mentioned\n\nCaught by medium-tier smelt-loop run.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(functions): fix smelt.models.* refs, add self-contained end-to-end example\n\n- Replace all smelt.models.<name> call-site examples with correct flat smelt.<name>\n- Add a \"Minimal end-to-end example\" section showing the complete file → define →\n  call cycle (functions/, models/, seeds/) without relying on external repo links\n- Highlight that filename stem is excluded from call path, Expr<Boolean> in WHERE\n  works directly, and named args are positional-only in v1\n\nReplaces the bottom \"Example: end-to-end pipeline\" that linked to repo files\ninaccessible in sandboxed environments.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(quickstart): add paths config, second seed, and multi-seed JOIN example\n\n- Add paths: [models, seeds] to smelt.yml — seeds/ wasn't discovered without it\n- Add raw_customers.csv as a second seed\n- Add stg_orders model showing a LEFT JOIN between two seeds\n- Note that seed column names are locked to CSV headers and must be aliased\n  in the model\n- Clarify flat smelt.<name> namespace (no smelt.models.* prefix)\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(seeds): connect type inference table to staging CAST pattern\n\nAdd a \"common cases\" callout under the CAST example explaining when\ninferred types need an explicit cast in staging:\n- Money columns (DECIMAL → DOUBLE for downstream SUM/COALESCE)\n- ISO-8601 timestamps with T separator (VARCHAR → TIMESTAMP)\n- IDs where join partner may be BIGINT\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-03T19:55:50+10:00",
+          "tree_id": "29196fe67db52798fbfbd5fa8ca6492021f8b3b9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/fa13175303d0fb1c94c962d59ea9a49729f5c296"
+        },
+        "date": 1777822066515,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.43252,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.795173,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.829438,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.4785239999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.004779,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9842060.58511,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 13.400786,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 12.989859,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 12.80838,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.782661,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9865945.793941,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.1263,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.01363,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.629235,
             "unit": "ms"
           }
         ]
