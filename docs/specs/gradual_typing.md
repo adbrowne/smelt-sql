@@ -1,7 +1,7 @@
 ---
 feature: gradual_typing
 status: experimental
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -132,7 +132,7 @@ These exclusions are normative — they bound what future plans may add without 
 - **`types.md` §"Bidirectional checking"** owns the rule that types push down at calls and flow up in bodies. This spec governs the *dispatch* of which body walks under which mode for which tier; it does not restate the bidirectional rule.
 - **`scoping.md`** owns parameters-first lookup, the no-overlap rule, and splice-context inference. The tier-dispatch path determines what `TypeContext` seeds the body walk; what *names* resolve in that walk is `scoping.md`'s territory.
 - **`functions.md`** owns the declaration grammar and the `FunctionCallCycle` cycle pre-pass — gradual typing assumes acyclic call graphs and does not re-justify them here.
-- **`expansion.md`** (when authored) will own the AST-level expansion mechanics, hygiene, and provenance origin tags. This spec consumes the frame-stack data structure but does not specify it.
+- **`expansion.md`** owns the AST-level expansion mechanics, hygiene, and provenance origin tags. This spec consumes the frame-stack data structure but does not specify it.
 
 ## Design
 
@@ -209,7 +209,7 @@ This section captures the load-bearing rationale behind the tier model and the b
 - `docs/specs/types.md` — type vocabulary, fragment sorts, bidirectional checking rule, generics inference
 - `docs/specs/functions.md` — declaration grammar, frontmatter, function-level diagnostics, cycle rule
 - `docs/specs/scoping.md` — body-scope name resolution and the `TypeContext` seeding contract
-- `docs/specs/expansion.md` *(planned)* — AST-level expansion mechanics, provenance origin tags, hygiene
+- `docs/specs/expansion.md` — AST-level expansion mechanics, provenance origin tags, hygiene
 
 ### Research
 

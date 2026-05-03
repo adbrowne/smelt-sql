@@ -18,7 +18,7 @@ A `.sql` file is a sequence of top-level **items**. Each item is one of:
 - A `smelt.define` declaration.
 - A `smelt.extern` declaration.
 - A bare model `SELECT`.
-- A `smelt.test` declaration (declaration shape and assertion semantics owned by a future `tests.md` spec; this spec covers only the parsing-contract sharing).
+- A `smelt.test` declaration (declaration shape and assertion semantics owned by `testing.md`; this spec covers only the parsing-contract sharing).
 
 Each item may be preceded by an optional YAML **frontmatter** block (`---` … `---`). Frontmatter attaches to the immediately following declaration; there is no file-level frontmatter scope. (Research §16 #22.)
 

@@ -1,7 +1,7 @@
 ---
 feature: planner_integration
 status: experimental
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -118,7 +118,7 @@ These rules are normative. Each phrasing of the form "the planner must ..." appl
 - **Models-as-functions equivalence** (`architecture.md`): a model body is itself a transparent function from this spec's perspective. The planner consumes models and `smelt.define`s by the same rules.
 - **Frontmatter grammar and key catalogue** (`functions.md`): the keys consumed here are defined there. Planner-relevant diagnostics from frontmatter parsing (`UnstableSchemaRequired`, `BackendsWideningNotAllowed`, `FrontmatterParseError`) are emitted by the parsing layer; this spec covers only the four codes in the Surface table.
 - **Incremental strategies** (`incremental_models.md`): L2 strategy selection reads `materialization`, `incremental.enabled`, `partition_column`, etc. from model frontmatter. This spec specifies the planner's *consumption*; the configuration surface lives there.
-- **Expansion mechanics** (`expansion.md`, when written): how `ExpandTransparentFunctionCalls` substitutes argument expressions and attaches `ProvenanceTag` is an internal invariant. This spec assumes correct expansion; it does not respec it.
+- **Expansion mechanics** (`expansion.md`): how `ExpandTransparentFunctionCalls` substitutes argument expressions and attaches `ProvenanceTag` is an internal invariant. This spec assumes correct expansion; it does not respec it.
 
 ## Design
 
@@ -206,7 +206,7 @@ The plan that produced this spec acknowledges the wired-vs-aspirational gap expl
 - `docs/specs/functions.md` — `smelt.define` / `smelt.extern` / frontmatter key catalogue
 - `docs/specs/incremental_models.md` — model-frontmatter keys consumed by L2 strategy selection
 - `docs/specs/types.md` — type vocabulary referenced by `FunctionProperties`-adjacent fields
-- `docs/specs/expansion.md` — internal invariants for AST expansion (when written)
+- `docs/specs/expansion.md` — internal invariants for AST expansion
 
 ### Research
 

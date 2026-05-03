@@ -8,6 +8,8 @@ owners: [andrew]
 # Testing
 
 > **What this is.** A normative spec for the smelt testing framework — `materialization: test` files, mock data injection, CTE isolation, assertion semantics, and property-based test behavior.
+>
+> **Naming history.** Earlier cross-references (in `architecture.md` Known Divergences, `functions.md`, `seeds.md`, `sources.md`) called this file `tests.md`. The canonical name is `testing.md`; the older name is no longer current.
 
 ## Surface
 
