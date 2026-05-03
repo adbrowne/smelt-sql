@@ -10,5 +10,5 @@ SELECT
     rating,
     duration_seconds,
     RANK() OVER (PARTITION BY rating ORDER BY created_at) AS win_val
-FROM smelt.models.page_views
+FROM smelt.page_views
 

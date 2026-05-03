@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT region, transaction_id, page_path
-    FROM smelt.models.sql_l2_200
+    FROM smelt.sql_l2_200
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (

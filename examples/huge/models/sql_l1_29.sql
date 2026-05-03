@@ -10,5 +10,5 @@ SELECT
     transaction_id,
     status,
     LAG(amount, 1) OVER (PARTITION BY transaction_id ORDER BY created_at) AS win_val
-FROM smelt.models.subscriptions
+FROM smelt.subscriptions
 

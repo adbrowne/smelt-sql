@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT device_type, referrer, revenue
-    FROM smelt.models.sql_l2_174
+    FROM smelt.sql_l2_174
     WHERE country = 'US'
 ),
 aggregated AS (

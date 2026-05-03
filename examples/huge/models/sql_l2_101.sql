@@ -12,6 +12,6 @@ SELECT
     SUM(quantity) AS agg_1,
     MAX(created_at) AS agg_2,
     AVG(duration_seconds) AS agg_3
-FROM smelt.models.sql_l1_205
+FROM smelt.sql_l1_205
 GROUP BY discount
 

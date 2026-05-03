@@ -14,7 +14,7 @@ smelt.define having_filter(
 )
 
 SELECT *
-FROM smelt.models.having_filter(
-    source => smelt.models.fn_annotation_too_wide_other,
+FROM smelt.having_filter(
+    source => smelt.fn_annotation_too_wide_other,
     pred => id > 0
 ) AS t

@@ -10,8 +10,8 @@ SELECT
     product_id,
     device_type,
     price
-FROM smelt.models.refunds
+FROM smelt.refunds
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.refunds WHERE status = 'active'
+    SELECT user_id FROM smelt.refunds WHERE status = 'active'
 )
 

@@ -85,7 +85,7 @@ pub fn generate_sql(rng: &mut ChaChaRng, spec: &ModelSpec) -> String {
     let ref_strs: Vec<String> = spec
         .dependencies
         .iter()
-        .map(|d| format!("smelt.models.{}", d))
+        .map(|d| format!("smelt.{}", d))
         .collect();
 
     match template_idx {

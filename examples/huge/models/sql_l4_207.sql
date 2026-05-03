@@ -10,8 +10,8 @@ SELECT
     platform,
     browser,
     segment
-FROM smelt.models.sql_l3_101
+FROM smelt.sql_l3_101
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l3_91 WHERE platform = 'web'
+    SELECT user_id FROM smelt.sql_l3_91 WHERE platform = 'web'
 )
 

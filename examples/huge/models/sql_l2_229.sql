@@ -11,7 +11,7 @@ SELECT
     b.region,
     c.discount,
     c.plan_type
-FROM smelt.models.sql_l1_192 a
-INNER JOIN smelt.models.sql_l1_92 b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.sql_l1_192 c ON a.user_id = c.user_id
+FROM smelt.sql_l1_192 a
+INNER JOIN smelt.sql_l1_92 b ON a.user_id = b.user_id
+LEFT JOIN smelt.sql_l1_192 c ON a.user_id = c.user_id
 

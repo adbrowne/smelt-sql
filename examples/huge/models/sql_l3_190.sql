@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_date, event_type, score
-    FROM smelt.models.sql_l2_240
+    FROM smelt.sql_l2_240
     WHERE event_type = 'purchase'
 )
 SELECT
     b.event_date,
     COUNT(*) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l2_212 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l2_212 j ON b.user_id = j.user_id
 GROUP BY b.event_date
 

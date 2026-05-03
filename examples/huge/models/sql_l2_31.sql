@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT browser, channel, user_id
-    FROM smelt.models.sql_l1_80
+    FROM smelt.sql_l1_80
     WHERE event_type = 'purchase'
 )
 SELECT
     b.browser,
     COUNT(*) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l1_135 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l1_135 j ON b.user_id = j.user_id
 GROUP BY b.browser
 

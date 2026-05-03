@@ -10,7 +10,7 @@ SELECT
     ip_address,
     SUM(revenue) AS val_1,
     COUNT(*) AS val_2
-FROM smelt.models.page_views
+FROM smelt.page_views
 GROUP BY ip_address
 HAVING COUNT(*) > 10
 

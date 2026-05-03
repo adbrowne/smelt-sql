@@ -10,7 +10,7 @@ SELECT
     session_id,
     AVG(amount) AS val_1,
     SUM(quantity) AS val_2
-FROM smelt.models.sql_l3_177
+FROM smelt.sql_l3_177
 GROUP BY session_id
 HAVING COUNT(*) > 10
 

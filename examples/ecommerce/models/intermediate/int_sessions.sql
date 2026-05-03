@@ -8,7 +8,7 @@ WITH session_bounds AS (
         gap_seconds,
         SUM(CASE WHEN gap_seconds IS NULL OR gap_seconds > 1800 THEN 1 ELSE 0 END)
             OVER (PARTITION BY visitor_id ORDER BY event_timestamp) AS session_id
-    FROM smelt.models.staging.stg_events
+    FROM smelt.staging.stg_events
 )
 
 SELECT

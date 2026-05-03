@@ -11,6 +11,6 @@ SELECT
     ip_address,
     device_type,
     order_id
-FROM smelt.models.users
+FROM smelt.users
 WHERE status = 'active'
 

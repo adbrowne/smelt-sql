@@ -6,7 +6,7 @@ SELECT
     user_id,
     COUNT(*) AS order_count,
     SUM(amount) AS lifetime_value
-FROM smelt.models.cleaned_orders
+FROM smelt.cleaned_orders
 GROUP BY user_id
 
 --- name: test_user_totals ---

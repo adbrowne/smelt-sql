@@ -11,6 +11,6 @@ SELECT
     SUM(amount) AS agg_0,
     AVG(price) AS agg_1,
     COUNT(*) AS agg_2
-FROM smelt.models.page_views
+FROM smelt.page_views
 GROUP BY channel
 

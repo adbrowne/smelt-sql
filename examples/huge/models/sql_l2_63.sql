@@ -10,8 +10,8 @@ SELECT
     ip_address,
     channel,
     transaction_id
-FROM smelt.models.sql_l1_67
+FROM smelt.sql_l1_67
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_67 WHERE is_active = true
+    SELECT user_id FROM smelt.sql_l1_67 WHERE is_active = true
 )
 

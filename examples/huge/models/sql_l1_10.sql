@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT transaction_id, browser, os_name
-    FROM smelt.models.transactions
+    FROM smelt.transactions
     WHERE score >= 50
 ),
 aggregated AS (

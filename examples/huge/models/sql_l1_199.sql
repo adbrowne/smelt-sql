@@ -10,6 +10,6 @@ SELECT
     a.is_active,
     a.event_type,
     b.status
-FROM smelt.models.payments a
-LEFT JOIN smelt.models.payments b ON a.user_id = b.user_id
+FROM smelt.payments a
+LEFT JOIN smelt.payments b ON a.user_id = b.user_id
 

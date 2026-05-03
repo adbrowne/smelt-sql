@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT region, email_domain, price
-    FROM smelt.models.sql_l3_143
+    FROM smelt.sql_l3_143
     WHERE country = 'US'
 ),
 aggregated AS (

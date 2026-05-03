@@ -12,6 +12,6 @@ SELECT
     COUNT(*) AS agg_1,
     COUNT(DISTINCT user_id) AS agg_2,
     AVG(duration_seconds) AS agg_3
-FROM smelt.models.events
+FROM smelt.events
 GROUP BY category
 

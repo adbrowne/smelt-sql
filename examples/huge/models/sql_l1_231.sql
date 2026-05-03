@@ -11,6 +11,6 @@ SELECT
     cohort_date,
     category,
     referrer
-FROM smelt.models.orders
+FROM smelt.orders
 WHERE is_active = true
 

@@ -11,6 +11,6 @@ SELECT
     duration_seconds,
     score,
     is_active
-FROM smelt.models.sql_l2_196
+FROM smelt.sql_l2_196
 WHERE platform = 'web'
 

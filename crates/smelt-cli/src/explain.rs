@@ -229,6 +229,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: ModelKind::Sql,
+            address_segments: vec![name.to_string()],
         }
     }
 

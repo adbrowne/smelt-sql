@@ -11,6 +11,6 @@ SELECT
     platform,
     channel,
     transaction_id
-FROM smelt.models.payments
+FROM smelt.payments
 WHERE platform = 'web'
 

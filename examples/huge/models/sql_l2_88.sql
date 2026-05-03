@@ -10,6 +10,6 @@ SELECT
     DATE_TRUNC('month', event_time) AS period,
     SUM(amount) AS metric_1,
     SUM(quantity) AS metric_2
-FROM smelt.models.sql_l1_31
+FROM smelt.sql_l1_31
 GROUP BY DATE_TRUNC('month', event_time)
 

@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_date, revenue, rating
-    FROM smelt.models.products
+    FROM smelt.products
     WHERE category IS NOT NULL
 )
 SELECT
     b.event_date,
     SUM(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.models.products j ON b.user_id = j.user_id
+INNER JOIN smelt.products j ON b.user_id = j.user_id
 GROUP BY b.event_date
 

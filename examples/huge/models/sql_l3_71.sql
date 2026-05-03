@@ -11,6 +11,6 @@ SELECT
     AVG(duration_seconds) AS agg_0,
     AVG(price) AS agg_1,
     MAX(created_at) AS agg_2
-FROM smelt.models.sql_l2_247
+FROM smelt.sql_l2_247
 GROUP BY quantity
 

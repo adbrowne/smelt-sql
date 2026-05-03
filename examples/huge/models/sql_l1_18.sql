@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT price, session_id, channel
-    FROM smelt.models.payments
+    FROM smelt.payments
     WHERE platform = 'web'
 ),
 aggregated AS (

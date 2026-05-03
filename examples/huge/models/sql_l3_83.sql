@@ -10,7 +10,7 @@ SELECT
     product_id,
     COUNT(DISTINCT user_id) AS val_1,
     SUM(quantity) AS val_2
-FROM smelt.models.sql_l2_70
+FROM smelt.sql_l2_70
 GROUP BY product_id
 HAVING COUNT(*) > 10
 

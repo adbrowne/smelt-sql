@@ -10,6 +10,6 @@ SELECT
     a.quantity,
     a.product_id,
     b.cost
-FROM smelt.models.categories a
-INNER JOIN smelt.models.categories b ON a.user_id = b.user_id
+FROM smelt.categories a
+INNER JOIN smelt.categories b ON a.user_id = b.user_id
 

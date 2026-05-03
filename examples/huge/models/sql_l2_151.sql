@@ -10,6 +10,6 @@ SELECT
     a.event_type,
     a.is_verified,
     b.ip_address
-FROM smelt.models.sql_l1_220 a
-LEFT JOIN smelt.models.sql_l1_104 b ON a.user_id = b.user_id
+FROM smelt.sql_l1_220 a
+LEFT JOIN smelt.sql_l1_104 b ON a.user_id = b.user_id
 

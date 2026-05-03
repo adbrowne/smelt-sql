@@ -11,7 +11,7 @@ SELECT
     b.product_id,
     c.os_name,
     c.channel
-FROM smelt.models.sql_l3_55 a
-INNER JOIN smelt.models.sql_l3_20 b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.sql_l3_53 c ON a.user_id = c.user_id
+FROM smelt.sql_l3_55 a
+INNER JOIN smelt.sql_l3_20 b ON a.user_id = b.user_id
+LEFT JOIN smelt.sql_l3_53 c ON a.user_id = c.user_id
 

@@ -11,6 +11,6 @@ SELECT
     AVG(price) AS agg_0,
     AVG(amount) AS agg_1,
     COUNT(DISTINCT user_id) AS agg_2
-FROM smelt.models.payments
+FROM smelt.payments
 GROUP BY is_verified
 

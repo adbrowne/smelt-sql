@@ -20,7 +20,7 @@ SELECT
         ORDER BY oi.item_date
         ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
     ) AS rolling_7day_avg_units
-FROM smelt.models.staging.stg_products AS p
-INNER JOIN smelt.models.staging.stg_order_items AS oi ON p.product_id = oi.product_id
+FROM smelt.staging.stg_products AS p
+INNER JOIN smelt.staging.stg_order_items AS oi ON p.product_id = oi.product_id
 GROUP BY p.product_id, p.category, p.subcategory, p.brand_tier, oi.item_date
 

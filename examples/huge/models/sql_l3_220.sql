@@ -10,6 +10,6 @@ SELECT
     a.duration_seconds,
     a.product_id,
     b.status
-FROM smelt.models.sql_l2_151 a
-INNER JOIN smelt.models.sql_l2_197 b ON a.user_id = b.user_id
+FROM smelt.sql_l2_151 a
+INNER JOIN smelt.sql_l2_197 b ON a.user_id = b.user_id
 

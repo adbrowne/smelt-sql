@@ -10,8 +10,8 @@ SELECT
     device_type,
     tier,
     campaign_id
-FROM smelt.models.sql_l2_136
+FROM smelt.sql_l2_136
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_102 WHERE country = 'US'
+    SELECT user_id FROM smelt.sql_l2_102 WHERE country = 'US'
 )
 

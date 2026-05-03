@@ -10,6 +10,6 @@ SELECT
     referrer,
     SUM(amount) AS agg_0,
     MAX(created_at) AS agg_1
-FROM smelt.models.reviews
+FROM smelt.reviews
 GROUP BY referrer
 

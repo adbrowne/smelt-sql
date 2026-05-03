@@ -7,8 +7,8 @@ SELECT DISTINCT
     SUM(o.net_revenue) AS total_revenue,
     SUM(o.net_revenue) / COUNT(DISTINCT o.customer_id) AS revenue_per_customer,
     SUM(o.net_revenue) / COUNT(DISTINCT o.order_id) AS avg_order_value
-FROM smelt.models.staging.stg_customers AS c
-INNER JOIN smelt.models.intermediate.int_order_enriched AS o ON c.customer_id = o.customer_id
+FROM smelt.staging.stg_customers AS c
+INNER JOIN smelt.intermediate.int_order_enriched AS o ON c.customer_id = o.customer_id
 GROUP BY c.country, c.city
 ORDER BY SUM(o.net_revenue) DESC
 

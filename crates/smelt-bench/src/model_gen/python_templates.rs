@@ -35,7 +35,7 @@ SELECT
     event_time,
     amount,
     status
-FROM smelt.models.{dep}
+FROM smelt.{dep}
 WHERE status = 'active'
 """
 "#,
@@ -54,7 +54,7 @@ def {name}(project):
     """Generated model: union tagged."""
     parts = []
     for dep in ['{dep}']:
-        parts.append(f"SELECT user_id, event_time, amount FROM smelt.models.{{dep}}")
+        parts.append(f"SELECT user_id, event_time, amount FROM smelt.{{dep}}")
     return """
 ---
 materialization: table
@@ -91,8 +91,8 @@ SELECT
     a.user_id,
     a.event_time,
     b.amount
-FROM smelt.models.{first} a
-LEFT JOIN smelt.models.{second} b ON a.user_id = b.user_id
+FROM smelt.{first} a
+LEFT JOIN smelt.{second} b ON a.user_id = b.user_id
 """
 "#,
         name = spec.name,
@@ -126,7 +126,7 @@ SELECT
     event_time,
     amount,
     category
-FROM smelt.models.{dep}
+FROM smelt.{dep}
 {{filter_clause}}
 """
 "#,

@@ -6,7 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT region, is_verified, browser, 'source_0' AS source_tag FROM smelt.models.sql_l3_55
+SELECT region, is_verified, browser, 'source_0' AS source_tag FROM smelt.sql_l3_55
 UNION ALL
-SELECT region, is_verified, browser, 'source_1' AS source_tag FROM smelt.models.sql_l3_55
+SELECT region, is_verified, browser, 'source_1' AS source_tag FROM smelt.sql_l3_55
 

@@ -10,8 +10,8 @@ SELECT
     cohort_date,
     os_name,
     is_verified
-FROM smelt.models.categories
+FROM smelt.categories
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.categories WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.categories WHERE category IS NOT NULL
 )
 

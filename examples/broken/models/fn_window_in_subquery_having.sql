@@ -2,6 +2,6 @@
 -- window function.  HAVING is a scalar context; any window function inside the
 -- scalar subquery is invalid and must be rejected with `WindowInScalarContext`.
 SELECT col, COUNT(*) AS cnt
-FROM smelt.models.events
+FROM smelt.events
 GROUP BY col
-HAVING COUNT(*) > (SELECT AVG(RANK() OVER (ORDER BY col)) FROM smelt.models.events)
+HAVING COUNT(*) > (SELECT AVG(RANK() OVER (ORDER BY col)) FROM smelt.events)

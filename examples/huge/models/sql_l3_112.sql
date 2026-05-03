@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT channel, profit, category
-    FROM smelt.models.sql_l2_73
+    FROM smelt.sql_l2_73
     WHERE category IS NOT NULL
 )
 SELECT
     b.channel,
     COUNT(*) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l2_184 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l2_184 j ON b.user_id = j.user_id
 GROUP BY b.channel
 

@@ -10,5 +10,5 @@ SELECT
     status,
     browser,
     ROW_NUMBER() OVER (PARTITION BY status ORDER BY created_at) AS win_val
-FROM smelt.models.campaigns
+FROM smelt.campaigns
 

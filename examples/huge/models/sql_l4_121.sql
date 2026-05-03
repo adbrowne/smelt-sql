@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cohort_date, transaction_id, country
-    FROM smelt.models.sql_l3_247
+    FROM smelt.sql_l3_247
     WHERE quantity > 0
 ),
 aggregated AS (

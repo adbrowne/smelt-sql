@@ -4,5 +4,5 @@
 smelt.define broken_helper(x) AS (x + 'text')
 
 smelt.define tier2_wrapper(n: Expr<Integer>) AS (
-    smelt.models.broken_helper(n)
+    smelt.broken_helper(n)
 )

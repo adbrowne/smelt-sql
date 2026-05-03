@@ -6,7 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT channel, plan_type, event_time, 'source_0' AS source_tag FROM smelt.models.sql_l3_109
+SELECT channel, plan_type, event_time, 'source_0' AS source_tag FROM smelt.sql_l3_109
 UNION ALL
-SELECT channel, plan_type, event_time, 'source_1' AS source_tag FROM smelt.models.sql_l3_101
+SELECT channel, plan_type, event_time, 'source_1' AS source_tag FROM smelt.sql_l3_101
 

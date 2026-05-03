@@ -10,8 +10,8 @@ SELECT
     created_at,
     tier,
     is_verified
-FROM smelt.models.sql_l2_33
+FROM smelt.sql_l2_33
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_9 WHERE category IS NOT NULL
+    SELECT user_id FROM smelt.sql_l2_9 WHERE category IS NOT NULL
 )
 

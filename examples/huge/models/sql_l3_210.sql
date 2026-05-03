@@ -13,6 +13,6 @@ SELECT
     SUM(amount) AS agg_2,
     COUNT(*) AS agg_3,
     MAX(created_at) AS agg_4
-FROM smelt.models.sql_l2_33
+FROM smelt.sql_l2_33
 GROUP BY ip_address
 

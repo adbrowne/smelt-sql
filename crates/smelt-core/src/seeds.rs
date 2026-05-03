@@ -1,28 +1,31 @@
 use smelt_types::DataType;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// Information about a seed CSV file discovered in the project's seed directories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedInfo {
-    /// CSV filename without extension (used as the ref target name)
+    /// CSV filename without extension (leaf name, used for simple lookups)
     pub name: String,
     /// Absolute path to the CSV file
     pub path: PathBuf,
     /// Column names and inferred types from the CSV headers + data
     pub columns: Vec<(String, DataType)>,
+    /// Full address segments from the scan-root to the leaf name (without
+    /// extension). For `seeds/data/users.csv` under `paths: ["seeds"]`,
+    /// this is `["data", "users"]`. For a top-level seed `seeds/users.csv`,
+    /// this is `["users"]`.
+    pub address_segments: Vec<String>,
 }
 
 /// Discover seed CSV files in the project's configured paths and infer column types.
 ///
-/// Seeds are CSV files under the configured `paths:` directories. Top-level
-/// CSVs are "target seeds" (schema = target schema). Subdirectory CSVs are
-/// "source seeds" (schema = subdirectory name). This function discovers only
-/// top-level seeds since those are the ones referenced as
-/// `smelt.models.seed_name`.
+/// Seeds are CSV files under the configured `paths:` directories. This
+/// function walks recursively and populates `address_segments` with the
+/// path from the scan-root to the leaf (e.g. `["data", "users"]` for
+/// `seeds/data/users.csv` under `paths: ["seeds"]`).
 ///
-/// `paths` is the unified `paths:` list from `smelt.yml` (Phase 1 of the
-/// unified-paths plan); kind-by-content classification is Phase 2 — for now
-/// this walker is fine to find `.csv` files at the top level of any path.
+/// `paths` is the unified `paths:` list from `smelt.yml`.
 pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo> {
     let mut seeds = Vec::new();
 
@@ -32,29 +35,46 @@ pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo
             continue;
         }
 
-        let Ok(entries) = std::fs::read_dir(&seed_dir) else {
-            continue;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|e| e == "csv") {
+        for entry in WalkDir::new(&seed_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path().to_path_buf();
+            if path.extension().is_some_and(|e| e == "csv") {
                 let name = path
                     .file_stem()
                     .expect("CSV file always has a stem")
                     .to_string_lossy()
                     .into_owned();
+
+                // Compute address_segments: path from scan-root to leaf.
+                let rel = path
+                    .strip_prefix(&seed_dir)
+                    .expect("path is under seed_dir");
+                let parent = rel.parent().unwrap_or(std::path::Path::new(""));
+                let mut address_segments: Vec<String> = parent
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                address_segments.push(name.clone());
+
                 let columns = infer_csv_columns(&path);
                 seeds.push(SeedInfo {
                     name,
                     path,
                     columns,
+                    address_segments,
                 });
             }
         }
     }
 
-    seeds.sort_by(|a, b| a.name.cmp(&b.name));
+    seeds.sort_by(|a, b| a.address_segments.cmp(&b.address_segments));
     seeds
 }
 

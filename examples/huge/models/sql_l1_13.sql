@@ -10,7 +10,7 @@ SELECT
     event_time,
     MAX(created_at) AS val_1,
     MIN(created_at) AS val_2
-FROM smelt.models.refunds
+FROM smelt.refunds
 GROUP BY event_time
 HAVING COUNT(*) > 10
 

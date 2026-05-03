@@ -13,7 +13,7 @@ SELECT
     order_date,
     COUNT(*) AS order_count,
     SUM(amount) AS total_revenue
-FROM smelt.models.cleaned_orders
+FROM smelt.cleaned_orders
 GROUP BY order_date
 
 --- name: test_daily_revenue ---

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT user_id, revenue, email_domain
-    FROM smelt.models.invoices
+    FROM smelt.invoices
     WHERE category IS NOT NULL
 ),
 aggregated AS (

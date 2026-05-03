@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT platform, browser, price
-    FROM smelt.models.sql_l2_146
+    FROM smelt.sql_l2_146
     WHERE status = 'active'
 )
 SELECT
     b.platform,
     AVG(price) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l2_106 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l2_106 j ON b.user_id = j.user_id
 GROUP BY b.platform
 

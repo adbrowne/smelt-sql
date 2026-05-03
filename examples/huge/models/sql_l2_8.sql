@@ -10,5 +10,5 @@ SELECT
     event_date,
     status,
     LAG(amount, 1) OVER (PARTITION BY event_date ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l1_248
+FROM smelt.sql_l1_248
 

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT event_time, event_date, event_type
-    FROM smelt.models.sql_l3_14
+    FROM smelt.sql_l3_14
     WHERE country = 'US'
 ),
 aggregated AS (

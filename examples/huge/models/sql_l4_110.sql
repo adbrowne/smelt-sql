@@ -11,6 +11,6 @@ SELECT
     is_active,
     page_path,
     region
-FROM smelt.models.sql_l3_60
+FROM smelt.sql_l3_60
 WHERE quantity > 0
 

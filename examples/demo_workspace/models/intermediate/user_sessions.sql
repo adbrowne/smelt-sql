@@ -4,6 +4,6 @@ SELECT
     DATE_TRUNC('day', event_time) AS session_date,
     COUNT(*) AS event_count,
     SUM(revenue_cents) AS session_revenue_cents
-FROM smelt.models.staging.stg_events
+FROM smelt.staging.stg_events
 GROUP BY user_id, session_date
 

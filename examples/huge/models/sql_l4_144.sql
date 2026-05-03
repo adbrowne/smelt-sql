@@ -11,7 +11,7 @@ SELECT
     b.country,
     c.created_at,
     c.event_date
-FROM smelt.models.sql_l3_218 a
-INNER JOIN smelt.models.sql_l3_218 b ON a.user_id = b.user_id
-LEFT JOIN smelt.models.sql_l3_218 c ON a.user_id = c.user_id
+FROM smelt.sql_l3_218 a
+INNER JOIN smelt.sql_l3_218 b ON a.user_id = b.user_id
+LEFT JOIN smelt.sql_l3_218 c ON a.user_id = c.user_id
 

@@ -10,5 +10,5 @@ SELECT
     price,
     device_type,
     RANK() OVER (PARTITION BY price ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l2_170
+FROM smelt.sql_l2_170
 

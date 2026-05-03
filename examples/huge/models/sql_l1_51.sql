@@ -11,6 +11,6 @@ SELECT
     region,
     rating,
     event_time
-FROM smelt.models.transactions
+FROM smelt.transactions
 WHERE amount > 0
 

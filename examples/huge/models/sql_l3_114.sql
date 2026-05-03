@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT session_id, tier, created_at
-    FROM smelt.models.sql_l2_208
+    FROM smelt.sql_l2_208
     WHERE created_at >= '2024-01-01'
 ),
 aggregated AS (

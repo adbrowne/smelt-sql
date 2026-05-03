@@ -13,6 +13,6 @@ SELECT
     AVG(duration_seconds) AS agg_2,
     AVG(amount) AS agg_3,
     MIN(created_at) AS agg_4
-FROM smelt.models.sql_l2_69
+FROM smelt.sql_l2_69
 GROUP BY ip_address
 

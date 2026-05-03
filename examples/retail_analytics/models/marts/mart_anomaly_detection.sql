@@ -7,7 +7,7 @@ WITH daily_revenue AS (
         SUM(gross_revenue) AS daily_gross,
         SUM(net_revenue) AS daily_net,
         COUNT(DISTINCT order_id) AS daily_orders
-    FROM smelt.models.intermediate.int_daily_store_metrics
+    FROM smelt.intermediate.int_daily_store_metrics
     GROUP BY order_date, store_id, store_type
 ),
 

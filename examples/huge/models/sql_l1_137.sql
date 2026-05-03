@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT referrer, order_id, transaction_id
-    FROM smelt.models.signups
+    FROM smelt.signups
     WHERE platform = 'web'
 )
 SELECT
     b.referrer,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.models.signups j ON b.user_id = j.user_id
+INNER JOIN smelt.signups j ON b.user_id = j.user_id
 GROUP BY b.referrer
 

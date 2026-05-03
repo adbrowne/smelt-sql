@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT country, profit, price
-    FROM smelt.models.sql_l3_238
+    FROM smelt.sql_l3_238
     WHERE is_active = true
 )
 SELECT
     b.country,
     AVG(amount) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l3_173 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l3_173 j ON b.user_id = j.user_id
 GROUP BY b.country
 

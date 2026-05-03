@@ -10,8 +10,8 @@ SELECT
     order_id,
     revenue,
     platform
-FROM smelt.models.transactions
+FROM smelt.transactions
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.transactions WHERE status = 'active'
+    SELECT user_id FROM smelt.transactions WHERE status = 'active'
 )
 

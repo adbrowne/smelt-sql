@@ -1,7 +1,7 @@
 //! Phase 2c — end-to-end compile test: path form models compile correctly.
 //!
 //! Test 3: `compile_and_plan_path_workspace` — staging a tempdir workspace
-//! with `smelt.models.base` in a FROM clause and asserting that the compiled
+//! with `smelt.base` in a FROM clause and asserting that the compiled
 //! SQL contains the schema-qualified name `main.base` with no residual
 //! `smelt.` prefix.
 
@@ -61,7 +61,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
 // ---------------------------------------------------------------------------
 
 /// Compile a simple two-model workspace where `derived.sql` uses
-/// `smelt.models.base` (path form) in its FROM clause. Assert that the
+/// `smelt.base` (path form) in its FROM clause. Assert that the
 /// compiled SQL for `derived` contains `main.base` (schema-qualified) and
 /// contains no residual `smelt.` prefix.
 ///
@@ -70,10 +70,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
 fn compile_and_plan_path_workspace() {
     let tmp = stage_workspace(&[
         ("models/base.sql", "SELECT 1 AS id, 'alice' AS name\n"),
-        (
-            "models/derived.sql",
-            "SELECT id, name FROM smelt.models.base\n",
-        ),
+        ("models/derived.sql", "SELECT id, name FROM smelt.base\n"),
     ]);
     let project_dir = tmp.path().to_path_buf();
 

@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT event_date, page_path, ip_address
-    FROM smelt.models.sql_l1_242
+    FROM smelt.sql_l1_242
     WHERE event_type = 'purchase'
 )
 SELECT
     b.event_date,
     AVG(price) AS agg_val
 FROM base b
-INNER JOIN smelt.models.sql_l1_242 j ON b.user_id = j.user_id
+INNER JOIN smelt.sql_l1_242 j ON b.user_id = j.user_id
 GROUP BY b.event_date
 

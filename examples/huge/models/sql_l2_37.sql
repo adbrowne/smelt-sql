@@ -10,6 +10,6 @@ SELECT
     DATE_TRUNC('week', event_time) AS period,
     AVG(price) AS metric_1,
     COUNT(*) AS metric_2
-FROM smelt.models.sql_l1_132
+FROM smelt.sql_l1_132
 GROUP BY DATE_TRUNC('week', event_time)
 

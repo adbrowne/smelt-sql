@@ -11,6 +11,6 @@ SELECT
     created_at,
     quantity,
     score
-FROM smelt.models.sql_l3_40
+FROM smelt.sql_l3_40
 WHERE status = 'active'
 

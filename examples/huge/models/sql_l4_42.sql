@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT price, event_type, rating
-    FROM smelt.models.sql_l3_235
+    FROM smelt.sql_l3_235
     WHERE score >= 50
 ),
 aggregated AS (

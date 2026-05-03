@@ -293,6 +293,8 @@ pub fn discover_python_models(
                             .collect(),
                     },
                     model_id,
+                    // Python model address_segments are computed in discover_python_models.
+                    address_segments: Vec::new(),
                 });
             }
         }
@@ -570,6 +572,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
         let model_b = ModelFile {
             name: "beta".to_string(),
@@ -580,6 +583,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
 
         let set1 = vec![model_a.clone(), model_b.clone()];
@@ -598,6 +602,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
         let model_b = ModelFile {
             name: "same_name".to_string(),
@@ -608,6 +613,7 @@ def union_model(project):
             metadata: None,
             kind: ModelKind::Sql,
             model_id: ModelId::from_path(PathBuf::from("test.sql")),
+            address_segments: Vec::new(),
         };
 
         assert!(!models_equal(&[model_a], &[model_b]));
@@ -1189,6 +1195,7 @@ def colliding(project):
                 }],
             },
             model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
+            address_segments: Vec::new(),
         };
 
         let config = crate::config::Config {
@@ -1229,6 +1236,7 @@ def colliding(project):
                 }],
             },
             model_id: ModelId::from_path(PathBuf::from("models/combined_events.py")),
+            address_segments: Vec::new(),
         };
 
         let config = crate::config::Config {

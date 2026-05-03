@@ -10,5 +10,5 @@ SELECT
     category,
     amount,
     ROW_NUMBER() OVER (PARTITION BY category ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l1_126
+FROM smelt.sql_l1_126
 

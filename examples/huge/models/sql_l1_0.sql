@@ -10,8 +10,8 @@ SELECT
     country,
     segment,
     discount
-FROM smelt.models.payments
+FROM smelt.payments
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.payments WHERE platform = 'web'
+    SELECT user_id FROM smelt.payments WHERE platform = 'web'
 )
 

@@ -13,6 +13,6 @@ SELECT
     COUNT(*) AS agg_2,
     AVG(amount) AS agg_3,
     AVG(price) AS agg_4
-FROM smelt.models.sql_l1_140
+FROM smelt.sql_l1_140
 GROUP BY browser
 

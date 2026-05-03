@@ -10,7 +10,7 @@ SELECT
     session_id,
     AVG(price) AS val_1,
     SUM(revenue) AS val_2
-FROM smelt.models.sql_l1_100
+FROM smelt.sql_l1_100
 GROUP BY session_id
 HAVING COUNT(*) > 10
 

@@ -10,6 +10,6 @@ SELECT
     os_name,
     AVG(amount) AS agg_0,
     COUNT(*) AS agg_1
-FROM smelt.models.shipments
+FROM smelt.shipments
 GROUP BY os_name
 

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT page_path, rating, updated_at
-    FROM smelt.models.refunds
+    FROM smelt.refunds
     WHERE event_type = 'purchase'
 ),
 aggregated AS (

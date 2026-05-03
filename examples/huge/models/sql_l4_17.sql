@@ -6,7 +6,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT discount, user_id, platform, 'source_0' AS source_tag FROM smelt.models.sql_l3_192
+SELECT discount, user_id, platform, 'source_0' AS source_tag FROM smelt.sql_l3_192
 UNION ALL
-SELECT discount, user_id, platform, 'source_1' AS source_tag FROM smelt.models.sql_l3_192
+SELECT discount, user_id, platform, 'source_1' AS source_tag FROM smelt.sql_l3_192
 

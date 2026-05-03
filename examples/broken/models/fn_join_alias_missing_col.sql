@@ -1,5 +1,5 @@
 -- Phase 45 fixture: a function whose body LEFT JOINs `dim_y` via a
--- `smelt.models.Y AS y` alias, but the body references a column
+-- `smelt.Y AS y` alias, but the body references a column
 -- (`does_not_exist`) that's not on the joined schema.  Phase 45 makes
 -- joined-alias columns visible inside the body, so unknown columns on
 -- those aliases now surface as `UnknownIdentifier` rooted at the call
@@ -12,11 +12,11 @@
 smelt.define join_alias_missing_local(orders: TableExpr<{order_id: BigInt}>) -> TableExpr AS (
   SELECT orders.order_id, y.does_not_exist
   FROM orders
-  LEFT JOIN smelt.models.fn_join_alias_missing_col_other AS y
+  LEFT JOIN smelt.fn_join_alias_missing_col_other AS y
     ON orders.order_id = y.id
 )
 
 SELECT *
-FROM smelt.models.join_alias_missing_local(
-  smelt.models.fn_join_alias_missing_col_other
+FROM smelt.join_alias_missing_local(
+  smelt.fn_join_alias_missing_col_other
 ) AS m

@@ -10,7 +10,7 @@ SELECT
     event_date,
     COUNT(*) AS val_1,
     AVG(price) AS val_2
-FROM smelt.models.sessions
+FROM smelt.sessions
 GROUP BY event_date
 HAVING COUNT(*) > 10
 

@@ -10,6 +10,6 @@ SELECT
     SUM(o.net_revenue) AS net_revenue,
     SUM(o.total_quantity) AS total_units,
     SUM(o.gross_revenue) / COUNT(DISTINCT o.order_id) AS avg_order_value
-FROM smelt.models.intermediate.int_order_enriched AS o
+FROM smelt.intermediate.int_order_enriched AS o
 GROUP BY o.order_date, o.store_id, o.store_type, o.store_region
 

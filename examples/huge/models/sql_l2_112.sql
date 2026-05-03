@@ -11,6 +11,6 @@ SELECT
     transaction_id,
     rating,
     product_id
-FROM smelt.models.sql_l1_117
+FROM smelt.sql_l1_117
 WHERE status = 'active'
 

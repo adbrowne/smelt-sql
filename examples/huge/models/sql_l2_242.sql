@@ -10,5 +10,5 @@ SELECT
     rating,
     ip_address,
     LAG(amount, 1) OVER (PARTITION BY rating ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l1_8
+FROM smelt.sql_l1_8
 

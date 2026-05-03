@@ -10,7 +10,7 @@ SELECT
     platform,
     MAX(created_at) AS val_1,
     AVG(amount) AS val_2
-FROM smelt.models.refunds
+FROM smelt.refunds
 GROUP BY platform
 HAVING COUNT(*) > 10
 

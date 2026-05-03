@@ -10,6 +10,6 @@ SELECT
     a.os_name,
     a.discount,
     b.campaign_id
-FROM smelt.models.sql_l3_58 a
-INNER JOIN smelt.models.sql_l3_188 b ON a.user_id = b.user_id
+FROM smelt.sql_l3_58 a
+INNER JOIN smelt.sql_l3_188 b ON a.user_id = b.user_id
 

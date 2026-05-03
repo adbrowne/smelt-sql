@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT cohort_date, is_verified, tier
-    FROM smelt.models.sql_l2_157
+    FROM smelt.sql_l2_157
     WHERE country = 'US'
 ),
 aggregated AS (

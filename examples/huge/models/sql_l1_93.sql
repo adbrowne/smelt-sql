@@ -10,8 +10,8 @@ SELECT
     referrer,
     page_path,
     os_name
-FROM smelt.models.invoices
+FROM smelt.invoices
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.invoices WHERE country = 'US'
+    SELECT user_id FROM smelt.invoices WHERE country = 'US'
 )
 

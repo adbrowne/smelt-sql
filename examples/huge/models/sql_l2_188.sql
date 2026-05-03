@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT transaction_id, email_domain, os_name
-    FROM smelt.models.sql_l1_177
+    FROM smelt.sql_l1_177
     WHERE amount > 0
 ),
 aggregated AS (

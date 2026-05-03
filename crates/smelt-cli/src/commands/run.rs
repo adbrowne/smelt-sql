@@ -626,6 +626,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }) {
         let model_name = &phys_node.name;
         let model = &phys_node.model_file;
+        // `db_table_name` is the qualified table name used for DB operations.
+        // For models in subdirectories, this is `segs.join("_")` (e.g.
+        // `staging_stg_events`), which matches the ref compiled by the SQL
+        // compiler (`main.staging_stg_events`). For flat models it equals
+        // `model_name`.
+        let db_table_name = model.db_name_owned();
         let backend = registry.get(&phys_node.target);
         let compiler = compilers.get(&phys_node.target);
         let schema = &registry.target_config(&phys_node.target).schema;
@@ -646,7 +652,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             );
 
             if use_alter {
-                if let Ok(true) = backend.table_exists(schema, model_name).await {
+                if let Ok(true) = backend.table_exists(schema, &db_table_name).await {
                     let inferred_columns = infer_deployed_columns(&type_db, model);
                     if !inferred_columns.is_empty() {
                         let (column_defaults, backfill_exprs) =
@@ -669,7 +675,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         match migration::check_and_migrate(
                             backend,
                             &file_store,
-                            model_name,
+                            &db_table_name,
                             &model.content,
                             schema,
                             &inferred_columns,
@@ -784,7 +790,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
                 executor::execute_plan_incremental(
                     backend,
-                    model_name,
+                    &db_table_name,
                     steps,
                     schema,
                     partition,
@@ -801,7 +807,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 // Cube split only (full refresh)
                 info!("Running model: {} (cube split)", model_name);
 
-                executor::execute_plan(backend, model_name, steps, schema, args.show_results)
+                executor::execute_plan(backend, &db_table_name, steps, schema, args.show_results)
                     .await
                     .with_context(|| format!("Failed to execute model: {}", model_name))?
             }
@@ -1008,13 +1014,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
             let inferred_columns = infer_deployed_columns(&type_db, model);
             if !inferred_columns.is_empty() {
                 let existing_version = file_store
-                    .load_schema(model_name)
+                    .load_schema(&db_table_name)
                     .ok()
                     .flatten()
                     .map(|s| s.version);
                 if let Err(e) = migration::save_deployed_schema(
                     &file_store,
-                    model_name,
+                    &db_table_name,
                     &model.content,
                     &inferred_columns,
                     existing_version,

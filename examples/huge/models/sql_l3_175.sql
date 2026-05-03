@@ -10,7 +10,7 @@ SELECT
     profit,
     MAX(created_at) AS val_1,
     SUM(amount) AS val_2
-FROM smelt.models.sql_l2_67
+FROM smelt.sql_l2_67
 GROUP BY profit
 HAVING COUNT(*) > 10
 

@@ -63,11 +63,7 @@ pub async fn run_seed(args: SeedArgs) -> Result<()> {
     let mut results = Vec::new();
 
     for s in &seeds {
-        let type_label = match s.seed_type {
-            seed::SeedType::Source => "source",
-            seed::SeedType::Target => "target",
-        };
-        info!("Seeding: {} ({})", s.qualified_name(), type_label);
+        info!("Seeding: {}", s.qualified_name());
 
         let result = seed::execute_seed(backend.as_ref(), s, args.show_results)
             .await

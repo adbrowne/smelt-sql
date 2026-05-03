@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT channel, rating, os_name
-    FROM smelt.models.subscriptions
+    FROM smelt.subscriptions
     WHERE score >= 50
 ),
 aggregated AS (

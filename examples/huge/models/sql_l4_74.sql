@@ -10,8 +10,8 @@ SELECT
     campaign_id,
     event_time,
     category
-FROM smelt.models.sql_l3_193
+FROM smelt.sql_l3_193
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l3_193 WHERE platform = 'web'
+    SELECT user_id FROM smelt.sql_l3_193 WHERE platform = 'web'
 )
 

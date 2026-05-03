@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT updated_at, user_id, is_active
-    FROM smelt.models.sql_l2_28
+    FROM smelt.sql_l2_28
     WHERE quantity > 0
 ),
 aggregated AS (

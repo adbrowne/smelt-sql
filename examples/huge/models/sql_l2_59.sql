@@ -10,6 +10,6 @@ SELECT
     a.session_id,
     a.page_path,
     b.updated_at
-FROM smelt.models.sql_l1_158 a
-INNER JOIN smelt.models.sql_l1_158 b ON a.user_id = b.user_id
+FROM smelt.sql_l1_158 a
+INNER JOIN smelt.sql_l1_158 b ON a.user_id = b.user_id
 

@@ -11,6 +11,6 @@ SELECT
     category,
     event_time,
     profit
-FROM smelt.models.categories
+FROM smelt.categories
 WHERE amount > 0
 

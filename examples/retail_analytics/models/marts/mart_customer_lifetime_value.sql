@@ -15,7 +15,7 @@ WITH order_history AS (
             PARTITION BY customer_id
             ORDER BY order_date
         ) AS order_sequence
-    FROM smelt.models.intermediate.int_order_enriched
+    FROM smelt.intermediate.int_order_enriched
     WHERE order_status = 'fulfilled'
 ),
 

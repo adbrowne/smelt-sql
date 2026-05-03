@@ -10,6 +10,6 @@ SELECT
     a.campaign_id,
     a.ip_address,
     b.platform
-FROM smelt.models.sql_l2_220 a
-LEFT JOIN smelt.models.sql_l2_172 b ON a.user_id = b.user_id
+FROM smelt.sql_l2_220 a
+LEFT JOIN smelt.sql_l2_172 b ON a.user_id = b.user_id
 

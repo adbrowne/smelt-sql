@@ -10,8 +10,8 @@ SELECT
     event_type,
     quantity,
     country
-FROM smelt.models.sql_l2_121
+FROM smelt.sql_l2_121
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_219 WHERE event_type = 'purchase'
+    SELECT user_id FROM smelt.sql_l2_219 WHERE event_type = 'purchase'
 )
 

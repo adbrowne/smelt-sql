@@ -8,13 +8,13 @@ incremental:
 ---
 WITH base AS (
     SELECT segment, cost, country
-    FROM smelt.models.transactions
+    FROM smelt.transactions
     WHERE platform = 'web'
 )
 SELECT
     b.segment,
     COUNT(DISTINCT user_id) AS agg_val
 FROM base b
-INNER JOIN smelt.models.transactions j ON b.user_id = j.user_id
+INNER JOIN smelt.transactions j ON b.user_id = j.user_id
 GROUP BY b.segment
 

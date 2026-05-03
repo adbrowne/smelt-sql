@@ -25,6 +25,7 @@ fn model_file(name: &str, content: &str) -> ModelFile {
         metadata: None,
         kind: ModelKind::Sql,
         model_id: smelt_core::ModelId::from_path(format!("models/{}.sql", name).into()),
+        address_segments: vec![name.to_string()],
     }
 }
 

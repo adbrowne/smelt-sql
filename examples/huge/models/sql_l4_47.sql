@@ -11,6 +11,6 @@ SELECT
     cohort_date,
     created_at,
     channel
-FROM smelt.models.sql_l3_111
+FROM smelt.sql_l3_111
 WHERE country = 'US'
 

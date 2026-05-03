@@ -10,6 +10,6 @@ SELECT
     a.revenue,
     a.quantity,
     b.is_verified
-FROM smelt.models.refunds a
-LEFT JOIN smelt.models.refunds b ON a.user_id = b.user_id
+FROM smelt.refunds a
+LEFT JOIN smelt.refunds b ON a.user_id = b.user_id
 

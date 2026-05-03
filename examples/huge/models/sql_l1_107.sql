@@ -10,7 +10,7 @@ SELECT
     user_id,
     COUNT(*) AS val_1,
     AVG(price) AS val_2
-FROM smelt.models.logs
+FROM smelt.logs
 GROUP BY user_id
 HAVING COUNT(*) > 10
 

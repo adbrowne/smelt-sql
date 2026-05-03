@@ -11,6 +11,6 @@ SELECT
     referrer,
     created_at,
     event_time
-FROM smelt.models.sql_l3_4
+FROM smelt.sql_l3_4
 WHERE quantity > 0
 

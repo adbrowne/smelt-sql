@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT score, cost, duration_seconds
-    FROM smelt.models.reviews
+    FROM smelt.reviews
     WHERE score >= 50
 ),
 aggregated AS (

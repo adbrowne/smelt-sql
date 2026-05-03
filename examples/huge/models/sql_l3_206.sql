@@ -10,8 +10,8 @@ SELECT
     quantity,
     score,
     event_type
-FROM smelt.models.sql_l2_6
+FROM smelt.sql_l2_6
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_194 WHERE status = 'active'
+    SELECT user_id FROM smelt.sql_l2_194 WHERE status = 'active'
 )
 

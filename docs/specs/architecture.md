@@ -73,16 +73,18 @@ Every project-defined entity — model, function, seed, source, test — is addr
 - `smelt.<path>` — value reference (used in `FROM` position, as a `TableExpr`-typed argument, etc.)
 - `smelt.<path>(<args>)` — call (used for functions and parameterised models)
 
-The path is the workspace-relative directory joined with the entity's leaf name, segments separated by `.`. Examples (assuming the recommended layout):
+The path is the workspace-relative directory joined with the entity's leaf name, **with the matching `paths:` scan-root prefix stripped**, segments separated by `.`. Examples (assuming `paths: ["models"]` and the recommended layout):
 
-| Filesystem location                                       | Reference syntax                                  |
+| Filesystem location                                       | Reference syntax (scan-root stripped)             |
 |-----------------------------------------------------------|---------------------------------------------------|
-| `models/marts/customers.sql` (lone bare SELECT)           | `smelt.models.marts.customers`                    |
-| `models/marts/file.sql` containing `name: customers`      | `smelt.models.marts.customers`                    |
+| `models/marts/customers.sql` (lone bare SELECT)           | `smelt.marts.customers`                           |
+| `models/marts/file.sql` containing `name: customers`      | `smelt.marts.customers`                           |
 | `functions/patterns/x.sql` declaring `session_rollup`     | `smelt.functions.patterns.session_rollup(...)`    |
-| `seeds/raw/users.csv`                                     | `smelt.seeds.raw.users`                           |
-| `sources/raw/events.yml`                                  | `smelt.sources.raw.events`                        |
+| `seeds/raw/users.csv`                                     | `smelt.raw.users`                                 |
+| `sources/raw/events.yml`                                  | `smelt.raw.events`                                |
 | `tests/marts/customers.sql` declaring `customers_no_nulls` | `smelt.tests.marts.customers_no_nulls`           |
+
+Note: `functions/`, `sources/`, and `tests/` are discovered via their own dedicated scan paths and are **not** in the `paths:` list by default; their scan-root prefix is not stripped (they keep their full workspace-relative path as the address). Only directories listed in `paths:` have their prefix stripped.
 
 **Kind is determined by file format and content, not by syntactic prefix.** When the resolver reaches a path:
 
@@ -152,7 +154,7 @@ The model
 materialization: table
 ---
 SELECT revenue - cost AS margin
-FROM smelt.models.product_summary
+FROM smelt.product_summary
 ```
 
 is equivalent to the parameterised form
@@ -160,14 +162,14 @@ is equivalent to the parameterised form
 ```sql
 -- models/margins.sql
 smelt.define margins(
-    product_summary: TableExpr = smelt.models.product_summary
+    product_summary: TableExpr = smelt.product_summary
 ) -> TableExpr AS (
     SELECT revenue - cost AS margin
     FROM product_summary
 )
 ```
 
-(both are addressable as `smelt.models.margins`)
+(both are addressable as `smelt.margins` when `paths: ["models"]`)
 
 #### Two orthogonal axes
 

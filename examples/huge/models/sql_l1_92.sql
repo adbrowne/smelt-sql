@@ -10,6 +10,6 @@ SELECT
     a.is_verified,
     a.browser,
     b.discount
-FROM smelt.models.errors a
-LEFT JOIN smelt.models.errors b ON a.user_id = b.user_id
+FROM smelt.errors a
+LEFT JOIN smelt.errors b ON a.user_id = b.user_id
 

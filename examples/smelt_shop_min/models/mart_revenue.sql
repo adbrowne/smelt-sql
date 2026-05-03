@@ -13,5 +13,5 @@ SELECT
     SUM(gross_amount) AS net_revenue,
     COUNT(DISTINCT order_id) AS unique_orders,
     SUM(gross_amount * qty) AS gross_value
-FROM smelt.models.stg_orders
+FROM smelt.stg_orders
 

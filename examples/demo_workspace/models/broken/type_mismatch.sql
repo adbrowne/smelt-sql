@@ -2,6 +2,6 @@
 SELECT
     user_id,
     email
-FROM smelt.models.staging.stg_users
+FROM smelt.staging.stg_users
 WHERE user_id = 'abc'
 

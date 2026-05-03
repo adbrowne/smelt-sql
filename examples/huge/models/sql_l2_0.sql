@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT os_name, device_type, campaign_id
-    FROM smelt.models.sql_l1_180
+    FROM smelt.sql_l1_180
     WHERE is_active = true
 ),
 aggregated AS (

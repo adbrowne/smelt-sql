@@ -10,8 +10,8 @@ SELECT
     profit,
     country,
     tier
-FROM smelt.models.sql_l1_209
+FROM smelt.sql_l1_209
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_114 WHERE score >= 50
+    SELECT user_id FROM smelt.sql_l1_114 WHERE score >= 50
 )
 

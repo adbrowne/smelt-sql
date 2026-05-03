@@ -10,5 +10,5 @@ SELECT
     campaign_id,
     duration_seconds,
     LAG(amount, 1) OVER (PARTITION BY campaign_id ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l2_139
+FROM smelt.sql_l2_139
 

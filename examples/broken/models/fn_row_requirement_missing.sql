@@ -14,6 +14,6 @@ smelt.define add_margin_req(source: TableExpr<{revenue: Numeric, cost: Numeric}>
 )
 
 SELECT *
-FROM smelt.models.add_margin_req(
-  smelt.models.fn_row_requirement_missing_other
+FROM smelt.add_margin_req(
+  smelt.fn_row_requirement_missing_other
 ) AS m

@@ -11,6 +11,6 @@ SELECT
     score,
     tier,
     quantity
-FROM smelt.models.clicks
+FROM smelt.clicks
 WHERE platform = 'web'
 

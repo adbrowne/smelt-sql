@@ -11,6 +11,6 @@ SELECT
     category,
     rating,
     event_type
-FROM smelt.models.subscriptions
+FROM smelt.subscriptions
 WHERE category IS NOT NULL
 

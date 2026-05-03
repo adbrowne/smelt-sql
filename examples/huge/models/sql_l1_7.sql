@@ -11,6 +11,6 @@ SELECT
     browser,
     region,
     status
-FROM smelt.models.events
+FROM smelt.events
 WHERE event_type = 'purchase'
 

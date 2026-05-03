@@ -8,7 +8,7 @@ SELECT
     user_id,
     amount,
     created_at AS order_date
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 WHERE status = 'completed'
 
 --- name: test_cleaned_orders ---

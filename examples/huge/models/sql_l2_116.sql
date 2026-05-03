@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT profit, event_type, email_domain
-    FROM smelt.models.sql_l1_125
+    FROM smelt.sql_l1_125
     WHERE score >= 50
 ),
 aggregated AS (

@@ -10,6 +10,6 @@ SELECT
     plan_type,
     SUM(revenue) AS agg_0,
     AVG(amount) AS agg_1
-FROM smelt.models.sql_l1_233
+FROM smelt.sql_l1_233
 GROUP BY plan_type
 

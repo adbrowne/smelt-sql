@@ -17,6 +17,6 @@ SELECT
              / CAST(COUNT(CASE WHEN event_type = 'view' THEN 1 END) AS FLOAT)
         ELSE 0.0
     END AS view_to_purchase_rate
-FROM smelt.models.staging.stg_web_events
+FROM smelt.staging.stg_web_events
 GROUP BY event_date, referrer_source, device_type
 

@@ -12,6 +12,6 @@ SELECT
     AVG(duration_seconds) AS agg_1,
     COUNT(DISTINCT user_id) AS agg_2,
     MIN(created_at) AS agg_3
-FROM smelt.models.sql_l3_117
+FROM smelt.sql_l3_117
 GROUP BY session_id
 

@@ -10,6 +10,6 @@ SELECT
     a.region,
     a.campaign_id,
     b.event_time
-FROM smelt.models.clicks a
-INNER JOIN smelt.models.clicks b ON a.user_id = b.user_id
+FROM smelt.clicks a
+INNER JOIN smelt.clicks b ON a.user_id = b.user_id
 

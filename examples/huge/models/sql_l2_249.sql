@@ -11,6 +11,6 @@ SELECT
     SUM(quantity) AS agg_0,
     SUM(revenue) AS agg_1,
     AVG(amount) AS agg_2
-FROM smelt.models.sql_l1_87
+FROM smelt.sql_l1_87
 GROUP BY created_at
 

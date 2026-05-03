@@ -1,28 +1,35 @@
 use anyhow::{Context, Result};
 use smelt_backend::Backend;
+use smelt_core::resolver::default_db_name;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use walkdir::WalkDir;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SeedType {
-    /// `seeds/<source_name>/<table>.csv` → loaded into source schema
-    Source,
-    /// `seeds/<table>.csv` → loaded into target schema
-    Target,
-}
-
+/// A discovered seed CSV file.
 #[derive(Debug, Clone)]
 pub struct SeedFile {
+    /// Leaf name (filename stem without extension).
     pub name: String,
+    /// Absolute path to the CSV file on disk.
     pub path: PathBuf,
+    /// Address segments from the scan-root to the leaf.
+    /// For `seeds/data/users.csv` under `paths: ["seeds"]`,
+    /// this is `["data", "users"]`.
+    pub address_segments: Vec<String>,
+    /// Target schema (from `smelt.yml`).
     pub schema: String,
-    pub seed_type: SeedType,
 }
 
 impl SeedFile {
-    /// Fully qualified table name (schema.table)
+    /// Fully qualified table name (`schema.table`), using the default
+    /// DB-name mapping: path segments joined with `_`.
     pub fn qualified_name(&self) -> String {
-        format!("{}.{}", self.schema, self.name)
+        default_db_name(&self.address_segments, &self.schema)
+    }
+
+    /// Table name portion only (address segments joined with `_`).
+    pub fn table_name(&self) -> String {
+        self.address_segments.join("_")
     }
 }
 
@@ -35,10 +42,10 @@ pub struct SeedResult {
 
 /// Discover seed CSV files under the configured paths.
 ///
-/// Directory structure determines seed type (Phase 1 — kind-by-content split
-/// is Phase 2):
-/// - `<paths>/<table>.csv` → Target seed (loaded into target_schema)
-/// - `<paths>/<source>/<table>.csv` → Source seed (loaded into <source> schema)
+/// Per Phase 2: seeds are CSV files anywhere in the configured paths.
+/// The address is the path from the scan-root to the leaf (no schema
+/// prefix from directory name). The DB location is
+/// `<target_schema>.<address_segments.join("_")>`.
 pub fn discover_seeds(
     project_root: &Path,
     paths: &[String],
@@ -52,68 +59,48 @@ pub fn discover_seeds(
             continue;
         }
 
-        discover_seeds_in_dir(&seed_dir, target_schema, &mut seeds)
-            .with_context(|| format!("Failed to scan seed directory: {}", seed_dir.display()))?;
+        for entry in WalkDir::new(&seed_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path().to_path_buf();
+            if path.extension().is_some_and(|ext| ext == "csv") {
+                let name = path
+                    .file_stem()
+                    .expect("CSV file always has a stem")
+                    .to_string_lossy()
+                    .into_owned();
+
+                // Compute address_segments: path from scan-root to leaf.
+                let rel = path
+                    .strip_prefix(&seed_dir)
+                    .expect("path is under seed_dir");
+                let parent = rel.parent().unwrap_or(std::path::Path::new(""));
+                let mut address_segments: Vec<String> = parent
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                address_segments.push(name.clone());
+
+                seeds.push(SeedFile {
+                    name,
+                    path,
+                    address_segments,
+                    schema: target_schema.to_string(),
+                });
+            }
+        }
     }
 
     // Sort for deterministic ordering
     seeds.sort_by_key(|a| a.qualified_name());
 
     Ok(seeds)
-}
-
-fn discover_seeds_in_dir(
-    seed_dir: &Path,
-    target_schema: &str,
-    seeds: &mut Vec<SeedFile>,
-) -> Result<()> {
-    for entry in std::fs::read_dir(seed_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "csv") {
-            // Top-level CSV → target seed
-            let name = path
-                .file_stem()
-                .expect("CSV file always has a stem")
-                .to_string_lossy()
-                .into_owned();
-            seeds.push(SeedFile {
-                name,
-                path,
-                schema: target_schema.to_string(),
-                seed_type: SeedType::Target,
-            });
-        } else if path.is_dir() {
-            // Subdirectory → source schema name
-            let schema = path
-                .file_name()
-                .expect("directory entry always has a file name")
-                .to_string_lossy()
-                .into_owned();
-
-            for sub_entry in std::fs::read_dir(&path)? {
-                let sub_entry = sub_entry?;
-                let sub_path = sub_entry.path();
-
-                if sub_path.is_file() && sub_path.extension().is_some_and(|ext| ext == "csv") {
-                    let name = sub_path
-                        .file_stem()
-                        .expect("CSV file always has a stem")
-                        .to_string_lossy()
-                        .into_owned();
-                    seeds.push(SeedFile {
-                        name,
-                        path: sub_path,
-                        schema: schema.clone(),
-                        seed_type: SeedType::Source,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Execute a single seed file: create schema, drop existing table, load CSV.
@@ -124,6 +111,7 @@ pub async fn execute_seed(
 ) -> Result<SeedResult> {
     let start = Instant::now();
     let qualified = seed.qualified_name();
+    let table = seed.table_name();
 
     // 1. Ensure schema exists
     let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {}", seed.schema);
@@ -138,11 +126,11 @@ pub async fn execute_seed(
     //    DuckDB rejects `DROP TABLE IF EXISTS` against a View, and vice
     //    versa).
     backend
-        .drop_view_if_exists(&seed.schema, &seed.name)
+        .drop_view_if_exists(&seed.schema, &table)
         .await
         .with_context(|| format!("Failed to drop view '{}'", qualified))?;
     backend
-        .drop_table_if_exists(&seed.schema, &seed.name)
+        .drop_table_if_exists(&seed.schema, &table)
         .await
         .with_context(|| format!("Failed to drop table '{}'", qualified))?;
 
@@ -207,14 +195,19 @@ pub async fn execute_seed(
 }
 
 /// Filter seeds by selector patterns.
-/// Supports matching by table name or qualified name (schema.table).
+/// Supports matching by leaf name, address dot-path, or qualified DB name.
 pub fn filter_seeds(seeds: Vec<SeedFile>, selectors: &[String]) -> Vec<SeedFile> {
     seeds
         .into_iter()
         .filter(|seed| {
-            selectors
-                .iter()
-                .any(|sel| seed.name == *sel || seed.qualified_name() == *sel)
+            selectors.iter().any(|sel| {
+                // Match by leaf name
+                seed.name == *sel
+                    // Match by address path (e.g. "data.users")
+                    || seed.address_segments.join(".") == *sel
+                    // Match by qualified DB name (e.g. "main.data_users")
+                    || seed.qualified_name() == *sel
+            })
         })
         .collect()
 }
@@ -226,7 +219,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_discover_target_seeds() {
+    fn test_discover_seeds_top_level() {
         let tmp = TempDir::new().unwrap();
         let seeds_dir = tmp.path().join("seeds");
         fs::create_dir_all(&seeds_dir).unwrap();
@@ -235,12 +228,13 @@ mod tests {
         let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "my_table");
+        assert_eq!(result[0].address_segments, vec!["my_table"]);
         assert_eq!(result[0].schema, "main");
-        assert_eq!(result[0].seed_type, SeedType::Target);
+        assert_eq!(result[0].qualified_name(), "main.my_table");
     }
 
     #[test]
-    fn test_discover_source_seeds() {
+    fn test_discover_seeds_nested() {
         let tmp = TempDir::new().unwrap();
         let raw_dir = tmp.path().join("seeds").join("raw");
         fs::create_dir_all(&raw_dir).unwrap();
@@ -249,8 +243,10 @@ mod tests {
         let result = discover_seeds(tmp.path(), &["seeds".to_string()], "main").unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "users");
-        assert_eq!(result[0].schema, "raw");
-        assert_eq!(result[0].seed_type, SeedType::Source);
+        assert_eq!(result[0].address_segments, vec!["raw", "users"]);
+        assert_eq!(result[0].schema, "main");
+        // DB name: main.raw_users (segments joined with _)
+        assert_eq!(result[0].qualified_name(), "main.raw_users");
     }
 
     #[test]
@@ -266,7 +262,7 @@ mod tests {
         assert_eq!(result.len(), 2);
         // Sorted by qualified name
         assert_eq!(result[0].qualified_name(), "main.lookup");
-        assert_eq!(result[1].qualified_name(), "raw.events");
+        assert_eq!(result[1].qualified_name(), "main.raw_events");
     }
 
     #[test]
@@ -282,14 +278,14 @@ mod tests {
             SeedFile {
                 name: "users".to_string(),
                 path: PathBuf::from("seeds/raw/users.csv"),
-                schema: "raw".to_string(),
-                seed_type: SeedType::Source,
+                address_segments: vec!["raw".to_string(), "users".to_string()],
+                schema: "main".to_string(),
             },
             SeedFile {
                 name: "events".to_string(),
                 path: PathBuf::from("seeds/raw/events.csv"),
-                schema: "raw".to_string(),
-                seed_type: SeedType::Source,
+                address_segments: vec!["raw".to_string(), "events".to_string()],
+                schema: "main".to_string(),
             },
         ];
 
@@ -299,24 +295,46 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_seeds_by_qualified_name() {
+    fn test_filter_seeds_by_address_path() {
         let seeds = vec![
             SeedFile {
                 name: "users".to_string(),
                 path: PathBuf::from("seeds/raw/users.csv"),
-                schema: "raw".to_string(),
-                seed_type: SeedType::Source,
+                address_segments: vec!["raw".to_string(), "users".to_string()],
+                schema: "main".to_string(),
             },
             SeedFile {
                 name: "users".to_string(),
-                path: PathBuf::from("seeds/users.csv"),
+                path: PathBuf::from("seeds/staging/users.csv"),
+                address_segments: vec!["staging".to_string(), "users".to_string()],
                 schema: "main".to_string(),
-                seed_type: SeedType::Target,
             },
         ];
 
         let filtered = filter_seeds(seeds, &["raw.users".to_string()]);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].schema, "raw");
+        assert_eq!(filtered[0].address_segments, vec!["raw", "users"]);
+    }
+
+    #[test]
+    fn test_filter_seeds_by_qualified_name() {
+        let seeds = vec![
+            SeedFile {
+                name: "users".to_string(),
+                path: PathBuf::from("seeds/raw/users.csv"),
+                address_segments: vec!["raw".to_string(), "users".to_string()],
+                schema: "main".to_string(),
+            },
+            SeedFile {
+                name: "users".to_string(),
+                path: PathBuf::from("seeds/users.csv"),
+                address_segments: vec!["users".to_string()],
+                schema: "main".to_string(),
+            },
+        ];
+
+        let filtered = filter_seeds(seeds, &["main.raw_users".to_string()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].address_segments, vec!["raw", "users"]);
     }
 }

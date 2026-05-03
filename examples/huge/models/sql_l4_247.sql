@@ -10,8 +10,8 @@ SELECT
     country,
     category,
     browser
-FROM smelt.models.sql_l3_200
+FROM smelt.sql_l3_200
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l3_23 WHERE is_active = true
+    SELECT user_id FROM smelt.sql_l3_23 WHERE is_active = true
 )
 

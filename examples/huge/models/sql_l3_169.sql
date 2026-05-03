@@ -10,5 +10,5 @@ SELECT
     email_domain,
     price,
     RANK() OVER (PARTITION BY email_domain ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l2_167
+FROM smelt.sql_l2_167
 

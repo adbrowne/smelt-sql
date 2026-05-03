@@ -8,6 +8,7 @@ pub mod project;
 pub mod python_models;
 pub mod python_utils;
 pub mod refs;
+pub mod resolver;
 pub mod seeds;
 pub mod selector;
 pub mod sources;

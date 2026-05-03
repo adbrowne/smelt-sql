@@ -10,8 +10,8 @@ SELECT
     score,
     email_domain,
     discount
-FROM smelt.models.sql_l1_67
+FROM smelt.sql_l1_67
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l1_56 WHERE status = 'active'
+    SELECT user_id FROM smelt.sql_l1_56 WHERE status = 'active'
 )
 

@@ -10,5 +10,5 @@ SELECT
     user_id,
     order_id,
     RANK() OVER (PARTITION BY user_id ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l3_94
+FROM smelt.sql_l3_94
 

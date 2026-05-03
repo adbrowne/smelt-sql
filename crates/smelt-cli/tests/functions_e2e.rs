@@ -112,7 +112,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT order_id, smelt.functions.safe_divide(revenue, cost) AS margin
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 ORDER BY order_id
 ";
 
@@ -212,7 +212,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT smelt.as_struct(o EXCEPT customer_id) AS order_record
-FROM smelt.seeds.raw_orders o
+FROM smelt.raw_orders o
 ";
 
     write_workspace(
@@ -334,7 +334,7 @@ default_materialization: view
 materialization: table
 ---
 SELECT order_id, smelt.functions.safe_divide(revenue, cost) AS margin
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 ORDER BY order_id
 ";
 

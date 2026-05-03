@@ -11,6 +11,6 @@ SELECT
     email_domain,
     event_type,
     price
-FROM smelt.models.sql_l1_201
+FROM smelt.sql_l1_201
 WHERE status = 'active'
 

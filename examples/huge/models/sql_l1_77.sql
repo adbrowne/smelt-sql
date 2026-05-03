@@ -13,6 +13,6 @@ SELECT
     SUM(revenue) AS agg_2,
     SUM(amount) AS agg_3,
     COUNT(DISTINCT user_id) AS agg_4
-FROM smelt.models.reviews
+FROM smelt.reviews
 GROUP BY order_id
 

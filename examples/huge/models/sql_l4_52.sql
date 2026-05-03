@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT updated_at, duration_seconds, platform
-    FROM smelt.models.sql_l3_161
+    FROM smelt.sql_l3_161
     WHERE platform = 'web'
 ),
 aggregated AS (

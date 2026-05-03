@@ -12,6 +12,6 @@ SELECT
     AVG(amount) AS agg_1,
     MIN(created_at) AS agg_2,
     COUNT(*) AS agg_3
-FROM smelt.models.users
+FROM smelt.users
 GROUP BY category
 

@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT is_active, discount, duration_seconds
-    FROM smelt.models.sql_l1_28
+    FROM smelt.sql_l1_28
     WHERE country = 'US'
 ),
 aggregated AS (

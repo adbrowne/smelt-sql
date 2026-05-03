@@ -11,6 +11,6 @@ SELECT
     duration_seconds,
     profit,
     updated_at
-FROM smelt.models.sql_l1_178
+FROM smelt.sql_l1_178
 WHERE category IS NOT NULL
 

@@ -11,6 +11,6 @@ SELECT
     event_date,
     page_path,
     transaction_id
-FROM smelt.models.sql_l2_238
+FROM smelt.sql_l2_238
 WHERE platform = 'web'
 

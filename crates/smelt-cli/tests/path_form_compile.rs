@@ -67,13 +67,13 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
 ///
 /// workspace:
 ///   models/users.sql       → SELECT 1 AS id
-///   models/downstream.sql  → SELECT * FROM smelt.models.users
+///   models/downstream.sql  → SELECT * FROM smelt.users
 ///
 /// After compilation, `downstream` should contain `main.users` (schema-qualified).
 #[test]
 fn compiles_path_form_workspace_to_duckdb() {
     let users_sql = "SELECT 1 AS id\n";
-    let downstream_sql = "SELECT * FROM smelt.models.users\n";
+    let downstream_sql = "SELECT * FROM smelt.users\n";
 
     let tmp = stage_workspace(&[
         ("models/users.sql", users_sql),
@@ -113,8 +113,8 @@ fn compiles_path_form_workspace_to_duckdb() {
         compiled.sql
     );
     assert!(
-        !compiled.sql.contains("smelt.models.users"),
-        "smelt.models.users should be rewritten, got: {}",
+        !compiled.sql.contains("smelt.users"),
+        "smelt.users should be rewritten, got: {}",
         compiled.sql
     );
     let _ = db; // keep db alive
@@ -122,17 +122,17 @@ fn compiles_path_form_workspace_to_duckdb() {
 
 // ─── Test 8: compiles_path_form_seed_ref_to_duckdb ───────────────────────────
 
-/// CLI compile resolves `smelt.seeds.raw.users` to a schema-qualified seed
+/// CLI compile resolves `smelt.raw.users` to a schema-qualified seed
 /// table name (`main.raw_users`).
 ///
 /// workspace:
-///   models/uses_seed.sql  → SELECT * FROM smelt.seeds.raw.users
+///   models/uses_seed.sql  → SELECT * FROM smelt.raw.users
 ///
-/// `make_path_ref_resolver` joins the non-namespace segments with '_' and
-/// qualifies with the schema, so ["seeds", "raw", "users"] → `main.raw_users`.
+/// `make_path_ref_resolver` joins the segments with '_' and
+/// qualifies with the schema, so ["raw", "users"] → `main.raw_users`.
 #[test]
 fn compiles_path_form_seed_ref_to_duckdb() {
-    let seed_model_sql = "SELECT * FROM smelt.seeds.raw.users\n";
+    let seed_model_sql = "SELECT * FROM smelt.raw.users\n";
 
     let tmp = stage_workspace(&[("models/uses_seed.sql", seed_model_sql)]);
     let project_dir = tmp.path().to_path_buf();
@@ -169,8 +169,8 @@ fn compiles_path_form_seed_ref_to_duckdb() {
         compiled.sql
     );
     assert!(
-        !compiled.sql.contains("smelt.seeds.raw.users"),
-        "smelt.seeds.raw.users should be rewritten, got: {}",
+        !compiled.sql.contains("smelt.raw.users"),
+        "smelt.raw.users should be rewritten, got: {}",
         compiled.sql
     );
     let _ = db; // keep db alive

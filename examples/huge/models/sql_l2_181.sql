@@ -10,5 +10,5 @@ SELECT
     is_verified,
     channel,
     ROW_NUMBER() OVER (PARTITION BY is_verified ORDER BY created_at) AS win_val
-FROM smelt.models.sql_l1_36
+FROM smelt.sql_l1_36
 

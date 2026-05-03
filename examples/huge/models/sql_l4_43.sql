@@ -11,6 +11,6 @@ SELECT
     price,
     duration_seconds,
     product_id
-FROM smelt.models.sql_l3_243
+FROM smelt.sql_l3_243
 WHERE event_type = 'purchase'
 

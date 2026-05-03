@@ -10,6 +10,6 @@ SELECT
     a.revenue,
     a.category,
     b.is_active
-FROM smelt.models.sql_l2_7 a
-INNER JOIN smelt.models.sql_l2_245 b ON a.user_id = b.user_id
+FROM smelt.sql_l2_7 a
+INNER JOIN smelt.sql_l2_245 b ON a.user_id = b.user_id
 

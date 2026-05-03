@@ -173,6 +173,7 @@ fn apply_ref_redirects(model_file: &ModelFile, redirects: &HashMap<String, Strin
         parse_errors: model_file.parse_errors.clone(),
         metadata: model_file.metadata.clone(),
         kind: model_file.kind.clone(),
+        address_segments: model_file.address_segments.clone(),
     }
 }
 
@@ -413,6 +414,7 @@ impl<'a> PhysicalGraphBuilder<'a> {
                 parse_errors: Vec::new(),
                 metadata: None,
                 kind: ModelKind::Sql,
+                address_segments: vec![name.clone()],
             };
 
             // Insert synthetic node into execution order respecting dependencies.
@@ -630,6 +632,7 @@ mod tests {
             parse_errors: Vec::new(),
             metadata: None,
             kind: ModelKind::Sql,
+            address_segments: vec![name.to_string()],
         }
     }
 

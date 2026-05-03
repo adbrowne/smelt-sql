@@ -11,6 +11,6 @@ SELECT
     product_id,
     plan_type,
     status
-FROM smelt.models.orders
+FROM smelt.orders
 WHERE created_at >= '2024-01-01'
 

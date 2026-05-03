@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT is_verified, created_at, is_active
-    FROM smelt.models.sql_l1_74
+    FROM smelt.sql_l1_74
     WHERE platform = 'web'
 ),
 aggregated AS (

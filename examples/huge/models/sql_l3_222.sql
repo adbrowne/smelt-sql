@@ -10,6 +10,6 @@ SELECT
     a.os_name,
     a.campaign_id,
     b.rating
-FROM smelt.models.sql_l2_118 a
-LEFT JOIN smelt.models.sql_l2_127 b ON a.user_id = b.user_id
+FROM smelt.sql_l2_118 a
+LEFT JOIN smelt.sql_l2_127 b ON a.user_id = b.user_id
 

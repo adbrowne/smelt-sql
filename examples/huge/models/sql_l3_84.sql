@@ -10,8 +10,8 @@ SELECT
     score,
     country,
     campaign_id
-FROM smelt.models.sql_l2_74
+FROM smelt.sql_l2_74
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_65 WHERE status = 'active'
+    SELECT user_id FROM smelt.sql_l2_65 WHERE status = 'active'
 )
 

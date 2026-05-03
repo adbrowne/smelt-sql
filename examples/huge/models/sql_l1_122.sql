@@ -10,8 +10,8 @@ SELECT
     ip_address,
     category,
     session_id
-FROM smelt.models.transactions
+FROM smelt.transactions
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.transactions WHERE score >= 50
+    SELECT user_id FROM smelt.transactions WHERE score >= 50
 )
 

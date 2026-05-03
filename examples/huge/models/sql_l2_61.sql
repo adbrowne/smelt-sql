@@ -8,7 +8,7 @@ incremental:
 ---
 WITH filtered AS (
     SELECT plan_type, channel, revenue
-    FROM smelt.models.sql_l1_89
+    FROM smelt.sql_l1_89
     WHERE is_active = true
 ),
 aggregated AS (

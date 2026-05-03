@@ -11,6 +11,6 @@ SELECT
     email_domain,
     event_date,
     channel
-FROM smelt.models.categories
+FROM smelt.categories
 WHERE category IS NOT NULL
 

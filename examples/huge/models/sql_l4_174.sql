@@ -11,6 +11,6 @@ SELECT
     amount,
     session_id,
     product_id
-FROM smelt.models.sql_l3_187
+FROM smelt.sql_l3_187
 WHERE status = 'active'
 

@@ -6,7 +6,7 @@ WITH daily_metrics AS (
         MONTH(order_date) AS month,
         COUNT(DISTINCT order_id) AS order_count,
         SUM(net_revenue) AS daily_revenue
-    FROM smelt.models.intermediate.int_order_enriched
+    FROM smelt.intermediate.int_order_enriched
     GROUP BY order_date
 ),
 

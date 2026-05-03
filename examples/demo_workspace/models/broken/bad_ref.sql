@@ -2,5 +2,5 @@
 SELECT
     user_id,
     email
-FROM smelt.models.stg_uusers
+FROM smelt.stg_uusers
 

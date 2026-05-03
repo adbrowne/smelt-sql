@@ -6,9 +6,9 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT updated_at, transaction_id, revenue, 'source_0' AS source_tag FROM smelt.models.sql_l3_117
+SELECT updated_at, transaction_id, revenue, 'source_0' AS source_tag FROM smelt.sql_l3_117
 UNION ALL
-SELECT updated_at, transaction_id, revenue, 'source_1' AS source_tag FROM smelt.models.sql_l3_158
+SELECT updated_at, transaction_id, revenue, 'source_1' AS source_tag FROM smelt.sql_l3_158
 UNION ALL
-SELECT updated_at, transaction_id, revenue, 'source_2' AS source_tag FROM smelt.models.sql_l3_208
+SELECT updated_at, transaction_id, revenue, 'source_2' AS source_tag FROM smelt.sql_l3_208
 

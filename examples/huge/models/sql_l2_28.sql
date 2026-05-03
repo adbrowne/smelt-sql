@@ -11,6 +11,6 @@ SELECT
     created_at,
     cost,
     event_date
-FROM smelt.models.sql_l1_109
+FROM smelt.sql_l1_109
 WHERE score >= 50
 

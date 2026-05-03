@@ -10,8 +10,8 @@ SELECT
     session_id,
     cohort_date,
     referrer
-FROM smelt.models.shipments
+FROM smelt.shipments
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.shipments WHERE status = 'active'
+    SELECT user_id FROM smelt.shipments WHERE status = 'active'
 )
 

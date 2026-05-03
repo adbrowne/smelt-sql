@@ -10,8 +10,8 @@ SELECT
     campaign_id,
     price,
     channel
-FROM smelt.models.sql_l2_0
+FROM smelt.sql_l2_0
 WHERE user_id IN (
-    SELECT user_id FROM smelt.models.sql_l2_83 WHERE quantity > 0
+    SELECT user_id FROM smelt.sql_l2_83 WHERE quantity > 0
 )
 
