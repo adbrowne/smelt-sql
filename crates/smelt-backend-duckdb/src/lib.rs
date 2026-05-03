@@ -2,11 +2,37 @@
 
 use anyhow::Context;
 use arrow::array::RecordBatch;
+use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
 use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionSpec, SqlDialect};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// Map an Arrow `DataType` to a DuckDB DDL type string.
+///
+/// Covers the seed type set from `seeds.md §"Type inference"`:
+/// BOOLEAN, INTEGER, BIGINT, DECIMAL(p, s), DOUBLE, DATE, TIMESTAMP (no TZ), VARCHAR.
+fn arrow_type_to_duckdb_ddl(dt: &DataType) -> Result<String, String> {
+    match dt {
+        DataType::Boolean => Ok("BOOLEAN".to_string()),
+        DataType::Int32 => Ok("INTEGER".to_string()),
+        DataType::Int64 => Ok("BIGINT".to_string()),
+        DataType::Decimal128(p, s) if *p <= 18 && *s <= 4 => Ok(format!("DECIMAL({}, {})", p, s)),
+        DataType::Decimal128(p, s) => Err(format!(
+            "DECIMAL({}, {}) exceeds supported bounds (p≤18, s≤4); use DOUBLE instead",
+            p, s
+        )),
+        DataType::Float64 => Ok("DOUBLE".to_string()),
+        DataType::Date32 => Ok("DATE".to_string()),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => Ok("TIMESTAMP".to_string()),
+        DataType::Utf8 => Ok("VARCHAR".to_string()),
+        other => Err(format!(
+            "unsupported Arrow type for load_table: {:?}",
+            other
+        )),
+    }
+}
 
 /// DuckDB backend for smelt.
 ///
@@ -275,6 +301,118 @@ impl Backend for DuckDbBackend {
             let conn = connection.lock().expect("DuckDB connection mutex poisoned");
             conn.execute(&sql, [])
                 .map_err(|e| BackendError::execution_failed("schema", e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
+
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        let table_name = format!("{}.{}", schema, name);
+        let schema_str = schema.to_string();
+        let name_str = name.to_string();
+        let connection = Arc::clone(&self.connection);
+
+        // Pre-validate nullability against the authoritative `arrow_schema`.
+        // The batch may have been constructed with looser (nullable: true) field
+        // declarations; we honour the nullability declared in `arrow_schema`.
+        for batch in &batches {
+            for (col_idx, field) in arrow_schema.fields().iter().enumerate() {
+                if !field.is_nullable() {
+                    let array = batch.column(col_idx);
+                    if array.null_count() > 0 {
+                        // Find the first null row for the error message.
+                        let row = (0..array.len()).find(|&i| array.is_null(i)).unwrap_or(0);
+                        return Err(BackendError::null_in_non_nullable_column(
+                            schema,
+                            name,
+                            field.name().as_str(),
+                            row,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Build the CREATE TABLE DDL from the Arrow schema.
+        let ddl = {
+            let mut cols = Vec::with_capacity(arrow_schema.fields().len());
+            for field in arrow_schema.fields() {
+                let duckdb_type = arrow_type_to_duckdb_ddl(field.data_type())
+                    .map_err(|msg| BackendError::execution_failed(table_name.clone(), msg))?;
+                let nullability = if field.is_nullable() {
+                    "NULL"
+                } else {
+                    "NOT NULL"
+                };
+                cols.push(format!("{} {} {}", field.name(), duckdb_type, nullability));
+            }
+            format!(
+                "CREATE TABLE {}.{} ({})",
+                schema_str,
+                name_str,
+                cols.join(", ")
+            )
+        };
+
+        tokio::task::spawn_blocking(move || {
+            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
+
+            // Drop any existing table or view with the same name.
+            let probe_sql = "SELECT table_type FROM information_schema.tables \
+                             WHERE table_schema = ? AND table_name = ? LIMIT 1";
+            let kind: Option<String> =
+                match conn.query_row(probe_sql, [&schema_str, &name_str], |row| row.get(0)) {
+                    Ok(k) => Some(k),
+                    Err(duckdb::Error::QueryReturnedNoRows) => None,
+                    Err(e) => {
+                        return Err(BackendError::execution_failed(
+                            format!("{}.{}", schema_str, name_str),
+                            e.to_string(),
+                        ))
+                    }
+                };
+            match kind.as_deref() {
+                Some("BASE TABLE") => {
+                    conn.execute(&format!("DROP TABLE {}.{}", schema_str, name_str), [])
+                        .map_err(|e| {
+                            BackendError::execution_failed(table_name.clone(), e.to_string())
+                        })?;
+                }
+                Some("VIEW") => {
+                    conn.execute(&format!("DROP VIEW {}.{}", schema_str, name_str), [])
+                        .map_err(|e| {
+                            BackendError::execution_failed(table_name.clone(), e.to_string())
+                        })?;
+                }
+                _ => {}
+            }
+
+            // Create the table.
+            conn.execute(&ddl, [])
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+
+            // Append each batch via the Arrow appender.
+            let mut appender = conn
+                .appender_to_db(&name_str, &schema_str)
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+
+            for batch in batches {
+                appender.append_record_batch(batch).map_err(|e| {
+                    BackendError::execution_failed(table_name.clone(), e.to_string())
+                })?;
+            }
+
+            appender
+                .flush()
+                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+
             Ok(())
         })
         .await

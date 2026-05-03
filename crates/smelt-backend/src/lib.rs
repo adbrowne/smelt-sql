@@ -14,6 +14,7 @@ pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use types::{ExecutionResult, Materialization, MaterializationStrategy, PartitionSpec};
 
 use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 
 /// Abstract interface for smelt execution backends.
@@ -68,6 +69,29 @@ pub trait Backend: Send + Sync {
 
     /// Get the capabilities of this backend.
     fn capabilities(&self) -> BackendCapabilities;
+
+    /// Load Arrow record batches into a new table at `schema.name`.
+    ///
+    /// Drops any existing table or view with the same name first (like seed loading does).
+    /// Returns an error if a non-nullable column (Arrow `Field::nullable == false`) contains
+    /// NULL values.
+    ///
+    /// Supported Arrow types (matching the seed type set from `seeds.md §"Type inference"`):
+    /// - `DataType::Boolean` → `BOOLEAN`
+    /// - `DataType::Int32` → `INTEGER`
+    /// - `DataType::Int64` → `BIGINT`
+    /// - `DataType::Decimal128(p, s)` → `DECIMAL(p, s)` with p ≤ 18 and s ≤ 4
+    /// - `DataType::Float64` → `DOUBLE`
+    /// - `DataType::Date32` → `DATE`
+    /// - `DataType::Timestamp(TimeUnit::Microsecond, None)` → `TIMESTAMP` (no TZ)
+    /// - `DataType::Utf8` → `VARCHAR`
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError>;
 
     /// Get the filesystem path where a model's output is materialized.
     /// Returns None for database backends (DuckDB), Some(path) for file-based backends (Spark).

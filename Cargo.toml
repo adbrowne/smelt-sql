@@ -17,7 +17,7 @@ license = "MIT"
 # DataFusion for SQL parsing and logical plans
 datafusion = "43"
 # DuckDB for testing and execution
-duckdb = { version = "1.4.4" }
+duckdb = { version = "1.4.4", features = ["appender-arrow"] }
 # Arrow for data interchange - must match duckdb's arrow version
 arrow = "58"
 # Parquet for data storage
