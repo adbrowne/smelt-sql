@@ -71,6 +71,7 @@ smelt build --show-plan path/to/model.sql   # compile a single model without exe
 
 `smelt build` does **not** accept `--dry-run`; do not pass it. There is currently no project-wide "compile only" flag — `--show-plan` works per-model.
 `smelt build` is idempotent on DuckDB targets — it will not error if tables already exist. You do *not* need to delete the `.duckdb` file between iterations.
+Success output is intentionally minimal: `built N model(s) in Xs`. A no-op rebuild (nothing changed) prints nothing at all. Either way, silence means success — not that nothing ran.
 
 To rebuild a subset:
 
