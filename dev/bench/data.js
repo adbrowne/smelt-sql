@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777764532116,
+  "lastUpdate": 1777766803875,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14569,6 +14569,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.379473,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "de8c36bf581eaf7e74f9ad62eefe3ef02eaab5af",
+          "message": "docs: mark all 12 spec-coverage plan items done\n\nAll phases complete: models, project_config, seeds, sources, cli,\nmodel_selection, testing, datagen, schema_evolution, python_models, lsp,\ndata_catalog.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-03T10:04:38+10:00",
+          "tree_id": "8ffd6cef6561bdbae01d6db6065f03ce9173f687",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/de8c36bf581eaf7e74f9ad62eefe3ef02eaab5af"
+        },
+        "date": 1777766802907,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.576359000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.279402,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.638785,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.345947,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002746,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 819.0183020000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 1.14908,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 0.90306,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 0.843459,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.821758,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 888.491406,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.926189999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 28.59832,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.177632,
             "unit": "ms"
           }
         ]
