@@ -1,7 +1,7 @@
 ---
 feature: architecture
 status: stable
-last_reviewed: 2026-05-02
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -67,6 +67,8 @@ A smelt workspace is rooted at a directory containing `smelt.yml`. **Directory l
 A project may rename or reorganise these freely (`staging/`, `marts/`, `external/`, etc.). The kind of an entity is determined by the file's *format and content*, not by the name of its containing directory.
 
 ### Resolution: `smelt.<path>` is the universal addressing scheme
+
+> The `smelt.<path>` migration completed across all feature specs on 2026-05-04. Earlier kind-prefixed forms (`smelt.models.<name>`, `smelt.sources.<schema>.<table>`, `smelt.fn.<path>`) are retired; references in older plans and research documents should be read as legacy.
 
 Every project-defined entity — model, function, seed, source, test — is addressed by a single uniform syntax:
 
@@ -211,6 +213,10 @@ The `Backend` trait is the contract every execution backend implements. The mini
 | `load_table(schema, name, arrow_schema, batches)` | Cross-backend Arrow ingest path. Used by seed loading and (future) any other "build a table from in-memory data" surface. DuckDB implements via `Appender`; Spark via `createDataFrame(...).saveAsTable(...)`. |
 
 Trait methods grow as new ingest / introspection paths land; the minimum a backend has to implement is the four above. The trait is `async`; backends are responsible for their own connection lifecycle.
+
+#### Cross-engine data exchange
+
+When a model on DuckDB references a model pinned to Spark (via `smelt.<path>`), smelt resolves the reference to a `read_parquet()` call against the Spark model's Parquet files in the `warehouse` directory. No explicit copy step is needed; DuckDB reads the files natively. This requires the Spark model to have `materialization: table` and the Spark target to have a `warehouse` path configured. (A full multi-backend execution model — capability negotiation, cross-engine reference rules, Databricks-specific features — is deferred to a future `multi_backend.md` spec; see Known Divergences.)
 
 ### `Transformation` and `ExecutionStep` (planner output)
 

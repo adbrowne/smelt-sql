@@ -229,4 +229,4 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **Related specs**:
   - `models.md` — model materialization modes
   - `cli.md` — `smelt diff` command, `smelt run` flags
-  - `project_config.md` — target backend configuration
+  - `smelt_yml.md` — target backend configuration

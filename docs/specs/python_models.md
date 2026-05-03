@@ -180,5 +180,5 @@ All standard model frontmatter keys (`materialization`, `tags`, `owner`, etc.) a
 - **User docs**:
   - `docs-site/docs/guide/python-models.md`
 - **Related specs**:
-  - `models.md` — SQL model files, frontmatter schema, `smelt.models.<name>` addressing
-  - `project_config.md` — `python:` config key
+  - `models.md` — SQL model files, frontmatter schema, `smelt.<path>` addressing
+  - `smelt_yml.md` — `python:` config key
