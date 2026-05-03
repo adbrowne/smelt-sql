@@ -54,14 +54,14 @@ impl ModelFile {
 
 pub struct ModelDiscovery {
     project_root: PathBuf,
-    model_paths: Vec<String>,
+    paths: Vec<String>,
 }
 
 impl ModelDiscovery {
-    pub fn new(project_root: PathBuf, model_paths: Vec<String>) -> Self {
+    pub fn new(project_root: PathBuf, paths: Vec<String>) -> Self {
         Self {
             project_root,
-            model_paths,
+            paths,
         }
     }
 
@@ -70,7 +70,7 @@ impl ModelDiscovery {
     pub fn discover_models(&self) -> Result<Vec<ModelFile>> {
         let mut models = Vec::new();
 
-        for model_path in &self.model_paths {
+        for model_path in &self.paths {
             let search_path = self.project_root.join(model_path);
 
             if !search_path.exists() {
@@ -128,7 +128,7 @@ impl ModelDiscovery {
     pub fn discover_python_files(&self) -> Result<Vec<(PathBuf, Vec<u32>, String)>> {
         let mut python_files = Vec::new();
 
-        for model_path in &self.model_paths {
+        for model_path in &self.paths {
             let search_path = self.project_root.join(model_path);
 
             if !search_path.exists() {

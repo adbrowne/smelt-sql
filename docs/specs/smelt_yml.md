@@ -92,7 +92,6 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 
 ## Known Divergences / Open Questions
 
-- **Implementation still has `model_paths` and `seed_paths`.** The `Config` struct in `crates/smelt-core/src/config.rs` carries two separate fields and two `default_*_paths` functions. The `paths:` unification specified above is the target shape; the migration plan is a follow-up alongside the seeds-spec rewrite.
 - **Typo escalation.** Unknown top-level keys are warned; whether typos of known keys (`default_matrialization`) should also warn or escalate to errors is open. A future schema-checker pass could fuzzy-match against the known-key set and emit a hint; not implemented today.
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.
 - **Multi-target precedence with frontmatter `target:`.** The model-level `target:` frontmatter overrides `smelt.yml::models.<name>.target`, which overrides the CLI `--target`. The frontmatter form is a relatively recent addition; whether it should also be allowed to declare a target *not* defined in `smelt.yml::targets` is open (today: hard error before any work begins).
@@ -100,7 +99,7 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 
 ## References
 
-- **Code**: `crates/smelt-core/src/config.rs` — `Config`, `Target`, `ModelConfig`, `Materialization`, `parse_unstable_schema_flag`, `parse_active_backends`. The default-functions are `default_model_paths`, `default_seed_paths`, `default_materialization` today; the `paths:` unification will collapse the first two into a single `default_paths`.
+- **Code**: `crates/smelt-core/src/config.rs` — `Config`, `Target`, `ModelConfig`, `Materialization`, `parse_unstable_schema_flag`, `parse_active_backends`, `parse_with_warnings`. The default functions are `default_paths` (for the unified `paths:` list) and `default_materialization`.
 - **Tests**: `crates/smelt-core/src/config.rs::tests` — round-trip tests for materialization defaults, version handling, target shape, validation rules.
 - **User docs**: `docs-site/docs/reference/smelt-yml.md` — per-key reference; `docs-site/docs/concepts/project-structure.md` — orientation page.
 - **Plans (history)**: `docs/plans/20260502-smelt-loop-findings.md` — the spec-authoring plan that produced this stub (DG-4 close).

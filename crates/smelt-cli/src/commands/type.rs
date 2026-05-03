@@ -12,7 +12,7 @@ pub async fn show_type(args: TypeArgs) -> Result<()> {
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;

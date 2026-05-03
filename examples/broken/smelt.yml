@@ -1,7 +1,7 @@
 name: broken_examples
 version: 1
 
-model_paths:
+paths:
   - models
 
 default_materialization: view

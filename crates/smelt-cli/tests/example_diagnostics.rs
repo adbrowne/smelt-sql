@@ -20,7 +20,7 @@ fn check_workspace_no_diagnostics(example_dir: &str) {
     let config: Config =
         serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
 
-    let discovery = ModelDiscovery::new(path.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
     let mut models = discovery.discover_models().unwrap();
 
     // Discover function files under `functions/`. Phase 3 registers them as
@@ -269,7 +269,7 @@ fn broken_workspace_diagnostics_still_fire() {
     let config: Config =
         serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
 
-    let discovery = ModelDiscovery::new(path.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
     let mut models = discovery.discover_models().unwrap();
     let function_files = discovery.discover_function_files().unwrap();
     models.extend(function_files);

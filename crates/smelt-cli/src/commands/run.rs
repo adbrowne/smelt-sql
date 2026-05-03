@@ -63,13 +63,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Discover seeds so they validate as `smelt.ref()` targets without a
     // sources.yml workaround (bug #2 in the 20260417 follow-up plan).
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
     if !seeds.is_empty() {
         info!("Discovered {} seed(s) as ref targets", seeds.len());
     }
 
     // 3. Discover models (SQL + Python)
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;
@@ -112,8 +112,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     if models.is_empty() {
         return Err(anyhow::anyhow!(
-            "No models found in model paths: {}",
-            config.model_paths.join(", ")
+            "No models found in paths: {}",
+            config.paths.join(", ")
         ));
     }
 

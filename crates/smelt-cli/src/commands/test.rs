@@ -22,7 +22,7 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;

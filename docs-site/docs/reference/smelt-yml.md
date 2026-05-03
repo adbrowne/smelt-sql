@@ -8,8 +8,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | | Project name |
 | `version` | integer | yes | | Configuration version (currently `1`) |
-| `model_paths` | string[] | no | `["models"]` | Directories to scan for SQL and Python model files |
-| `seed_paths` | string[] | no | `["seeds"]` | Directories to scan for CSV seed files |
+| `paths` | string[] | no | `["models"]` | Workspace-relative directories scanned for project files (`.sql`, `.py`, `.csv`, `.yml`). Kind is determined by file format/content, not by which directory the file lives in. |
 | `targets` | map | yes | | Named execution environments (see [Targets](#targets)) |
 | `default_materialization` | string | no | `"view"` | Default materialization for all models |
 | `models` | map | no | `{}` | Per-model configuration overrides (see [Model Configuration](#model-configuration)) |
@@ -248,12 +247,10 @@ The following is a fully annotated `smelt.yml` based on the timeseries example p
 name: smelt_examples
 version: 1
 
-# Where to find model files (default: ["models"])
-model_paths:
+# Workspace-relative directories scanned for project files (.sql, .py, .csv, .yml).
+# Default: ["models"]. Kind is determined by file format/content, not by directory.
+paths:
   - models
-
-# Where to find CSV seed files (default: ["seeds"])
-seed_paths:
   - seeds
 
 # Execution environments

@@ -199,12 +199,12 @@ impl UpstreamSchemas {
 
         // Seeds are CSV files outside the Salsa graph under the 0.26 API; load
         // them directly via the pure smelt-core helper using the project's
-        // configured seed_paths (defaults to ["seeds"] if no smelt.yml).
-        let seed_paths = smelt_core::Config::load(project_dir)
-            .map(|c| c.seed_paths)
-            .unwrap_or_else(|_| vec!["seeds".to_string()]);
+        // configured `paths` (defaults to ["models"] if no smelt.yml).
+        let paths = smelt_core::Config::load(project_dir)
+            .map(|c| c.paths)
+            .unwrap_or_else(|_| vec!["models".to_string()]);
         let mut seed_schemas: HashMap<String, Vec<(String, TypedColumn)>> = HashMap::new();
-        for seed in smelt_core::discover_seed_infos(project_dir, &seed_paths) {
+        for seed in smelt_core::discover_seed_infos(project_dir, &paths) {
             let cols: Vec<(String, TypedColumn)> = seed
                 .columns
                 .iter()
@@ -1336,8 +1336,7 @@ mod tests {
         Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),

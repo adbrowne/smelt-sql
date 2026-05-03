@@ -194,8 +194,8 @@ fn default_compile_unchanged() {
         project.join("smelt.yml"),
         "name: default_unchanged_ws\n\
          version: 1\n\
-         model_paths:\n  - models\n\
-         seed_paths:\n  - seeds\n\
+         paths:\n  - models\n\
+         \
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: view\n",
     )

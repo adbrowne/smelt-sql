@@ -12,16 +12,21 @@ pub struct SeedInfo {
     pub columns: Vec<(String, DataType)>,
 }
 
-/// Discover seed CSV files in the project's seed directories and infer column types.
+/// Discover seed CSV files in the project's configured paths and infer column types.
 ///
-/// Seeds are CSV files in the configured seed directories. Top-level CSVs are
-/// "target seeds" (schema = target schema). Subdirectory CSVs are "source seeds"
-/// (schema = subdirectory name). This function discovers only top-level seeds
-/// since those are the ones referenced as `smelt.models.seed_name`.
-pub fn discover_seed_infos(project_dir: &Path, seed_paths: &[String]) -> Vec<SeedInfo> {
+/// Seeds are CSV files under the configured `paths:` directories. Top-level
+/// CSVs are "target seeds" (schema = target schema). Subdirectory CSVs are
+/// "source seeds" (schema = subdirectory name). This function discovers only
+/// top-level seeds since those are the ones referenced as
+/// `smelt.models.seed_name`.
+///
+/// `paths` is the unified `paths:` list from `smelt.yml` (Phase 1 of the
+/// unified-paths plan); kind-by-content classification is Phase 2 — for now
+/// this walker is fine to find `.csv` files at the top level of any path.
+pub fn discover_seed_infos(project_dir: &Path, paths: &[String]) -> Vec<SeedInfo> {
     let mut seeds = Vec::new();
 
-    for seed_path in seed_paths {
+    for seed_path in paths {
         let seed_dir = project_dir.join(seed_path);
         if !seed_dir.exists() {
             continue;

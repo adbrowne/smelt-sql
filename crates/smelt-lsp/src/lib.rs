@@ -1377,8 +1377,7 @@ impl Backend {
                 smelt_core::Config::load(&project_root).unwrap_or_else(|_| smelt_core::Config {
                     name: String::new(),
                     version: 1,
-                    model_paths: vec!["models".to_string()],
-                    seed_paths: vec!["seeds".to_string()],
+                    paths: vec!["models".to_string()],
                     targets: std::collections::HashMap::new(),
                     default_materialization: smelt_core::Materialization::View,
                     models: std::collections::HashMap::new(),
@@ -1636,23 +1635,22 @@ impl LanguageServer for Backend {
                         }
                     }
 
-                    // Load config (defaults to a minimal config with model_paths = ["models"])
+                    // Load config (defaults to a minimal config with paths = ["models"])
                     let config = smelt_core::Config::load(&project_root).unwrap_or_else(|_| {
                         smelt_core::Config {
                             name: String::new(),
                             version: 1,
-                            model_paths: vec!["models".to_string()],
-                            seed_paths: vec!["seeds".to_string()],
+                            paths: vec!["models".to_string()],
                             targets: std::collections::HashMap::new(),
                             default_materialization: smelt_core::Materialization::View,
                             models: std::collections::HashMap::new(),
                             python: None,
                         }
                     });
-                    let model_paths = config.model_paths.clone();
+                    let paths = config.paths.clone();
 
-                    // Scan model directories for this project
-                    for model_path in &model_paths {
+                    // Scan project paths for this project
+                    for model_path in &paths {
                         let models_path = project_root.join(model_path);
                         match std::fs::read_dir(&models_path) {
                             Ok(entries) => {

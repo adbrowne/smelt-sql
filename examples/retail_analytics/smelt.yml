@@ -1,7 +1,7 @@
 name: retail_analytics
 version: 1
 
-model_paths:
+paths:
   - models
   - tests
 

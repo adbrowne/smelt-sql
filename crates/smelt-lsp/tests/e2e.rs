@@ -81,7 +81,7 @@ impl TestWorkspaceDir {
         // Create minimal smelt.yml so project discovery finds this workspace
         std::fs::write(
             path.join("smelt.yml"),
-            "name: test\nversion: 1\nmodel_paths:\n  - models\n",
+            "name: test\nversion: 1\npaths:\n  - models\n",
         )
         .unwrap();
         Self { _dir: dir, path }

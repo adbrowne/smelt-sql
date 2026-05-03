@@ -23,7 +23,7 @@ fn test_workspace_no_parse_errors() {
         serde_yaml::from_str(&std::fs::read_to_string(project_dir.join("smelt.yml")).unwrap())
             .unwrap();
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery.discover_models().unwrap();
 
     let mut errors = Vec::new();
@@ -47,7 +47,7 @@ fn test_workspace_no_undefined_refs() {
         serde_yaml::from_str(&std::fs::read_to_string(project_dir.join("smelt.yml")).unwrap())
             .unwrap();
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let mut models = discovery.discover_models().unwrap();
 
     // Discover Python models
@@ -65,7 +65,7 @@ fn test_workspace_no_undefined_refs() {
     }
 
     let sources = SourcesConfig::load(&project_dir).ok();
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
     let default_target = config
         .targets

@@ -1,10 +1,8 @@
 name: bench_workspace
 version: 1
 
-model_paths:
+paths:
   - models
-
-seed_paths:
   - seeds
 
 targets:

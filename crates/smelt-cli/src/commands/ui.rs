@@ -14,7 +14,7 @@ pub async fn ui(args: UiArgs) -> Result<()> {
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;

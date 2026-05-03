@@ -111,10 +111,10 @@ async fn test_ecommerce_models_compile_and_execute() -> anyhow::Result<()> {
     let config: Config =
         serde_yaml::from_str(&std::fs::read_to_string(project_dir.join("smelt.yml"))?)?;
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery.discover_models()?;
     let sources = SourcesConfig::load(&project_dir).ok();
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
     let default_target = config
         .targets

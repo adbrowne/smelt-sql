@@ -19,10 +19,8 @@ version: 1
 #           builds an empty TypeContext. SUM(double_col) becomes BIGINT,
 #           silently truncating financial data. mart_revenue exercises this.
 
-model_paths:
+paths:
   - models
-
-seed_paths:
   - seeds
 
 targets:

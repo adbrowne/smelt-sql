@@ -1,11 +1,9 @@
 name: smelt_examples
 version: 1
 
-model_paths:
+paths:
   - models
   - tests
-
-seed_paths:
   - seeds
 
 targets:

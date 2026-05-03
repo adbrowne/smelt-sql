@@ -72,7 +72,7 @@ The implementation today still uses `model_paths` + `seed_paths`, an aggregate r
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | 0a1e91f | 2026-05-03 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |

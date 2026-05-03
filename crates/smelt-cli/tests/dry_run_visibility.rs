@@ -35,7 +35,7 @@ fn write_smelt_yml(dir: &Path, name: &str) {
     let yml = format!(
         "name: {name}\n\
          version: 1\n\
-         model_paths:\n  - models\n\
+         paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: view\n"
     );

@@ -569,8 +569,7 @@ mod tests {
         Config {
             name: "test-project".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets,
             default_materialization: Materialization::View,
             models: HashMap::new(),

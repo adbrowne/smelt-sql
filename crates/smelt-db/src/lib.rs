@@ -678,10 +678,10 @@ pub fn project_active_backends(
 #[salsa::tracked]
 pub fn project_seeds(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SeedInfo>> {
     let project_root = project.root(db).clone();
-    let seed_paths = smelt_core::Config::load(&project_root)
-        .map(|c| c.seed_paths)
-        .unwrap_or_else(|_| vec!["seeds".to_string()]);
-    Arc::new(smelt_core::discover_seed_infos(&project_root, &seed_paths))
+    let paths = smelt_core::Config::load(&project_root)
+        .map(|c| c.paths)
+        .unwrap_or_else(|_| vec!["models".to_string()]);
+    Arc::new(smelt_core::discover_seed_infos(&project_root, &paths))
 }
 
 #[salsa::tracked]
@@ -2658,7 +2658,7 @@ impl std::fmt::Debug for ResolvedRef {
 /// - `.sql` file declaring `smelt.define` → `Function`
 /// - `.sql` file with `materialization: test` (Phase 2a stand-in for
 ///   the future `smelt.test` declaration kind) → `Test`
-/// - `.csv` under a project's `seed_paths` → `Seed`
+/// - `.csv` under a project's `paths` → `Seed`
 /// - `.yml` declaring an external table → `Source`
 ///
 /// The tuple is matched against each workspace `SourceFile`'s path,
@@ -2677,7 +2677,7 @@ pub fn resolve_ref_path(
     for project in workspace.projects(db).iter().copied() {
         let project_root = project.root(db).clone();
 
-        // Seeds: project-configured seed_paths under <root>. We compare
+        // Seeds: project-configured `paths` under <root>. We compare
         // the leaf segment to the seed name (top-level CSVs only, per
         // current `discover_seed_infos`).
         if path.len() >= 2 && path[0] == "seeds" {

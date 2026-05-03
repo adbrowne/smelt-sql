@@ -57,7 +57,7 @@ fn diags_with_code(
 /// configuration — exactly what `examples/functions_demo/smelt.yml` uses.
 const UNSTABLE_SMELT_YML: &str = "name: phase43_regression
 version: 1
-model_paths:
+paths:
   - models
 targets:
   dev:

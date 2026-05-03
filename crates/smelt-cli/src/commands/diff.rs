@@ -35,9 +35,9 @@ pub async fn diff(args: DiffArgs) -> Result<()> {
     let sources = SourcesConfig::load(&project_dir).ok();
 
     // Seeds participate as `smelt.ref()` targets (bug #2 in 20260417 follow-up).
-    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.seed_paths);
+    let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let mut models = discovery
         .discover_models()
         .with_context(|| "Failed to discover models")?;

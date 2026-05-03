@@ -96,7 +96,7 @@ fn e2e_safe_divide_executes_against_duckdb() {
     let smelt_yml = format!(
         "name: e2e_safe_divide
 version: 1
-model_paths:
+paths:
   - models
 targets:
   dev:
@@ -184,9 +184,8 @@ fn e2e_as_struct_emits_executable_struct_literal() {
     let smelt_yml = format!(
         "name: e2e_as_struct
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   dev:
@@ -314,7 +313,7 @@ fn e2e_cross_target_function_call() {
     let smelt_yml = format!(
         "name: e2e_cross_target
 version: 1
-model_paths:
+paths:
   - models
 targets:
   dev:

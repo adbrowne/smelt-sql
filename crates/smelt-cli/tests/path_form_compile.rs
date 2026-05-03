@@ -27,7 +27,7 @@ fn stage_workspace(files: &[(&str, &str)]) -> TempDir {
     // Minimal smelt.yml so `find_project_root` recognises this as a project.
     let yml = "name: test_proj\n\
                version: 1\n\
-               model_paths:\n  - models\n\
+               paths:\n  - models\n\
                targets:\n  default:\n    type: duckdb\n    schema: main\n\
                default_materialization: view\n";
     std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
@@ -52,8 +52,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
     Config {
         name: "test_proj".to_string(),
         version: 1,
-        model_paths: vec!["models".to_string()],
-        seed_paths: vec!["seeds".to_string()],
+        paths: vec!["models".to_string()],
         targets,
         default_materialization: Materialization::View,
         models: HashMap::new(),

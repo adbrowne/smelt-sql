@@ -33,19 +33,20 @@ pub struct SeedResult {
     pub duration: Duration,
 }
 
-/// Discover seed CSV files in the configured seed paths.
+/// Discover seed CSV files under the configured paths.
 ///
-/// Directory structure determines seed type:
-/// - `seeds/<table>.csv` → Target seed (loaded into target_schema)
-/// - `seeds/<source>/<table>.csv` → Source seed (loaded into <source> schema)
+/// Directory structure determines seed type (Phase 1 — kind-by-content split
+/// is Phase 2):
+/// - `<paths>/<table>.csv` → Target seed (loaded into target_schema)
+/// - `<paths>/<source>/<table>.csv` → Source seed (loaded into <source> schema)
 pub fn discover_seeds(
     project_root: &Path,
-    seed_paths: &[String],
+    paths: &[String],
     target_schema: &str,
 ) -> Result<Vec<SeedFile>> {
     let mut seeds = Vec::new();
 
-    for seed_path in seed_paths {
+    for seed_path in paths {
         let seed_dir = project_root.join(seed_path);
         if !seed_dir.exists() {
             continue;

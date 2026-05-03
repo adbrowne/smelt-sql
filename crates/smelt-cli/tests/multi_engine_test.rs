@@ -47,8 +47,7 @@ fn make_config_with_targets(targets: HashMap<String, Target>) -> Config {
     Config {
         name: "test".to_string(),
         version: 1,
-        model_paths: vec!["models".to_string()],
-        seed_paths: vec!["seeds".to_string()],
+        paths: vec!["models".to_string()],
         targets,
         default_materialization: Materialization::View,
         models: HashMap::new(),
@@ -451,7 +450,7 @@ fn test_multi_engine_example_parses() {
     let config: Config =
         serde_yaml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
 
-    let discovery = ModelDiscovery::new(project_dir.clone(), config.model_paths.clone());
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let models = discovery.discover_models().unwrap();
 
     assert!(

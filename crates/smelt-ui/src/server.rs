@@ -71,12 +71,8 @@ pub async fn start_server(
 
     // Start file watcher
     let watcher_state = state.clone();
-    let model_paths: Vec<PathBuf> = config
-        .model_paths
-        .iter()
-        .map(|p| project_dir.join(p))
-        .collect();
-    crate::watcher::start_watcher(watcher_state, model_paths, project_dir.clone())?;
+    let watch_paths: Vec<PathBuf> = config.paths.iter().map(|p| project_dir.join(p)).collect();
+    crate::watcher::start_watcher(watcher_state, watch_paths, project_dir.clone())?;
 
     let app = Router::new()
         .route("/api/project", get(api::get_project))
@@ -262,8 +258,7 @@ mod tests {
             config: Arc::new(Config {
                 name: "test".to_string(),
                 version: 1,
-                model_paths: vec!["models".to_string()],
-                seed_paths: vec!["seeds".to_string()],
+                paths: vec!["models".to_string()],
                 targets,
                 default_materialization: Materialization::View,
                 models: HashMap::new(),

@@ -33,11 +33,11 @@ pub async fn run_seed(args: SeedArgs) -> Result<()> {
     })?;
 
     // 3. Discover seeds
-    let mut seeds = seed::discover_seeds(&project_dir, &config.seed_paths, &target_config.schema)
+    let mut seeds = seed::discover_seeds(&project_dir, &config.paths, &target_config.schema)
         .with_context(|| "Failed to discover seeds")?;
 
     if seeds.is_empty() {
-        info!("No seed files found in: {}", config.seed_paths.join(", "));
+        info!("No seed files found in: {}", config.paths.join(", "));
         return Ok(());
     }
 

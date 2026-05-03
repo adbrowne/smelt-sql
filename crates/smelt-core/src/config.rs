@@ -72,10 +72,12 @@ pub struct Config {
     /// and only printed in run logs. (iter-4 issue #1.)
     #[serde(default = "default_config_version")]
     pub version: u32,
-    #[serde(default = "default_model_paths")]
-    pub model_paths: Vec<String>,
-    #[serde(default = "default_seed_paths")]
-    pub seed_paths: Vec<String>,
+    /// Workspace-relative directories scanned for project files (`.sql`, `.py`, `.csv`, `.yml`).
+    /// Replaces the legacy `model_paths` + `seed_paths` split — kind is
+    /// determined by file format/content (`architecture.md` §"Resolution"),
+    /// not by which directory the file lives in.
+    #[serde(default = "default_paths")]
+    pub paths: Vec<String>,
     pub targets: HashMap<String, Target>,
     #[serde(default = "default_materialization")]
     pub default_materialization: Materialization,
@@ -90,12 +92,8 @@ fn default_config_version() -> u32 {
     1
 }
 
-fn default_model_paths() -> Vec<String> {
+fn default_paths() -> Vec<String> {
     vec!["models".to_string()]
-}
-
-fn default_seed_paths() -> Vec<String> {
-    vec!["seeds".to_string()]
 }
 
 fn default_materialization() -> Materialization {
@@ -390,13 +388,45 @@ impl Config {
                 source: e.into(),
             })?;
 
-        serde_yaml::from_str(&content).map_err(|e| {
-            ConfigError::LoadError {
+        let (config, warnings) =
+            Self::parse_with_warnings(&content).map_err(|e| ConfigError::LoadError {
                 path: config_path,
                 source: e.into(),
+            })?;
+        for w in &warnings {
+            eprintln!("{}", w);
+        }
+        Ok(config)
+    }
+
+    /// Parse `smelt.yml` text into a `Config` plus any warnings about
+    /// unknown / legacy top-level keys.
+    ///
+    /// Pure function — does not touch the filesystem and emits no side
+    /// effects. Callers that want the warnings on stderr (`Config::load`)
+    /// print them themselves.
+    ///
+    /// Recognises the legacy `model_paths` and `seed_paths` keys (replaced
+    /// by the unified `paths:` list) and emits a warning naming them. The
+    /// returned `Config.paths` is the default (`["models"]`) — legacy keys
+    /// are silently ignored beyond the warning, per `smelt_yml.md`
+    /// §"Unknown keys".
+    pub fn parse_with_warnings(text: &str) -> Result<(Self, Vec<String>), serde_yaml::Error> {
+        let config: Config = serde_yaml::from_str(text)?;
+        let mut warnings = Vec::new();
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(text) {
+            if let Some(map) = value.as_mapping() {
+                for legacy in ["model_paths", "seed_paths"] {
+                    if map.contains_key(serde_yaml::Value::String(legacy.to_string())) {
+                        warnings.push(format!(
+                            "warning: smelt.yml: ignoring legacy key `{}`. Use `paths:` instead — the single scan list (smelt_yml.md §Top-level keys).",
+                            legacy
+                        ));
+                    }
+                }
             }
-            .into()
-        })
+        }
+        Ok((config, warnings))
     }
 
     /// Get materialization for a model
@@ -921,8 +951,7 @@ models:
         let config = Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: HashMap::new(),
             default_materialization: Materialization::View,
             models: HashMap::new(),
@@ -956,8 +985,7 @@ models:
         let config = Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: HashMap::new(),
             default_materialization: Materialization::View,
             models: HashMap::new(),
@@ -1073,8 +1101,7 @@ targets:
         let config = Config {
             name: "test".to_string(),
             version: 1,
-            model_paths: vec!["models".to_string()],
-            seed_paths: vec!["seeds".to_string()],
+            paths: vec!["models".to_string()],
             targets: HashMap::new(),
             default_materialization: Materialization::View,
             models: HashMap::new(),
@@ -1100,5 +1127,95 @@ targets:
 
         let errors = config.validate_model_configs(&metadata);
         assert!(errors.is_empty());
+    }
+
+    /// `paths:` defaults to `["models"]` when omitted (`smelt_yml.md`
+    /// Surface §"Top-level keys" / Semantics §5).
+    #[test]
+    fn paths_defaults_to_models() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.paths, vec!["models".to_string()]);
+    }
+
+    /// `paths: [...]` round-trips through (de)serialization unchanged.
+    /// Order is preserved.
+    #[test]
+    fn paths_round_trips() {
+        let yaml = r#"
+name: test_project
+version: 1
+paths:
+  - models
+  - fixtures
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.paths,
+            vec!["models".to_string(), "fixtures".to_string()]
+        );
+
+        // Round-trip serialise → deserialise → expect same paths.
+        let round_trip = serde_yaml::to_string(&config).unwrap();
+        let config2: Config = serde_yaml::from_str(&round_trip).unwrap();
+        assert_eq!(config2.paths, config.paths);
+    }
+
+    /// Legacy `model_paths` / `seed_paths` keys parse successfully (per the
+    /// `smelt_yml.md` §"Unknown keys" rule) but the resulting `paths`
+    /// field is the default. `parse_with_warnings` reports a warning
+    /// naming each legacy key.
+    #[test]
+    fn legacy_path_keys_warn() {
+        let yaml = r#"
+name: test_project
+version: 1
+model_paths:
+  - models
+  - tests
+seed_paths:
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+"#;
+        let (config, warnings) = Config::parse_with_warnings(yaml).unwrap();
+
+        // Legacy keys parse successfully — paths is the default.
+        assert_eq!(config.paths, vec!["models".to_string()]);
+
+        // Warnings are emitted for each legacy key.
+        assert_eq!(warnings.len(), 2, "expected one warning per legacy key");
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains("model_paths"),
+            "warning text must name `model_paths`: {}",
+            joined
+        );
+        assert!(
+            joined.contains("seed_paths"),
+            "warning text must name `seed_paths`: {}",
+            joined
+        );
+        assert!(
+            joined.to_lowercase().contains("paths"),
+            "warning should refer to the replacement `paths:` key: {}",
+            joined
+        );
     }
 }
