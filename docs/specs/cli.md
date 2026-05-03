@@ -97,4 +97,4 @@ This is a stub spec; the CLI surface is large and the deep design rationale will
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
   - `functions.md` — `smelt build` plans function expansion as part of the build lifecycle.
-  - `smelt_yml.md` — `targets:`, `model_paths:`, `seed_paths:` keys consumed by the CLI.
+  - `smelt_yml.md` — `targets:` and `paths:` keys consumed by the CLI.
