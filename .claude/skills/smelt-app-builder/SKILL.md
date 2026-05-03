@@ -32,9 +32,8 @@ my-project/
 ```yaml
 name: my-project
 version: 1
-model_paths:
+paths:
   - models
-seed_paths:
   - seeds
 targets:
   dev:
@@ -54,10 +53,10 @@ SELECT
     CAST(o.order_id AS INTEGER) AS order_id,
     ...
 FROM smelt.sources.raw.orders o
-LEFT JOIN smelt.models.seed_order_statuses s ON o.status_code = s.status_code
+LEFT JOIN smelt.seed_order_statuses s ON o.status_code = s.status_code
 ```
 
-- Reference seeds and other models with `smelt.models.<name>` (seeds are first-class ref targets — name = filename minus `.csv`).
+- Reference seeds and other SQL models with `smelt.<name>` — addressing is **flat**: seeds under `seeds/` and models under `models/` are both addressed as `smelt.<name>` with no intermediate namespace segment. There is no `smelt.models.*` prefix. Seed name = filename minus `.csv`.
   **Seed column names are locked to CSV headers.** You cannot rename them in `smelt.yml` or the seed definition — if the spec requires a different name (e.g. spec says `customer_name` but the CSV has `name`), apply the alias in your first staging model: `c.name AS customer_name`.
 - Reference declared sources with `smelt.sources.<schema>.<table>`.
 - Materializations: `table`, `view`, `incremental` — see `smelt docs show guide/materializations`. **Always set `materialization:` explicitly in frontmatter.** If omitted, the model defaults to `view` (or whatever `default_materialization` is set to in `smelt.yml`). A mart or staging model silently built as a view will pass row-count checks but fail any test that asserts a physical table exists or queries the object type.
@@ -169,17 +168,17 @@ materialization: table
 SELECT
     order_id,
     smelt.functions.safe_revenue(amount) AS amount
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 ```
 
 ## Stuck-points checklist
 
 If `smelt build` fails, work through these before changing approach:
 
-- **"Unknown ref / source"** → run `smelt docs show concepts/project-structure`. Confirm seed CSV is under `seeds/` and the model frontmatter `name:` matches what other models call via `smelt.models.<name>`. Seed names = seed filename minus `.csv`.
+- **"Unknown ref / source"** → run `smelt docs show concepts/project-structure`. Confirm seed CSV is under `seeds/` and that `paths:` in `smelt.yml` includes `seeds`. Other models reference a seed via `smelt.<seed_name>` (flat, no `models` segment). Seed names = seed filename minus `.csv`.
 - **YAML frontmatter parse error** → the `---` fences must be on their own lines, with valid YAML between. No tabs.
-- **Type errors on aggregates** → `SUM`/`COUNT` infer as non-null, and `COUNT(*)` lands as `BIGINT` (not `INTEGER`). For `LEFT JOIN`-fed sums where the right side may be empty, wrap in `COALESCE(SUM(...), 0)`; if a downstream column or test expects `INTEGER`, add an outer `CAST(... AS INTEGER)`. A worked mart pattern: `SELECT c.customer_id, COALESCE(SUM(CASE WHEN o.status = 'shipped' THEN o.amount END), 0) AS revenue FROM smelt.models.raw_customers c LEFT JOIN smelt.models.stg_orders o USING (customer_id) GROUP BY c.customer_id` — ensures every customer appears with `0` revenue instead of `NULL`.
-  **"All N rows must appear" completeness check:** if the spec says every dimension row (e.g. every customer) must appear in the mart output, first verify whether every such row already exists in your upstream model. A customer with at least one order (even cancelled) already appears in `stg_orders`, so `GROUP BY` + `COALESCE` is sufficient. A customer with *zero* orders is absent from `stg_orders` entirely and cannot be recovered by `COALESCE` — start the mart from the dimension seed (`LEFT JOIN smelt.models.raw_customers`) rather than from the orders table.
+- **Type errors on aggregates** → `SUM`/`COUNT` infer as non-null, and `COUNT(*)` lands as `BIGINT` (not `INTEGER`). For `LEFT JOIN`-fed sums where the right side may be empty, wrap in `COALESCE(SUM(...), 0)`; if a downstream column or test expects `INTEGER`, add an outer `CAST(... AS INTEGER)`. A worked mart pattern: `SELECT c.customer_id, COALESCE(SUM(CASE WHEN o.status = 'shipped' THEN o.amount END), 0) AS revenue FROM smelt.raw_customers c LEFT JOIN smelt.stg_orders o USING (customer_id) GROUP BY c.customer_id` — ensures every customer appears with `0` revenue instead of `NULL`. **DECIMAL vs DOUBLE:** `COALESCE(SUM(decimal_col), 0.0)` returns `DECIMAL(38,2)`, not `DOUBLE` — DuckDB promotes to DECIMAL when the fallback literal `0.0` matches a decimal operand. If the spec requires `DOUBLE`, use `CAST(COALESCE(SUM(col), 0.0) AS DOUBLE)` explicitly.
+  **"All N rows must appear" completeness check:** if the spec says every dimension row (e.g. every customer) must appear in the mart output, first verify whether every such row already exists in your upstream model. A customer with at least one order (even cancelled) already appears in `stg_orders`, so `GROUP BY` + `COALESCE` is sufficient. A customer with *zero* orders is absent from `stg_orders` entirely and cannot be recovered by `COALESCE` — start the mart from the dimension seed (`LEFT JOIN smelt.raw_customers`) rather than from the orders table.
 - **`smelt diff` reports phantom nullability changes after a clean build** → known issue; safe to ignore for app correctness, but don't use `smelt diff` as a CI gate yet.
 - **Stale model cache after deleting a `.sql` file** → `rm .smelt/schemas/<deleted_model>.json` manually.
 
