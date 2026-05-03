@@ -149,17 +149,22 @@ The implementation today still uses `model_paths` + `seed_paths`, an aggregate r
 **Critical files.**
 - `crates/smelt-core/src/{discovery.rs,project.rs,graph.rs,seeds.rs,sources.rs}`.
 - `crates/smelt-cli/src/seed.rs` — drop subdirectory-becomes-schema; route through `default_db_name`.
+- `crates/smelt-cli/src/compiler.rs` — update `make_path_ref_resolver_with_ephemerals` to remove kind-prefix dispatch (`segs[0]` match on "models"/"seeds"/"sources") and emit `{target_schema}.{segs.join("_")}` for all persisted paths. The current `smelt.models.X` → `{schema}.{leaf}` branch and the `smelt.seeds.X` → `{schema}.{segs[1..].join("_")}` branch both collapse into one rule: all address segments joined by underscore.
 - `crates/smelt-db/src/lib.rs` — update `resolve_ref` if it carries any kind-by-prefix branches.
-- `examples/*/` — adjust any tests or expected outputs that depended on the old `<schema>.<leaf>` naming. Existing per-example baseline files (e.g. `expected_output.sql`) regenerate to the new `<schema>.<path-joined>` form.
+- `examples/**/*.sql` — **All model SQL files that reference `smelt.models.*`, `smelt.seeds.*`, `smelt.sources.*`, `smelt.tests.*`, or `smelt.functions.*` must be updated to the scan-root-stripped form.** Under `paths: [models]`, `smelt.models.users` becomes `smelt.users`; `smelt.models.staging.orders` becomes `smelt.staging.orders`. This is a large mechanical sweep (~1000+ SQL files, mostly in `examples/huge/`). Use a script or sed to perform the rename; regenerate any expected-output baselines in the same commit.
+
+**Spec note (architecture.md address-table inconsistency).** The body text of `architecture.md` §"Resolution" says "scan-root prefix is stripped from each independently" — this matches the plan's TDD tests (e.g. `paths: ["models"]` + `models/data/users.csv` → `smelt.data.users`). However, the address-examples table in the same section still shows the scan-root included (e.g. `models/marts/customers.sql` → `smelt.models.marts.customers`). The table is wrong. Fix the table as part of this phase's Docs touched.
 
 **Docs touched.**
-- `docs/specs/architecture.md` — Known Divergences: nothing to remove yet (resolver and name mapping are now matched by code).
+- `docs/specs/architecture.md` — Fix address-examples table to use scan-root-stripped forms (e.g. `models/marts/customers.sql` → `smelt.marts.customers`). The rule text "scan-root prefix is stripped" is already correct; bring the table into alignment with it.
 - `docs-site/docs/concepts/project-structure.md` — describe kind-by-content + sidecar rule + cross-path uniqueness.
 
 **Review checklist** (material findings only):
 - [ ] Resolver tests above exercise every kind branch and the sidecar tiebreaker.
 - [ ] Cross-path collision is a hard error (not a warning).
 - [ ] No remaining call site uses subdirectory-becomes-schema for seed schemas.
+- [ ] `compiler.rs` `make_path_ref_resolver_with_ephemerals` emits `{schema}.{segs.join("_")}` with no kind-prefix dispatch; the old `segs[0]` match on "models"/"seeds"/"sources" is gone.
+- [ ] No example SQL file uses `smelt.models.*`, `smelt.seeds.*`, `smelt.sources.*` as a ref (only scan-root-stripped `smelt.<content-address>` refs).
 - [ ] Default-DB-name helper is pure and used by every persisted-entity site.
 - [ ] Example diagnostics test green; example baselines regenerated and committed in this phase.
 
