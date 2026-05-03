@@ -161,7 +161,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 
 ## Known Divergences / Open Questions
 
-- **Implementation lags spec (partial).** The CSV parser, type inferencer, Arrow batch builder, `Backend::load_table` wiring (Phase 4), sidecar YAML parsing/validation, ephemeral seed CTE expansion, and materialization dispatch (Phase 5) are implemented. The LSP affordances — missing-sidecar diagnostic and "Pin schema" code action (Phase 7) — are implemented. The remaining divergence is: aggregate `sources.yml` still active alongside per-entity source YAMLs (Phase 6).
+- **Implementation lags spec (partial).** The CSV parser, type inferencer, Arrow batch builder, `Backend::load_table` wiring (Phase 4), sidecar YAML parsing/validation, ephemeral seed CTE expansion, and materialization dispatch (Phase 5) are implemented. The LSP affordances — missing-sidecar diagnostic and "Pin schema" code action (Phase 7) — are implemented. Per-entity source YAMLs (Phase 6) are implemented; the aggregate `sources.yml` format is removed.
 - **Drift diagnostic between CSV and pinned YAML.** The "Re-pin schema from CSV" LSP code action is in scope here, but the diagnostic that surfaces drift (column added/removed, inferred type drift) is implementation-deferred to the LSP plan.
 - **Ephemeral seed size limits.** A 100k-row CSV declared `materialization: ephemeral` would generate a `VALUES` literal of dangerous size. A future row-count threshold (warn, then error) is open; today's spec leaves the choice to the user.
 - **Tests on seed columns.** The shared YAML does not yet support `tests:`. Tests on seed/source/model columns will land together when `tests.md` exists.

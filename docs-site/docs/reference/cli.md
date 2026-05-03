@@ -141,7 +141,7 @@ Seed the database with CSV files and then run all models. This is a convenience 
 **Lifecycle.** A single `smelt build` performs these steps in order:
 
 1. **Load `smelt.yml`** and validate the requested `--target` exists.
-2. **Discover** seed CSVs (under `seed_paths`), sources (`sources.yml`, optional), SQL models, Python models, and `smelt.define` function files.
+2. **Discover** seed CSVs, per-entity source YAMLs, SQL models, Python models, and `smelt.define` function files — all under the directories listed in `paths:`.
 3. **Seed** — for each CSV, smelt's own parser reads and type-infers the file, converts the rows to typed Arrow batches, and loads them via `Backend::load_table`. Seeds are loaded sequentially in deterministic (sorted) order. Schemas are auto-created.
 4. **Plan** — build the logical graph from discovered models, apply planner rules, and produce the physical execution graph. Models are executed in topological order so each model's upstreams are materialised first.
 5. **Run** — for each model, materialise according to its `materialization` (`table`, `view`, `materialized_view`, or inlined for `ephemeral`). Backends that support it use `CREATE OR REPLACE TABLE` / `CREATE OR REPLACE VIEW` for atomic replacement.
@@ -202,7 +202,7 @@ smelt build --select daily_revenue --select transactions
 
 ## smelt seed
 
-Load CSV seed files into the database. Seed files are CSV files placed in the directories specified by `seed_paths` in `smelt.yml` (default: `seeds/`).
+Load CSV seed files into the database. Seed files are CSV files placed in the directories listed under `paths:` in `smelt.yml` (default: `["models"]`).
 
 **Usage:**
 
@@ -237,7 +237,7 @@ smelt seed --show-results
 
 ## smelt test
 
-Run model tests and report results. Tests are `.sql` files with `materialization: test` in YAML frontmatter, placed in a directory listed in `model_paths` (typically `tests/`).
+Run model tests and report results. Tests are `.sql` files with `materialization: test` in YAML frontmatter, placed in a directory listed in `paths:` (typically `tests/`).
 
 Each test defines mock input data and expected output for a model or CTE. smelt compiles the test into a standalone SQL query, executes it against an in-memory DuckDB instance, and compares the result.
 

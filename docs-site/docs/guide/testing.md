@@ -12,10 +12,10 @@ Tests are `.sql` files with `materialization: test` in YAML frontmatter. Each te
 
 When you run `smelt test`, smelt compiles each test into a standalone SQL query with mock data substituted for dependencies, executes it against an in-memory DuckDB instance, and compares the actual output to your expected rows.
 
-Tests live in a `tests/` directory (or co-located in model files) and must be discoverable via `model_paths` in your `smelt.yml`:
+Tests live in a `tests/` directory (or co-located in model files) and must be discoverable via `paths:` in your `smelt.yml`:
 
 ```yaml
-model_paths:
+paths:
   - models
   - tests
 ```

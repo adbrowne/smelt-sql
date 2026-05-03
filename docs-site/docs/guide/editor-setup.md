@@ -38,10 +38,10 @@ The LSP supports go-to-definition for multiple targets:
 | Cursor position | Jumps to |
 |---|---|
 | `smelt.models.model_name` | The referenced model's SQL file |
-| `smelt.sources.schema.table` | The table entry in `sources.yml` |
+| `smelt.sources.schema.table` | The per-entity source `.yml` file |
 | CTE name in FROM/JOIN | The CTE definition in the WITH clause |
 | Table alias (e.g., `t` in `t.column`) | Where the alias is defined |
-| Column reference | The column's definition in the upstream SELECT, CTE, or `sources.yml` |
+| Column reference | The column's definition in the upstream SELECT, CTE, or source `.yml` |
 
 Column go-to-definition traces through `SELECT *` wildcards to find the original definition. If a column name is ambiguous (unqualified with multiple possible sources), multiple locations are returned.
 
@@ -51,7 +51,7 @@ The LSP reports errors and warnings in real time as you edit:
 
 - **Parse errors** -- Syntax mistakes in SQL
 - **Undefined refs** -- `smelt.models.model` where `model` does not exist
-- **Undeclared columns** -- References to columns not present in upstream model schemas or `sources.yml` declarations
+- **Undeclared columns** -- References to columns not present in upstream model schemas or source `.yml` declarations
 - **Unsupported syntax** -- Features like PIVOT/UNPIVOT that smelt does not support
 
 Undeclared column diagnostics catch typos and schema drift at edit time, before you run anything. For example:
@@ -62,7 +62,7 @@ SELECT visitor_id FROM smelt.sources.raw.sessions
 ```
 
 !!! tip
-    Column diagnostics require that your `sources.yml` declares column names (types are optional). Without column declarations, the LSP cannot validate column references against external sources.
+    Column diagnostics require that your per-entity source `.yml` files declare column names (types are optional). Without column declarations, the LSP cannot validate column references against external sources.
 
 ## Other editors
 

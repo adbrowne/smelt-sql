@@ -405,17 +405,16 @@ A typical workflow: generate Parquet data with datagen, then configure smelt to 
 smelt-datagen --config datagen.yaml
 ```
 
-**2. Configure sources** in `sources.yml`:
+**2. Declare per-entity source YAMLs** under your `paths:` directory (e.g. `models/sources/raw/`):
 
+`models/sources/raw/customers.yml`:
 ```yaml
-version: 1
-sources:
-  - name: raw
-    tables:
-      - name: customers
-        path: data/customers
-      - name: orders
-        path: data/orders
+path: data/customers
+```
+
+`models/sources/raw/orders.yml`:
+```yaml
+path: data/orders
 ```
 
 **3. Write models** that reference the sources:

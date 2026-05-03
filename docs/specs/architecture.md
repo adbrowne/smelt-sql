@@ -189,7 +189,7 @@ The taxonomy of current concepts:
 | Ephemeral model            | transparent  | inline (CTE)    | DAG-default             |
 | `smelt.define` function    | transparent  | inline (expansion) | explicit             |
 | `smelt.extern` / built-in  | black-box    | inline          | engine- / user-declared signature |
-| Source                     | black-box    | external        | schema from `sources.yml` or catalog |
+| Source                     | black-box    | external        | schema from per-entity source YAML or catalog |
 
 #### Normative rules
 
