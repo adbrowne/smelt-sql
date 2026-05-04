@@ -20,13 +20,13 @@ FROM table_references
 
 ## smelt extensions
 
-### smelt.models
+### smelt.&lt;path&gt;
 
 Reference another model in the project:
 
 ```sql
-FROM smelt.models.model_name
-FROM smelt.models.model_name(filter => condition, limit => n)
+FROM smelt.model_name
+FROM smelt.model_name(filter => condition, limit => n)
 ```
 
 ### smelt.sources
@@ -74,18 +74,18 @@ See the [Functions guide](../guide/functions.md) for the full type annotation la
 
 ```sql
 -- Positional arguments
-SELECT smelt.functions.safe_divide(revenue, cost) AS margin FROM smelt.models.orders
+SELECT smelt.functions.safe_divide(revenue, cost) AS margin FROM smelt.orders
 
 -- Named arguments
 SELECT * FROM smelt.functions.sessionize(
-  smelt.models.events,
+  smelt.events,
   user_col => user_id,
   ts_col   => event_time
 )
 
 -- PASSING clause for fragment parameters
 SELECT *
-FROM smelt.functions.session_rollup(smelt.models.events, user_id, event_time)
+FROM smelt.functions.session_rollup(smelt.events, user_id, event_time)
 PASSING metrics AS (COUNT(*) AS events, SUM(amount) AS total)
 ```
 
@@ -170,7 +170,7 @@ SELECT
   CASE WHEN GROUPING(category) = 1 THEN 'ALL' ELSE category END AS category,
   CASE WHEN GROUPING(region)   = 1 THEN 'ALL' ELSE region   END AS region,
   SUM(amount) AS total
-FROM smelt.models.sales
+FROM smelt.sales
 GROUP BY CUBE(category, region)
 ```
 
@@ -248,8 +248,8 @@ smelt assigns canonical return types to aggregates so the same model writes the 
     SELECT
       c.customer_id,
       COALESCE(SUM(o.amount), 0) AS lifetime_spend
-    FROM smelt.models.customers AS c
-    LEFT JOIN smelt.models.orders AS o USING (customer_id)
+    FROM smelt.customers AS c
+    LEFT JOIN smelt.orders AS o USING (customer_id)
     GROUP BY c.customer_id
     ```
 

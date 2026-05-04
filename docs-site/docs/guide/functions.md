@@ -69,7 +69,7 @@ Use `smelt.functions.<name>()` to call a user-defined function:
 -- In a model file
 SELECT
   smelt.functions.safe_divide(revenue, cost) AS margin
-FROM smelt.models.orders
+FROM smelt.orders
 ```
 
 A function's call path is derived from the workspace-relative directory of the file it is declared in, joined with the declared name. The filename stem itself is **not** part of the call path. The mapping is enforced — calling a function under the wrong path is an `UnknownSmeltFn` diagnostic.
@@ -113,7 +113,7 @@ smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
 ```sql
 -- models/shipped_orders.sql
 SELECT *
-FROM smelt.models.orders
+FROM smelt.orders
 WHERE smelt.functions.is_shipped(status)
 ```
 
@@ -124,7 +124,7 @@ Pass arguments by name to improve readability or skip over defaulted parameters:
 ```sql
 SELECT *
 FROM smelt.functions.sessionize(
-  smelt.models.events,
+  smelt.events,
   user_col => user_id,
   ts_col   => event_time,
   gap      => INTERVAL '1 hour'
@@ -208,7 +208,7 @@ Fragment sorts are the key to composable pipelines. They let you pass table-valu
 
 ### TableExpr — table-valued parameters
 
-`TableExpr` parameters accept a table reference (`smelt.models.<name>`, `smelt.sources.<name>`, a CTE, or a subquery):
+`TableExpr` parameters accept a table reference (`smelt.<name>`, `smelt.sources.<name>`, a CTE, or a subquery):
 
 ```sql
 smelt.define add_margin(
@@ -222,7 +222,7 @@ smelt.define add_margin(
 Call it with any table that has at least those columns:
 
 ```sql
-SELECT * FROM smelt.functions.add_margin(smelt.models.orders)
+SELECT * FROM smelt.functions.add_margin(smelt.orders)
 ```
 
 The row-requirement annotation `TableExpr<{revenue: Numeric, cost: Numeric}>` is checked at each call site — the compiler reports a `RowRequirementMissing` diagnostic if the supplied table is missing a required column.

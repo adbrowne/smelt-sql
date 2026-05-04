@@ -24,12 +24,12 @@ def combined_events(project):
     """Combine all event source models into a single UNION ALL."""
     children = project.find_models(tag="event_source")
     if not children:
-        return "SELECT event_id, user_id, event_time, event_type FROM smelt.models.raw_events"
-    refs = [f"SELECT * FROM smelt.models.{m.name}" for m in children]
+        return "SELECT event_id, user_id, event_time, event_type FROM smelt.raw_events"
+    refs = [f"SELECT * FROM smelt.{m.name}" for m in children]
     return " UNION ALL ".join(refs)
 ```
 
-The function name becomes the model name. The function must return a string containing valid SQL (with `smelt.models.<name>` and `smelt.sources.<name>` calls as needed).
+The function name becomes the model name. The function must return a string containing valid SQL (with `smelt.<name>` and `smelt.sources.<name>` calls as needed).
 
 ### The project context
 
@@ -51,7 +51,7 @@ def active_users(project):
     """Users with recent activity."""
     return """
     SELECT user_id, COUNT(*) as activity_count
-    FROM smelt.models.user_sessions
+    FROM smelt.user_sessions
     WHERE session_count > 0
     GROUP BY user_id
     """
@@ -60,7 +60,7 @@ def active_users(project):
 @model
 def inactive_users(project):
     """Users with no recent activity."""
-    return "SELECT user_id FROM smelt.models.user_stats WHERE total_sessions = 0"
+    return "SELECT user_id FROM smelt.user_stats WHERE total_sessions = 0"
 ```
 
 ### Helper functions
@@ -71,7 +71,7 @@ Python files without `@model` decorators are not treated as models. You can use 
 # models/helpers.py -- not a model, just a helper module
 def format_union(model_names):
     """Helper to build UNION ALL queries from a list of model names."""
-    refs = [f"SELECT * FROM smelt.models.{name}" for name in model_names]
+    refs = [f"SELECT * FROM smelt.{name}" for name in model_names]
     return " UNION ALL ".join(refs)
 ```
 
@@ -93,7 +93,7 @@ tags: [daily, summary]
 SELECT
     DATE(event_time) as event_date,
     COUNT(*) as event_count
-FROM smelt.models.events
+FROM smelt.events
 GROUP BY 1
 """
 ```

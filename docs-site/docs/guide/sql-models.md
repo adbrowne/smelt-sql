@@ -8,7 +8,7 @@ smelt models are SQL files in the `models/` directory with optional YAML frontma
 SELECT
   user_id,
   COUNT(*) as event_count
-FROM smelt.models.events
+FROM smelt.events
 GROUP BY 1
 ```
 
@@ -33,27 +33,27 @@ SELECT
   DATE(event_time) as event_date,
   user_id,
   COUNT(*) as event_count
-FROM smelt.models.events
+FROM smelt.events
 GROUP BY 1, 2
 ```
 
 ## References
 
-Use `smelt.models.<name>` to reference other models and seeds:
+Use `smelt.<path>` to reference other models and seeds. Addressing is **flat** — the `models/` scan root is stripped:
 
 ```sql
-SELECT * FROM smelt.models.upstream_model
-SELECT * FROM smelt.models.my_seed  -- seeds are first-class ref targets
+SELECT * FROM smelt.upstream_model
+SELECT * FROM smelt.my_seed  -- seeds are first-class ref targets
 ```
 
 The parser supports named parameters using `=>` syntax:
 
 ```sql
-SELECT * FROM smelt.models.events(filter => date > '2024-01-01')
+SELECT * FROM smelt.events(filter => date > '2024-01-01')
 ```
 
 !!! note
-    Named parameter support in `smelt.models.<name>` is parsed but not yet used at runtime. The primary use case is `smelt.models.model_name`.
+    Named parameter support in `smelt.<name>` is parsed but not yet used at runtime. The primary use case is `smelt.model_name`.
 
 For more on defining external sources, see [Sources](sources.md).
 
@@ -74,7 +74,7 @@ smelt's type inference and LSP diagnostics understand the following SQL patterns
 ```sql
 WITH
   filtered AS (
-    SELECT * FROM smelt.models.events WHERE event_type = 'purchase'
+    SELECT * FROM smelt.events WHERE event_type = 'purchase'
   ),
   summary AS (
     SELECT user_id, COUNT(*) AS purchase_count FROM filtered GROUP BY 1
@@ -92,7 +92,7 @@ SELECT
     WHEN total_spent > 100  THEN 'medium_value'
     ELSE 'low_value'
   END AS value_segment
-FROM smelt.models.user_totals
+FROM smelt.user_totals
 ```
 
 ### EXTRACT
@@ -101,7 +101,7 @@ FROM smelt.models.user_totals
 SELECT
   EXTRACT(YEAR FROM event_timestamp) AS event_year,
   EXTRACT(EPOCH FROM event_timestamp) AS unix_ts
-FROM smelt.models.events
+FROM smelt.events
 ```
 
 ### Subqueries
@@ -110,7 +110,7 @@ FROM smelt.models.events
 SELECT *
 FROM (
   SELECT user_id, SUM(amount) AS total
-  FROM smelt.models.transactions
+  FROM smelt.transactions
   GROUP BY 1
 ) AS sub
 WHERE sub.total > 100
