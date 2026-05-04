@@ -97,6 +97,27 @@ For an incremental run with `[start, end)`:
 
 This is idempotent: re-running the same `[start, end)` range produces the same final state.
 
+### First-run and backfill
+
+A first run (no existing output table) and a backfill (a re-run of a range that has already been written) follow the same DELETE+INSERT contract — the DELETE is a no-op when the partition is absent. The planner picks a chunking shape from the model's batch-safety class (§"Batch safety classification"):
+
+| Class                | Chunking                                                                                   |
+|----------------------|--------------------------------------------------------------------------------------------|
+| `FullyBatchSafe`     | A single DELETE+INSERT pair covers any `[start, end)`. No chunking.                        |
+| `BoundedSafe(n)`     | Auto-sized sub-ranges (the existing 3× context, clamped 7–90 partitions rule). Each sub-range is one DELETE+INSERT pair, executed sequentially in temporal order. |
+| `PerPartitionOnly`   | One partition per iteration, sequential, temporal order. Each partition is one DELETE+INSERT pair. |
+
+**Per-chunk transaction boundary.** Each chunk's DELETE+INSERT is one backend transaction. INSERT failure rolls back the chunk's DELETE. Earlier committed chunks **do not** roll back — partial-progress is intentional, since each chunk is idempotent under the same `[start, end)`.
+
+**Failure mode.** A run halts at the first failed chunk and exits non-zero. Re-running the same `[start, end)` resumes correctly because every committed chunk is idempotent: the next attempt will re-DELETE+INSERT the failed (or any later) range from the same input data and converge to the same final state.
+
+**Late-arriving data (interim guidance).** smelt does **not** automatically re-run partitions when data arrives late. Two interim mitigations:
+
+1. Trail `--event-time-end` behind real-time by the source's known latency window — i.e., always run with an end bound far enough in the past that late-arriving rows are already present.
+2. Run with overlapping ranges — e.g., a daily run that always re-processes the last 7 days' partitions — accepting the redundant work for the correctness guarantee.
+
+A planned automated mechanism is the per-column `data_latency:` annotation (Known Divergences below); until that lands, the two mitigations above are the only options.
+
 ### Batch safety classification
 
 The optimizer analyzes the model's SQL via the CST and classifies each incremental model:
@@ -121,6 +142,21 @@ The optimizer rejects an incremental model if its SQL uses constructs that break
 - `DISTINCT`
 
 Each check can be individually disabled via `incremental.safety_overrides.allow_<check>: true`. Disabling is opt-in and recorded.
+
+### Functions inside incremental bodies
+
+An incremental model body may call transparent functions (`smelt.define`-resolved) and opaque calls (`smelt.extern` declarations, canonical built-ins, source references). Two interactions matter:
+
+1. **Per-model WHERE injection happens at the outer query, not at call sites.** The framework's injected `WHERE partition_column >= start AND partition_column < end` clause is applied once at the outermost SELECT (Execution model step 2). It is **not** pushed into transparent function bodies or opaque call arguments. This is Constraint 4. Source-level filtering (pushing a predicate into a `smelt.<path>` reference inside the body) depends on temporal-dependency analysis and is planned, not implemented; in-body transparent-function expansion happens via the L1 `ExpandTransparentFunctionCalls` rule (`planner_integration.md`), not via WHERE pushdown.
+
+2. **Transparent expansion happens before WHERE injection.** Conceptually, a transparent function call site is replaced with its body during planning, and only then is the per-model WHERE injected. The injected filter therefore applies to the columns visible *after* expansion — including any columns produced inside the transparent body — without the planner needing a separate pushdown rule.
+
+**Batch-safety classification through call sites (current state).** Today, `analyze_batch_safety` and `analyze_temporal_dependencies` (`crates/smelt-planner/src/rules/incremental.rs`, `crates/smelt-planner/src/analysis/temporal.rs`) operate on the outermost CST after frontmatter strip — they do not walk transparent function bodies, and they do not have a special opaque-call branch. Consequences:
+
+- A window-frame, `LAG`/`LEAD`, or temporal join lifted out of a transparent function and inlined at the call site is detected; one buried inside a `smelt.define` body is not yet detected. Aligning the classifier with `ExpandTransparentFunctionCalls` so it walks expanded bodies is open work — see Known Divergences.
+- Opaque calls (`smelt.extern`, built-ins) are not flagged as `PerPartitionOnly` automatically. The classifier sees them as ordinary function calls and classifies based only on the constructs it does recognise. Authors of opaque calls with hidden temporal dependencies must encode the constraint via the model's frontmatter (e.g., declaring a partition-aligned shape) — there is no compiler-enforced check today.
+
+The intent — once the classifier walks expanded transparent bodies, transparent calls inherit the body's class; opaque calls are treated conservatively (likely forcing `PerPartitionOnly`) — is captured here so future plans don't have to re-derive it. Cross-link: `planner_integration.md` §"Optimization boundary: transparent vs black-box".
 
 ### `partition_column` validation
 
@@ -153,7 +189,7 @@ This section captures the load-bearing rationale behind the incremental model su
 1. **Logical model is pure SQL.** No `is_incremental()`, no `{{ ... }}` macros, no conditional branches. The same SQL describes both the full-build and the incremental-build behavior; the framework injects the time filter.
 2. **Strategy is not on the model.** Frontmatter declares `unique_key` and `partition_column`; the backend chooses `DeleteInsert` / `Merge` / etc. Model files do not name a strategy.
 3. **smelt does not manage computational state.** Watermarks, offsets, and run-history live in the backend. The framework only generates SQL artifacts.
-4. **Time filter injection is per-model.** The injected `WHERE` is applied to the outer model query once, not pushed into each `smelt.<path>` reference in the body. Source-level filtering depends on temporal-dependency analysis (planned).
+4. **Time filter injection is per-model.** The injected `WHERE` is applied to the outer model query once, not pushed into each `smelt.<path>` reference in the body. Source-level filtering depends on temporal-dependency analysis (planned); function-body filtering happens via the L1 expand-transparent-function rule (`planner_integration.md`), not via pushdown.
 5. **Idempotence under fixed input.** For a given backend and unchanged source data, running the same `[start, end)` range repeatedly converges to the same output table state.
 6. **Granularity is closed under partition arithmetic.** A `[start, end)` range must align to whole granularity units; partial-unit ranges are rejected.
 7. **Safety check overrides are explicit.** A safety override must name the specific check it bypasses. There is no global "disable all safety checks" switch.

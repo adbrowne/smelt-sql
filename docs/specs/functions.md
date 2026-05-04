@@ -272,7 +272,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 - `docs/specs/scoping.md` — body-scope name resolution (parameters-first, no-overlap, splice contexts)
 - `docs/specs/gradual_typing.md` — Tier 1/2/3 checking model and error-tracing contract
 - `docs/specs/planner_integration.md` — how frontmatter properties feed planner rules
-- `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`)
+- `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
 
 ### Research
 
