@@ -65,6 +65,8 @@ Prints a message indicating that docs are embedded in the binary and advises usi
 - Model name as heading; model description (if set)
 - Metadata: Materialization, Owner (if set), Tags (if any)
 - Columns table: `Column | Type | Nullable | Description | Tests`
+  - The per-column **Tests** cell lists the column-level test constraints declared under `columns.<col>.tests` in the model's frontmatter (`models.md` §"`columns:` — column metadata"). Cell content is the comma-separated test names; an empty cell means no column-level tests are declared.
+- **Tests** section: a bulleted list of every test model that targets this model — i.e. every `materialization: test` model with `test.model: <this model>` in its frontmatter (`testing.md` §"`test:` frontmatter key"). Each bullet is the test name, linking to the test model's source location. The section is omitted when no test models target this one.
 - Upstream dependencies (links to upstream model pages)
 - Downstream dependencies (links to downstream model pages)
 - Incremental config section (only if the model is incremental): granularity, partition column, event time column, unique key
@@ -133,9 +135,7 @@ Prints a message indicating that docs are embedded in the binary and advises usi
 Each column in the catalog is built from two sources, merged:
 
 1. **Type inference** (Salsa DB): `data_type`, `nullable`, `expression`, and `source` (lineage). If type inference cannot determine a field, that field is omitted.
-2. **Frontmatter metadata** (`columns:` in model YAML frontmatter): `description`, `tests`. If no frontmatter entry exists for a column, these fields are absent.
-
-The frontmatter `columns:` key maps column names to metadata objects:
+2. **Frontmatter metadata** (the `columns:` map in model YAML frontmatter): `description` and `tests`. The full `columns:` shape is owned by `models.md` §"`columns:` — column metadata" — this spec only specifies which keys are rendered into the catalog. If no frontmatter entry exists for a column, the description and tests fields are absent from the catalog output.
 
 ```yaml
 columns:

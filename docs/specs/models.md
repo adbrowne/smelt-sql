@@ -92,17 +92,23 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 2. `models.<name>.materialization` in `smelt.yml`
 3. `default_materialization` in `smelt.yml` (fallback: `view`)
 
-### Column metadata
+### `columns:` — column metadata
 
-Under `columns:`, each key is a column name and each value is an object with:
+> **Canonical home.** This section pins the full shape of the per-model `columns:` frontmatter map. Adjacent specs (`schema_evolution.md`, `data_catalog.md`, `testing.md`) reference this section rather than duplicating the schema; they only define keys they normatively own (e.g. evolution semantics, catalog rendering).
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `description` | string | Column description; surfaced in data catalog |
-| `data_latency` | object | Late-arrival configuration for incremental safety analysis |
-| `tests` | list | Column-level test constraints (`not_null`, `unique`, `{accepted_values: [...]}`, etc.) |
-| `default` | string | Raw SQL expression for the column's default value during schema evolution |
-| `backfill` | string | Raw SQL expression for backfilling existing rows when a column is added |
+Under `columns:`, each key is a column name. Each value is an object with the keys below. All keys are optional; omitted keys have no effect. The map is read by the type checker, the data catalog, the schema-evolution path, and the LSP — each consumes the keys it cares about and ignores the rest.
+
+| Key | Type | Description | Owning spec |
+|-----|------|-------------|-------------|
+| `description` | string | Human-readable column description. Rendered in the data catalog. | `data_catalog.md` |
+| `tests` | list | Column-level test constraints (`not_null`, `unique`, `{accepted_values: [...]}`, etc.). | `testing.md` |
+| `data_latency` | object | Late-arrival configuration consumed by incremental batch-safety analysis. | `incremental_models.md` |
+| `default` | string | SQL literal used as the DEFAULT expression when adding a NOT NULL column under schema evolution. | `schema_evolution.md` |
+| `backfill` | string | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. | `schema_evolution.md` |
+
+Column **types** are not declared in this map — they are derived by the type-inference system from the model's SQL (see `types.md`). Catalog output and LSP hover both read inferred types. A future per-column `type:` annotation has not been specified.
+
+Columns named in `columns:` but absent from the inferred schema are silently dropped from catalog output (`data_catalog.md` Semantics §"Column description sources"). Columns present in the inferred schema but absent from `columns:` appear in the catalog without per-column metadata.
 
 ### Reference syntax
 

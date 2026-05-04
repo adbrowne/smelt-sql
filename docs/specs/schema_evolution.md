@@ -1,7 +1,7 @@
 ---
 feature: schema_evolution
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -74,19 +74,19 @@ model_name: REMOVED
 
 ### Column evolution annotations
 
-Model frontmatter may include per-column annotations used during evolution:
-
-```yaml
-columns:
-  - name: status
-    default: "'active'"        # SQL expression for new NOT NULL column default
-    backfill: "lower(status)"  # SQL UPDATE expression run after column addition
-```
+The `columns:` frontmatter map (full shape: see `models.md` §"`columns:` — column metadata") includes two per-column keys consumed by the schema-evolution path:
 
 | Key | Description |
 |-----|-------------|
 | `default` | SQL literal used as the DEFAULT expression when adding a NOT NULL column. Required when adding a NOT NULL column to an existing table. |
 | `backfill` | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. |
+
+```yaml
+columns:
+  status:
+    default: "'active'"        # SQL expression for new NOT NULL column default
+    backfill: "lower(status)"  # SQL UPDATE expression run after column addition
+```
 
 ## Semantics
 
