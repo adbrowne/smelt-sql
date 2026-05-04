@@ -1,7 +1,7 @@
 ---
 feature: seeds
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -40,7 +40,11 @@ A YAML carrying only `description:` (no `columns:`, no `materialization:`) is va
 
 `view` and `materialized_view` are not currently supported for seeds and produce a hard error at load time.
 
+> **v1 sharp edge — ephemeral seed size.** Declaring `materialization: ephemeral` on a large CSV (e.g. 100k rows) will generate a `VALUES` literal of dangerous size that may cause query compilation failures or very slow execution. There is no row-count threshold in v1 — the choice is left to the user. A future warn-then-error threshold is open. Use `materialization: table` for any seed that is larger than a few thousand rows.
+
 ### CSV format the loader accepts
+
+> **v1 sharp edge — no per-seed override.** The CSV loader accepts one fixed format in v1: comma delimiter, double-quote quoting, mandatory header row, UTF-8, empty cell = NULL. There is no way to configure a custom delimiter, NULL marker, or quote character per-seed. If a data source produces non-standard CSVs, convert them at the source before placing them in the seeds directory.
 
 The loader is strict (no per-seed override surface in v1):
 
@@ -58,7 +62,9 @@ CSVs that do not match this format produce a hard error with file/line/column po
 When a sidecar YAML does not declare `columns:`, smelt infers each column's type from the CSV data. Two phases consume the same inference rules:
 
 - **Compile time** (LSP, `smelt table`, type-checking downstream models): samples the **first 100 data rows**.
-- **Runtime** (`smelt seed`, `smelt build`): reads the **whole file** and infers from every row. Runtime types may be wider than compile-time types when the first 100 rows happen to fit a narrower type.
+- **Runtime** (`smelt seed`, `smelt build`): reads the **whole file** and infers from every row.
+
+> **v1 sharp edge — compile/runtime type divergence.** When the first 100 rows fit a narrower type than the full file, the compile-time inferred type and the runtime inferred type will differ. For example, if rows 1–100 all contain integers but row 101 contains `1.5`, compile time infers `INTEGER` while runtime infers `DECIMAL`. Downstream models type-checked at compile time will see the narrower type; the seed will be loaded with the wider type at runtime. Pin the schema in a sidecar YAML (`columns:`) to prevent this divergence. Cross-link: `lsp.md` for the LSP's compile-time view of seed types.
 
 Both phases apply the same precedence:
 
@@ -145,7 +151,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 **Rejected alternatives.**
 
 - *Auto-detect delimiter/quote like DuckDB.* Surface that magic only matters when a user has a non-standard CSV; we'd rather have them convert it explicitly or override in the (future) sidecar config.
-- *Tests on seed columns now.* The architecture spec defers `smelt.test` semantics; reserving a `tests:` key now makes promises we cannot keep. Tests land in the shared YAML when the tests spec exists.
+- *Tests on seed columns now.* `testing.md` covers `materialization: test` models but does not yet specify column-level assertions on a seed sidecar; reserving a `tests:` key now would commit to a shape before that surface lands. The shared YAML grows uniformly when it does.
 - *`view` and `materialized_view` materialization for seeds.* A view backed by `VALUES` is technically possible but offers little over `ephemeral` (inline) or `table` (real). Out of scope until a concrete need emerges.
 
 ## Constraints & Invariants
@@ -164,7 +170,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 - **Implementation lags spec (partial).** The CSV parser, type inferencer, Arrow batch builder, `Backend::load_table` wiring (Phase 4), sidecar YAML parsing/validation, ephemeral seed CTE expansion, and materialization dispatch (Phase 5) are implemented. The LSP affordances — missing-sidecar diagnostic and "Pin schema" code action (Phase 7) — are implemented. Per-entity source YAMLs (Phase 6) are implemented; the aggregate `sources.yml` format is removed.
 - **Drift diagnostic between CSV and pinned YAML.** The "Re-pin schema from CSV" LSP code action is in scope here, but the diagnostic that surfaces drift (column added/removed, inferred type drift) is implementation-deferred to the LSP plan.
 - **Ephemeral seed size limits.** A 100k-row CSV declared `materialization: ephemeral` would generate a `VALUES` literal of dangerous size. A future row-count threshold (warn, then error) is open; today's spec leaves the choice to the user.
-- **Tests on seed columns.** The shared YAML does not yet support `tests:`. Tests on seed/source/model columns will land together when `tests.md` exists.
+- **Tests on seed columns.** The shared YAML does not yet support `tests:`. Column-level tests on seed/source/model columns will land together when `testing.md` grows that surface (it currently covers only `materialization: test` model files).
 - **`view` / `materialized_view` materialization for seeds.** Not supported in v1. Possible if a concrete need emerges; would lower as `CREATE VIEW … AS SELECT * FROM (VALUES …)` or backend-equivalent.
 - **Migration tooling.** No `smelt migrate` command exists. A bundled examples migration and a documentation note are the v1 story; a tool is a follow-up plan.
 

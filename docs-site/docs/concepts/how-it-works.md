@@ -4,7 +4,7 @@
 
 smelt is a SQL-to-SQL compiler and orchestrator for data transformation pipelines. You write SQL models that reference each other using `smelt.<path>`, and smelt takes care of the rest: resolving dependencies, compiling to target-specific SQL, and executing against your database.
 
-`smelt.<path>` is the universal addressing scheme: the path is the workspace-relative directory joined with the entity's name, so a model at `models/staging/user_logins.sql` is referenced as `smelt.models.staging.user_logins`. Every project entity — model, source, seed, function, or test — is addressed the same way.
+`smelt.<path>` is the universal addressing scheme: the path is the workspace-relative directory joined with the entity's name, so a model at `models/staging/user_logins.sql` is referenced as `smelt.staging.user_logins` (the `models/` scan root is stripped). Every project entity — model, source, seed, function, or test — is addressed the same way.
 
 ```sql
 -- models/marts/active_users.sql
@@ -14,7 +14,7 @@ materialization: table
 SELECT
     user_id,
     COUNT(*) AS login_count
-FROM smelt.models.staging.user_logins
+FROM smelt.staging.user_logins
 WHERE login_date >= CURRENT_DATE - INTERVAL '30 days'
 GROUP BY user_id
 ```
@@ -27,7 +27,7 @@ The core architectural insight behind smelt is the separation of **what to compu
 
 **Logical layer (what you write):**
 
-- SQL models with `smelt.<path>` calls (e.g., `smelt.models.staging.users`)
+- SQL models with `smelt.<path>` calls (e.g., `smelt.staging.users`)
 - YAML frontmatter for configuration
 - Pure data transformation logic
 
@@ -97,7 +97,7 @@ incremental:
   partition_column: event_date
   granularity: day
 ---
-SELECT * FROM smelt.models.events
+SELECT * FROM smelt.events
 ```
 
 ### Automatic incrementalization
@@ -132,7 +132,7 @@ Model
 :   A SQL file in `models/` that defines a data transformation. Each model produces one table or view.
 
 Ref
-:   `smelt.<path>` addresses any project entity — model, source, seed, function, or test. The path maps to the entity's filesystem location relative to the workspace root (e.g., `smelt.models.marts.customers` for `models/marts/customers.sql`). smelt resolves these to actual table names and ensures correct execution order.
+:   `smelt.<path>` addresses any project entity — model, source, seed, function, or test. The path maps to the entity's filesystem location relative to the workspace root, with the `models/` scan root stripped (e.g., `smelt.marts.customers` for `models/marts/customers.sql`). smelt resolves these to actual table names and ensures correct execution order.
 
 Source
 :   A `.yml` file in `sources/` declaring an external table that smelt does not manage. Referenced via `smelt.<path>` like any other entity (e.g., `smelt.sources.raw.events` for `sources/raw/events.yml`). smelt validates schema correctness but does not create or modify source tables.

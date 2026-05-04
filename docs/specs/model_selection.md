@@ -1,7 +1,7 @@
 ---
 feature: model_selection
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -59,19 +59,19 @@ Both flags are repeatable. Each instance adds one selector to the set.
 
 ### Graph traversal
 
-`+` prefix (upstream): includes the target model(s) and every model they transitively depend on, following `smelt.models.<name>` and `smelt.sources.<name>` references.
+`+` prefix (upstream): includes the target model(s) and every model they transitively depend on, following every `smelt.<path>` reference (whether the resolved entity is a model, seed, or source).
 
 `+` suffix (downstream): includes the target model(s) and every model that transitively depends on them.
 
 `+name+` is the union of both traversal directions starting from `name`.
 
-Seeds are included in upstream traversal when a model references a seed via `smelt.models.<seed_name>`. Ephemeral models are included in traversal even though they are not materialized.
+Seeds are included in upstream traversal when a model references a seed via `smelt.<path>`. Ephemeral models are included in traversal even though they are not materialized.
 
 **No depth limit.** Upstream and downstream traversal are unbounded — they walk the entire reachable subgraph, not just N levels.
 
 ### Tag matching
 
-A model matches `tag:X` if tag `X` appears in its effective tag set (the merged union of `smelt.yml` model config tags and frontmatter tags — see `models.md`). Tag matching is case-sensitive.
+A model matches `tag:X` if tag `X` appears in its effective tag set (the merged union of `smelt.yml` model config tags and frontmatter tags — see `models.md` §"Tag merging" for the merge rule and the case-sensitivity contract).
 
 If no model in the project has the given tag, the selector matches nothing (no error). The resulting working set may be empty.
 
@@ -83,9 +83,9 @@ A `ModelName` selector that names a model not in the project matches nothing (no
 
 ## Design
 
-**`+` as directional modifier, not separate flag.** Upstream and downstream expansion are inline modifiers on each selector rather than separate flags (e.g., `--upstream`, `--downstream`). This lets each selector carry its own traversal intent, which is useful when mixing: `--select +A --select B+` expands A's upstreams and B's downstreams independently before taking the union.
+**`+` as directional modifier, not separate flag.** Upstream and downstream expansion are inline modifiers on each selector rather than separate flags (e.g., `--upstream`, `--downstream`). This lets each selector carry its own traversal intent, which is useful when mixing: `--select +A --select B+` expands A's upstreams and B's downstreams independently before taking the union. Separate `--upstream` / `--downstream` flags were rejected because they apply globally to all selectors — you cannot say "expand upstream for A but downstream for B" without splitting into two command invocations.
 
-**Union semantics for multiple `--select`.** Multiple `--select` flags add to the set, not narrow it. This mirrors common shell usage: `grep -e pat1 -e pat2` means OR, not AND. Narrowing (intersection) would require a different flag or syntax and is not supported today.
+**Union semantics for multiple `--select`.** Multiple `--select` flags add to the set, not narrow it. This mirrors common shell usage: `grep -e pat1 -e pat2` means OR, not AND. Intersection semantics were rejected because the most common use case for multiple `--select` is "run these models and those models" — not "run models that match all criteria simultaneously." Users who need intersection can apply `--exclude` as a post-pass.
 
 **Exclusion as post-pass.** Applying `--exclude` after the full selection (including traversal) is simpler to reason about than applying it before traversal. The user can say "select X and all its upstreams, except model Y" and get a predictable result regardless of where Y appears in X's dependency tree.
 
@@ -97,7 +97,7 @@ A `ModelName` selector that names a model not in the project matches nothing (no
 2. **Union of selectors, not intersection.** Multiple `--select` flags produce a union.
 3. **Exclusion is applied after all inclusion expansions.** An excluded model cannot be re-included by a separate `--select`.
 4. **No-match is not an error.** A selector that matches no models produces no error; the working set may become empty.
-5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`.
+5. **Tag matching is case-sensitive.** `tag:Revenue` does not match a model tagged `revenue`. The case-sensitivity contract is owned by `models.md` §"Tag merging"; this rule cross-references it.
 
 ## Known Divergences / Open Questions
 

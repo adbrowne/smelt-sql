@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-04-28
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -202,6 +202,18 @@ A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.defi
 | `SELECT 1 UNION SELECT 'a'` | `Unknown` per column | `TypeMismatch` |
 | Window function in `WHERE` | flagged | `WindowInScalarContext` |
 
+## Design
+
+This section captures the load-bearing rationale behind the type system's shape and the alternatives that were considered and rejected.
+
+**Strict-by-default, no implicit cross-family coercion.** The Semantics §"Strict-by-default doctrine" rule — `42 + '3'` is a `TypeMismatch`, not a silent string-to-int coercion — is the single most user-visible decision in the type system. It is doctrine because every alternative we considered traded near-term ergonomics for far-more-expensive long-term debugging. *Implicit coercion across families* (the SQL-92 / MySQL shape) was rejected because it lets schema drift hide for months: a column that quietly turns from `INTEGER` to `VARCHAR` upstream still type-checks downstream and silently corrupts joins. *Configurable strictness* (a `--strict` flag, or per-project lenient mode) was rejected because once strict diagnostics are optional, large projects negotiate them away and the framework loses its strongest correctness lever. The strict rule is paid back in two ways: the LSP offers one-click `CAST` quick-fixes, and committed code has a single, documented, mechanical answer to "why did this expression infer `Unknown`?".
+
+**Single `DataType` vocabulary across all backends.** `DataType` is one enum in one crate (`smelt-types`); backend-specific names (`HUGEINT`, `STRING`, `TIMESTAMPTZ`) parse into the enum on input, and `to_backend_sql()` is the only path that emits an engine-specific name. *Per-backend type vocabularies* (one `DataType` for DuckDB, another for Spark, another for Postgres) was rejected because cross-backend reasoning — incremental models that read DuckDB and write Spark, function signatures portable across engines, type-aware diagnostics in the LSP — would require a translation layer at every boundary, and translation layers are where correctness goes to die. The trade-off is that adding an engine-native type that no other backend supports requires either a new `DataType` variant (semi-permanent) or a `<backend>.<type>(...)` opt-in (the `postgres.sum(...)` shape from §"Canonical built-in returns"). That cost is paid by the few projects that need it, not by the ecosystem as a whole.
+
+**Engine-alias normalisation is a parser concern, not an inference concern.** The aliases `INT`, `INT4`, `STRING`, `BOOL`, `BYTEA`, `TIMESTAMPTZ` are normalised on input by `crates/smelt-types/src/parse.rs`; type inference operates only on canonical `DataType` values. *Carrying alias spellings through inference* was rejected because it doubles the surface every inference rule has to handle ("does `Integer + Int` unify? does `Text + String` round-trip?") with no semantic value — every such pair is the same type. Normalising at the boundary keeps the inference rules clean and means the test surface for type inference doesn't have to enumerate alias permutations.
+
+**Local, bidirectional checking; no global constraint solver.** Each function call's row-variable unification, generic binding, and constraint discharge happens at the call site (§"Bidirectional checking", §"Generics inference"). *Global constraint propagation* (a Hindley-Milner-style solver across the whole workspace) was rejected because workspaces grow to thousands of models and millions of inferred columns, and global solvers do not survive that scale gracefully — incremental recompilation in particular suffers, since one edit can invalidate constraints far away. Local checking means the LSP's "what's the type of this expression?" question always has a fast answer, and parameterised functions feel like local reasoning ("what does `T` bind to here?") not deep magic. The trade-off is that callers must annotate `smelt.define` signatures whose generics cannot be inferred locally — a price we accept (the function form is `smelt.extern` / built-ins; user-defined `smelt.define` is monomorphic in v1).
+
 ## Constraints & Invariants
 
 - The `DataType` enum in `crates/smelt-types/src/lib.rs` is the single SQL-type vocabulary; backend-specific names (HUGEINT, STRING, TIMESTAMPTZ) parse into it on input, and `to_backend_sql()` is the only emission path that produces an engine-specific name.
@@ -216,12 +228,13 @@ A model `m` (a bare `SELECT` in some `.sql` file) is equivalent to a `smelt.defi
 ## Known Divergences / Open Questions
 
 - **Promotion chain implementation drift.** `crates/smelt-db/src/type_inference.rs::promote_types` orders the chain `SmallInt < Integer < BigInt < Float < Decimal < Double` (with the integer/Decimal mixing rule producing `Decimal(38,10)`). `docs/type_semantics.md` documents `Float < Decimal < Double`. The normative chain in this spec is the research-aligned one (§16 #9): `SmallInt < Integer < BigInt < Decimal < Double`, `Float` collapsed into `Double`. Implementation conformance is a follow-up plan.
-- **Decimal precision/scale arithmetic is deferred.** The current `Decimal(38,10)` widening rule is the v1 fallback; a future spec will define proper Decimal precision arithmetic (`Decimal(p1, s1) + Decimal(p2, s2)`).
+- **Decimal arithmetic v1 fallback.** Decimal arithmetic in v1 produces `Decimal(38,10)` regardless of operand precision (e.g. `Decimal(19,2) + Decimal(19,2) → Decimal(38,10)`), where DuckDB native produces `Decimal(19,2)`. The fallback is conservative and avoids precision-loss; precision-aware inference is open. (See `architecture.md` §"Specs not yet authored".)
 - **Nullability scope mismatch.** The column-level `nullable: bool` flag is implemented and load-bearing in inference, but it does not appear in `smelt.define` parameter types (§16 #10). This spec scopes nullability to the column form only.
 - **Fragment sort coverage.** `Expr<T>`, `TableExpr`, and `TableExpr<{…}>` are landed. `AggExpr<T>` and `WindowExpr<T>` are partially landed: the `ExprKind` axis enforces the kind ceiling at splice points (`WindowInScalarContext`), but type-annotation parsing for `AggExpr<T>` / `WindowExpr<T>` may still be in flight per the smelt-functions plan (Step 3, Phase 13). Validate against the live `crates/smelt-types/src/signatures.rs::SmeltType` enum.
 - **`Float` as a distinct DataType.** `DataType::Float` exists in code; research treats Float as Double. This spec aligns with research and lists `Float` collapsing into `Double` as the normative rule. `Float` may be removed from the enum in a future plan.
 - **`docs/type_semantics.md` overlap.** The legacy quasi-spec contains backend-divergence material that is still useful (DuckDB/Spark divergence registry). Recommendation: keep it as a backend-divergence appendix referenced from this spec; over time, fold or trim.
 - **`Map<K,V>` rules.** `DataType::Map` exists in the vocabulary but research is silent on its semantics. This spec marks `Map` as non-`Ordered`; broader rules for Map equality, ordering, and arithmetic remain open.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

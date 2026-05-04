@@ -52,7 +52,7 @@ test:
 
 ## Whole-model tests
 
-A whole-model test runs the entire model with mocked dependencies. Each key in `inputs` corresponds to a `smelt.models....` call in the model's SQL.
+A whole-model test runs the entire model with mocked dependencies. Each key in `inputs` corresponds to a `smelt.<name>` call in the model's SQL.
 
 ```sql
 --- name: test_user_activity ---
@@ -73,7 +73,7 @@ test:
 ---
 ```
 
-The framework replaces `smelt.models.users` and `smelt.models.events` with CTEs containing the mock data, then executes the rewritten query and compares the result to `expect`.
+The framework replaces `smelt.users` and `smelt.events` with CTEs containing the mock data, then executes the rewritten query and compares the result to `expect`.
 
 ## CTE-level tests
 
@@ -187,7 +187,7 @@ SELECT
     user_id,
     amount,
     created_at AS order_date
-FROM smelt.models.raw_orders
+FROM smelt.raw_orders
 WHERE status = 'completed'
 
 --- name: test_cleaned_orders ---

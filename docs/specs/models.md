@@ -1,13 +1,13 @@
 ---
 feature: models
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
 # Models
 
-> **What this is.** A normative spec for SQL model files — the core unit of computation in smelt. Covers file format, YAML frontmatter schema, model naming, materialization modes, and the `smelt.models.<name>` reference surface.
+> **What this is.** A normative spec for SQL model files — the core unit of computation in smelt. Covers file format, YAML frontmatter schema, model naming, materialization modes, and the `smelt.<path>` reference surface as it applies to models. The universal addressing scheme is defined in `architecture.md` §"Resolution".
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 
@@ -15,7 +15,7 @@ owners: [andrew]
 
 ### File format
 
-A model is a `.sql` file discovered by recursively walking each directory listed in `model_paths` (default: `["models"]`). Files may be:
+A model is a `.sql` file discovered by recursively walking each directory listed in `paths:` (default: `["models"]`; see `smelt_yml.md`). Files may be:
 
 **Single-model** — the file contains one SQL query, optionally preceded by YAML frontmatter:
 
@@ -26,7 +26,7 @@ tags: [revenue, core]
 ---
 
 SELECT order_date, SUM(amount) AS revenue
-FROM smelt.models.orders
+FROM smelt.orders
 GROUP BY 1
 ```
 
@@ -42,7 +42,7 @@ SELECT * FROM smelt.sources.raw.orders WHERE status != 'cancelled'
 materialization: table
 ---
 SELECT DATE(order_time) AS order_date, SUM(amount) AS revenue
-FROM smelt.models.staging_orders
+FROM smelt.staging_orders
 GROUP BY 1
 ```
 
@@ -53,9 +53,9 @@ Each section delimiter must follow the exact form `--- name: <model_name> ---` (
 | File type | Name source |
 |-----------|-------------|
 | Single-model | `file_stem()` — the filename without extension (e.g. `daily_revenue.sql` → `daily_revenue`) |
-| Multi-model | The `--- name: <model_name> ---` delimiter; the optional `name:` YAML key in the section body is ignored |
+| Multi-model | The Layer 1 `--- name: <model_name> ---` section delimiter; the optional `name:` YAML key in the section body (Layer 2 frontmatter) is ignored |
 
-The `name:` frontmatter key in single-model files is accepted by the parser but has no effect on the model's identity; the file stem is always authoritative.
+The `name:` frontmatter key in single-model files is accepted by the parser but has no effect on the model's identity; the file stem is always authoritative. Identity in multi-model files comes from the Layer 1 section delimiter, never from Layer 2 (declaration frontmatter) `name:` keys — see `architecture.md` §"Resolution" for the two-layer file-format stack and the universal addressing rules.
 
 ### YAML frontmatter keys
 
@@ -92,34 +92,42 @@ All keys are optional. Unknown keys are a **hard error** (`deny_unknown_fields` 
 2. `models.<name>.materialization` in `smelt.yml`
 3. `default_materialization` in `smelt.yml` (fallback: `view`)
 
-### Column metadata
+### `columns:` — column metadata
 
-Under `columns:`, each key is a column name and each value is an object with:
+> **Canonical home.** This section pins the full shape of the per-model `columns:` frontmatter map. Adjacent specs (`schema_evolution.md`, `data_catalog.md`, `testing.md`) reference this section rather than duplicating the schema; they only define keys they normatively own (e.g. evolution semantics, catalog rendering).
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `description` | string | Column description; surfaced in data catalog |
-| `data_latency` | object | Late-arrival configuration for incremental safety analysis |
-| `tests` | list | Column-level test constraints (`not_null`, `unique`, `{accepted_values: [...]}`, etc.) |
-| `default` | string | Raw SQL expression for the column's default value during schema evolution |
-| `backfill` | string | Raw SQL expression for backfilling existing rows when a column is added |
+Under `columns:`, each key is a column name. Each value is an object with the keys below. All keys are optional; omitted keys have no effect. The map is read by the type checker, the data catalog, the schema-evolution path, and the LSP — each consumes the keys it cares about and ignores the rest.
+
+| Key | Type | Description | Owning spec |
+|-----|------|-------------|-------------|
+| `description` | string | Human-readable column description. Rendered in the data catalog. | `data_catalog.md` |
+| `tests` | list | Column-level test constraints (`not_null`, `unique`, `{accepted_values: [...]}`, etc.). | `testing.md` |
+| `data_latency` | object | Late-arrival configuration consumed by incremental batch-safety analysis. | `incremental_models.md` |
+| `default` | string | SQL literal used as the DEFAULT expression when adding a NOT NULL column under schema evolution. | `schema_evolution.md` |
+| `backfill` | string | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. | `schema_evolution.md` |
+
+Column **types** are not declared in this map — they are derived by the type-inference system from the model's SQL (see `types.md`). Catalog output and LSP hover both read inferred types. A future per-column `type:` annotation has not been specified.
+
+Columns named in `columns:` but absent from the inferred schema are silently dropped from catalog output (`data_catalog.md` Semantics §"Column description sources"). Columns present in the inferred schema but absent from `columns:` appear in the catalog without per-column metadata.
 
 ### Reference syntax
 
-Within model SQL, other models are referenced using `smelt.models.<name>`:
+Within model SQL, every project-defined entity — model, seed, source — is referenced using the universal `smelt.<path>` form (see `architecture.md` §"Resolution"). The path is the entity's workspace location with the matching `paths:` scan-root prefix stripped:
 
 ```sql
-FROM smelt.models.upstream_model
-FROM smelt.models.my_seed       -- seeds are valid ref targets
+FROM smelt.upstream_model         -- model at models/upstream_model.sql
+FROM smelt.staging.cleaned        -- model at models/staging/cleaned.sql
+FROM smelt.my_seed                -- seed at seeds/my_seed.csv (seeds are valid ref targets)
+FROM smelt.sources.raw.events     -- source at sources/raw/events.yml
 ```
 
-Named parameter syntax is parsed but **not executed at runtime**:
+Models can also be invoked as parameterised functions when they declare `TableExpr` parameters (`architecture.md` §"Models as functions"). Named-argument syntax binds parameters by name; bare `smelt.<path>` (without parens) is shorthand for the DAG-default binding:
 
 ```sql
-FROM smelt.models.events(filter => date > '2024-01-01', limit => 1000)
+FROM smelt.events(filter => date > '2024-01-01', limit => 1000)
 ```
 
-External sources are referenced using `smelt.sources.<schema>.<table>` (see `sources.md`).
+Calling a non-parameterised model with arguments, or omitting required parameters of a parameterised model without DAG defaults, is a hard error.
 
 ### Constraint violations
 
@@ -137,13 +145,13 @@ External sources are referenced using `smelt.sources.<schema>.<table>` (see `sou
 
 ### Model discovery
 
-smelt recursively walks each path in `model_paths` (resolved relative to the project root), following symlinks, and collects all `.sql` files. Files are parsed independently — multi-model files yield multiple `ModelFile` entries, one per section.
+smelt recursively walks each path in `paths:` (resolved relative to the project root), following symlinks, and collects all `.sql` files. Files are parsed independently — multi-model files yield multiple `ModelFile` entries, one per section.
 
 Model names must be unique across the project. If two models produce the same name (e.g., `models/users.sql` and `models/archive/users.sql`), behavior is undefined (last writer wins in the current implementation).
 
 ### Ephemeral inlining
 
-An `ephemeral` model's SQL is substituted as a CTE at each point a downstream model references it via `smelt.models.<name>`. The ephemeral model itself is never materialized. If multiple downstream models reference the same ephemeral, each gets an independent copy of the CTE; there is no shared materialization.
+An `ephemeral` model's SQL is substituted as a CTE at each point a downstream model references it via `smelt.<path>`. The ephemeral model itself is never materialized. If multiple downstream models reference the same ephemeral, each gets an independent copy of the CTE; there is no shared materialization.
 
 Transitive ephemeral chains are resolved: if `a` references ephemeral `b`, which references ephemeral `c`, then `a` gets both `b` and `c` as CTEs.
 
@@ -154,6 +162,8 @@ A model's effective tags are the deduplicated union of:
 2. Tags listed in the model's `tags:` frontmatter
 
 Order within the merged list is smelt.yml tags first, frontmatter tags second, with duplicates removed on second occurrence.
+
+**Tag case-sensitivity.** Tag string comparison is case-sensitive throughout: `Revenue` and `revenue` are different tags. The merged set treats them as distinct entries; selectors (`tag:Revenue` vs `tag:revenue` per `model_selection.md`) match the exact case that appears in the merged set.
 
 ### Materialization change
 
@@ -173,9 +183,9 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 
 **Tag union, not override.** Tags accumulate across config layers rather than overriding. This lets a project-level `smelt.yml` add organization-wide tags (e.g., `pii`, `sla`) to specific models without preventing model authors from adding their own. Override semantics would require model authors to re-declare all project-level tags whenever they add their own.
 
-**`deny_unknown_fields`.** Strict field validation catches typos before execution. The alternative — silently ignoring unknown keys — hides configuration mistakes and makes frontmatter edits feel non-deterministic. The error message from `serde` names the offending field, which is sufficient for the user to correct it.
+**`deny_unknown_fields`.** Model frontmatter is the user-authored side of the unknown-key doctrine in `architecture.md` §"Constraints & Invariants" §8: user-authored content rejects unknown keys so typos surface immediately. The alternative — silently ignoring unknown keys — hides configuration mistakes and makes frontmatter edits feel non-deterministic. The error message from `serde` names the offending field, which is sufficient for the user to correct it.
 
-**Named parameters parsed but deferred.** `smelt.models.name(filter => ...)` syntax is parsed to avoid breaking the grammar if/when it is implemented. It is not executed today. The note in user docs is the authoritative statement of current status.
+**Named parameters parsed but deferred.** `smelt.<path>(filter => ...)` syntax is parsed to avoid breaking the grammar if/when full parameterised-model execution is implemented (see `architecture.md` §"Models as functions"). DAG-defaulted bare references work today; parameter-binding overrides at call sites are pre-execution. The note in user docs is the authoritative statement of current status.
 
 ## Constraints & Invariants
 
@@ -189,9 +199,9 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 ## Known Divergences / Open Questions
 
 - **`test` mode missing from materializations user guide.** `docs-site/docs/guide/materializations.md` documents four materialization types; `test` is absent. It is documented only in the testing guide. Should be added to materializations page.
-- **Duplicate model names undefined.** If `models/users.sql` and `models/archive/users.sql` both exist, the current implementation uses last-discovery order with no diagnostic. The spec mandates uniqueness; the implementation should emit an error.
+- **Duplicate model names undefined.** Names must be unique within a project (Constraint 4) and within a file (across bare SELECTs, `smelt.define`s, and `smelt.extern`s, per `architecture.md` §"Bare-model naming"). The current implementation enforces neither: if `models/users.sql` and `models/archive/users.sql` both exist, last-discovery order wins with no diagnostic; if a single multi-model file declares two `--- name: users ---` sections (Layer 1), `crates/smelt-core/src/metadata.rs::extract_multi_model` accepts both with no diagnostic. The spec mandates uniqueness in both cases; the implementation should emit an error in both cases.
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
-- **Named parameter syntax in `smelt.models.<name>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
+- **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
 
 ## References

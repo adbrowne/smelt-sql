@@ -37,7 +37,7 @@ The LSP supports go-to-definition for multiple targets:
 
 | Cursor position | Jumps to |
 |---|---|
-| `smelt.models.model_name` | The referenced model's SQL file |
+| `smelt.model_name` | The referenced model's SQL file |
 | `smelt.sources.schema.table` | The per-entity source `.yml` file |
 | CTE name in FROM/JOIN | The CTE definition in the WITH clause |
 | Table alias (e.g., `t` in `t.column`) | Where the alias is defined |
@@ -50,7 +50,7 @@ Column go-to-definition traces through `SELECT *` wildcards to find the original
 The LSP reports errors and warnings in real time as you edit:
 
 - **Parse errors** -- Syntax mistakes in SQL
-- **Undefined refs** -- `smelt.models.model` where `model` does not exist
+- **Undefined refs** -- `smelt.model` where `model` does not exist
 - **Undeclared columns** -- References to columns not present in upstream model schemas or source `.yml` declarations
 - **Unsupported syntax** -- Features like PIVOT/UNPIVOT that smelt does not support
 

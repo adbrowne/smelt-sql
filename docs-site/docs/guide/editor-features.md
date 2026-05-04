@@ -26,7 +26,7 @@ The diagnostics cover the full range of common errors:
 
 ## Go-to-Definition
 
-Trace your data lineage by jumping directly to definitions -- from a `smelt.models.<name>` call to the upstream model, from a column reference to where it's defined, or from a CTE usage to its definition.
+Trace your data lineage by jumping directly to definitions -- from a `smelt.<name>` call to the upstream model, from a column reference to where it's defined, or from a CTE usage to its definition.
 
 In a large pipeline with dozens of models, you can follow the data flow without ever leaving your editor. No more grepping for model names or manually opening files.
 
@@ -36,7 +36,7 @@ Go-to-definition works for:
 
 | Cursor position | Jumps to |
 |---|---|
-| `smelt.models.model_name` | The referenced model's SQL file |
+| `smelt.model_name` | The referenced model's SQL file |
 | `smelt.sources.schema.table` | The per-entity source `.yml` file |
 | CTE name in FROM/JOIN | The CTE definition in the WITH clause |
 | Table alias (e.g., `t` in `t.column`) | Where the alias is defined |
@@ -58,7 +58,7 @@ This is particularly useful when writing joins or aggregations: you can quickly 
 
 ## Code Completion
 
-Build queries faster with context-aware completions. smelt suggests model names inside `smelt.models.<name>`, source names inside `smelt.sources.<name>`, and column names when you're writing SELECT lists or WHERE clauses.
+Build queries faster with context-aware completions. smelt suggests model names inside `smelt.<name>`, source names inside `smelt.sources.<name>`, and column names when you're writing SELECT lists or WHERE clauses.
 
 Completions are schema-aware: they know what columns each upstream model exposes, so you get accurate suggestions as you type.
 
@@ -80,7 +80,7 @@ In dbt, discovering downstream impact means grepping the codebase for `ref('mode
 
 Rename a model and have every reference across the project update automatically. The LSP shows a preview of all changes before applying them, so you can review the impact.
 
-This works for model names inside `smelt.models.<name>` calls across all files in the project.
+This works for model names inside `smelt.<name>` calls across all files in the project.
 
 ![Rename model across project](../assets/editor-features/rename-model-across-project.gif)
 

@@ -1,7 +1,7 @@
 ---
 feature: architecture
 status: stable
-last_reviewed: 2026-05-02
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -61,12 +61,14 @@ A smelt workspace is rooted at a directory containing `smelt.yml`. **Directory l
 | `functions/`   | `.sql` files containing `smelt.define` declarations.                              |
 | `seeds/`       | Static `.csv` inputs.                                                             |
 | `sources/`     | Per-source `.yml` declarations (schemas for external tables).                     |
-| `tests/`       | `.sql` files containing `smelt.test` declarations (any number per file).         |
+| `tests/`       | `.sql` files containing `materialization: test` models (any number per file).    |
 | `smelt.yml`    | Project-level configuration (backend selection, feature flags such as `unstable_schema`). |
 
 A project may rename or reorganise these freely (`staging/`, `marts/`, `external/`, etc.). The kind of an entity is determined by the file's *format and content*, not by the name of its containing directory.
 
 ### Resolution: `smelt.<path>` is the universal addressing scheme
+
+> The `smelt.<path>` migration completed across all feature specs on 2026-05-04. Earlier kind-prefixed forms (`smelt.models.<name>`, `smelt.sources.<schema>.<table>`, `smelt.fn.<path>`) are retired; references in older plans and research documents should be read as legacy.
 
 Every project-defined entity — model, function, seed, source, test — is addressed by a single uniform syntax:
 
@@ -82,20 +84,20 @@ The path is the workspace-relative directory joined with the entity's leaf name,
 | `functions/patterns/x.sql` declaring `session_rollup`     | `smelt.functions.patterns.session_rollup(...)`    |
 | `seeds/raw/users.csv`                                     | `smelt.raw.users`                                 |
 | `sources/raw/events.yml`                                  | `smelt.raw.events`                                |
-| `tests/marts/customers.sql` declaring `customers_no_nulls` | `smelt.tests.marts.customers_no_nulls`           |
+| `tests/marts/customers.sql` (lone `materialization: test` model)        | `smelt.tests.marts.customers`                     |
+| `tests/marts/file.sql` containing `name: customers_no_nulls` + `materialization: test` | `smelt.tests.marts.customers_no_nulls` |
 
 Note: `functions/`, `sources/`, and `tests/` are discovered via their own dedicated scan paths and are **not** in the `paths:` list by default; their scan-root prefix is not stripped (they keep their full workspace-relative path as the address). Only directories listed in `paths:` have their prefix stripped.
 
 **Kind is determined by file format and content, not by syntactic prefix.** When the resolver reaches a path:
 
-- A `.sql` file with a bare SELECT (or one of multiple named bare SELECTs) → **model** (DAG-defaulted, `TableExpr`-valued).
+- A `.sql` file with a bare SELECT (or one of multiple named bare SELECTs) → **model** (DAG-defaulted, `TableExpr`-valued). Tests are a model kind: a bare SELECT carrying `materialization: test` in its frontmatter is a **test** model — addressable for tooling but **not** valid in `TableExpr` positions, since a test never produces a database object (`testing.md`).
 - A `.sql` file declaring `smelt.define <name>` → **function** (callable with arguments).
-- A `.sql` file declaring `smelt.test <name>` → **test** (executable assertion; addressable for tooling but **not** valid in `TableExpr` positions — using a `smelt.tests.*` path in `FROM` is a kind-mismatch error).
 - A `.csv` file → **seed**.
 - A `.yml` file with **no** sibling `.csv` (same directory, same stem) → **source** (externally-managed table; smelt declares its schema, does not load it).
 - A `.yml` file **with** a sibling `.csv` (same directory, same stem) → **sidecar** to that seed; binds schema / column descriptions / `materialization` to the seed and is not itself an addressable entity.
 
-A `.sql` file may mix declaration kinds — a model with co-located tests, a function with co-located tests — provided names are unique within the file. A given path resolves to at most one kind. Names must be unique within a directory across all kinds — a `data/users.csv` and `data/users.sql` is a workspace-load error.
+A `.sql` file may mix declaration kinds — a model with co-located tests (each declared via `materialization: test`), a function with co-located tests — provided names are unique within the file. A given path resolves to at most one kind. Names must be unique within a directory across all kinds — a `data/users.csv` and `data/users.sql` is a workspace-load error.
 
 **Address uniqueness is global across `paths:`.** When `smelt.yml::paths` lists multiple roots (e.g. `paths: ["models", "fixtures"]`), the scan-root prefix is stripped from each independently and addresses share a single namespace. Two files that resolve to the same `smelt.<path>` — e.g. `models/users.csv` and `fixtures/users.csv` — are a hard workspace-load error. The rule is "one path → one entity" regardless of which scan root the file lives under.
 
@@ -103,7 +105,14 @@ A `.sql` file may mix declaration kinds — a model with co-located tests, a fun
 
 **File kind is grammar, not location.** `data/foo.sql` containing a bare SELECT is a model addressable as `smelt.data.foo`; `random/x.sql` declaring `smelt.define helper(...)` is callable as `smelt.random.helper(...)` (the filename stem is not a path component). The recommended layout is convention; the resolver only cares about path and content.
 
-**Bare-model naming.** A `.sql` file may contain any number of bare-SELECT models. A file's *lone* bare SELECT takes its leaf name from the filename and **must not** declare `name:` in its frontmatter. In a file with two or more bare SELECTs, each bare SELECT **must** declare `name:` in its frontmatter; the filename ceases to register as a model name and becomes purely a container. The model's full path is the directory path joined with the leaf name. Names within a file must be unique across bare SELECTs, `smelt.define`s, `smelt.extern`s, and `smelt.test`s.
+**Bare-model naming.** A `.sql` file may contain any number of bare-SELECT models. A file's *lone* bare SELECT takes its leaf name from the filename and the file uses no section delimiter. In a file with two or more bare SELECTs, each bare SELECT **must** declare itself with a `--- name: <name> ---` section delimiter line (Layer 1, see "Two-layer multi-model file format" below); the filename ceases to register as a model name and becomes purely a container. The model's full path is the directory path joined with the leaf name. Names within a file must be unique across bare SELECTs (including `materialization: test` ones), `smelt.define`s, and `smelt.extern`s. The canonical syntax for the section delimiter and worked examples live in `models.md` §"File format".
+
+**Two-layer multi-model file format.** Multi-model `.sql` files use a two-layer stack with distinct grammars:
+
+- **Layer 1 — section delimiter (`--- name: <name> ---`).** A line that introduces a new model section within a multi-model file. Owned by `smelt-core`; splits the file into independent model sections. The `name:` carried on this line is the **source of identity** for the model — it is the address-component used by the `smelt.<path>` resolver. A bare `--- ---` form (no `name:`) on a delimiter line is a hard parse error in a multi-model file. The lone-bare-SELECT case in a single-model file uses no Layer 1 delimiter at all.
+- **Layer 2 — declaration frontmatter (`---` / `---` fences).** A YAML frontmatter block enclosed by bare `---` fences that attaches to the **immediately following declaration** (a model `SELECT`, a `smelt.define`, or a `smelt.extern`) within a section. Owned by `smelt-parser`; supplies per-declaration metadata (`materialization:`, `tags:`, `deterministic:`, etc.). A `name:` key inside Layer 2 frontmatter is **ignored** — identity comes from Layer 1 (in multi-model files) or the filename (in single-model files), never from Layer 2.
+
+The two layers compose: Layer 1 splits a file into sections; within each section, Layer 2 frontmatter attaches to the declaration that follows it. Single-model files have no Layer 1 delimiter at all; their identity comes from the filename, and any Layer 2 `name:` key is ignored.
 
 ### Default materialization name mapping
 
@@ -133,7 +142,7 @@ Per-entity overrides are kind-specific:
 
 ### Unified frontmatter rule
 
-A YAML frontmatter block (between `---` fences) attaches to the **immediately following declaration**: a model `SELECT`, a `smelt.define`, a `smelt.extern`, or a `smelt.test`. Each declaration may carry its own block; there is no file-level frontmatter, and no inheritance across declarations in the same file. (Research §16 #22.)
+A YAML frontmatter block (between `---` fences) attaches to the **immediately following declaration**: a model `SELECT` (including a test, declared via `materialization: test` on the SELECT's frontmatter), a `smelt.define`, or a `smelt.extern`. Each declaration may carry its own block; there is no file-level frontmatter, and no inheritance across declarations in the same file. (Research §16 #22.)
 
 The frontmatter parser is shared across all four declaration kinds; the parsing contract is identical. Property semantics differ — per-feature key catalogues live in the relevant feature spec:
 
@@ -211,6 +220,10 @@ The `Backend` trait is the contract every execution backend implements. The mini
 | `load_table(schema, name, arrow_schema, batches)` | Cross-backend Arrow ingest path. Used by seed loading and (future) any other "build a table from in-memory data" surface. DuckDB implements via `Appender`; Spark via `createDataFrame(...).saveAsTable(...)`. |
 
 Trait methods grow as new ingest / introspection paths land; the minimum a backend has to implement is the four above. The trait is `async`; backends are responsible for their own connection lifecycle.
+
+#### Cross-engine data exchange
+
+When a model on DuckDB references a model pinned to Spark (via `smelt.<path>`), smelt resolves the reference to a `read_parquet()` call against the Spark model's Parquet files in the `warehouse` directory. No explicit copy step is needed; DuckDB reads the files natively. This requires the Spark model to have `materialization: table` and the Spark target to have a `warehouse` path configured. (A full multi-backend execution model — capability negotiation, cross-engine reference rules, Databricks-specific features — is deferred to a future `multi_backend.md` spec; see Known Divergences.)
 
 ### `Transformation` and `ExecutionStep` (planner output)
 
@@ -293,7 +306,7 @@ This section captures the load-bearing rationale behind the pipeline, the crate 
 
 **Single addressing scheme `smelt.<path>` for all project-defined entities.** Earlier shapes used kind-specific prefixes — `smelt.ref('m')` for models, `smelt.source('raw.x')` for sources, `smelt.fn.<path>(...)` for functions, with externs flat. That asymmetry forced users to know an entity's kind before referencing it, conflated the *what* with the *where*, and made cross-kind refactors (a seed promoted to a model, a model factored as a parameterised function) churn every callsite. Collapsing every project-defined entity into `smelt.<path>` makes resolution uniform: the path locates the entity, the file format/content determines the kind, and the resolver dispatches accordingly. A reader who *wants* the kind-signal at the callsite gets it for free if the project follows the recommended layout (`smelt.sources.raw.events` reads as "this is a source"); a reader who doesn't can name their directory whatever they like. Externs remain the documented exception (flat, ambient, callable by bare name) because their job is to extend the built-in namespace — a path-prefixed extern would defeat the ergonomics that motivate them. (Research §16 #22; addressing redesigned 2026-05-01.)
 
-**Directory layout is user-chosen; kind is determined by file format/content.** The recommended `models/` / `functions/` / `seeds/` / `sources/` layout is convention, not spec-mandated structure. Forcing kind-by-directory was rejected because it forecloses meaningful per-project organisation — a project that prefers `staging/` / `marts/` / `external/` should not have to fight the framework. Forcing kind-by-syntactic-prefix was rejected for the addressing-scheme reason above. The resolver examines the file at a given path — bare SELECT → model, `smelt.define` → function, `.csv` → seed, source `.yml` → source, `smelt.test` → test — which means a user can refactor across kinds without changing call sites, and `smelt.yml` stays as project-level configuration rather than a directory-type registry. The spec mandates only that `smelt.yml` exists at the workspace root.
+**Directory layout is user-chosen; kind is determined by file format/content.** The recommended `models/` / `functions/` / `seeds/` / `sources/` layout is convention, not spec-mandated structure. Forcing kind-by-directory was rejected because it forecloses meaningful per-project organisation — a project that prefers `staging/` / `marts/` / `external/` should not have to fight the framework. Forcing kind-by-syntactic-prefix was rejected for the addressing-scheme reason above. The resolver examines the file at a given path — bare SELECT → model (a SELECT carrying `materialization: test` is a test model), `smelt.define` → function, `.csv` → seed, source `.yml` → source — which means a user can refactor across kinds without changing call sites, and `smelt.yml` stays as project-level configuration rather than a directory-type registry. The spec mandates only that `smelt.yml` exists at the workspace root.
 
 A consequence worth naming: multi-team or multi-domain workspaces can co-locate everything for a domain — sources, seeds, tests, and models — under a single directory tree (`payments/`, `inventory/`, `support/`), with the namespace falling out of the path automatically. The kind-axis and the domain-axis stay independent. A kind-by-directory rule would have collapsed them, forcing every team to scatter their entities across `models/payments/`, `seeds/payments/`, `tests/payments/` instead of holding `payments/` together.
 
@@ -316,17 +329,32 @@ These are normative and must be upheld across all features.
 5. **`smelt-dialect` is lightweight.** No Arrow / Tokio / DuckDB dependencies. The LSP and CLI link it freely; backends do not flow back through it.
 6. **No circular crate dependencies.** The dependency graph in the Surface table is total order modulo `smelt-types` (root) and `smelt-backend-*` (leaves).
 7. **Parser produces a usable CST on invalid input.** No panics, no aborts, no truncated trees on syntax errors.
+8. **Unknown-key doctrine: user-authored content is strict; project-level config is lenient with warnings.** Frontmatter on a model `SELECT`, a `smelt.define`, or a `smelt.extern`, plus type annotations and per-entity source / seed-sidecar YAML, are user-authored under direct review and reject unknown keys (`deny_unknown_fields`) so typos surface immediately. Project-level configuration in `smelt.yml` is reviewed less often, edited cross-team, and read by tools that pre-date keys they encounter; it warns on unknown top-level keys instead of erroring, so forward-compatible configs work across smelt versions. Per-feature specs that catalogue keys (`models.md`, `smelt_yml.md`, `functions.md`, `sources.md`) reference this doctrine rather than restating the rule.
 
 ## Known Divergences / Open Questions
 
 Update as part of any plan that touches architecture.
 
-- **`smelt.test` declaration semantics are pre-spec.** This spec introduces `smelt.test` as a top-level declaration kind so tests can live alongside models, but defers the assertion semantics (does a non-empty result mean fail? are there severity tiers? how do parameterised tests work?) to a future `tests.md` feature spec.
 - **Namespace decoupled from directory path is future work.** Today `smelt.<path>` is the literal workspace-relative directory path. A future extension could let projects declare a namespace alias (per-directory `package.yml`, top-level `smelt.yml` mapping, or a `smelt.package <name>` declaration at file scope) so deeply nested directories can present a flatter namespace — useful when an organisation's filesystem hierarchy is richer than the desired call-surface depth (e.g., `models/teams/payments/marts/balances.sql` exposed as `smelt.payments.balances`). Deferred until concrete need emerges; the literal-path rule is the default and removes one layer of indirection.
 - **LSP dialect diagnostics are planned but not implemented.** `smelt-dialect` is in place; the LSP does not yet emit "QUALIFY will be rewritten" hints. Add to a future plan.
 - **`smelt-check` crate not yet extracted.** The Salsa purity rule is currently upheld by convention; nothing prevents a regression. Once `smelt-check` is extracted, it becomes structurally enforced.
 - **Planner cost estimation is future work.** Current rules are deterministic detectors with no statistics input.
 - **Python model discovery** (`smelt-core` extracting SQL from `@model` decorators) is via subprocess/PyO3 — interface details are still in flux; no spec yet.
+- **Multi-backend execution model not specified beyond trait surface.** Capability negotiation (incremental support, MERGE support, ALTER COLUMN support), cross-engine reference resolution rules (when does `read_parquet()` substitution apply?), and target precedence will land in `multi_backend.md` (or an expansion of §"Backend trait surface"). Today, capability claims are scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, and `smelt_yml.md`.
+- **User journey integrity matrix open.** The cross-product of testing × incremental × schema-evolution × multi-backend is not pinned end-to-end. Pinning depends on `run_state.md` and the multi-backend spec landing first.
+- **dbt comparison and migration story not specified.** Expected home: a `migration_from_dbt.md` spec or a dedicated docs-site/ guide. Until authored, the gap is a known limitation for adopters migrating from dbt.
+
+### Specs not yet authored
+
+The spec set has explicit gaps that the following entries claim space for. Each names the in-scope future spec and which existing specs will pull content out of it:
+
+- **`diagnostics.md`** — owns the diagnostic-code catalogue. Today scattered across `lsp.md`, `functions.md`, `gradual_typing.md`, `scoping.md`, `types.md`, `planner_integration.md`, `incremental_models.md`.
+- **`run_state.md`** — owns manifest format, `.smelt/` layout, run IDs, parallelism, recovery. Today implicit in `cli.md` (`smelt status`, `smelt history`) and `incremental_models.md` (state ownership).
+- **Multi-backend execution model** — likely an expansion of §"Backend trait surface" or a dedicated `multi_backend.md`. Today scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, `smelt_yml.md`.
+- **`planner_api.md`** — owns the user-authored planner-rule surface. Working design at `docs/planner_rule_api_design.md`; needs review against the 2026-05-01 universal-addressing rework before becoming normative.
+- **`migration_from_dbt.md`** *(or docs-site guide)* — owns the dbt analogue mapping and migration story. No content today.
+
+Each in-spec Known Divergence cross-references this anchor.
 
 ## References
 

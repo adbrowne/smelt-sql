@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -30,7 +30,7 @@ owners: [andrew]
 | `smelt docs generate` | Generate a data catalog (markdown or JSON) |
 | `smelt docs list` | List embedded documentation topics |
 | `smelt docs show <topic>` | Print embedded documentation topic to stdout |
-| `smelt docs path` | Print the location of embedded docs (inside the binary) |
+| `smelt docs path` | **Stub.** Prints a message indicating docs are embedded in the binary and suggests using `smelt docs list` / `smelt docs show` instead. Does not print a usable filesystem path — there is none; docs are compiled into the binary. Future feature. |
 
 ### Top-level flags
 
@@ -71,7 +71,11 @@ owners: [andrew]
 | `--exclude` / `-e` | Repeatable; same selector grammar as `--select`. |
 | `--event-time-start` / `--event-time-end` | ISO-8601 date or timestamp. End is exclusive. Both required together for incremental execution. |
 
+`smelt build` also accepts the schema-evolution flags `--allow-column-removal` and `--allow-full-refresh`; see `schema_evolution.md` §"Evolution flags" for semantics. The same flags are accepted by `smelt run` (which delegates to the same evolution-handling path).
+
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
+
+**`smelt explain` excludes test models.** `smelt explain` (with or without `--json`) filters out all `materialization: test` models from its output via the `is_test()` predicate applied to every discovered model. Test models never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
 
 ### `smelt explain --json` output schema
 
@@ -121,7 +125,7 @@ A single `smelt build` performs these steps, in order:
 
 1. **Load** `smelt.yml` from `--project-dir`. Fail if absent.
 2. **Validate** that the requested `--target` exists in the config.
-3. **Discover** seed CSVs (under all `seed_paths`), `sources.yml`, SQL models, Python models, and `smelt.define` function files.
+3. **Discover** all project files under `paths:` and the dedicated scan paths (functions, sources, tests). The resolver classifies each file by format and content per `architecture.md` §"Resolution": `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone in `sources/`) become seed sidecars or sources respectively.
 4. **Seed** — for each CSV file (in deterministic sorted order):
    - Drop any existing table or view with the same qualified name.
    - `CREATE TABLE <schema>.<name> AS SELECT * FROM read_csv_auto('<path>')`.
@@ -213,6 +217,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **`smelt status` reads from live DB.** Gap detection requires a database connection; this is not documented clearly in the command help.
 - **No project-wide compile-only flag (TB-3).** `smelt build --dry-run` does not exist; `smelt build --show-plan` requires a positional model-file argument. There is no single command to compile every model and show the plan without executing. Two candidate resolutions: (1) extend `--show-plan` to accept no positional argument for project-wide output, or (2) add `smelt build --dry-run` mirroring `smelt run --dry-run` semantics across the seed→run lifecycle.
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
+- **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

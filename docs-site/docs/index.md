@@ -27,7 +27,7 @@ SELECT
   order_date,
   customer_id,
   SUM(amount) as daily_revenue
-FROM smelt.models.orders
+FROM smelt.orders
 WHERE order_date IS NOT NULL
 GROUP BY 1, 2
 ```

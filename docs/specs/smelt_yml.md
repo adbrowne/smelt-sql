@@ -1,7 +1,7 @@
 ---
 feature: smelt_yml
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -22,7 +22,18 @@ owners: [andrew]
 | `default_materialization` | string | no | `"view"` | Project-level fallback materialization for any model that does not declare its own. Accepts `table`, `view`, `ephemeral`, `materialized_view`, `test`. |
 | `models` | map of `<name>` → model-config object | no | `{}` | Per-model overrides keyed by model name. Each entry may declare `materialization`, `tags`, `target`, `incremental`, etc. |
 | `python` | string | no | — | Path to a Python interpreter for Python-model discovery. The `SMELT_PYTHON` environment variable takes precedence. |
-| `unstable_schema` | bool | no | `false` | Gate for unstable feature surfaces (e.g. `provenance:` and `joins:` frontmatter keys in `functions.md`). When `true`, the gated keys parse without warnings. |
+| `unstable_schema` | bool | no | `false` | Gate for unstable feature surfaces. When `true`, the gated keys listed in §"`unstable_schema:` gated keys" parse without warnings. |
+
+### `unstable_schema:` gated keys
+
+Setting `unstable_schema: true` unlocks the following feature surfaces. Each is gated because its syntax is being prototyped against real usage and may change before graduating to stable:
+
+| Key | Owning spec | Status |
+|-----|-------------|--------|
+| `joins:` on `smelt.define` / `smelt.extern` frontmatter | `functions.md` | Experimental |
+| `provenance:` on `smelt.define` / `smelt.extern` frontmatter | `functions.md` | Experimental |
+
+An enumeration command (`smelt unstable list`) that prints this list is open work. Until it exists, this table is the canonical v1 source of truth. Entries are removed from this table when the feature graduates to stable (gate dropped) or is removed.
 
 The full per-key reference (target sub-shape, model-config sub-shape, incremental config, schema-evolution config) is in `docs-site/docs/reference/smelt-yml.md`. This spec mirrors the implemented `Config` struct in `crates/smelt-core/src/config.rs`; anything beyond what that struct accepts is "shape TBD" until it lands.
 
@@ -76,7 +87,7 @@ A typo'd known key (e.g. `default_matrialization`) is currently silently ignored
 
 **`default_materialization: view`.** A view-by-default doctrine keeps development cheap (no table-rebuild cost on every change) and pushes the user to opt in to `table` exactly where performance matters. Earlier discussions floated `table` as the default, but that punishes the iteration loop where most models are still being shaped. The view default is consistent with the dbt convention and matches the implementation. (Notably, the smelt-loop finding DG-9 originally suggested the default was `table`; that was an artefact of the loop agents' discovery process — the canonical default is `view`.)
 
-**`unknown keys = warning, not error`.** The forward-compatibility invariant in Semantics §7 is the load-bearing reason. Strict-rejection of unknown keys forecloses staged rollouts (a new key cannot be authored in the project until every consumer recognises it). Warning-on-unknown lets new fields land in the parser ahead of every consumer recognising them, while still surfacing typos to the user.
+**`unknown keys = warning, not error`.** This is the project-level side of the unknown-key doctrine (`architecture.md` §"Constraints & Invariants" §8). The forward-compatibility invariant in Semantics §7 is the load-bearing reason. Strict-rejection of unknown keys forecloses staged rollouts (a new key cannot be authored in the project until every consumer recognises it). Warning-on-unknown lets new fields land in the parser ahead of every consumer recognising them, while still surfacing typos to the user.
 
 **Per-feature config lives in feature specs.** `incremental:` shape, function frontmatter keys (`deterministic`, `idempotent`, …), schema-evolution config, and the per-column `tests:` map are owned by their feature specs (`incremental_models.md`, `functions.md`, future `schema_evolution.md`). This spec lists only the top-level shape and the cross-feature precedence rules; otherwise, the page would have to be re-written every time a new key lands.
 

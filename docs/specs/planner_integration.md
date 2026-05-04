@@ -1,7 +1,7 @@
 ---
 feature: planner_integration
 status: experimental
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -117,8 +117,8 @@ These rules are normative. Each phrasing of the form "the planner must ..." appl
 
 - **Models-as-functions equivalence** (`architecture.md`): a model body is itself a transparent function from this spec's perspective. The planner consumes models and `smelt.define`s by the same rules.
 - **Frontmatter grammar and key catalogue** (`functions.md`): the keys consumed here are defined there. Planner-relevant diagnostics from frontmatter parsing (`UnstableSchemaRequired`, `BackendsWideningNotAllowed`, `FrontmatterParseError`) are emitted by the parsing layer; this spec covers only the four codes in the Surface table.
-- **Incremental strategies** (`incremental_models.md`): L2 strategy selection reads `materialization`, `incremental.enabled`, `partition_column`, etc. from model frontmatter. This spec specifies the planner's *consumption*; the configuration surface lives there.
-- **Expansion mechanics** (`expansion.md`, when written): how `ExpandTransparentFunctionCalls` substitutes argument expressions and attaches `ProvenanceTag` is an internal invariant. This spec assumes correct expansion; it does not respec it.
+- **Incremental strategies** (`incremental_models.md`): L2 strategy selection reads `materialization`, `incremental.enabled`, `partition_column`, etc. from model frontmatter. This spec specifies the planner's *consumption*; the configuration surface lives there. See `incremental_models.md` §"Functions inside incremental bodies" for how transparent-function expansion (via `ExpandTransparentFunctionCalls`) composes with the framework's per-model WHERE injection and batch-safety classification.
+- **Expansion mechanics** (`expansion.md`): how `ExpandTransparentFunctionCalls` substitutes argument expressions and attaches `ProvenanceTag` is an internal invariant. This spec assumes correct expansion; it does not respec it.
 
 ## Design
 
@@ -165,6 +165,8 @@ The plan that produced this spec acknowledges the wired-vs-aspirational gap expl
 - **End-to-end `smelt build` does not yet pass L1-optimised plans to the executor.** `--show-plan` proves the rules run; the production build path's integration with rule-optimised plans is in progress (Phases 56–57 of the smelt-functions plan). Today, the executor consumes a SQL string emitted from the CST, not from the optimised logical plan.
 - **`backends:` narrowing is enforced at parse time, not at L2 strategy selection.** The narrow-only check (`BackendsWideningNotAllowed`) is wired in `smelt-db::backends`. The downstream consumption — refusing to lower a body to a backend not in its declared set at L2 — has no code path yet because L2 strategy selection has no code path yet.
 - **No L1 rule fires on bare model `SELECT`s today.** The four L1 rules pattern-match on `FunctionCall { transparent: true, .. }` (i.e., `smelt.<path>(...)` call sites that resolve to a `smelt.define`). Models, despite being conceptually transparent functions per `architecture.md`, are constructed as `Select { from: TableRef { ... } }` in the current logical-plan builder rather than as `FunctionCall` nodes — and the body's `smelt.<path>` references resolve through the dependency graph, not through a function-call node. Aligning the model construction path with the unified-model framing (so a `smelt.<path>` reference resolving to a model is also a `FunctionCall { transparent: true }` node with `body: Some(_)`) is open work; the spec fixes the *intent* (planner reasons across model boundaries) without claiming that intent is fully wired.
+- **User-authored planner-rule API — pre-spec.** Today, only built-in rules ship (the four L1 rules in `show_plan_rules()`). The `Rule` trait and `RuleContext` are reusable, but the surface for a **user-authored** rule — registration, lifecycle, stability guarantees, the `RuleContext` extension surface, error handling and validation hooks — is not specified. The `README.md` / `CLAUDE.md` differentiator "engineer controls planning" describes intent; the working design lives at `docs/planner_rule_api_design.md` and predates the 2026-05-01 universal-addressing rework, so it needs review before becoming normative. A future `planner_api.md` spec is in scope (see `architecture.md` §"Specs not yet authored").
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 
@@ -206,7 +208,7 @@ The plan that produced this spec acknowledges the wired-vs-aspirational gap expl
 - `docs/specs/functions.md` — `smelt.define` / `smelt.extern` / frontmatter key catalogue
 - `docs/specs/incremental_models.md` — model-frontmatter keys consumed by L2 strategy selection
 - `docs/specs/types.md` — type vocabulary referenced by `FunctionProperties`-adjacent fields
-- `docs/specs/expansion.md` — internal invariants for AST expansion (when written)
+- `docs/specs/expansion.md` — internal invariants for AST expansion
 
 ### Research
 
