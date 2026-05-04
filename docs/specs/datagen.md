@@ -1,7 +1,7 @@
 ---
 feature: datagen
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -132,13 +132,13 @@ When `partition:` is configured:
 
 ## Design
 
-**Parquet output, not CSV.** Parquet preserves column types exactly (no string-coercion ambiguity), is natively readable by DuckDB and Spark, and compresses large datasets efficiently. The trade-off is that Parquet files are binary and not human-readable — for small fixtures, CSV seeds or inline YAML test data are more appropriate.
+**Parquet output, not CSV.** Parquet preserves column types exactly (no string-coercion ambiguity), is natively readable by DuckDB and Spark, and compresses large datasets efficiently. The trade-off is that Parquet files are binary and not human-readable — for small fixtures, CSV seeds or inline YAML test data are more appropriate. CSV was rejected because its type information is lossy: a `DATE` column round-trips through CSV as a `VARCHAR` unless the reader applies inference rules that may disagree with smelt's. Generating large CSV fixtures that feed type-sensitive downstream models is therefore fragile.
 
-**ChaCha8 RNG, not system random.** Platform-independent determinism is essential for reproducible CI. ChaCha8 is fast and produces high-quality randomness for data generation without the platform variance of `rand::thread_rng()`. The per-dataset seed override allows individual datasets to be regenerated in isolation while keeping others stable.
+**ChaCha8 RNG, not system random.** Platform-independent determinism is essential for reproducible CI. ChaCha8 is fast and produces high-quality randomness for data generation without the platform variance of `rand::thread_rng()`. The per-dataset seed override allows individual datasets to be regenerated in isolation while keeping others stable. `rand::thread_rng()` was rejected because it produces different sequences on different platforms and OS kernel versions, making CI non-deterministic across Mac/Linux or across kernel upgrades.
 
 **Entity pools for realistic cardinality.** Real datasets have a smaller number of distinct entities (users, devices, customers) than rows (events, orders, sessions). The `pool_ratio` mechanism models this: a 10M-row event dataset might have 2M unique visitors (`pool_ratio: 0.2`), each with consistent attributes across their sessions.
 
-**Foreign keys by sequential ID convention.** The `foreign_key` generator assumes dimension tables use `sequential_id` (1, 2, ..., N). This convention simplifies the implementation: the generator only needs to know the dimension table's row count to produce valid references. Custom ID types (UUIDs, strings) cannot be foreign-key targets today.
+**Foreign keys by sequential ID convention.** The `foreign_key` generator assumes dimension tables use `sequential_id` (1, 2, ..., N). This convention simplifies the implementation: the generator only needs to know the dimension table's row count to produce valid references. Custom ID types (UUIDs, strings) cannot be foreign-key targets today. Supporting arbitrary ID columns was rejected for v1 because it requires the generator to read the already-generated dimension data at generation time, introducing ordering dependencies between datasets; the sequential-ID convention eliminates that dependency entirely.
 
 **`geometric` defaults to `min: 1`.** The raw geometric distribution starts at 0, but count data (quantities, page views, purchase counts) is almost always positive. Defaulting to `min: 1` prevents callers from accidentally generating zero-count rows. Users who need the zero case must explicitly set `min: 0`.
 

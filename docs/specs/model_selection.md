@@ -1,7 +1,7 @@
 ---
 feature: model_selection
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -83,9 +83,9 @@ A `ModelName` selector that names a model not in the project matches nothing (no
 
 ## Design
 
-**`+` as directional modifier, not separate flag.** Upstream and downstream expansion are inline modifiers on each selector rather than separate flags (e.g., `--upstream`, `--downstream`). This lets each selector carry its own traversal intent, which is useful when mixing: `--select +A --select B+` expands A's upstreams and B's downstreams independently before taking the union.
+**`+` as directional modifier, not separate flag.** Upstream and downstream expansion are inline modifiers on each selector rather than separate flags (e.g., `--upstream`, `--downstream`). This lets each selector carry its own traversal intent, which is useful when mixing: `--select +A --select B+` expands A's upstreams and B's downstreams independently before taking the union. Separate `--upstream` / `--downstream` flags were rejected because they apply globally to all selectors — you cannot say "expand upstream for A but downstream for B" without splitting into two command invocations.
 
-**Union semantics for multiple `--select`.** Multiple `--select` flags add to the set, not narrow it. This mirrors common shell usage: `grep -e pat1 -e pat2` means OR, not AND. Narrowing (intersection) would require a different flag or syntax and is not supported today.
+**Union semantics for multiple `--select`.** Multiple `--select` flags add to the set, not narrow it. This mirrors common shell usage: `grep -e pat1 -e pat2` means OR, not AND. Intersection semantics were rejected because the most common use case for multiple `--select` is "run these models and those models" — not "run models that match all criteria simultaneously." Users who need intersection can apply `--exclude` as a post-pass.
 
 **Exclusion as post-pass.** Applying `--exclude` after the full selection (including traversal) is simpler to reason about than applying it before traversal. The user can say "select X and all its upstreams, except model Y" and get a predictable result regardless of where Y appears in X's dependency tree.
 

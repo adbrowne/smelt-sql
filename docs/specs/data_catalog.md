@@ -1,7 +1,7 @@
 ---
 feature: data_catalog
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -162,9 +162,9 @@ When `--select` is specified, only selected models appear in the output. Test mo
 
 ## Design
 
-**Two formats serve different consumers.** Markdown is human-readable and suitable for static site deployment (e.g., GitHub Pages, Confluence). JSON is the integration format for programmatic consumers — data portals, lineage tools, BI catalog integrations.
+**Two formats serve different consumers.** Markdown is human-readable and suitable for static site deployment (e.g., GitHub Pages, Confluence). JSON is the integration format for programmatic consumers — data portals, lineage tools, BI catalog integrations. A single-format output was rejected: pure Markdown excludes programmatic consumers; pure JSON excludes human readers who want to browse catalog pages without writing a script.
 
-**Column lineage from type inference.** The `source` field on each column (computed, from_model, wildcard, external_table, unknown) is derived from smelt's type inference system rather than explicit annotation. This means lineage is automatically correct for well-typed models and degrades gracefully (omitted or `unknown`) for models with incomplete type information.
+**Column lineage from type inference.** The `source` field on each column (computed, from_model, wildcard, external_table, unknown) is derived from smelt's type inference system rather than explicit annotation. This means lineage is automatically correct for well-typed models and degrades gracefully (omitted or `unknown`) for models with incomplete type information. User-declared provenance maps were rejected: they drift when the SQL changes and require maintenance work that the type inferencer eliminates.
 
 **Embedded docs in binary.** Embedding user documentation in the binary ensures that `smelt docs show` always returns docs that match the installed version. There is no risk of docs being installed separately or out of sync. The trade-off is that docs updates require a binary release.
 

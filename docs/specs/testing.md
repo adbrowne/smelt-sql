@@ -1,7 +1,7 @@
 ---
 feature: testing
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -133,7 +133,7 @@ Each iteration uses a different random seed derived from the test's global seed.
 
 ## Design
 
-**Test-as-materialization.** Using `materialization: test` rather than a separate test file format means the parser, type checker, LSP, and model discovery system all handle test files uniformly. Tests are discovered by the unified `paths:` scan, not a separate `test_paths`. The tradeoff is that test models appear in `smelt explain` output and must be explicitly excluded from execution runs (they are never materialized by `smelt run`).
+**Test-as-materialization.** Using `materialization: test` rather than a separate test file format means the parser, type checker, LSP, and model discovery system all handle test files uniformly. Tests are discovered by the unified `paths:` scan, not a separate `test_paths`. The tradeoff is that test models appear in `smelt explain` output and must be explicitly excluded from execution runs (they are never materialized by `smelt run`). A separate test file format was rejected because it would require a second parser, second type-checker path, and second LSP affordance — tripling the surface area for features that are already handled correctly by the model pipeline.
 
 **`smelt.test <name>` as a top-level declaration kind — deferred, not closed.** An earlier shape made tests a sibling of `smelt.define` / `smelt.extern` at the file level. v1 takes the simpler `materialization: test` route because (a) the body grammar is identical to a model SELECT — same parser, same type checker, same LSP affordances — and (b) `crates/smelt-core/src/metadata.rs::TestConfig` already implements the frontmatter shape. The case for revisiting is a symmetry argument: now that `smelt.define`, `smelt.extern`, seeds, and sources are all kind-signalled by something *other than* frontmatter, `materialization: test` is the only kind that piggybacks on another kind's syntax with a frontmatter flag. A future spec change could mint `smelt.test <name>` as a first-class declaration — most interestingly with `expect`/`inputs` lifted out of YAML and into a SQL-grammar `EXPECT (...) PASSING ... AS (...)` clause that mirrors the function `PASSING` shape. See Known Divergences for the open framing.
 

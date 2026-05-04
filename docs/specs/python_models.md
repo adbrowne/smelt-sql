@@ -1,7 +1,7 @@
 ---
 feature: python_models
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -142,9 +142,9 @@ All standard model frontmatter keys (`materialization`, `tags`, `owner`, etc.) a
 
 ## Design
 
-**Compile-time Python, not Jinja.** Python model generation runs once at compile time and produces plain SQL. This avoids the template-execution-per-run overhead of Jinja, enables proper error messages (Python exceptions with tracebacks rather than template expansion failures), and keeps the query engine free of Python dependencies. The trade-off is that Python cannot access live query results — it can only operate on the project's structural metadata.
+**Compile-time Python, not Jinja.** Python model generation runs once at compile time and produces plain SQL. This avoids the template-execution-per-run overhead of Jinja, enables proper error messages (Python exceptions with tracebacks rather than template expansion failures), and keeps the query engine free of Python dependencies. The trade-off is that Python cannot access live query results — it can only operate on the project's structural metadata. Jinja was rejected because Jinja templates mix control flow with SQL syntax (no IDE, no type-checker, no LSP understands them), have opaque failure modes at render time, and force the executor to interpret template logic — coupling execution to a Python runtime. Runtime-access Python (calling a function each time the query runs) was rejected for the same reason: it couples execution to a Python runtime and prevents static analysis.
 
-**`find_models` as the only context API.** The project context deliberately exposes only structural metadata (name, tags, directory), not schema, type, or lineage information. This keeps the API stable: schema and type information changes with implementation; structural metadata changes only when models are added or removed. A richer API would require Python evaluation to depend on type inference, creating a circular dependency in the compiler pipeline.
+**`find_models` as the only context API.** The project context deliberately exposes only structural metadata (name, tags, directory), not schema, type, or lineage information. This keeps the API stable: schema and type information changes with implementation; structural metadata changes only when models are added or removed. A richer API would require Python evaluation to depend on type inference, creating a circular dependency in the compiler pipeline. Exposing schema/type was rejected specifically to avoid that circularity: if Python models can inspect column types, and column types come from type-checking Python-generated SQL, the compiler pipeline has no topological ordering.
 
 **Iterative evaluation for self-referential generation.** A Python model may generate models that in turn are used by other Python models (e.g., a "tag all staging models" generator that a marts generator queries). The iterative fixed-point approach handles these cases without requiring explicit ordering.
 
