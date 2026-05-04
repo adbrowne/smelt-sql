@@ -63,7 +63,7 @@ After each phase: `git commit` with the phase's commit line, push to the trackin
 | 16a   | done     | Mi6, Mi8, Mi17                      | d7ba100 | 2026-05-05 |
 | 16b   | done     | Mi10–Mi16, Mi18, Mi19               | 49b00ec | 2026-05-05 |
 | 16c   | done     | Mi9                                 | 43cb36b | 2026-05-05 |
-| 17    | ready    | H6, H7, H8, M12, M14, plus 14c      |         |            |
+| 17    | done     | H6, H7, H8, M12, M14, plus 14c      | e1aa445 | 2026-05-05 |
 
 ### Spawned to follow-up plans / specs
 
