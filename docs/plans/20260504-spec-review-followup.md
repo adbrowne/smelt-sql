@@ -56,7 +56,7 @@ After each phase: `git commit` with the phase's commit line, push to the trackin
 | 6     | done     | M3                                  | 4ba5e51 | 2026-05-04 |
 | 7     | done     | M4                                  | 483a6ce | 2026-05-04 |
 | 8     | done     | M5, M16, Mi1, Mi2, Mi3, Mi7, N3     | 261cdd9 | 2026-05-04 |
-| 9     | done     | C1                                  | 988cbb4 | 2026-05-04 |
+| 9     | done     | C1                                  | ba277e5 | 2026-05-04 |
 | 13    | ready    | H4                                  |         |            |
 | 14a   | ready    | M10, M11                            |         |            |
 | 14b   | ready    | M9, M13                             |         |            |
