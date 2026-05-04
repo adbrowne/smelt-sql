@@ -306,7 +306,7 @@ impl LogicalGraph {
                     if self.nodes.contains_key(name) {
                         vec![name.clone()]
                     } else {
-                        return Err(anyhow!("Model '{}' not found", name));
+                        vec![]
                     }
                 }
                 SelectionMethod::Tag(tag) => self

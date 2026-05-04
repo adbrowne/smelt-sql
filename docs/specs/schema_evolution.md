@@ -101,6 +101,14 @@ When a model is materialized by `smelt run` or `smelt build`, smelt writes the d
 
 If `.smelt/schemas/` does not exist, `smelt diff` reports all models as `new`.
 
+### Stale schema cleanup
+
+After a successful `smelt run` or `smelt build`, smelt scans `.smelt/schemas/` and deletes any `.json` entry whose model name is not in the set of models discovered in the current project. A model is discovered if a corresponding `.sql` file exists under `paths:`. Stale entries arise when a model file is deleted without a rebuild.
+
+**Why this matters:** without cleanup, `smelt diff` will permanently report deleted models as `REMOVED` even after the user has removed the file and rebuilt. The cleanup runs only after a *successful* build — a failed build does not trigger cleanup so as not to destroy the deployed-schema record for a model whose SQL has a syntax error.
+
+This cleanup applies only to `.json` schema files, not to the live database. Smelt does not drop the corresponding database table automatically when a model is deleted; that is left to the user.
+
 `smelt diff` does not require a live database connection. It reads the stored schemas and runs type inference on the current model SQL offline.
 
 ### Change classification
@@ -214,7 +222,7 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **`smelt diff --format json` schema not published.** The JSON output format is not documented as a stable contract. Orchestrators consuming it could break on version changes.
 - **Struct field reordering detection.** Whether changing struct field order is detected as `IncompatibleTypeChange` or silently ignored depends on the comparison implementation. Current behavior undocumented in user guide.
 - **Exit code for blocked migrations.** When a run is blocked by `RequiresColumnRemovalFlag` or `FullRefreshBlocked`, the exit code is non-zero but the specific code (1 vs. other) is not specified.
-- **`.smelt/schemas/` format pre-`run_state.md`.** The format of stored schemas in `.smelt/schemas/`, update timing, and lifecycle are implementation-defined. A future `run_state.md` will specify this alongside manifest format and run IDs. (See `architecture.md` §"Specs not yet authored".)
+- **`.smelt/schemas/` format pre-`run_state.md`.** The on-disk JSON format of stored schemas, update timing on partial runs, and the manifest (run IDs, parallelism) are still implementation-defined. A future `run_state.md` will cover the full `.smelt/` layout. Stale-schema cleanup semantics are now specified above. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

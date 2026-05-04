@@ -233,6 +233,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         if selected.is_empty() {
             info!("No models matched the selectors");
+            eprintln!("smelt: no models matched the selector(s)");
             return Ok(());
         }
 
@@ -1123,6 +1124,25 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
     if let Err(e) = file_store.save_intervals(&interval_store) {
         warn!("Failed to save interval store: {}", e);
+    }
+
+    // Stale schema cleanup: remove .smelt/schemas/<name>.json entries for models
+    // that no longer exist in the project. Compares against ALL discovered models
+    // (not just selected ones) so a deleted model's schema is cleaned up even if
+    // the run was selective (spec: schema_evolution.md §"Stale schema cleanup").
+    if !args.dry_run {
+        let current_names: HashSet<String> = graph.all_model_names().into_iter().collect();
+        for orphan in file_store
+            .list_deployed_model_names()
+            .into_iter()
+            .filter(|n| !current_names.contains(n))
+        {
+            if let Err(e) = file_store.delete_schema(&orphan) {
+                warn!("Failed to delete stale schema for '{}': {}", orphan, e);
+            } else {
+                debug!("Removed stale schema for deleted model '{}'", orphan);
+            }
+        }
     }
 
     // 10. Summary

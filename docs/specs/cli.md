@@ -119,6 +119,24 @@ owners: [andrew]
 
 ## Semantics
 
+### No-op rebuild output
+
+When `smelt build` or `smelt run` completes with no models executed (either because `--select` matched nothing, or because no models required re-running), smelt must emit a human-readable line to **stderr** to avoid silent ambiguity:
+
+```
+smelt: nothing to rebuild
+```
+
+When `--select` matched no models, the message is:
+
+```
+smelt: no models matched the selector(s)
+```
+
+Both messages are emitted to **stderr** so they do not pollute stdout-parsed output. Neither message is emitted on a successful build that ran at least one model.
+
+> **Implementation note.** The current implementation logs `"No models matched the selectors"` via `info!()`, which is only visible when `RUST_LOG=info` is set. This diverges from the above spec. Until fixed, users observing complete silence should treat it as a no-op (not an error).
+
 ### `smelt build` lifecycle
 
 A single `smelt build` performs these steps, in order:

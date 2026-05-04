@@ -192,6 +192,19 @@ impl FileStore {
             .collect()
     }
 
+    /// Delete the deployed schema for a model.
+    ///
+    /// No-ops silently if the file does not exist. Called by the build lifecycle
+    /// after a successful run to remove orphan entries for deleted model files.
+    pub fn delete_schema(&self, model_name: &str) -> Result<()> {
+        let path = self.schemas_dir().join(format!("{}.json", model_name));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Failed to delete schema: {:?}", path))?;
+        }
+        Ok(())
+    }
+
     /// Check if state directory exists (indicates state tracking has been initialized).
     pub fn exists(&self) -> bool {
         self.state_dir.exists()
@@ -337,5 +350,37 @@ mod tests {
 
         let loaded = store.load_schema("nonexistent").unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_delete_schema_removes_file() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        let schema = DeployedSchema {
+            model: "stg_orders".to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "sha256:abc".to_string(),
+            columns: vec![],
+        };
+        store.save_schema(&schema).unwrap();
+        assert!(store.load_schema("stg_orders").unwrap().is_some());
+
+        store.delete_schema("stg_orders").unwrap();
+        assert!(store.load_schema("stg_orders").unwrap().is_none());
+
+        // list_deployed_model_names should no longer include it
+        let names = store.list_deployed_model_names();
+        assert!(!names.contains(&"stg_orders".to_string()));
+    }
+
+    #[test]
+    fn test_delete_schema_noop_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        // Deleting a non-existent schema should not error
+        store.delete_schema("nonexistent").unwrap();
     }
 }
