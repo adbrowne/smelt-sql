@@ -45,24 +45,24 @@ The discussion phases (9–16) carry the questions that need answers before they
 
 ## Progress tracking
 
-| Phase | Status   | Findings closed                     | Commit | Date |
-|-------|----------|-------------------------------------|--------|------|
-| 1     | pending  | H1 (delete), Mi1 partial            |        |      |
-| 2     | pending  | M8, M6, partial H1                  |        |      |
-| 3     | pending  | H2, N1, N2, Mi5                     |        |      |
-| 4     | pending  | M1, M2                              |        |      |
-| 5     | pending  | H3                                  |        |      |
-| 6     | pending  | M3                                  |        |      |
-| 7     | pending  | M4                                  |        |      |
-| 8     | pending  | M5, M7, M16, Mi3, Mi7, Mi1, Mi2, N3 |        |      |
-| 9     | discuss  | C1                                  |        |      |
-| 10    | discuss  | H6                                  |        |      |
-| 11    | discuss  | H7                                  |        |      |
-| 12    | discuss  | H8                                  |        |      |
-| 13    | discuss  | H4                                  |        |      |
-| 14    | discuss  | H5, M9, M10, M11, M13, M15          |        |      |
-| 15    | discuss  | M12                                 |        |      |
-| 16    | discuss  | M14, Mi4, Mi6, Mi10–Mi19, Ergonomics |        |      |
+| Phase | Status   | Findings closed                     | Commit  | Date       |
+|-------|----------|-------------------------------------|---------|------------|
+| 1     | done     | H1                                  | 0e76ac2 | 2026-05-04 |
+| 2     | done     | M6, M8 (M7 deferred to Phase 3)     | 17e7b6f | 2026-05-04 |
+| 3     | done     | H2, M7, N1, N2, Mi4, Mi5            | 7fa3db0 | 2026-05-04 |
+| 4     | done     | M1, M2                              | 9d912c2 | 2026-05-04 |
+| 5     | done     | H3                                  | a93b4a5 | 2026-05-04 |
+| 6     | done     | M3                                  | 4ba5e51 | 2026-05-04 |
+| 7     | done     | M4                                  | 483a6ce | 2026-05-04 |
+| 8     | done     | M5, M16, Mi1, Mi2, Mi3, Mi7, N3     | 261cdd9 | 2026-05-04 |
+| 9     | discuss  | C1                                  |         |            |
+| 10    | discuss  | H6                                  |         |            |
+| 11    | discuss  | H7                                  |         |            |
+| 12    | discuss  | H8                                  |         |            |
+| 13    | discuss  | H4                                  |         |            |
+| 14    | discuss  | H5, M9, M10, M11, M13, M15          |         |            |
+| 15    | discuss  | M12                                 |         |            |
+| 16    | discuss  | M14, Mi4, Mi6, Mi10–Mi19, Ergonomics |         |            |
 
 ---
 
