@@ -1,7 +1,7 @@
 ---
 feature: functions
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -100,6 +100,28 @@ PASSING <name2> AS (<body2>)
 - Trigger rule: after the call's closing `)`, the parser peeks one token; if it is `PASSING`, a clause sequence begins; otherwise normal SQL parsing resumes.
 - The trigger rule is uniform in expression position and FROM position.
 - `PASSING` does **not** attach to plain SQL function calls (`UPPER(...)`, `SUM(...)`), nor to `smelt.extern` calls in v1 — externs declare no fragment-sort parameters.
+
+**Worked example — recognised vs unrecognised positions:**
+
+```sql
+-- RECOGNISED: immediately after a smelt call's closing )
+FROM smelt.analytics.session_rollup(user_id => user_id)
+PASSING filter_expr AS (event_type = 'click')   -- PASSING is a keyword here
+
+-- NOT RECOGNISED: PASSING as a column alias (regular identifier)
+SELECT e.event_id, e.passing AS was_passing     -- 'passing' is an identifier here
+FROM events e
+
+-- NOT RECOGNISED: PASSING in a plain SQL function call
+SELECT UPPER(PASSING)                           -- 'PASSING' parsed as an identifier
+FROM events
+
+-- NOT RECOGNISED: PASSING inside a CTE name
+WITH passing_events AS (SELECT * FROM events)   -- 'passing_events' is an identifier
+SELECT * FROM passing_events
+```
+
+The parser distinguishes by position — it looks one token ahead after the closing `)` of a `smelt.<path>(...)` call. This is intentional: `PASSING` needs no escaping in ordinary SQL contexts.
 
 ### `smelt.as_struct(...)`
 

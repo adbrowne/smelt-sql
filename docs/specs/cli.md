@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -30,7 +30,7 @@ owners: [andrew]
 | `smelt docs generate` | Generate a data catalog (markdown or JSON) |
 | `smelt docs list` | List embedded documentation topics |
 | `smelt docs show <topic>` | Print embedded documentation topic to stdout |
-| `smelt docs path` | Print the location of embedded docs (inside the binary) |
+| `smelt docs path` | **Stub.** Prints a message indicating docs are embedded in the binary and suggests using `smelt docs list` / `smelt docs show` instead. Does not print a usable filesystem path — there is none; docs are compiled into the binary. Future feature. |
 
 ### Top-level flags
 
@@ -74,6 +74,8 @@ owners: [andrew]
 `smelt build` also accepts the schema-evolution flags `--allow-column-removal` and `--allow-full-refresh`; see `schema_evolution.md` §"Evolution flags" for semantics. The same flags are accepted by `smelt run` (which delegates to the same evolution-handling path).
 
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
+
+**`smelt explain` excludes test models.** `smelt explain` (with or without `--json`) filters out all `materialization: test` models from its output via the `is_test()` predicate applied to every discovered model. Test models never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
 
 ### `smelt explain --json` output schema
 

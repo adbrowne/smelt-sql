@@ -1,7 +1,7 @@
 ---
 feature: seeds
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -40,7 +40,11 @@ A YAML carrying only `description:` (no `columns:`, no `materialization:`) is va
 
 `view` and `materialized_view` are not currently supported for seeds and produce a hard error at load time.
 
+> **v1 sharp edge — ephemeral seed size.** Declaring `materialization: ephemeral` on a large CSV (e.g. 100k rows) will generate a `VALUES` literal of dangerous size that may cause query compilation failures or very slow execution. There is no row-count threshold in v1 — the choice is left to the user. A future warn-then-error threshold is open. Use `materialization: table` for any seed that is larger than a few thousand rows.
+
 ### CSV format the loader accepts
+
+> **v1 sharp edge — no per-seed override.** The CSV loader accepts one fixed format in v1: comma delimiter, double-quote quoting, mandatory header row, UTF-8, empty cell = NULL. There is no way to configure a custom delimiter, NULL marker, or quote character per-seed. If a data source produces non-standard CSVs, convert them at the source before placing them in the seeds directory.
 
 The loader is strict (no per-seed override surface in v1):
 
@@ -58,7 +62,9 @@ CSVs that do not match this format produce a hard error with file/line/column po
 When a sidecar YAML does not declare `columns:`, smelt infers each column's type from the CSV data. Two phases consume the same inference rules:
 
 - **Compile time** (LSP, `smelt table`, type-checking downstream models): samples the **first 100 data rows**.
-- **Runtime** (`smelt seed`, `smelt build`): reads the **whole file** and infers from every row. Runtime types may be wider than compile-time types when the first 100 rows happen to fit a narrower type.
+- **Runtime** (`smelt seed`, `smelt build`): reads the **whole file** and infers from every row.
+
+> **v1 sharp edge — compile/runtime type divergence.** When the first 100 rows fit a narrower type than the full file, the compile-time inferred type and the runtime inferred type will differ. For example, if rows 1–100 all contain integers but row 101 contains `1.5`, compile time infers `INTEGER` while runtime infers `DECIMAL`. Downstream models type-checked at compile time will see the narrower type; the seed will be loaded with the wider type at runtime. Pin the schema in a sidecar YAML (`columns:`) to prevent this divergence. Cross-link: `lsp.md` for the LSP's compile-time view of seed types.
 
 Both phases apply the same precedence:
 
