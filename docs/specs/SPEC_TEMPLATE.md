@@ -5,9 +5,30 @@ last_reviewed: YYYY-MM-DD
 owners: [andrew]
 ---
 
+<!--
+Frontmatter rules:
+- `feature`: short slug matching the filename stem (e.g. `incremental_models`).
+- `status`: one of `experimental`, `stable`, `deprecated`.
+  - `experimental` (default for new specs): the surface may break; pre-1.0.
+  - `stable`: the surface is committed; breaking changes require a deprecation cycle.
+    Today only `architecture.md` is `stable` — it pins load-bearing invariants the
+    rest of the spec set depends on.
+  - `deprecated`: the spec describes a feature being phased out. Cross-references
+    should mark the replacement.
+- `last_reviewed`: YYYY-MM-DD of the last substantive review (drift audit, sweep,
+  or rewrite). Bump on any non-trivial edit.
+- `owners`: GitHub handles or names of people responsible for keeping the spec
+  current.
+
+References blocks (the bottom-of-spec section) use **flat bullets** under the
+`- **Code**:` / `- **Tests**: ` / `- **User docs**:` / `- **Plans (history)**:` /
+`- **Related specs**:` headings — not nested sub-headings — to keep cross-spec
+parsing scripts simple.
+-->
+
 # <Feature Title>
 
-> **What this is.** A normative spec for `<feature>`. This is the canonical answer to "how does `<feature>` work?". Behavior changes start here, then propagate to plans, code, and user docs.
+> **What this is.** *(Required scope callout — keep this blockquote between the H1 and the first `## Surface` heading on every spec.)* A one-paragraph statement of what this spec covers and what it does not — naming the adjacent specs that own neighbouring concerns. Readers skim this first; if they're in the wrong file, the callout sends them to the right one. Example shape: "A normative spec for `<feature>`: <one-sentence summary of in-scope surface>. Out of scope: <bullet of adjacent concern> (see `<other_spec>.md`); <another adjacent concern> (see `<another_spec>.md`)."
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 

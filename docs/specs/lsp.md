@@ -1,7 +1,7 @@
 ---
 feature: lsp
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -57,13 +57,12 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 **Parse and syntax:**
 - `ParseError` — SQL syntax error
 - `UnsupportedConstruct` — construct that parses but is not supported (e.g., PIVOT)
-- `YamlParseError` — invalid YAML in frontmatter or `sources.yml`
+- `YamlParseError` — invalid YAML in frontmatter or a per-entity source / seed-sidecar `.yml`
 - `FrontmatterParseError` — malformed YAML frontmatter block
 - `InvalidModel` — model file cannot be parsed at all
 
 **References:**
-- `UndefinedModelRef` — `smelt.models.<name>` references a model that doesn't exist
-- `UndefinedSource` — `smelt.sources.<schema>.<table>` references an undeclared source
+- `UnknownSmeltPath` — a `smelt.<path>` reference does not resolve to any project entity (no file at that path, or the file resolves to a non-addressable kind). Mirrors `UnknownSmeltFn` from `functions.md` for the call form. The diagnostic message is kind-aware on the *expected* kind at the use site (a missing `FROM smelt.<path>` referent reports "model, seed, or source"; a missing `smelt.<path>(...)` call reports "function") so user-facing messages stay specific without a code split.
 - `KindMismatch` — entity used in the wrong context (e.g., a test model in a FROM clause)
 - `CircularDependency` — model dependency graph contains a cycle
 - `CteCycle` — CTE references itself directly or transitively
@@ -76,7 +75,7 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `CannotInferType` — type inference cannot determine the type of an expression
 - `TypeMismatch` — operation applied to incompatible types
 - `UnknownCastType` — CAST target type is not recognized
-- `SourceTypeError` — invalid type string in `sources.yml`
+- `SourceTypeError` — invalid type string in a source `.yml` (owned by `sources.md`; mirrored here for completeness)
 
 **Functions (`smelt.define`, `smelt.extern`):**
 - `UnrecognizedFunction` — call to undefined smelt function
@@ -104,7 +103,7 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `ProvenanceMismatch` — declared vs. actual column reads disagree
 - `JoinsMismatch` — declared join not present in FROM clause
 - `MissingProvenancePushdownAdvisory` (Hint) — suggests declaring provenance
-- `MalformedSource` — malformed entry in `sources.yml`
+- `MalformedSource` — malformed entry in a source `.yml` (owned by `sources.md`; mirrored here for completeness)
 
 ### Go-to-Definition
 
@@ -112,8 +111,10 @@ Go-to-Definition resolves the following identifier types:
 
 | Identifier | Resolves to |
 |------------|-------------|
-| `smelt.models.<name>` | The SQL (or Python) source file for that model |
-| `smelt.sources.<schema>.<table>` | The line in `sources.yml` declaring that table |
+| `smelt.<path>` (resolves to a model) | The SQL (or Python) source file for that model |
+| `smelt.<path>` (resolves to a source) | The source `.yml` file declaring that table |
+| `smelt.<path>` (resolves to a seed) | The seed `.csv` file (or the sidecar `.yml` if cursor is on a column) |
+| `smelt.<path>(...)` (resolves to a function) | The `smelt.define` declaration |
 | CTE name (reference site) | The CTE definition in the same file's WITH clause |
 | Table alias (in column reference) | The FROM or JOIN clause that defines the alias |
 | Column reference (qualified) | The upstream column definition, traced through SELECT chains |
@@ -121,7 +122,7 @@ Go-to-Definition resolves the following identifier types:
 | Column reference (unqualified, ambiguous) | All matching upstream definitions (array response) |
 | Python `@model` function (from SQL ref) | The `.py` file, at the decorator line |
 
-Go-to-Definition on `smelt.models.<name>` in a SQL model navigates to the model's source file. For Python-derived models, it navigates to the `.py` file at the line of the `@model` decorator for that function.
+Go-to-Definition on a `smelt.<path>` reference in a SQL model navigates to the file at that path. For Python-derived models, it navigates to the `.py` file at the line of the `@model` decorator for that function.
 
 Column definition tracing follows `SELECT *` chains across multiple upstream models.
 
@@ -131,10 +132,10 @@ Find References resolves the following identifier types:
 
 | Identifier | Returns |
 |------------|---------|
-| `smelt.models.<name>` (at definition or use) | All `smelt.models.<name>` references across the workspace |
+| `smelt.<path>` (at definition or use) | All `smelt.<path>` references to the same entity across the workspace |
 | CTE name (at definition or use) | All references to that CTE within the same file |
 
-Cross-file find-references for model names searches all loaded workspace files.
+Cross-file find-references for `smelt.<path>` searches all loaded workspace files.
 
 ### Hover
 
@@ -142,8 +143,9 @@ Hover is supported on:
 
 | Target | Hover content |
 |--------|--------------|
-| `smelt.models.<name>` | Model schema as markdown table (columns, types, nullability) plus upstream lineage |
-| `smelt.sources.<schema>.<table>` | Source table schema from `sources.yml` |
+| `smelt.<path>` (model) | Model schema as markdown table (columns, types, nullability) plus upstream lineage |
+| `smelt.<path>` (source) | Source table schema from the source `.yml` |
+| `smelt.<path>` (seed) | Seed schema (sidecar or inferred) plus row count |
 
 Hover content includes type annotations and row requirements from the type inference system where available.
 
@@ -153,8 +155,8 @@ Completions are triggered by the characters `'`, `(`, and `.`.
 
 | Context | Completions offered |
 |---------|---------------------|
-| After `smelt.models.` | All model names in the workspace |
-| After `smelt.sources.` | All `<schema>.<table>` pairs from `sources.yml` |
+| After `smelt.` | All addressable entities in the workspace (models, seeds, sources, functions), grouped by kind in the completion list |
+| After a `smelt.<partial>` segment | Entities whose path begins with the entered segments |
 | Column context (unqualified) | All reachable column names with inferred types |
 | After `<alias>.` | Columns from the table/model/CTE bound to that alias |
 
@@ -167,8 +169,8 @@ Rename is supported on:
 | Identifier | What is renamed |
 |------------|----------------|
 | CTE name | CTE definition and all references within the same file |
-| `smelt.models.<name>` | All `smelt.models.<name>` references across the workspace; the source file itself is **not** renamed |
-| Column name | Column in local file, upstream model files (via source tracing), downstream model files (via dependency graph), and `sources.yml` (for source table columns) |
+| `smelt.<path>` | All `smelt.<path>` references to that entity across the workspace; the source file itself is **not** renamed |
+| Column name | Column in local file, upstream model files (via source tracing), downstream model files (via dependency graph), and the relevant per-entity source `.yml` (for source-table columns) |
 
 `prepare_rename` is supported — editors can preview the rename range before committing.
 
@@ -180,9 +182,9 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 
 | Action | Trigger | What it does |
 |--------|---------|--------------|
-| Create model from ref | Cursor on `UndefinedModelRef` diagnostic | Generates a SQL file skeleton for the missing model |
+| Create model from ref | Cursor on an `UnknownSmeltPath` diagnostic where the expected kind is a model | Generates a SQL file skeleton at the resolved path |
 | Fix undefined ref | Cursor on parse/ref error | Offers text edit to correct the reference |
-| Add column to sources.yml | Cursor on undeclared source column | Inserts column declaration into `sources.yml` |
+| Add column to source YAML | Cursor on undeclared source column | Inserts column declaration into the resolved per-entity source `.yml` |
 | Extract CTE | Cursor on subquery expression | Extracts subquery into a named CTE in the WITH clause |
 | Inline CTE | Cursor on CTE reference | Inlines the CTE body at the reference site |
 
@@ -210,10 +212,13 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 
 - **Rename does not rename the file.** Renaming a model via LSP updates all references but not the source file. This is a known gap — after a rename, the model name reverts to the file stem on next discovery unless the file is also renamed.
 - **Python LSP support is partial.** Go-to-definition from SQL to Python `@model` functions works. Diagnostics for type errors *inside* the Python-generated SQL are attributed to the virtual SQL location, not the Python source line.
-- **`sources.yml` is not watched.** Changes to `sources.yml` require reopening the workspace or making a model file change to trigger re-analysis. The server does not watch `sources.yml` independently.
+- **Source `.yml` files are not watched.** Changes to a per-entity source YAML require reopening the workspace or making a model file change to trigger re-analysis. The server does not watch source `.yml` files independently.
 - **`smelt.yml` changes require server restart.** Project configuration changes (new model paths, target changes) are not detected dynamically; the LSP server must be restarted.
-- **Hover on CTEs not implemented.** Hover resolves `smelt.models.*` and `smelt.sources.*` but not CTE names or column references.
+- **Hover on CTEs not implemented.** Hover resolves `smelt.<path>` references but not CTE names or column references.
 - **Find-references for columns not implemented.** Find References is implemented for model names and CTEs, but not for column names. Column rename works, but finding all uses of a column without renaming is not supported.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
+- **`UnknownSmeltPath` vs. code split.** This spec says the implementation uses a single `UnknownSmeltPath` code with a kind-aware message. The actual code (`crates/smelt-db/src/lib.rs`) instead has two separate codes: `UndefinedModelRef` (unresolved model/seed reference) and `UndefinedSource` (unresolved source reference). The spec should be updated to match the split, or the codes should be consolidated. Correction needed before `diagnostics.md` lands.
+- **Six undocumented diagnostic codes.** The following codes appear in `crates/smelt-db/src/lib.rs` but are absent from this spec: `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `DeclaredCardinalityUnverifiable`, `ExternFragmentParamUnsupported`, `MissingSeedSidecar`. They should be documented here (or in `diagnostics.md`) once their semantics are stable.
 
 ## References
 
@@ -228,7 +233,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
   - `docs-site/docs/guide/editor-features.md`
   - `docs-site/docs/guide/editor-setup.md`
 - **Related specs**:
-  - `models.md` — `smelt.models.<name>` addressing, frontmatter schema
-  - `sources.md` — `sources.yml` format, `smelt.sources.<schema>.<table>` addressing
+  - `models.md` — `smelt.<path>` addressing, frontmatter schema
+  - `sources.md` — per-entity source `.yml` format, `smelt.<path>` resolution to sources, ownership of `MalformedSource` / `SourceTypeError` codes
   - `functions.md` — `smelt.define`, `smelt.extern`, function-related diagnostic codes
   - `types.md` — type inference system, DataType vocabulary

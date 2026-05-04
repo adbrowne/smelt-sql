@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-04
 owners: [andrew]
 ---
 
@@ -52,7 +52,7 @@ columns:
 | `name` | no | derived | Override the database-side name. When present, must be a `<schema>.<table>` literal. When absent, defaults to `<target_schema>.<address-path-joined-by-_>`. |
 | `materialization` | — | — | **Not allowed on a source.** Sources are externally managed; declaring a materialization is a hard error pointing at the seed sidecar shape. |
 
-The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar / source YAML shape"). The only differences are: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path).
+The YAML grammar is shared with the seed sidecar (`seeds.md` §"Sidecar YAML — seed-specific keys"). The only differences are: a source must declare `columns:`; a source must not declare `materialization:`; a source supports the `name:` override (because the external table's name is not always a function of the workspace path).
 
 ### Discovery and addressing
 
@@ -68,6 +68,15 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 - **Goto-definition** → opens the source `.yml`.
 - **Diagnostics** — references to columns not declared in the source YAML produce an "undeclared column" diagnostic, same as for any other typed table reference.
 - **No "Pin schema" code action.** Sources have no data file to infer from; the YAML is hand-written.
+
+### Diagnostic codes (owned by this spec)
+
+The codes below are owned by `sources.md` — `lsp.md` mirrors them in its catalogue but defers the trigger contract here. (Diagnostic ownership is a per-spec rule that a future `diagnostics.md` registry will formalise; the rule today is "diagnostic codes live with the feature that owns them.")
+
+| Code | Severity | Trigger |
+|---|---|---|
+| `MalformedSource` | Error | A source `.yml` parses as YAML but violates the shape above (e.g., missing `columns`, `materialization:` key present, malformed column entry). |
+| `SourceTypeError` | Error | A `columns[].type` value is not a recognised smelt `DataType` (`types.md`). |
 
 ## Semantics
 
@@ -99,7 +108,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 ## Known Divergences / Open Questions
 
 - **Source-existence verification.** A future `smelt verify` pass could check that every declared source exists in the target database with the declared columns. Out of scope here.
-- **Column-level tests on sources.** Same status as for seeds — deferred to the future `tests.md`. The shared YAML grammar grows uniformly.
+- **Column-level tests on sources.** Same status as for seeds — column-level tests on the shared YAML grammar are not yet defined; `testing.md` covers `materialization: test` models but not per-column assertions on a source's sidecar. The shared YAML grammar will grow uniformly when that surface is added.
 - **Co-location with seeds.** Worth noting: a `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems), since kind-by-content makes the directory layout independent of kind. Style guides may discourage mixing for readability; the resolver does not.
 
 ## References

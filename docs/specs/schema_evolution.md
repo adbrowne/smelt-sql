@@ -1,7 +1,7 @@
 ---
 feature: schema_evolution
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -74,19 +74,19 @@ model_name: REMOVED
 
 ### Column evolution annotations
 
-Model frontmatter may include per-column annotations used during evolution:
-
-```yaml
-columns:
-  - name: status
-    default: "'active'"        # SQL expression for new NOT NULL column default
-    backfill: "lower(status)"  # SQL UPDATE expression run after column addition
-```
+The `columns:` frontmatter map (full shape: see `models.md` §"`columns:` — column metadata") includes two per-column keys consumed by the schema-evolution path:
 
 | Key | Description |
 |-----|-------------|
 | `default` | SQL literal used as the DEFAULT expression when adding a NOT NULL column. Required when adding a NOT NULL column to an existing table. |
 | `backfill` | SQL expression applied in an UPDATE statement after the column is added, to populate existing rows. |
+
+```yaml
+columns:
+  status:
+    default: "'active'"        # SQL expression for new NOT NULL column default
+    backfill: "lower(status)"  # SQL UPDATE expression run after column addition
+```
 
 ## Semantics
 
@@ -187,13 +187,13 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 
 ## Design
 
-**Offline diff.** `smelt diff` does not connect to the live database. Stored schemas in `.smelt/schemas/` serve as the deployed-state snapshot. This enables CI checks without database credentials and means `smelt diff` reflects the *last deployed* schema, not the current live one. If the database was modified outside of smelt, the stored schema will diverge from reality.
+**Offline diff.** `smelt diff` does not connect to the live database. Stored schemas in `.smelt/schemas/` serve as the deployed-state snapshot. This enables CI checks without database credentials and means `smelt diff` reflects the *last deployed* schema, not the current live one. If the database was modified outside of smelt, the stored schema will diverge from reality. Live-connection diff was rejected because it requires credentials in CI environments and creates non-determinism when the database is being modified concurrently.
 
-**ALTER TABLE over full refresh as default.** The system prefers non-destructive ALTER TABLE operations for additive changes. Full table recreation is reserved for changes that cannot be expressed as additive DDL. This avoids unnecessary data movement on large tables.
+**ALTER TABLE over full refresh as default.** The system prefers non-destructive ALTER TABLE operations for additive changes. Full table recreation is reserved for changes that cannot be expressed as additive DDL. This avoids unnecessary data movement on large tables. Full-refresh-by-default was rejected because additive changes (adding a nullable column, widening a type) have no correctness requirement for rewriting existing rows — requiring a full refresh would penalise the common case.
 
 **Column removal is always opt-in.** Dropping columns is a destructive operation that cannot be reversed. Requiring `--allow-column-removal` makes the intent explicit in pipelines and prevents accidental column drops from model renames or typos.
 
-**`backfill:` for NOT NULL column additions.** Adding a NOT NULL column requires populating existing rows. Rather than silently inserting NULL (which would violate the constraint) or always requiring a full refresh, smelt supports `default:` (column default for new rows) and `backfill:` (UPDATE expression for existing rows) as first-class evolution primitives.
+**`backfill:` for NOT NULL column additions.** Adding a NOT NULL column requires populating existing rows. Rather than silently inserting NULL (which would violate the constraint) or always requiring a full refresh, smelt supports `default:` (column default for new rows) and `backfill:` (UPDATE expression for existing rows) as first-class evolution primitives. Silent NULL insertion was rejected because it violates the declared constraint; always-full-refresh was rejected because it forces large table rewrites for what is often a small migration.
 
 **Backend capability is the binding constraint.** Safe widenings are safe in principle, but each backend limits which DDL it can execute. The planner resolves the most capable action the backend supports, falling back to TableRewrite or FullRefresh when DDL is unavailable.
 
@@ -214,6 +214,7 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **`smelt diff --format json` schema not published.** The JSON output format is not documented as a stable contract. Orchestrators consuming it could break on version changes.
 - **Struct field reordering detection.** Whether changing struct field order is detected as `IncompatibleTypeChange` or silently ignored depends on the comparison implementation. Current behavior undocumented in user guide.
 - **Exit code for blocked migrations.** When a run is blocked by `RequiresColumnRemovalFlag` or `FullRefreshBlocked`, the exit code is non-zero but the specific code (1 vs. other) is not specified.
+- **`.smelt/schemas/` format pre-`run_state.md`.** The format of stored schemas in `.smelt/schemas/`, update timing, and lifecycle are implementation-defined. A future `run_state.md` will specify this alongside manifest format and run IDs. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 
@@ -229,4 +230,4 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **Related specs**:
   - `models.md` — model materialization modes
   - `cli.md` — `smelt diff` command, `smelt run` flags
-  - `project_config.md` — target backend configuration
+  - `smelt_yml.md` — target backend configuration

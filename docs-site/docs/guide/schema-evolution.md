@@ -33,7 +33,7 @@ SELECT
     id,
     status,
     metadata
-FROM smelt.models.upstream_model
+FROM smelt.upstream_model
 ```
 
 ### smelt.yml example

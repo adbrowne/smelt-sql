@@ -176,13 +176,15 @@ Files without frontmatter continue to work:
 
 ## Key Differentiators from dbt
 
-| Aspect | dbt | smelt |
-|--------|-----|-------|
-| Model definition | Jinja templates | Parsed semantic models |
-| Incrementalization | Manual `is_incremental()` | Automatic semantic analysis |
-| Type checking | None (runtime errors) | Static analysis with LSP |
-| Cross-engine | One target per project | Split work across engines |
-| Optimization | Manual | Rule-based with learning |
+1. **Logical/Physical Separation**: Users specify logic in models, possibly with some attributes that specify how planner rules should work, planner rules specify how it actually runs (for example turning a full table query into an incrimental model)
+2. **Engineer controls planning**: Planner is not a black box - the API will allow data engineers to refactor specific logical plans to optimize - the framework should make it easy to do these and know that correctness is preserved - or where not - what has been lost.
+3. **Cross-Model Optimization**: Can fuse or split queries across model boundaries
+4. **Multi-Backend**: Automatically distribute work across engines (e.g., DuckDB for small data, Databricks for large)
+5. **Proper Language**: No Jinja templates, proper compilation with type checking
+6. **First-Class Editor Support**: LSP with incremental compilation via Salsa
+   - Real-time diagnostics and completions
+   - Error-recovery parser handles partial/invalid code
+   - Incremental recompilation for fast feedback
 
 ## License
 

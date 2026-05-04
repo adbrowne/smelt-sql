@@ -1,7 +1,7 @@
 ---
 feature: data_catalog
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -65,6 +65,8 @@ Prints a message indicating that docs are embedded in the binary and advises usi
 - Model name as heading; model description (if set)
 - Metadata: Materialization, Owner (if set), Tags (if any)
 - Columns table: `Column | Type | Nullable | Description | Tests`
+  - The per-column **Tests** cell lists the column-level test constraints declared under `columns.<col>.tests` in the model's frontmatter (`models.md` §"`columns:` — column metadata"). Cell content is the comma-separated test names; an empty cell means no column-level tests are declared.
+- **Tests** section: a bulleted list of every test model that targets this model — i.e. every `materialization: test` model with `test.model: <this model>` in its frontmatter (`testing.md` §"`test:` frontmatter key"). Each bullet is the test name, linking to the test model's source location. The section is omitted when no test models target this one.
 - Upstream dependencies (links to upstream model pages)
 - Downstream dependencies (links to downstream model pages)
 - Incremental config section (only if the model is incremental): granularity, partition column, event time column, unique key
@@ -133,9 +135,7 @@ Prints a message indicating that docs are embedded in the binary and advises usi
 Each column in the catalog is built from two sources, merged:
 
 1. **Type inference** (Salsa DB): `data_type`, `nullable`, `expression`, and `source` (lineage). If type inference cannot determine a field, that field is omitted.
-2. **Frontmatter metadata** (`columns:` in model YAML frontmatter): `description`, `tests`. If no frontmatter entry exists for a column, these fields are absent.
-
-The frontmatter `columns:` key maps column names to metadata objects:
+2. **Frontmatter metadata** (the `columns:` map in model YAML frontmatter): `description` and `tests`. The full `columns:` shape is owned by `models.md` §"`columns:` — column metadata" — this spec only specifies which keys are rendered into the catalog. If no frontmatter entry exists for a column, the description and tests fields are absent from the catalog output.
 
 ```yaml
 columns:
@@ -162,9 +162,9 @@ When `--select` is specified, only selected models appear in the output. Test mo
 
 ## Design
 
-**Two formats serve different consumers.** Markdown is human-readable and suitable for static site deployment (e.g., GitHub Pages, Confluence). JSON is the integration format for programmatic consumers — data portals, lineage tools, BI catalog integrations.
+**Two formats serve different consumers.** Markdown is human-readable and suitable for static site deployment (e.g., GitHub Pages, Confluence). JSON is the integration format for programmatic consumers — data portals, lineage tools, BI catalog integrations. A single-format output was rejected: pure Markdown excludes programmatic consumers; pure JSON excludes human readers who want to browse catalog pages without writing a script.
 
-**Column lineage from type inference.** The `source` field on each column (computed, from_model, wildcard, external_table, unknown) is derived from smelt's type inference system rather than explicit annotation. This means lineage is automatically correct for well-typed models and degrades gracefully (omitted or `unknown`) for models with incomplete type information.
+**Column lineage from type inference.** The `source` field on each column (computed, from_model, wildcard, external_table, unknown) is derived from smelt's type inference system rather than explicit annotation. This means lineage is automatically correct for well-typed models and degrades gracefully (omitted or `unknown`) for models with incomplete type information. User-declared provenance maps were rejected: they drift when the SQL changes and require maintenance work that the type inferencer eliminates.
 
 **Embedded docs in binary.** Embedding user documentation in the binary ensures that `smelt docs show` always returns docs that match the installed version. There is no risk of docs being installed separately or out of sync. The trade-off is that docs updates require a binary release.
 

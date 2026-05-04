@@ -1,7 +1,7 @@
 ---
 feature: python_models
 status: experimental
-last_reviewed: 2026-05-03
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -13,7 +13,7 @@ owners: [andrew]
 
 ### File format
 
-Python model files are `.py` files in any `model_paths` directory. A file must import and use the `@model` decorator from the smelt Python SDK:
+Python model files are `.py` files in any directory listed under `paths:` (see `smelt_yml.md`). A file must import and use the `@model` decorator from the smelt Python SDK:
 
 ```python
 from smelt import model
@@ -22,7 +22,7 @@ from smelt import model
 def combined_events(project):
     sources = project.find_models(tag="source")
     unions = "\nUNION ALL\n".join(
-        f"SELECT * FROM smelt.models.{m.name}" for m in sources
+        f"SELECT * FROM smelt.{m.name}" for m in sources
     )
     return f"""
 --- name: combined_events ---
@@ -101,7 +101,7 @@ Python model functions are evaluated at **compile time** — during `smelt build
 
 ### Model name derivation
 
-The model name is the Python function name, exactly. A function named `daily_revenue` produces a model named `daily_revenue`, addressable as `smelt.models.daily_revenue` in other models.
+The model name is the Python function name, exactly. A function named `daily_revenue` produces a model named `daily_revenue`, addressable as `smelt.daily_revenue` (universal `smelt.<path>` form per `architecture.md` §"Resolution") in other models.
 
 If a returned SQL string includes a `--- name: X ---` frontmatter header, that name is used instead of the function name. This allows a single Python function to return SQL with an explicit model name.
 
@@ -142,9 +142,9 @@ All standard model frontmatter keys (`materialization`, `tags`, `owner`, etc.) a
 
 ## Design
 
-**Compile-time Python, not Jinja.** Python model generation runs once at compile time and produces plain SQL. This avoids the template-execution-per-run overhead of Jinja, enables proper error messages (Python exceptions with tracebacks rather than template expansion failures), and keeps the query engine free of Python dependencies. The trade-off is that Python cannot access live query results — it can only operate on the project's structural metadata.
+**Compile-time Python, not Jinja.** Python model generation runs once at compile time and produces plain SQL. This avoids the template-execution-per-run overhead of Jinja, enables proper error messages (Python exceptions with tracebacks rather than template expansion failures), and keeps the query engine free of Python dependencies. The trade-off is that Python cannot access live query results — it can only operate on the project's structural metadata. Jinja was rejected because Jinja templates mix control flow with SQL syntax (no IDE, no type-checker, no LSP understands them), have opaque failure modes at render time, and force the executor to interpret template logic — coupling execution to a Python runtime. Runtime-access Python (calling a function each time the query runs) was rejected for the same reason: it couples execution to a Python runtime and prevents static analysis.
 
-**`find_models` as the only context API.** The project context deliberately exposes only structural metadata (name, tags, directory), not schema, type, or lineage information. This keeps the API stable: schema and type information changes with implementation; structural metadata changes only when models are added or removed. A richer API would require Python evaluation to depend on type inference, creating a circular dependency in the compiler pipeline.
+**`find_models` as the only context API.** The project context deliberately exposes only structural metadata (name, tags, directory), not schema, type, or lineage information. This keeps the API stable: schema and type information changes with implementation; structural metadata changes only when models are added or removed. A richer API would require Python evaluation to depend on type inference, creating a circular dependency in the compiler pipeline. Exposing schema/type was rejected specifically to avoid that circularity: if Python models can inspect column types, and column types come from type-checking Python-generated SQL, the compiler pipeline has no topological ordering.
 
 **Iterative evaluation for self-referential generation.** A Python model may generate models that in turn are used by other Python models (e.g., a "tag all staging models" generator that a marts generator queries). The iterative fixed-point approach handles these cases without requiring explicit ordering.
 
@@ -180,5 +180,5 @@ All standard model frontmatter keys (`materialization`, `tags`, `owner`, etc.) a
 - **User docs**:
   - `docs-site/docs/guide/python-models.md`
 - **Related specs**:
-  - `models.md` — SQL model files, frontmatter schema, `smelt.models.<name>` addressing
-  - `project_config.md` — `python:` config key
+  - `models.md` — SQL model files, frontmatter schema, `smelt.<path>` addressing
+  - `smelt_yml.md` — `python:` config key

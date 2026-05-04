@@ -74,7 +74,7 @@ materialization: table
 ---
 
 SELECT user_id, SUM(amount) as lifetime_value
-FROM smelt.models.transactions
+FROM smelt.transactions
 GROUP BY 1
 ```
 

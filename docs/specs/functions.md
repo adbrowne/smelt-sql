@@ -1,7 +1,7 @@
 ---
 feature: functions
 status: experimental
-last_reviewed: 2026-04-29
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -17,19 +17,18 @@ A `.sql` file is a sequence of top-level **items**. Each item is one of:
 
 - A `smelt.define` declaration.
 - A `smelt.extern` declaration.
-- A bare model `SELECT`.
-- A `smelt.test` declaration (declaration shape and assertion semantics owned by a future `tests.md` spec; this spec covers only the parsing-contract sharing).
+- A bare model `SELECT` (a SELECT carrying `materialization: test` is a test model — declaration shape and assertion semantics owned by `testing.md`).
 
 Each item may be preceded by an optional YAML **frontmatter** block (`---` … `---`). Frontmatter attaches to the immediately following declaration; there is no file-level frontmatter scope. (Research §16 #22.)
 
 Rules:
 
 - Items are separated by whitespace only — no separator token.
-- A file may contain **any number** of bare model `SELECT`s. The naming rule (lone-anonymous OR all-named via frontmatter `name:`, never mixed) is specified in `architecture.md` §"Project layout — Bare-model naming".
-- A file may contain **zero or more** `smelt.define`, `smelt.extern`, and `smelt.test` items, interleaved freely with each other and with bare model `SELECT`s.
-- All declared names within a file (bare-SELECT names, `smelt.define`s, `smelt.extern`s, `smelt.test`s) must be unique.
+- A file may contain **any number** of bare model `SELECT`s (test or otherwise). The naming rule (lone-anonymous OR all-named via frontmatter `name:`, never mixed) is specified in `architecture.md` §"Project layout — Bare-model naming".
+- A file may contain **zero or more** `smelt.define` and `smelt.extern` items, interleaved freely with each other and with bare model `SELECT`s.
+- All declared names within a file (bare-SELECT names, `smelt.define`s, `smelt.extern`s) must be unique.
 - File **kind** is a property of each declaration, not of the file (architecture spec, "Resolution"). The directory containing the file contributes to the entity's `smelt.<path>` namespace — e.g. `functions/patterns/session_rollup.sql` declaring `session_rollup` produces the call path `smelt.functions.patterns.session_rollup`. Externs are flat and ambient: their declaring path affects navigation only, never the call surface (see `architecture.md` §"Externs are flat").
-- A trailing `;` after a `smelt.define`, `smelt.extern`, or `smelt.test` declaration is allowed but optional.
+- A trailing `;` after a `smelt.define` or `smelt.extern` declaration is allowed but optional.
 
 ### `smelt.define` grammar
 
@@ -75,7 +74,7 @@ A `smelt.<path>(...)` call whose return type is `Expr<Boolean>` is valid in any 
 ```sql
 -- functions/orders.sql declares is_shipped(status TEXT) -> Expr<Boolean>
 SELECT *
-FROM smelt.models.orders
+FROM smelt.orders
 WHERE smelt.functions.is_shipped(status)
 ```
 
@@ -102,6 +101,28 @@ PASSING <name2> AS (<body2>)
 - The trigger rule is uniform in expression position and FROM position.
 - `PASSING` does **not** attach to plain SQL function calls (`UPPER(...)`, `SUM(...)`), nor to `smelt.extern` calls in v1 — externs declare no fragment-sort parameters.
 
+**Worked example — recognised vs unrecognised positions:**
+
+```sql
+-- RECOGNISED: immediately after a smelt call's closing )
+FROM smelt.analytics.session_rollup(user_id => user_id)
+PASSING filter_expr AS (event_type = 'click')   -- PASSING is a keyword here
+
+-- NOT RECOGNISED: PASSING as a column alias (regular identifier)
+SELECT e.event_id, e.passing AS was_passing     -- 'passing' is an identifier here
+FROM events e
+
+-- NOT RECOGNISED: PASSING in a plain SQL function call
+SELECT UPPER(PASSING)                           -- 'PASSING' parsed as an identifier
+FROM events
+
+-- NOT RECOGNISED: PASSING inside a CTE name
+WITH passing_events AS (SELECT * FROM events)   -- 'passing_events' is an identifier
+SELECT * FROM passing_events
+```
+
+The parser distinguishes by position — it looks one token ahead after the closing `)` of a `smelt.<path>(...)` call. This is intentional: `PASSING` needs no escaping in ordinary SQL contexts.
+
 ### `smelt.as_struct(...)`
 
 ```
@@ -127,7 +148,7 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 | `provenance` | structured map (shape TBD) | absent | Declared column-provenance map. Gated behind `smelt.yml: unstable_schema: true`. |
 | `backends.<name>.emit` | string | declared name | (`smelt.extern` only) Backend-specific emitted name. |
 
-Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all four declaration kinds (model `SELECT`, `smelt.define`, `smelt.extern`, `smelt.test`).
+Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all three declaration kinds (model `SELECT` — including `materialization: test` test models — `smelt.define`, and `smelt.extern`).
 
 ### Diagnostic codes
 
@@ -176,7 +197,7 @@ These rules are normative.
 12. **Frontmatter attachment.** Each frontmatter block attaches to the immediately following declaration. Each declaration may carry its own. There is no file-level frontmatter and no frontmatter inheritance across declarations.
 13. **`PASSING` parses without type information.** The trigger rule (one-token lookahead after `)`) does not require knowing the callee's parameter list. Name validation, sort compatibility, and binding all run after parsing in the type-checker.
 14. **Externs treated as atomic.** `smelt.extern` calls are checked against their declared signature exactly like built-ins. The planner treats them as atomic nodes (see `planner_integration.md`).
-15. **Error recovery.** `smelt.define`, `smelt.extern`, `smelt.test`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `smelt.test`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
+15. **Error recovery.** `smelt.define`, `smelt.extern`, and the frontmatter fence `---` are all safe resync tokens. Unrecoverable errors inside a declaration skip tokens until the next top-level boundary (`smelt.define`, `smelt.extern`, `---`, or EOF). Errors inside a body's `(...)` use standard Rowan SQL error recovery.
 16. **Declared return type is authoritative for call-site typing.** When the type checker encounters a `smelt.<path>(...)` call, it looks up the function's declared return type. A `-> <Type>` annotation yields a concrete call-expression type only when the annotation resolves to a specific concrete type (`Concrete(T)` in the type constraint system) or to `Numeric` (which widens to `Double`). Polymorphic constraints (`Ordered`, `Any`) and absent return types (Tier 1/2 functions) all produce `Unknown` at the call site. The schema of any model that projects such a call reflects this rule: a column whose source expression is a `smelt.<path>(...)` call inherits the resolved type or `Unknown`. Downstream aggregate functions (`SUM`, `AVG`, etc.) apply their standard return-type rules to the resolved type — for example, `SUM(Double) → Double`.
 
 ### Interactions with adjacent specs
@@ -234,8 +255,9 @@ This section captures the load-bearing rationale behind the surface and semantic
 - **`smelt.as_struct` is partially landed.** The grammar parses, the diagnostic `AsStructUnsupportedBackend` is wired, but per research §16 #19 the full design is deferred to post-v1 alongside struct row polymorphism (`Expr<Struct<{…, ..r}>>`). Strategies 1 (CTE rename) and 2 (typed `TableExpr<{…}>` parameter) are the recommended v1 paths; `smelt.as_struct` should be treated as "design sketch, available but not finalised" until Step 8 of the smelt-functions plan revisits it.
 - **`joins:` and `provenance:` parsing is partial.** The keys are recognised in frontmatter and gated by `unstable_schema: true`; structured-map shape and the `ProvenanceMismatch` / `JoinsMismatch` validation phase land in Phase 51 of the smelt-functions plan. Until that lands, declaring these properties is unstable in both surface and behaviour.
 - **End-to-end `smelt build` execution of `smelt.<path>(...)` function calls is incomplete.** Phases 56–57 of `docs/plans/20260422-smelt-functions.md` cover the codegen integration that finalises function expansion at build time. LSP-time checking and `--show-plan` work today; the full build-and-execute path is in progress.
-- **Frontmatter validation depth.** Unknown keys currently emit `FrontmatterParseError` at Warning severity, which means typos like `deterministc: true` are silently ignored beyond a warning. Whether this should escalate to Error is open.
+- **Frontmatter validation depth — divergent from doctrine.** Function frontmatter is user-authored, so under `architecture.md` §"Constraints & Invariants" §8 (the unknown-key doctrine) it should reject unknown keys with an error, like model frontmatter does. The current implementation emits `FrontmatterParseError` at Warning severity instead, which means typos like `deterministc: true` are silently accepted past the warning. Aligning with the doctrine (escalating to Error) is a straightforward future change once an audit confirms no in-the-wild function frontmatter relies on the lenient behaviour.
 - **Workspace-wide vs. directory-scoped name uniqueness.** The implementation today applies `DuplicateFunctionDefinition` workspace-wide. The research originally framed it directory-scoped; the workspace rule is stricter and matches the single canonical-namespace doctrine, but the spec author should confirm this is intended before treating it as final.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 
@@ -273,7 +295,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 - `docs/specs/scoping.md` — body-scope name resolution (parameters-first, no-overlap, splice contexts)
 - `docs/specs/gradual_typing.md` — Tier 1/2/3 checking model and error-tracing contract
 - `docs/specs/planner_integration.md` — how frontmatter properties feed planner rules
-- `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`)
+- `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
 
 ### Research
 
