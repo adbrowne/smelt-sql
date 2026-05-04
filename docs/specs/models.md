@@ -53,9 +53,9 @@ Each section delimiter must follow the exact form `--- name: <model_name> ---` (
 | File type | Name source |
 |-----------|-------------|
 | Single-model | `file_stem()` — the filename without extension (e.g. `daily_revenue.sql` → `daily_revenue`) |
-| Multi-model | The `--- name: <model_name> ---` delimiter; the optional `name:` YAML key in the section body is ignored |
+| Multi-model | The Layer 1 `--- name: <model_name> ---` section delimiter; the optional `name:` YAML key in the section body (Layer 2 frontmatter) is ignored |
 
-The `name:` frontmatter key in single-model files is accepted by the parser but has no effect on the model's identity; the file stem is always authoritative.
+The `name:` frontmatter key in single-model files is accepted by the parser but has no effect on the model's identity; the file stem is always authoritative. Identity in multi-model files comes from the Layer 1 section delimiter, never from Layer 2 (declaration frontmatter) `name:` keys — see `architecture.md` §"Resolution" for the two-layer file-format stack and the universal addressing rules.
 
 ### YAML frontmatter keys
 
@@ -193,7 +193,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 ## Known Divergences / Open Questions
 
 - **`test` mode missing from materializations user guide.** `docs-site/docs/guide/materializations.md` documents four materialization types; `test` is absent. It is documented only in the testing guide. Should be added to materializations page.
-- **Duplicate model names undefined.** If `models/users.sql` and `models/archive/users.sql` both exist, the current implementation uses last-discovery order with no diagnostic. The spec mandates uniqueness; the implementation should emit an error.
+- **Duplicate model names undefined.** Names must be unique within a project (Constraint 4) and within a file (across bare SELECTs, `smelt.define`s, and `smelt.extern`s, per `architecture.md` §"Bare-model naming"). The current implementation enforces neither: if `models/users.sql` and `models/archive/users.sql` both exist, last-discovery order wins with no diagnostic; if a single multi-model file declares two `--- name: users ---` sections (Layer 1), `crates/smelt-core/src/metadata.rs::extract_multi_model` accepts both with no diagnostic. The spec mandates uniqueness in both cases; the implementation should emit an error in both cases.
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
 - **`backend_hints` is completely unvalidated.** Any freeform YAML is accepted. No backend currently reads it. It is a forward-compatibility escape hatch.
