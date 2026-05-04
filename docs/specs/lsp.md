@@ -217,6 +217,8 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 - **Hover on CTEs not implemented.** Hover resolves `smelt.<path>` references but not CTE names or column references.
 - **Find-references for columns not implemented.** Find References is implemented for model names and CTEs, but not for column names. Column rename works, but finding all uses of a column without renaming is not supported.
 - **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
+- **`UnknownSmeltPath` vs. code split.** This spec says the implementation uses a single `UnknownSmeltPath` code with a kind-aware message. The actual code (`crates/smelt-db/src/lib.rs`) instead has two separate codes: `UndefinedModelRef` (unresolved model/seed reference) and `UndefinedSource` (unresolved source reference). The spec should be updated to match the split, or the codes should be consolidated. Correction needed before `diagnostics.md` lands.
+- **Six undocumented diagnostic codes.** The following codes appear in `crates/smelt-db/src/lib.rs` but are absent from this spec: `FragmentColumnMissing`, `AnnotationTooWide`, `FragmentKindMismatch`, `DeclaredCardinalityUnverifiable`, `ExternFragmentParamUnsupported`, `MissingSeedSidecar`. They should be documented here (or in `diagnostics.md`) once their semantics are stable.
 
 ## References
 
