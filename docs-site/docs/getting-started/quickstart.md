@@ -13,6 +13,9 @@ Create a `smelt.yml` configuration file:
 ```yaml
 name: my-project
 version: 1
+paths:
+  - models
+  - seeds
 targets:
   dev:
     type: duckdb
@@ -49,7 +52,15 @@ order_id,order_date,customer_id,amount
 3,2025-01-02,100,19.99
 ```
 
-Seeds become tables that can be referenced with `smelt.<name>`.
+Create `seeds/raw_customers.csv`:
+
+```csv
+customer_id,name,country
+100,Alice,AU
+101,Bob,NZ
+```
+
+Seeds become tables addressed as `smelt.<name>` (e.g. `smelt.raw_orders`, `smelt.raw_customers`). Seeds and SQL models share the same flat namespace — there is no `smelt.models.*` prefix.
 
 ## 3. Write a model
 
@@ -59,20 +70,41 @@ Create a `models/` directory and add your first SQL model:
 mkdir models
 ```
 
+A simple aggregate model:
+
 ```sql
 -- models/orders_summary.sql
 ---
 name: orders_summary
 materialization: table
 ---
-
 SELECT
-  DATE(order_date) as order_day,
-  COUNT(*) as order_count,
-  SUM(amount) as total_amount
+  DATE(order_date) AS order_day,
+  COUNT(*) AS order_count,
+  SUM(amount) AS total_amount
 FROM smelt.raw_orders
 GROUP BY 1
 ```
+
+You can also join seeds together — for example, to enrich orders with customer details:
+
+```sql
+-- models/stg_orders.sql
+---
+name: stg_orders
+materialization: table
+---
+SELECT
+  o.order_id,
+  o.order_date,
+  o.amount,
+  c.name AS customer_name,
+  c.country
+FROM smelt.raw_orders o
+LEFT JOIN smelt.raw_customers c ON o.customer_id = c.customer_id
+```
+
+If a seed column name doesn't match what your model needs, alias it in the model — seed column names are locked to the CSV header row and cannot be renamed in `smelt.yml`.
 
 ## 4. Run your models
 

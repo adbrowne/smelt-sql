@@ -39,7 +39,7 @@ GROUP BY 1, 2
 
 ## References
 
-Use `smelt.<path>` to reference other models and seeds. Addressing is **flat** — the `models/` scan root is stripped:
+Use `smelt.<name>` to reference other models and seeds. Addressing is **flat** — seeds and models share the same namespace with no intermediate segment:
 
 ```sql
 SELECT * FROM smelt.upstream_model
@@ -114,6 +114,20 @@ FROM (
   GROUP BY 1
 ) AS sub
 WHERE sub.total > 100
+```
+
+## Aggregate type gotchas
+
+**`COUNT(*)` returns `BIGINT`, not `INTEGER`.** If a downstream model or acceptance check expects `INTEGER`, cast explicitly:
+
+```sql
+CAST(COUNT(*) AS INTEGER) AS order_count
+```
+
+**`COALESCE(SUM(col), 0.0)` returns `DECIMAL(38,2)`, not `DOUBLE`.** DuckDB promotes to the wider decimal type when the fallback literal is `0.0`. If you need `DOUBLE`:
+
+```sql
+CAST(COALESCE(SUM(col), 0.0) AS DOUBLE) AS revenue
 ```
 
 ## Configuration precedence

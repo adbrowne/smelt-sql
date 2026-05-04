@@ -263,7 +263,7 @@ Instead of passing `SelectItems` arguments inline, use a trailing `PASSING` clau
 ```sql
 -- Inline style
 SELECT * FROM smelt.functions.session_rollup(
-  smelt.sources.source.events,
+  smelt.sources.events,
   user_col => user_id,
   ts_col   => event_time,
   metrics  => (COUNT(*) AS event_count, SUM(amount) AS total_amount)
@@ -272,7 +272,7 @@ SELECT * FROM smelt.functions.session_rollup(
 -- Block style with PASSING
 SELECT *
 FROM smelt.functions.session_rollup(
-  smelt.sources.source.events,
+  smelt.sources.events,
   user_col => user_id,
   ts_col   => event_time
 ) PASSING metrics AS (
@@ -399,11 +399,68 @@ smelt.define add_margin_with_provenance(
 | `FragmentColumnMissing` | Column referenced in a `PASSING` body isn't in the declared context | Correct the column name or the context annotation |
 | `FunctionCallCycle` | A function directly or indirectly calls itself | Restructure to eliminate the cycle |
 
-## Example: end-to-end pipeline
+## Minimal end-to-end example
 
-The `examples/functions_demo/` workspace in the repo shows a complete pipeline:
+A complete self-contained project showing the full file → define → call cycle:
 
-1. `functions/sessionize.sql` — assigns session IDs to event streams using `LAG()`.
-2. `functions/session_rollup.sql` — aggregates a sessionized stream; accepts a `metrics: SelectItems<Agg>` fragment.
-3. `models/rollup_with_passing.sql` — calls `session_rollup` with a `PASSING metrics AS (...)` block.
-4. `models/monitored_dashboard.sql` — calls `monitored_session_rollup`, which internally forwards its own `metrics` parameter through a PASSING clause to `session_rollup` (two-level composition).
+```
+my-project/
+  smelt.yml
+  seeds/
+    raw_orders.csv        # order_id, customer_id, status, amount
+  functions/
+    revenue.sql
+    status.sql
+  models/
+    stg_orders.sql
+    mart_revenue.sql
+```
+
+```sql
+-- functions/revenue.sql
+smelt.define safe_revenue(amount: Expr<Double>) -> Expr<Double> AS (
+  COALESCE(amount, 0.0)
+)
+```
+
+```sql
+-- functions/status.sql
+smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
+  status = 'shipped'
+)
+```
+
+```sql
+-- models/stg_orders.sql
+---
+name: stg_orders
+materialization: table
+---
+SELECT
+  order_id,
+  customer_id,
+  smelt.functions.safe_revenue(CAST(amount AS DOUBLE)) AS amount,
+  status
+FROM smelt.raw_orders
+```
+
+```sql
+-- models/mart_revenue.sql
+---
+name: mart_revenue
+materialization: table
+---
+SELECT
+  customer_id,
+  CAST(COUNT(*) AS INTEGER) AS order_count,
+  SUM(amount) AS total_revenue
+FROM smelt.stg_orders
+WHERE smelt.functions.is_shipped(status)
+GROUP BY customer_id
+```
+
+Key rules demonstrated:
+- `functions/` is auto-discovered — no `smelt.yml` change needed.
+- Call path = `smelt.functions.<declared_name>` — the **filename stem is not included**.
+- `Expr<Boolean>` works directly in `WHERE` with no extra wrapping.
+- Arguments are positional in v1 (`param => value` named syntax is not yet wired end-to-end).
