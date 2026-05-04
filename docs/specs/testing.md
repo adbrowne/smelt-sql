@@ -85,6 +85,10 @@ Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`. If
 - **Floating point**: Values within `1e-6` of each other are treated as equal.
 - **Row order**: When `check_order: false` (default), row order does not matter; both actual and expected are compared as multisets. When `check_order: true`, rows are compared positionally.
 
+### Selector behaviour
+
+`smelt test --select <expr>` matches `<expr>` as a **plain substring** against test names. The full `tag:` / `path:` / `+upstream` / `downstream+` selector grammar in `model_selection.md` does **not** apply to `smelt test`; it applies to `smelt run`, `smelt build`, and `smelt explain`. Substring match is asymmetric with the rest of the CLI and is tracked as a divergence in `model_selection.md` Known Divergences (and in this spec's Known Divergences below); aligning the two is open work.
+
 ## Semantics
 
 ### Execution model

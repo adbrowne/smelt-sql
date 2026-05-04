@@ -71,6 +71,8 @@ owners: [andrew]
 | `--exclude` / `-e` | Repeatable; same selector grammar as `--select`. |
 | `--event-time-start` / `--event-time-end` | ISO-8601 date or timestamp. End is exclusive. Both required together for incremental execution. |
 
+`smelt build` also accepts the schema-evolution flags `--allow-column-removal` and `--allow-full-refresh`; see `schema_evolution.md` §"Evolution flags" for semantics. The same flags are accepted by `smelt run` (which delegates to the same evolution-handling path).
+
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
 
 ### `smelt explain --json` output schema
