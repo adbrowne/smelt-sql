@@ -37,7 +37,7 @@ A fourth item — broken sdist on PyPI — is a packaging concern tracked in `do
 | 1 | Phantom nullability fix | done (regression test added; bug not reproduced — likely fixed by B8/B9) | 2026-05-05 | 253ed4a |
 | 2 | Stale schema cache cleanup | done | 2026-05-05 | 253ed4a |
 | 3 | No-op rebuild stderr output | done | 2026-05-05 | 253ed4a |
-| 4 | Broken sdist on PyPI | pending | — | — |
+| 4 | Broken sdist on PyPI | done | 2026-05-05 | (next commit) |
 | 5 | Skill update | done | 2026-05-05 | (next commit) |
 
 ---

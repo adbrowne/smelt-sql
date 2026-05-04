@@ -24,4 +24,3 @@ bindings = "bin"
 strip = true
 python-packages = ["smelt_sql"]
 data = "smelt_sql.data"
-include = [{path = "LICENSE", format = "sdist"}]
