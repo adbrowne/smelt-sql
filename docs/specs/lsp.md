@@ -1,7 +1,7 @@
 ---
 feature: lsp
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -216,6 +216,7 @@ Renaming a model name does not rename the SQL file on disk. The model name is de
 - **`smelt.yml` changes require server restart.** Project configuration changes (new model paths, target changes) are not detected dynamically; the LSP server must be restarted.
 - **Hover on CTEs not implemented.** Hover resolves `smelt.<path>` references but not CTE names or column references.
 - **Find-references for columns not implemented.** Find References is implemented for model names and CTEs, but not for column names. Column rename works, but finding all uses of a column without renaming is not supported.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

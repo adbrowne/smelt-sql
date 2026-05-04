@@ -1,7 +1,7 @@
 ---
 feature: gradual_typing
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -179,6 +179,7 @@ This section captures the load-bearing rationale behind the tier model and the b
 - **Tier 1 → Tier 2 upgrade-path breaking changes** are an open item from research §16 #17. Annotating a previously Tier 1 parameter with a type narrower than what some caller was passing will surface a new `ArgTypeMismatch` at that caller. There is currently no migration tooling for this; it is a known sharp edge of the upgrade story.
 - **Caching of Tier 1 expansion checks** across re-runs of the same Tier 2 body is not currently exploited beyond Salsa's per-input memoisation. Whether to add a dedicated expansion cache (keyed on (callee_id, arg_types)) is open and orthogonal to correctness.
 - **Diagnostic deduplication across distinct call sites.** A Tier 1 callee with a body bug today emits one `FunctionBodyTypeMismatch` per call site that reaches it. Whether to dedupe these per `(file, body-span)` is a polish item flagged under research §16 #16.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

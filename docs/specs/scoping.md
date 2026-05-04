@@ -1,7 +1,7 @@
 ---
 feature: scoping
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -170,6 +170,7 @@ This section captures the load-bearing rationale behind the scoping rules above.
 - **`smelt.as_struct(...)`** as a no-overlap escape hatch is partially landed: the grammar parses and `AsStructUnsupportedBackend` is wired, but the full semantic finalisation (Step 8 of the smelt-functions plan, alongside struct row polymorphism) is post-v1. Treat Strategy 3 as design-sketch in v1.
 - **Ambiguous bare-column references** (a name reachable through two `TableExpr` parameters) currently surface as `UnknownIdentifier` with a hint rather than a dedicated `AmbiguousColumn` code. Whether to mint a distinct code is open.
 - **`fragment_param_kinds` seeding.** The body-check pure function seeds a parameter's declared kind into `TypeContext::fragment_param_kinds` so that bare references to a `SelectItems<Kind>`-typed parameter inside `PASSING` bodies inherit the right kind. The seeding contract is wired but lightly tested; corner cases (e.g. a `SelectItems<Agg>` parameter referenced inside a non-aggregate splice point) may surface as Phase 44b/45 follow-ups land.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

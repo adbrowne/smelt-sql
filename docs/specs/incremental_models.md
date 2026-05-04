@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -202,9 +202,10 @@ This section captures the load-bearing rationale behind the incremental model su
 - **MERGE strategy is DuckDB-only-future.** `BackendCapabilities.supports_merge` is `true` for DuckDB / Spark / PostgreSQL, but the planner emits `DeleteInsert` for all three today. A Spark MERGE pathway is in the plan but unbuilt.
 - **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+incremental, incremental-only — Phase 1 of the incremental plan unified `IncrementalConfig` but the CLI dispatch is still tri-modal. Should converge.
 - **Granularity conversion boilerplate.** A duplicate `Granularity` enum existed in `smelt-planner/src/types.rs` and was reconciled with `smelt-core`; check for residual conversion code in `main.rs` (lines around 669–683 in the plan reference) when next touching this area.
-- **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is planned but opt-in.
+- **No interval / run-state tracking.** Skipped runs currently produce silent gaps (same failure mode as dbt). Tracking is planned but opt-in; see `run_state.md` anchor in `architecture.md` §"Specs not yet authored".
 - **Schema evolution is unspecified.** A `partition_column` rename or an output schema change has no defined handling today.
 - **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for incremental models that consume metrics.
+- **Diagnostic codes pre-`diagnostics.md`.** Codes listed in this spec are owned here until a `diagnostics.md` spec lands. `diagnostics.md` will define ownership rules, severity tiers, stability tiers, and suppression. Code names may be renamed under that spec. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

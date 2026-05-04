@@ -214,6 +214,7 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **`smelt diff --format json` schema not published.** The JSON output format is not documented as a stable contract. Orchestrators consuming it could break on version changes.
 - **Struct field reordering detection.** Whether changing struct field order is detected as `IncompatibleTypeChange` or silently ignored depends on the comparison implementation. Current behavior undocumented in user guide.
 - **Exit code for blocked migrations.** When a run is blocked by `RequiresColumnRemovalFlag` or `FullRefreshBlocked`, the exit code is non-zero but the specific code (1 vs. other) is not specified.
+- **`.smelt/schemas/` format pre-`run_state.md`.** The format of stored schemas in `.smelt/schemas/`, update timing, and lifecycle are implementation-defined. A future `run_state.md` will specify this alongside manifest format and run IDs. (See `architecture.md` §"Specs not yet authored".)
 
 ## References
 

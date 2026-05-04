@@ -1,7 +1,7 @@
 ---
 feature: architecture
 status: stable
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-05
 owners: [andrew]
 ---
 
@@ -340,6 +340,21 @@ Update as part of any plan that touches architecture.
 - **`smelt-check` crate not yet extracted.** The Salsa purity rule is currently upheld by convention; nothing prevents a regression. Once `smelt-check` is extracted, it becomes structurally enforced.
 - **Planner cost estimation is future work.** Current rules are deterministic detectors with no statistics input.
 - **Python model discovery** (`smelt-core` extracting SQL from `@model` decorators) is via subprocess/PyO3 — interface details are still in flux; no spec yet.
+- **Multi-backend execution model not specified beyond trait surface.** Capability negotiation (incremental support, MERGE support, ALTER COLUMN support), cross-engine reference resolution rules (when does `read_parquet()` substitution apply?), and target precedence will land in `multi_backend.md` (or an expansion of §"Backend trait surface"). Today, capability claims are scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, and `smelt_yml.md`.
+- **User journey integrity matrix open.** The cross-product of testing × incremental × schema-evolution × multi-backend is not pinned end-to-end. Pinning depends on `run_state.md` and the multi-backend spec landing first.
+- **dbt comparison and migration story not specified.** Expected home: a `migration_from_dbt.md` spec or a dedicated docs-site/ guide. Until authored, the gap is a known limitation for adopters migrating from dbt.
+
+### Specs not yet authored
+
+The spec set has explicit gaps that the following entries claim space for. Each names the in-scope future spec and which existing specs will pull content out of it:
+
+- **`diagnostics.md`** — owns the diagnostic-code catalogue. Today scattered across `lsp.md`, `functions.md`, `gradual_typing.md`, `scoping.md`, `types.md`, `planner_integration.md`, `incremental_models.md`.
+- **`run_state.md`** — owns manifest format, `.smelt/` layout, run IDs, parallelism, recovery. Today implicit in `cli.md` (`smelt status`, `smelt history`) and `incremental_models.md` (state ownership).
+- **Multi-backend execution model** — likely an expansion of §"Backend trait surface" or a dedicated `multi_backend.md`. Today scattered across `incremental_models.md`, `schema_evolution.md`, `testing.md`, `smelt_yml.md`.
+- **`planner_api.md`** — owns the user-authored planner-rule surface. Working design at `docs/planner_rule_api_design.md`; needs review against the 2026-05-01 universal-addressing rework before becoming normative.
+- **`migration_from_dbt.md`** *(or docs-site guide)* — owns the dbt analogue mapping and migration story. No content today.
+
+Each in-spec Known Divergence cross-references this anchor.
 
 ## References
 
