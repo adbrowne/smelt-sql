@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777985744307,
+  "lastUpdate": 1777985747546,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20021,6 +20021,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 33.47890367619927,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "914dfbce4cf27bf31d884828d9f55fb7814a7384",
+          "message": "chore: re-enable pypi mode in smelt-loop harness\n\n0.3.2 ships embedded docs, so the agent can now use `smelt docs list/show`\nin pypi mode. Allow pinning via SMELT_PYPI_VERSION env var.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:23:22+10:00",
+          "tree_id": "b082e4cb3833de1a549d6e568a23288c381acc25",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/914dfbce4cf27bf31d884828d9f55fb7814a7384"
+        },
+        "date": 1777985746734,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 26.23933408508351,
             "unit": "MB/s"
           }
         ]
