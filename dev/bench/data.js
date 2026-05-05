@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777988048881,
+  "lastUpdate": 1777988052523,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20390,6 +20390,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.80558247019384,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "a5675ab39383617c89dcc6c4a8447b2ff25376fa",
+          "message": "fix(harness): pypi mode pins >=0.3.2 and uses --refresh to bypass stale cache\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T18:23:05+10:00",
+          "tree_id": "ab2b55bb515ffd3f0d5ab4a56029bfc5c448eeb9",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a5675ab39383617c89dcc6c4a8447b2ff25376fa"
+        },
+        "date": 1777988051682,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.67860170395985,
             "unit": "MB/s"
           }
         ]
