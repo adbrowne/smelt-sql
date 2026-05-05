@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777987146569,
+  "lastUpdate": 1777987149334,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20267,6 +20267,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.421797538751974,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "eeb5110588f954266e67aeaaa857a2bd7ad13a7a",
+          "message": "skill(smelt-app-builder): fix DECIMAL/DOUBLE seed type, clarify COUNT(*) cast\n\n- Split aggregate type-errors bullet into named sub-bullets: COUNT(*)→BIGINT,\n  COALESCE(SUM), DECIMAL vs DOUBLE (cleaner scan path)\n- Correct backwards claim: decimal CSV values land as DECIMAL(n,m) not DOUBLE;\n  integer CSVs land as BIGINT; update smelt table example accordingly\n- Both changes empirically verified against live DuckDB builds in the agent loop\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:45:02+10:00",
+          "tree_id": "4daaa5616786dd2d2da049e5bab25f6cff045b57",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/eeb5110588f954266e67aeaaa857a2bd7ad13a7a"
+        },
+        "date": 1777987148414,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.80558247019384,
             "unit": "MB/s"
           }
         ]
