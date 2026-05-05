@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778006024834,
+  "lastUpdate": 1778006027037,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20759,6 +20759,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.607717167958576,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4b3fb1a7cd26cdcf394bd4435de77034ba55dd96",
+          "message": "skill(smelt-app-builder): smelt.functions in CASE WHEN example + SUM corollary\n\n- Upgrade worked mart-pattern example to use smelt.functions.is_shipped() in\n  the CASE condition; add note that NULL input returns false so zero-order\n  customers need no extra NULL guards\n- Append SUM corollary: SUM over a ->Expr<Double> column returns DOUBLE,\n  no extra CAST needed at the aggregate layer\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T23:01:31+10:00",
+          "tree_id": "e8ca0ef93826cbd4136cb8e601a5d16e2ca98bad",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4b3fb1a7cd26cdcf394bd4435de77034ba55dd96"
+        },
+        "date": 1778006026483,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.855150108759414,
             "unit": "MB/s"
           }
         ]
