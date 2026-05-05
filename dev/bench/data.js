@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777997588341,
+  "lastUpdate": 1777997590387,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20513,6 +20513,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.67860170395985,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "b7ef2f0f79c6b08116d775c5c13d6c6c8854cc9e",
+          "message": "skill(smelt-app-builder): add WRONG/RIGHT contrast for dimension-first mart pattern\n\nConverts the prose explanation of zero-order customer completeness into a\nscannable anti-pattern/pattern SQL contrast, consistent with other gotcha\nbullets in the skill.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T20:34:16+10:00",
+          "tree_id": "a8383f3c304b5777ac0b201e50b99563165a1ba8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b7ef2f0f79c6b08116d775c5c13d6c6c8854cc9e"
+        },
+        "date": 1777997589882,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.67389758024114,
             "unit": "MB/s"
           }
         ]
