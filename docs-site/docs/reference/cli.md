@@ -159,7 +159,7 @@ The flags below have surprised users in practice; the table records what each on
 | Flag | Status | Behaviour |
 |------|--------|-----------|
 | `--verbose` / `-v` | implemented | Prints `-- <model_name>` + the compiled SQL to stdout immediately before each executed model. No extra output when all models are up-to-date and skipped. |
-| `--show-plan` | per-model only | Requires a positional argument naming a model file path (e.g. `smelt build --show-plan models/marts/customers.sql`). There is no project-wide `--show-plan` mode — a bare `smelt build --show-plan` errors. |
+| `--show-plan` | per-model only | Requires a positional argument naming a model file path (e.g. `smelt build --show-plan models/marts/customers.sql`). There is no project-wide `--show-plan` mode — a bare `smelt build --show-plan` errors. **Output format:** success prints an `ExpandedCall fn_id="<name>"` node with the inlined function body; an unresolved function call prints `error: Unknown function \`smelt.functions...\`` to stderr and exits non-zero. |
 | `--select` / `-s` | repeatable | Supply each selector as its own `--select <value>`. Space-separated values inside a single `--select` are taken as one literal selector and will not match anything; use repetition. |
 | `--exclude` / `-e` | repeatable | Same selector grammar and repetition rule as `--select`. |
 | `--dry-run` | **not on `smelt build`** | Use `smelt run --dry-run` for parse-and-validate-without-executing. There is no project-wide compile-only flag on `build` today. |

@@ -99,6 +99,33 @@ Note that `--show-plan` requires a positional model file path — there is no pr
 
 For typed functions (those with a `-> ReturnType` annotation), smelt uses the declared return type as the column type in downstream models. `smelt table <model>` reflects this — a column fed by a `-> Expr<Double>` call shows as `DOUBLE`. Downstream aggregates also use the declared type: `SUM` over a `-> Expr<Double>` call infers as `DOUBLE`, not `BIGINT`.
 
+!!! note "`smelt table` may show `UNKNOWN` for function-fed columns"
+    In some type-inference paths — particularly when the function argument is a `CAST` of a seed column — `smelt table` may display `UNKNOWN` instead of the declared return type. This is a known inference gap and does **not** indicate a build failure. The materialized DuckDB column type is always correct; verify with `DESCRIBE <table>` in DuckDB if you need to confirm the actual column type.
+
+### NULL semantics in function bodies
+
+smelt function bodies are SQL expressions — they inherit standard SQL NULL propagation. A body that compares a nullable column with `=` returns `NULL` (which is falsy) when the argument is `NULL`, not an error.
+
+```sql
+smelt.define is_shipped(status: Expr<Text>) -> Expr<Boolean> AS (
+  status = 'shipped'
+)
+```
+
+- `is_shipped('shipped')` → `true`
+- `is_shipped('cancelled')` → `false`
+- `is_shipped(NULL)` → `NULL` (falsy) — `NULL = 'shipped'` is `NULL` in SQL
+
+This matters in `LEFT JOIN` contexts: when the right side has no matching row, nullable columns arrive as `NULL`. `is_shipped(NULL)` returns falsy, so `CASE WHEN smelt.functions.is_shipped(o.status) THEN o.amount END` naturally produces `NULL` for non-matching rows — no explicit NULL guard is needed at the call site. Wrap the whole `SUM(...)` in `COALESCE(..., 0)` if you need `0` instead of `NULL` for customers with no shipped orders.
+
+If your function body needs to distinguish `NULL` from `false`, use `COALESCE` *inside* the body:
+
+```sql
+smelt.define is_shipped_safe(status: Expr<Text>) -> Expr<Boolean> AS (
+  COALESCE(status = 'shipped', false)
+)
+```
+
 ### Calling in boolean positions
 
 A function whose declared return type is `Expr<Boolean>` can be used in any boolean position the SQL grammar accepts: `WHERE`, `HAVING`, `JOIN ON`, `QUALIFY`, `CASE WHEN`, and as a `SELECT`-list expression.
@@ -118,6 +145,9 @@ WHERE smelt.functions.is_shipped(status)
 ```
 
 ### Named arguments
+
+!!! warning "v1 limitation — named arguments are not yet wired end-to-end"
+    The `param => value` syntax is parsed and shown in the docs as the intended v1 design, but it is **not yet enforced or dispatched** in the current release. Pass all arguments **positionally** for now. Named-arg calls may silently pass through or produce unexpected results.
 
 Pass arguments by name to improve readability or skip over defaulted parameters:
 
