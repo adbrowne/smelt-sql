@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777985770927,
+  "lastUpdate": 1777987146569,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15415,6 +15415,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.73419,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "eeb5110588f954266e67aeaaa857a2bd7ad13a7a",
+          "message": "skill(smelt-app-builder): fix DECIMAL/DOUBLE seed type, clarify COUNT(*) cast\n\n- Split aggregate type-errors bullet into named sub-bullets: COUNT(*)→BIGINT,\n  COALESCE(SUM), DECIMAL vs DOUBLE (cleaner scan path)\n- Correct backwards claim: decimal CSV values land as DECIMAL(n,m) not DOUBLE;\n  integer CSVs land as BIGINT; update smelt table example accordingly\n- Both changes empirically verified against live DuckDB builds in the agent loop\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:45:02+10:00",
+          "tree_id": "4daaa5616786dd2d2da049e5bab25f6cff045b57",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/eeb5110588f954266e67aeaaa857a2bd7ad13a7a"
+        },
+        "date": 1777987145032,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.411038,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.982374,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.661208,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.418804,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0027949999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9822778.144149,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 13.821618,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 13.572391,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 13.75884,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.037683,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9999075.539012,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.57885,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.02801,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.544804999999998,
             "unit": "ms"
           }
         ]
