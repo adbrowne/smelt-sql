@@ -106,6 +106,25 @@ LEFT JOIN smelt.raw_customers c ON o.customer_id = c.customer_id
 
 If a seed column name doesn't match what your model needs, alias it in the model — seed column names are locked to the CSV header row and cannot be renamed in `smelt.yml`.
 
+You can also reference SQL models from other models — seeds and models share the same flat `smelt.<name>` namespace. A mart that rolls up from a staging model looks like this:
+
+```sql
+-- models/mart_customers.sql
+---
+name: mart_customers
+materialization: table
+---
+SELECT
+  c.customer_id,
+  c.name AS customer_name,
+  COALESCE(SUM(o.amount), 0.0) AS total_revenue
+FROM smelt.raw_customers c
+LEFT JOIN smelt.stg_orders o ON c.customer_id = o.customer_id
+GROUP BY c.customer_id, c.name
+```
+
+Starting from the dimension seed (`raw_customers`) and LEFT JOINing the staging model (`stg_orders`) ensures every customer appears in the output, even those with no orders.
+
 ## 4. Run your models
 
 ```bash
