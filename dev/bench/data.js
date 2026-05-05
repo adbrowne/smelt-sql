@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778001156698,
+  "lastUpdate": 1778006024834,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15791,6 +15791,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.641736,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4b3fb1a7cd26cdcf394bd4435de77034ba55dd96",
+          "message": "skill(smelt-app-builder): smelt.functions in CASE WHEN example + SUM corollary\n\n- Upgrade worked mart-pattern example to use smelt.functions.is_shipped() in\n  the CASE condition; add note that NULL input returns false so zero-order\n  customers need no extra NULL guards\n- Append SUM corollary: SUM over a ->Expr<Double> column returns DOUBLE,\n  no extra CAST needed at the aggregate layer\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T23:01:31+10:00",
+          "tree_id": "e8ca0ef93826cbd4136cb8e601a5d16e2ca98bad",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4b3fb1a7cd26cdcf394bd4435de77034ba55dd96"
+        },
+        "date": 1778006023824,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.90445,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.517191000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.6296649999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.427388,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003266,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9897535.783892,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 13.681983,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 13.298118,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 13.236223,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.7831290000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9905327.722283,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.451439999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.04737,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.520755,
             "unit": "ms"
           }
         ]
