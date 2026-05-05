@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777988052523,
+  "lastUpdate": 1777997588341,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15603,6 +15603,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.11768,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "b7ef2f0f79c6b08116d775c5c13d6c6c8854cc9e",
+          "message": "skill(smelt-app-builder): add WRONG/RIGHT contrast for dimension-first mart pattern\n\nConverts the prose explanation of zero-order customer completeness into a\nscannable anti-pattern/pattern SQL contrast, consistent with other gotcha\nbullets in the skill.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T20:34:16+10:00",
+          "tree_id": "a8383f3c304b5777ac0b201e50b99563165a1ba8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b7ef2f0f79c6b08116d775c5c13d6c6c8854cc9e"
+        },
+        "date": 1777997587446,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.183433,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.808605,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.661886,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.395499,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003637,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9946195.144581,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 14.471462,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 14.470591,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 14.381475,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.169176,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 10130824.456251,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.26903,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 31.29056,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.609149,
             "unit": "ms"
           }
         ]
