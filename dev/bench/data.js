@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777997590387,
+  "lastUpdate": 1778001153936,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15697,6 +15697,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.609149,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ea965e265b6ea1626739d499792eeb492ac271ed",
+          "message": "skill(smelt-app-builder): clarify --show-plan success/failure output\n\nAdds inline description of what ExpandedCall vs UnknownSmeltFn looks like\nso agents can self-diagnose function expansion without trial-and-error.\nEmpirically verified against a test project.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T21:27:09+10:00",
+          "tree_id": "fc53de6f62d8dab817575ebd6354bb94a637985e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ea965e265b6ea1626739d499792eeb492ac271ed"
+        },
+        "date": 1778001152675,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.167361,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.798798,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.655253,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.395478,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0031360000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 10092328.434748,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 35.998842,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 36.281449,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 30.287397,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 3.47933,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 10386614.344188,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.60713,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.09785,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.641736,
             "unit": "ms"
           }
         ]
