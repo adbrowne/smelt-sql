@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777983529392,
+  "lastUpdate": 1777983531883,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19898,6 +19898,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.9961782751326,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ce2c19e42973c959cf3c4c6d757364ca8b9281f9",
+          "message": "fix(harness): tighten docs smoke check to catch 0.3.1 pypi installed\n\nsmelt 0.3.1 exits 0 from 'smelt docs list' but prints an error — the old\ncheck missed this. Now count output lines; fail with a clear message if\nempty, directing the user to >= 0.3.2 or local mode.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:52:49+10:00",
+          "tree_id": "20eb503501c8657b3d4c8a85ce8e862658dd5471",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ce2c19e42973c959cf3c4c6d757364ca8b9281f9"
+        },
+        "date": 1777983531049,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 33.47890367619927,
             "unit": "MB/s"
           }
         ]
