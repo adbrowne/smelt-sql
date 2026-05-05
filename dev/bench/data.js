@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777983531883,
+  "lastUpdate": 1777985744307,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15227,6 +15227,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 9.669552,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "914dfbce4cf27bf31d884828d9f55fb7814a7384",
+          "message": "chore: re-enable pypi mode in smelt-loop harness\n\n0.3.2 ships embedded docs, so the agent can now use `smelt docs list/show`\nin pypi mode. Allow pinning via SMELT_PYPI_VERSION env var.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:23:22+10:00",
+          "tree_id": "b082e4cb3833de1a549d6e568a23288c381acc25",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/914dfbce4cf27bf31d884828d9f55fb7814a7384"
+        },
+        "date": 1777985742890,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.880776000000004,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.399869,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.7307239999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.40411,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003124,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9794864.722873,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 14.013634,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 13.922145,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 13.765358,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.2018650000000002,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9899969.535096,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.70563,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.941460000000003,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.337432,
             "unit": "ms"
           }
         ]
