@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778001153936,
+  "lastUpdate": 1778001156698,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20636,6 +20636,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.67389758024114,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ea965e265b6ea1626739d499792eeb492ac271ed",
+          "message": "skill(smelt-app-builder): clarify --show-plan success/failure output\n\nAdds inline description of what ExpandedCall vs UnknownSmeltFn looks like\nso agents can self-diagnose function expansion without trial-and-error.\nEmpirically verified against a test project.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T21:27:09+10:00",
+          "tree_id": "fc53de6f62d8dab817575ebd6354bb94a637985e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ea965e265b6ea1626739d499792eeb492ac271ed"
+        },
+        "date": 1778001156071,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.607717167958576,
             "unit": "MB/s"
           }
         ]
