@@ -48,12 +48,9 @@ case "$mode" in
         uv pip install --python "$PY" "$wheel" >&2
         ;;
     pypi)
-        # Published 0.3.1 doesn't ship `smelt docs`, so the agent would have
-        # no way to read docs in pypi mode. Re-enable once a release with
-        # embedded docs (>= 0.3.2) is published.
-        echo "pypi mode is disabled until a release with embedded docs ships;" >&2
-        echo "use --mode local for now." >&2
-        exit 1
+        version="${SMELT_PYPI_VERSION:-smelt-sql}"
+        echo "installing from PyPI: $version" >&2
+        uv pip install --python "$PY" "$version" >&2
         ;;
     *)
         echo "unknown mode: $mode (expected local|pypi)" >&2
