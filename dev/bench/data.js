@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777952405838,
+  "lastUpdate": 1777952408395,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19652,6 +19652,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.803126558514787,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3ddec6a6ba6cea54abb48fc0ea0a5f5624b24762",
+          "message": "fix: stale schema cleanup, no-op stderr, unknown selector tolerance, drop broken sdist (#116)",
+          "timestamp": "2026-05-05T08:09:48+10:00",
+          "tree_id": "6c899301a0e441bdf069768437963a58ef1d1269",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3ddec6a6ba6cea54abb48fc0ea0a5f5624b24762"
+        },
+        "date": 1777952407837,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.72780924198705,
             "unit": "MB/s"
           }
         ]
