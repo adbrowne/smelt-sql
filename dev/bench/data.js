@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777822069734,
+  "lastUpdate": 1777948265099,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -14851,6 +14851,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.629235,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b3df8feb98c8766e32f17123dc147bb8f11738dd",
+          "message": "docs: multi-reviewer audit of docs/specs/ (#115)\n\n* docs: multi-reviewer audit of docs/specs/\n\nSynthesises three parallel reviewer subagents (vision & coherence,\ncross-spec consistency, practitioner / user-surface) into a single\nreview doc. 22 specs reviewed across ~4,300 lines.\n\nHeadline findings:\n- H1: project_config.md and smelt_yml.md describe smelt.yml with\n  contradictory schemas; one must go (smelt_yml.md matches the code).\n- H2: smelt.<path> universal addressing migration is incomplete —\n  6 specs still use legacy smelt.models.<name>.\n- H3: Test declaration described two ways (smelt.test vs\n  materialization: test).\n- H4: Planner-extensibility differentiator has no public surface.\n- H5: Cross-cutting user journey (incremental + schema-evolution +\n  testing + multi-backend) breaks at every join.\n- H6/H7/H8: Missing system-level specs — diagnostics, run-state,\n  multi-backend execution.\n\nSequenced cleanup proposed in 6 PRs. No specs modified by this PR;\nthe deliverable is the review.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs: plan to address spec-review-2026-05-03 findings\n\nEight obvious phases (executable now) close H1–H3, M1–M8, M16 et al.\nthrough mechanical sweeps the review already prescribes. Eight discussion\nplaceholders (Part B) carry the open questions for new system specs\n(diagnostics, run_state, multi_backend, planner_api), cross-cutting\njourney integrity, dbt migration, and the M-level design calls.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: delete project_config.md, salvage cross-engine paragraph (review H1)\n\n`smelt_yml.md` is the canonical project-config spec. `project_config.md`\nduplicated it with an incompatible schema (model_paths/seed_paths,\nsilent unknown-keys); per the 2026-05-03 spec review it is the loser.\nLifted the cross-engine Parquet-exchange paragraph into\narchitecture.md §\"Backend trait surface\" (a future multi_backend.md\nwill re-author it). Swept references in python_models.md and\nschema_evolution.md to cite smelt_yml.md instead. Added a migration-\ncompletion note to architecture.md §\"Resolution\" (closes H1; also\nprepares for the H2 sweep).\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: complete unified paths: migration in feature specs (review M6, M8)\n\nReplaced every `model_paths` / `seed_paths` reference with the unified\n`paths:` key (matches `smelt_yml.md` and the implementation):\n\n- `models.md`: file-format and discovery sections.\n- `python_models.md`: discovery section.\n- `testing.md`: discovery + Design rationale paragraph.\n- `cli.md`: `smelt build` lifecycle — also retired the aggregate\n  `sources.yml` mention by replacing it with the universal-resolver\n  description (per `sources.md` Constraint §6, the aggregate file is\n  not recognised; per-entity source `.yml` files are canonical).\n\nBumped `last_reviewed` on every touched spec. The lsp.md\n`sources.yml` legacy references co-locate with the addressing-scheme\nsweep; deferred to Phase 3 per the plan. M7 (lsp.md `sources.yml`)\nremains pending until then.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: complete smelt.<path> addressing migration in feature specs (review H2, N1, N2, Mi5)\n\nSwept every feature spec to use the universal `smelt.<path>` form per\n`architecture.md` §\"Resolution\". The legacy kind-prefixed `smelt.models.<name>`\nand `smelt.sources.<schema>.<table>` forms are retired.\n\n- `models.md`: Reference-syntax section rewritten around `smelt.<path>`;\n  added the parameterised-call surface (closes Mi4).\n- `lsp.md`: Diagnostic codes `UndefinedModelRef` / `UndefinedSource`\n  consolidated to `UnknownSmeltPath` (mirroring `UnknownSmeltFn`); kind-\n  aware messages keep user-facing specificity. Goto-definition / hover /\n  completion / rename tables rewritten around `smelt.<path>` with kind-\n  dispatched targets. Sources `.yml` references switched to per-entity.\n- `python_models.md`, `testing.md`, `model_selection.md`, `scoping.md`,\n  `functions.md`, `incremental_models.md`: examples and rule statements\n  switched to `smelt.<path>`. (Closes N1: incremental_models.md mixed\n  forms; closes N2: smelt-yml.md hyphen typo on line 38 — fixed in\n  previous phase but verified here.)\n- `sources.md`: added a Diagnostic-codes block surfacing `MalformedSource`\n  and `SourceTypeError` (codes are owned here; lsp.md mirrors them with a\n  reference to this spec — closes Mi5).\n- `architecture.md` §\"Resolution\": migration-completion note (2026-05-04)\n  was added in Phase 1; Phase 3 lands the actual sweep it announced.\n\nBumped `last_reviewed` on every touched spec.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: drop stale future-spec pointers (review M1, M2)\n\nBoth `expansion.md` and `testing.md` exist and are substantive — the\n\"(when written)\" / \"(planned)\" / \"future tests.md\" markers across six\nspecs were stale.\n\n- `gradual_typing.md`: drop \"(when authored)\" and \"*(planned)*\" markers\n  for `expansion.md`.\n- `scoping.md`: drop \"(when authored)\" markers for `expansion.md`.\n- `planner_integration.md`: drop \"(when written)\" markers for\n  `expansion.md`.\n- `functions.md`, `sources.md`, `seeds.md` (×2): rewrite \"future\n  tests.md\" cross-references to point at `testing.md` (or, for the\n  column-level-tests gap, qualify what `testing.md` covers vs what is\n  still open).\n- `testing.md`: add a one-line \"Naming history\" note so a returning\n  reader who searches for `tests.md` resolves to this file.\n\nBumped `last_reviewed` on every touched spec. The remaining\n`architecture.md` Known Divergences entry citing \"future tests.md\" is\nthe `smelt.test` declaration entry that Phase 5 deletes outright.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: pin test-declaration shape to materialization: test (review H3)\n\nThe spec set described tests two ways: `architecture.md` and\n`functions.md` listed `smelt.test <name>` as a top-level declaration\nkind alongside `smelt.define` / `smelt.extern`; `testing.md` and\n`models.md` only documented `materialization: test` on a regular\nbare-SELECT model. The implementation uses `materialization: test`\n(crates/smelt-core/src/metadata.rs::TestConfig); the parser does not\naccept a `smelt.test <name>` declaration grammar (the resolver has a\ncontent-string scaffold that classifies `.sql` files containing the\nliteral \"smelt.test\" as tests, but no parser surface backs it). Per the\nspec review's source-of-truth call we keep `materialization: test` and\ndelete `smelt.test` as a top-level declaration kind from the specs.\n\n- `architecture.md`: dropped the `smelt.test`-kind row from §\"Resolution\"\n  and the `smelt.test` enumeration from Bare-model naming, frontmatter\n  attachment, the directory-layout convention (`tests/`), and Design\n  §\"Directory layout is user-chosen\". Removed the `smelt.test`\n  declaration-semantics entry from Known Divergences. Reworded the\n  example table for `tests/` so the test address comes from\n  `materialization: test` on a bare SELECT.\n- `functions.md`: dropped `smelt.test` from File-structure items, the\n  shared-parser callout, and the error-recovery resync-token list.\n- `testing.md`: added a Design rationale paragraph naming\n  `smelt.test <name>` as the rejected alternative (per\n  `feedback_specs_include_design.md`: rejected alternatives belong in\n  Design).\n- `models.md` already documents `test` as a materialization mode and\n  cross-links to `testing.md`; no change needed.\n\nImplementation followup (out of scope for this docs-only plan): the\nresolver string-scan classifier in\n`crates/smelt-core/src/resolver.rs` should be reworked to classify\ntest files via `materialization: test` in frontmatter rather than the\n`smelt.test` substring scaffold. `/smelt:validate` will surface this\nonce the spec change lands.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: fix smelt-optimizer references to smelt-planner in incremental_models (review M3)\n\nThe crate is `smelt-planner`, not `smelt-optimizer`. Verified the cited\npaths exist on disk: `crates/smelt-planner/src/rules/incremental.rs`\nand `crates/smelt-planner/src/types.rs`. References in\n`incremental_models.md` Known Divergences (granularity conversion\nnote) and References block (rules, types, tests) updated.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: add ## Design sections to incremental_models and types (review M4)\n\n`SPEC_TEMPLATE.md` mandates a `## Design` section per spec, and the\nuser's recorded preference (`feedback_specs_include_design.md`) makes\nthis normative — design rationale and rejected alternatives belong in\nevery spec, not just the strong ones.\n\n- `incremental_models.md`: extracted four load-bearing decisions —\n  pure logical SQL with framework-injected filter (rejecting\n  `is_incremental()` branching), DELETE+INSERT over MERGE for v1\n  (rejecting the cross-engine MERGE surface), smelt-does-not-own-state\n  (rejecting a `.smelt/state/` watermark store), and the three-class\n  batch-safety taxonomy (rejecting binary safe/unsafe and continuous\n  scores).\n- `types.md`: extracted four load-bearing decisions —\n  strict-by-default with no implicit cross-family coercion (rejecting\n  SQL-92 silent coercion and configurable strictness), single\n  `DataType` vocabulary across backends (rejecting per-backend\n  vocabularies), engine-alias normalisation as a parser concern not an\n  inference concern, and local bidirectional checking (rejecting a\n  global constraint solver).\n\nEach Design paragraph leads with the rule and explicitly names what\nwas rejected and why. Section position follows `SPEC_TEMPLATE.md`:\nafter Semantics, before Constraints. Bumped `last_reviewed` on the\ntouched specs.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: cross-spec doctrine, dates, and cross-reference cleanup (review M5, M16, Mi1-Mi3, Mi7, N3)\n\nGrab-bag of low-risk fixes after the heavier sweeps. Each step is\nindependent of the others; commit groups them because they're all\nmechanical.\n\n- **Unknown-key doctrine (M5).** Promoted the rule to\n  `architecture.md` Constraints & Invariants §8: user-authored content\n  (model frontmatter, type annotations, per-entity source / sidecar\n  YAML) rejects unknown keys; project-level `smelt.yml` warns instead.\n  `models.md` and `smelt_yml.md` Design paragraphs cross-reference the\n  doctrine instead of restating the rule. `functions.md` Known\n  Divergences flags that function frontmatter is currently divergent\n  (Warning rather than Error) and names the alignment as future work.\n- **README ↔ CLAUDE.md differentiator lists (M16).** Replaced the\n  5-row table in README with the 6-item numbered list from CLAUDE.md\n  (more granular, matches the spec set). README.md is at the repo root,\n  not in `docs/specs/`.\n- **`SPEC_TEMPLATE.md` `status:` values + References shape (Mi1, N3).**\n  Added a frontmatter-rules HTML comment to the template defining the\n  three allowed status values (`experimental`, `stable`, `deprecated`)\n  and pinning References-block shape as flat bullets under headings.\n  The single `status: stable` (architecture.md) is now consistent with\n  the documented enum.\n- **`last_reviewed` audit (Mi2).** Bumped expansion.md from\n  2026-04-29 to 2026-05-04. All other specs were bumped during the\n  earlier phases of this plan; rg confirms no `2026-04` dates remain.\n- **sources.md ↔ seeds.md cross-references (Mi3).** Fixed the broken\n  back-reference: sources.md now points at `seeds.md` §\"Sidecar YAML\n  — seed-specific keys\" (the actual heading) instead of the\n  non-existent §\"Sidecar / source YAML shape\".\n- **Tag case-sensitivity (Mi7).** Moved the rule from\n  `model_selection.md` Constraints §5 into `models.md` §\"Tag merging\"\n  so it co-locates with the merge contract. `model_selection.md`\n  cross-references it from both the Tag-matching section and\n  Constraints §5.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(plan): mark spec-review-followup Phases 1-8 done\n\nAll eight obvious phases (Part A) of the 2026-05-03 spec review\nfollow-up are landed. Phases 9-16 are the discussion phases that need\nalignment before they can be executed; left as `discuss` per the\nplan's Part B framing.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec(testing): flag smelt.test first-class syntax as open for future consideration\n\nThe Phase 5 commit closed the test-declaration split by pinning\n`materialization: test` as canonical, but the symmetry argument cuts\nthe other way: now that `smelt.define`, `smelt.extern`, seeds, and\nsources are all signalled by something other than frontmatter,\n`materialization: test` is the only kind that piggybacks on another\nkind's syntax via a frontmatter flag.\n\n- Softened the `## Design` paragraph from \"rejected\" to \"deferred,\n  not closed\" — names the v1 reasons (shared body grammar, existing\n  TestConfig implementation) honestly without foreclosing the\n  redesign.\n- Added a Known Divergences entry capturing the open framing: a\n  `smelt.test <name> AS (<select>) PASSING ... EXPECT (...)` form\n  that lifts `expect`/`inputs` from YAML into grammar (reusing the\n  function PASSING machinery), the open questions if we pursue it,\n  and a recommendation to write a research note before opening a plan.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(plan): refine spec-review-followup remainder — convert discussion phases to executable\n\nRefines the remainder of the spec-review-2026-05-03 follow-up plan:\n\n- Phase 9 rewritten with two-layer stack design (section delimiter / declaration frontmatter), grounded in parser inspection of smelt-core/metadata.rs and smelt-parser/lib.rs.\n- Phase 13 collapsed to path (a): single Known Divergence in planner_integration.md pointing at future planner_api.md.\n- Phase 14 split into 14a (cli flags + select substring note) and 14b (incremental first-run / functions sections, with the design answers pinned in-plan).\n- Phase 16 split into 16a (canonical columns: home + scope-callout pattern), 16b (v1 sharp edges promoted to Surface), 16c (Mi9 Design rejected-alternatives audit).\n- Phase 17 (new) anchors the spawn list (diagnostics.md, run_state.md, multi_backend, journey integrity, dbt migration, Decimal arithmetic) as in-spec Known Divergences plus an \"Specs not yet authored\" subsection in architecture.md, instead of a sidecar backlog.\n- Phases 10/11/12/15 and Phase 16's M14 removed from this plan's executable scope; they're tracked via Phase 17 anchors so future plans citing those specs inherit the gaps.\n- Progress tracking restructured: \"Executable phases\" table plus \"Spawned\" table.\n- Verification extended with Phase 17 anchor checks.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: pin multi-model file format to two-layer stack (review C1)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(plan): correct Phase 9 commit sha\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: divergence note for planner extensibility surface (review H4)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(plan): record Phase 13 sha\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: surface schema-evolution flags on smelt build and --select substring-match in testing (review M10, M11)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(plan): record Phase 14a sha\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: pin incremental first-run, partial-failure, and function-call semantics (review M9, M13)\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* docs(plan): record Phase 14b sha\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* spec: pick canonical home for columns: and promote scope-callout pattern (review Mi6, Mi8, Mi17)\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 16a sha\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* spec: promote v1 sharp edges to Surface (review Mi10-Mi16, Mi18, Mi19)\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 16b sha\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* spec: Mi9 Design rejected-alternatives audit and inline fixes (review Mi9)\n\nAudit: 12 specs OK, 6 EASY-FIX (explicit rejections added), 0 HARD-CASE.\nEasy-fix specs: data_catalog, schema_evolution, testing, model_selection,\npython_models, datagen. types.md and expansion.md already had explicit\nrejection paragraphs.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 16c sha\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* spec: anchor planned specs as in-spec Known Divergences (review H4 follow-on, H6, H7, H8, M9 follow-on, M12, M14)\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs(plan): record Phase 17 sha\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* docs: migrate smelt.models.<name> → smelt.<path> across docs-site\n\nAll SQL examples, prose, and table entries now use the correct flat\naddressing scheme. The models/ scan root is stripped so models/foo.sql\nis smelt.foo, not smelt.models.foo.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n* spec(lsp): note UnknownSmeltPath/code-split and 6 undocumented codes\n\nRecords two known divergences:\n- Spec says UnknownSmeltPath; code has UndefinedModelRef + UndefinedSource\n- Six codes in smelt-db (FragmentColumnMissing, AnnotationTooWide,\n  FragmentKindMismatch, DeclaredCardinalityUnverifiable,\n  ExternFragmentParamUnsupported, MissingSeedSidecar) not in spec\n\nNo fix applied — both corrections deferred to the diagnostics.md spec.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T07:02:57+10:00",
+          "tree_id": "12072705320a9eb93e8e872c5f1d6121ca6ef751",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b3df8feb98c8766e32f17123dc147bb8f11738dd"
+        },
+        "date": 1777948264320,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.771521,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.291441,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.7058690000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.422193,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0031149999999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9763883.38783,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 13.58216,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 13.229642,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 12.96197,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.830636,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9795559.571975,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.90889,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 29.75072,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.545999,
             "unit": "ms"
           }
         ]
