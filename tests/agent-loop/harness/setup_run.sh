@@ -48,9 +48,9 @@ case "$mode" in
         uv pip install --python "$PY" "$wheel" >&2
         ;;
     pypi)
-        version="${SMELT_PYPI_VERSION:-smelt-sql}"
+        version="${SMELT_PYPI_VERSION:-smelt-sql>=0.3.2}"
         echo "installing from PyPI: $version" >&2
-        uv pip install --python "$PY" "$version" >&2
+        uv pip install --python "$PY" --refresh "$version" >&2
         ;;
     *)
         echo "unknown mode: $mode (expected local|pypi)" >&2
