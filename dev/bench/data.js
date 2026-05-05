@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777982881870,
+  "lastUpdate": 1777983529392,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15133,6 +15133,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 9.811015,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ce2c19e42973c959cf3c4c6d757364ca8b9281f9",
+          "message": "fix(harness): tighten docs smoke check to catch 0.3.1 pypi installed\n\nsmelt 0.3.1 exits 0 from 'smelt docs list' but prints an error — the old\ncheck missed this. Now count output lines; fail with a clear message if\nempty, directing the user to >= 0.3.2 or local mode.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:52:49+10:00",
+          "tree_id": "20eb503501c8657b3d4c8a85ce8e862658dd5471",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ce2c19e42973c959cf3c4c6d757364ca8b9281f9"
+        },
+        "date": 1777983528056,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 27.745952,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 26.527071,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.638143,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.31795,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.002504,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 7819742.352684,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 11.063682,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 10.761726,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 10.780124,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.8630340000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 7887923.441875,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 4.28667,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 23.689179999999997,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 9.669552,
             "unit": "ms"
           }
         ]
