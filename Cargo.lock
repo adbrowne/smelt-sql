@@ -3995,7 +3995,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smelt-backend"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4008,7 +4008,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-backend-duckdb"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4022,7 +4022,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-backend-spark"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4038,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-bench"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4059,7 +4059,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4094,7 +4094,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4114,7 +4114,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-datagen"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-db"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4154,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-dialect"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "insta",
  "smelt-parser",
@@ -4163,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-lsp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "lsp-types",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-parser"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "proptest",
  "rowan",
@@ -4191,7 +4191,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-parser-compat"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "pg_query",
  "proptest",
@@ -4207,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-planner"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "pyo3",
  "rowan",
@@ -4223,7 +4223,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-state"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4238,7 +4238,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-types"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "smelt-parser",
  "thiserror 2.0.18",
@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-ui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "axum",
