@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777982879395,
+  "lastUpdate": 1777982881870,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -19775,6 +19775,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.72780924198705,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "aadd734f0d44bce945372aa0ccdccd62987e1479",
+          "message": "docs(quickstart): add mart example joining a seed with a downstream model\n\nThe quickstart showed seed+seed joins but not the pattern of starting a mart\nfrom a dimension seed and LEFT JOINing a staging model. Adds mart_customers\nexample and explains why dimension-first ordering guarantees all rows appear.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-05T17:47:01+10:00",
+          "tree_id": "d524f5c007ca1d2540145c5029628c3b3d61866c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/aadd734f0d44bce945372aa0ccdccd62987e1479"
+        },
+        "date": 1777982881167,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.9961782751326,
             "unit": "MB/s"
           }
         ]
