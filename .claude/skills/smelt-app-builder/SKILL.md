@@ -183,6 +183,8 @@ If `smelt build` fails, work through these before changing approach:
   - `LEFT JOIN`-fed sums where the right side may be empty: `COALESCE(SUM(...), 0)`. A worked mart pattern: `SELECT c.customer_id, COALESCE(SUM(CASE WHEN o.status = 'shipped' THEN o.amount END), 0) AS revenue FROM smelt.raw_customers c LEFT JOIN smelt.stg_orders o USING (customer_id) GROUP BY c.customer_id` — ensures every customer appears with `0` revenue instead of `NULL`.
   - **DECIMAL vs DOUBLE:** `COALESCE(SUM(decimal_col), 0.0)` returns `DECIMAL(38,2)`, not `DOUBLE`. If the spec requires `DOUBLE`: `CAST(COALESCE(SUM(col), 0.0) AS DOUBLE)`.
   **"All N rows must appear" completeness check:** if the spec says every dimension row (e.g. every customer) must appear in the mart output, first verify whether every such row already exists in your upstream model. A customer with at least one order (even cancelled) already appears in `stg_orders`, so `GROUP BY` + `COALESCE` is sufficient. A customer with *zero* orders is absent from `stg_orders` entirely and cannot be recovered by `COALESCE` — start the mart from the dimension seed (`LEFT JOIN smelt.raw_customers`) rather than from the orders table.
+    - WRONG: `FROM smelt.stg_orders GROUP BY customer_id` — misses customers with zero orders of any kind.
+    - RIGHT: `FROM smelt.raw_customers c LEFT JOIN smelt.raw_orders o ON c.customer_id = o.customer_id` — guarantees all dimension rows appear.
 - **`smelt diff` reports phantom nullability changes after a clean build** → known issue; safe to ignore for app correctness, but don't use `smelt diff` as a CI gate yet.
 
 ## Iteration discipline
