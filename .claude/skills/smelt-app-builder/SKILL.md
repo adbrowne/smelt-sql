@@ -150,7 +150,7 @@ If the spec asks you to use `smelt.define` typed functions, read `smelt docs sho
 - Typed parameter syntax: `name: Expr<T>` where `T` is a concrete type (`Double`, `Text`, `Integer`, `Boolean`, `Date`, …) or a constraint (`Numeric`, `Any`).
 - A function declared in `functions/revenue.sql` as `smelt.define safe_revenue(...)` is called as `smelt.functions.safe_revenue(...)` — **the filename stem is not a path segment**. Only directory segments under `functions/` appear in the call path. Including the stem (e.g. `smelt.functions.revenue.safe_revenue(...)`) causes `UnknownSmeltFn` at build time.
 - Arguments are **positional** in v1 — `param => value` named syntax is not yet wired end-to-end.
-- Use `smelt build --show-plan models/your_model.sql` to confirm the function call expands before a full build.
+- Use `smelt build --show-plan models/your_model.sql` to confirm the function call expands before a full build. Success shows `ExpandedCall fn_id="<name>"` in the output. Failure exits non-zero with `error: Unknown function \`smelt.functions...\`` — the wrong call path is printed explicitly.
 
 Minimal working example:
 
