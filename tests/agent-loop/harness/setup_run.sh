@@ -62,7 +62,14 @@ uv pip install --python "$PY" duckdb >&2
 
 # Smoke checks
 "$run_dir/project/.venv/bin/smelt" --help > /dev/null
-"$run_dir/project/.venv/bin/smelt" docs list > /dev/null
+# Verify docs list produces at least one topic (catches 0.3.1 which exits 0 but prints an error)
+topic_count="$("$run_dir/project/.venv/bin/smelt" docs list 2>/dev/null | wc -l)"
+if [[ "$topic_count" -lt 1 ]]; then
+    smelt_ver="$("$run_dir/project/.venv/bin/smelt" --version 2>/dev/null || echo unknown)"
+    echo "smoke check failed: 'smelt docs list' produced no output (smelt version: $smelt_ver)" >&2
+    echo "pypi mode requires smelt-sql >= 0.3.2; install a newer release or use --mode local" >&2
+    exit 1
+fi
 
 # Update a `latest` symlink under the parent runs dir so the most recent
 # build is easy to find later (e.g. `cd ~/.smelt-test-runs/latest/project`).
