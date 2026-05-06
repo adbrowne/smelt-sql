@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778006027037,
+  "lastUpdate": 1778034081795,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15885,6 +15885,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.520755,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c579545c23119f0a040b102eee444beadee3d366",
+          "message": "docs: function NULL semantics, named-arg warning, smelt table UNKNOWN, --show-plan output\n\nguide/functions:\n- Add NULL semantics section: function bodies follow SQL NULL propagation;\n  is_shipped(NULL) returns falsy, no extra guard needed in LEFT JOIN marts\n- Add v1 warning to Named arguments section: param => value not wired yet,\n  use positional args\n- Add smelt table UNKNOWN callout: known inference gap for CAST'd seed\n  columns; DuckDB DESCRIBE is authoritative\n\nreference/cli:\n- Extend --show-plan table row with output format: ExpandedCall on success,\n  error + non-zero exit on unresolved function\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-06T06:51:09+10:00",
+          "tree_id": "1a5319ceda20a31a1c49c8648c7aa7e8b30ef8d4",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c579545c23119f0a040b102eee444beadee3d366"
+        },
+        "date": 1778034080264,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 36.084509,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.722588,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.651716,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.393595,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.0028550000000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9872110.2086,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 13.175956,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 12.770209,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 12.581918,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.759938,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9800238.819124,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.384949999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.04864,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.52416,
             "unit": "ms"
           }
         ]
