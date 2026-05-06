@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778034081795,
+  "lastUpdate": 1778034084424,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20882,6 +20882,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.855150108759414,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "c579545c23119f0a040b102eee444beadee3d366",
+          "message": "docs: function NULL semantics, named-arg warning, smelt table UNKNOWN, --show-plan output\n\nguide/functions:\n- Add NULL semantics section: function bodies follow SQL NULL propagation;\n  is_shipped(NULL) returns falsy, no extra guard needed in LEFT JOIN marts\n- Add v1 warning to Named arguments section: param => value not wired yet,\n  use positional args\n- Add smelt table UNKNOWN callout: known inference gap for CAST'd seed\n  columns; DuckDB DESCRIBE is authoritative\n\nreference/cli:\n- Extend --show-plan table row with output format: ExpandedCall on success,\n  error + non-zero exit on unresolved function\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-06T06:51:09+10:00",
+          "tree_id": "1a5319ceda20a31a1c49c8648c7aa7e8b30ef8d4",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/c579545c23119f0a040b102eee444beadee3d366"
+        },
+        "date": 1778034083537,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.84812075221013,
             "unit": "MB/s"
           }
         ]
