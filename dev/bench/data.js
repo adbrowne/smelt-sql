@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778034084424,
+  "lastUpdate": 1778080387438,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -15979,6 +15979,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 12.52416,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9aa8e53ed3bb5852d2185fab9a284296a6164dad",
+          "message": "test+docs: regression guard for CAST-arg function return type; remove stale UNKNOWN caveat\n\nAdds test_cast_argument_does_not_suppress_declared_return_type to\nfunction_return_type.rs — guards the CAST-argument variant of the bug\nfixed in Phase 2 of 20260503-loop-medium-followups.md.\n\nRemoves the !!! note callout from guide/functions.md that warned smelt\ntable may show UNKNOWN for CAST-argument function calls. Investigation\nconfirmed the fix covers this case; the caveat was inaccurate.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-06T19:39:31+10:00",
+          "tree_id": "e1d59a0b2d06abfabc2ea034d9d1583a722be720",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9aa8e53ed3bb5852d2185fab9a284296a6164dad"
+        },
+        "date": 1778080386694,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 35.502770000000005,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 34.020481,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.71126,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.421563,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.003044,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 9915237.052306,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 14.125202,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 13.990183,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 14.257717,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 1.274342,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 9971731.346619,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.89721,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 30.86699,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 12.588984,
             "unit": "ms"
           }
         ]
