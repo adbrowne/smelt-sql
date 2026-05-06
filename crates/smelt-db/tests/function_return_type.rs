@@ -179,6 +179,57 @@ fn test_sum_over_function_double_infers_double() {
     );
 }
 
+// ─── Test 5 (regression): CAST argument does not suppress declared return type ──
+
+/// `smelt.functions.safe_revenue(CAST(amount AS DOUBLE))` — the CAST wrapping a
+/// plain column as the argument must not prevent the declared `-> Expr<Double>`
+/// return type from reaching the model schema. Regression guard for the CAST-arg
+/// variant of the bug fixed in Phase 2 of 20260503-loop-medium-followups.md.
+#[test]
+fn test_cast_argument_does_not_suppress_declared_return_type() {
+    let root = PathBuf::from("/fake/project/cast_arg_regression");
+    let fn_path = root.join("functions").join("revenue.sql");
+    let fn_src =
+        "smelt.define safe_revenue(a: Expr<Double>) -> Expr<Double> AS (COALESCE(a, 0.0))\n";
+
+    let upstream_path = root.join("models").join("orders.sql");
+    let upstream_src = "SELECT 1.50 AS amount\n";
+
+    let staging_path = root.join("models").join("staging.sql");
+    // Note: qualifier on the argument: CAST(o.amount AS DOUBLE), matching the exact reproduction
+    let staging_src = "SELECT smelt.functions.safe_revenue(CAST(o.amount AS DOUBLE)) AS amount FROM smelt.models.orders o\n";
+
+    let (db, ws, files) = build_db(
+        root,
+        &[
+            (fn_path, fn_src),
+            (upstream_path, upstream_src),
+            (staging_path.clone(), staging_src),
+        ],
+    );
+    let staging_file = files[2];
+
+    let schema = typed_model_schema(&db, ws, staging_file);
+
+    let col = schema
+        .columns
+        .iter()
+        .find(|c| c.name == "amount")
+        .expect("expected `amount` column in schema");
+
+    let typed = col
+        .data_type
+        .as_ref()
+        .expect("expected `amount` to have an inferred type");
+
+    assert_eq!(
+        typed.data_type,
+        DataType::Double,
+        "CAST argument must not suppress declared return type — got {:?} instead of Double",
+        typed.data_type,
+    );
+}
+
 // ─── Test 4: Untyped function (Tier 1/2) produces Unknown ─────────────────────
 
 /// `smelt.define f(x) AS (x + 1)` — no return type declared.

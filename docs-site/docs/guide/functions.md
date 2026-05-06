@@ -99,9 +99,6 @@ Note that `--show-plan` requires a positional model file path — there is no pr
 
 For typed functions (those with a `-> ReturnType` annotation), smelt uses the declared return type as the column type in downstream models. `smelt table <model>` reflects this — a column fed by a `-> Expr<Double>` call shows as `DOUBLE`. Downstream aggregates also use the declared type: `SUM` over a `-> Expr<Double>` call infers as `DOUBLE`, not `BIGINT`.
 
-!!! note "`smelt table` may show `UNKNOWN` for function-fed columns"
-    In some type-inference paths — particularly when the function argument is a `CAST` of a seed column — `smelt table` may display `UNKNOWN` instead of the declared return type. This is a known inference gap and does **not** indicate a build failure. The materialized DuckDB column type is always correct; verify with `DESCRIBE <table>` in DuckDB if you need to confirm the actual column type.
-
 ### NULL semantics in function bodies
 
 smelt function bodies are SQL expressions — they inherit standard SQL NULL propagation. A body that compares a nullable column with `=` returns `NULL` (which is falsy) when the argument is `NULL`, not an error.
