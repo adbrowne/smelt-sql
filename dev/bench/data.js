@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778080387438,
+  "lastUpdate": 1778080390210,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -21005,6 +21005,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.84812075221013,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9aa8e53ed3bb5852d2185fab9a284296a6164dad",
+          "message": "test+docs: regression guard for CAST-arg function return type; remove stale UNKNOWN caveat\n\nAdds test_cast_argument_does_not_suppress_declared_return_type to\nfunction_return_type.rs — guards the CAST-argument variant of the bug\nfixed in Phase 2 of 20260503-loop-medium-followups.md.\n\nRemoves the !!! note callout from guide/functions.md that warned smelt\ntable may show UNKNOWN for CAST-argument function calls. Investigation\nconfirmed the fix covers this case; the caveat was inaccurate.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-05-06T19:39:31+10:00",
+          "tree_id": "e1d59a0b2d06abfabc2ea034d9d1583a722be720",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9aa8e53ed3bb5852d2185fab9a284296a6164dad"
+        },
+        "date": 1778080389724,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.715021958880875,
             "unit": "MB/s"
           }
         ]
