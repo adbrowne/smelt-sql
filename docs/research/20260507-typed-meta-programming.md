@@ -20,14 +20,15 @@ This paper explores how smelt can match — and exceed — dbt's ability to expr
 
 - **Lambda syntax** — the `=>` collision with named-argument syntax has no costless fix. Current lean is keyword-prefixed `fn x => body`; backup is position-based disambiguation. See §4.5.
 - **Reflection API shape** — sketched only in §4.8. Type *shape* (`ModelRef`, `ColumnRef`, `Schema`) is what needs committing now so the meta-language type system accommodates reflection without a breaking change later.
+- **Multi-model production mechanism** — §4.10.4 leans on a frontmatter directive + `List<ModelDef>` body. The alternative (a top-level `smelt.generate.models { ... }` construct) is non-trivial to undo if shipped, and the path-naming rule for generated models is similarly load-bearing. Decide before any meaningful Phase E work.
 
 **Author confidence (subjective — for a reviewer's calibration):**
 
 - **High** — §3 (meta-world recap), §6 (LSP exceedance over dbt), §8 (open-question enumeration).
-- **Medium** — §4.1 (`List<T>`), §4.4 (HOF set), §4.6 (pipe), §4.7 (reducer registry).
-- **Low** — §4.5 (lambda surface — `fn` is a guess), §4.8 (reflection API — sketch only), §5.2 / §5.5 (worked examples that lean on undecided sub-questions, especially the meta-`Text`-as-identifier lift).
+- **Medium** — §4.1 (`List<T>`), §4.4 (HOF set), §4.6 (pipe), §4.7 (reducer registry), §4.10.2 (records — record types are small and well-precedented), §4.10.3 (`Map<K, V>` — the reduced API set is conservative).
+- **Low** — §4.5 (lambda surface — `fn` is a guess), §4.8 (reflection API — sketch only), §4.10.1 (config loader API — typing approach is leaning but unsettled), §4.10.4 (multi-model production — the deepest workspace-shape change in the paper, several alternatives with no clearly dominant choice), §4.10.5 (meta-`Text`-as-identifier lift — implicit vs. explicit cast, narrowness rule), §5.2 / §5.5 / §5.7 / §5.8 (worked examples lean on undecided sub-questions).
 
-**Consciously out of v1 scope** (per §1.2 and §8): hooks / lifecycle events, custom materialisations, pipe-SQL extension into the data world, meta-let / `@variables`, `Map<K, V>`, tuples, recursive reflection, user-extensible reducers.
+**Consciously out of v1 scope** (per §1.2 and §8): hooks / lifecycle events, *general* custom materialisations as a planner-rule extension point (multi-model production in §4.10.4 is in scope as a *workspace-shape* concern, not a planner-rule one), pipe-SQL extension into the data world, meta-let / `@variables`, tuples, recursive reflection, user-extensible reducers, generators-of-generators, sum / variant types. **Pulled back into scope by §4.10:** `Map<K, V>` (the §1 patterns were list-shaped and could defer; the §4.10 use case makes `Map` the dominant entry-point type).
 
 **Background a continuing reader should pre-read** before extending this paper:
 
@@ -58,6 +59,9 @@ A non-exhaustive catalogue of dbt patterns smelt cannot express today:
 | Generic test parameterised over columns | `{% for col in cols %}check {{ col }} {% endfor %}` | List parameter + map |
 | Surrogate key over column list | `dbt_utils.generate_surrogate_key(['a', 'b', 'c'])` | List parameter + reduce-with-separator |
 | Cross-source schema enumeration | `{% for src in graph.sources %}` | Source reflection |
+| Generate staging models from a sources YAML | `dbt-codegen` macros | External config + records + multi-model production |
+| Per-tenant model variants from a tenants list | per-project copies or external codegen | Multi-model production + meta-`Text`-as-identifier |
+| Metric / KPI definitions become individual models | `dbt-metrics`, SQLMesh metrics | Records + multi-model production |
 
 The shared shape is: a **list of metadata items** is computed at compile time, transformed through `map`/`filter`, and reduced into a SQL fragment that is spliced into a model. Jinja makes this textual. smelt should make it typed.
 
@@ -79,7 +83,7 @@ A typed meta-language can do all of these — every meta-world value has a type,
 Out-of-scope for this paper (each is its own design exercise):
 
 - **Hooks / lifecycle events** (dbt's `on-run-start`, `pre-hook`, `post-hook`). These are an orchestration concern, not a meta-language concern.
-- **Custom materialisations** as a user-extension point. smelt's planner-rule API will eventually serve this need; that is a separate spec (`planner_integration.md`).
+- **Custom materialisations** as a user-extension point. smelt's planner-rule API will eventually serve this need; that is a separate spec (`planner_integration.md`). The §4.10 multi-model-production case touches the boundary — one file generating several models — but is a *workspace-shape* concern (which models exist), not a *materialisation* concern (how each model materialises). The two compose; neither subsumes the other.
 - **Custom dialects via macros**. smelt's `smelt.extern` + `backends:` frontmatter solves the dialect-portability axis differently.
 - **Imperative control flow** (`if`/`else` blocks at the top level of a model). The proposal here is purely *value-level meta computation* — function-style, no statements.
 
@@ -423,6 +427,184 @@ FROM events
 
 Lean: (i). Function parameters cover every case so far identified, and "extract a helper" is a reasonable diagnostic when a long inline meta-binding is wanted. (ii) is non-breaking to add later if a pattern emerges where it would be much cleaner.
 
+### 4.10 Config-driven model generation
+
+The §1 catalogue covered patterns where dynamism lives *inside* a model: the column list flexes, but the model itself is one user-authored file producing one node in the dependency graph. A second class of patterns has dynamism live *across* models — a single configuration source produces *multiple* models. dbt approximates this with `dbt-codegen` (literal codegen of `.sql` files), per-tenant projects, and `dbt-metrics` (each metric becomes an effective model). The shape: a YAML / JSON file describes a list of "things"; each thing should become a top-level model.
+
+This is structurally different from §1. There, meta-evaluation produced a fragment that spliced into one user-written model. Here, meta-evaluation produces N model definitions where there were previously zero user-written model files for them. Several of §4.1–§4.9's building blocks contribute (HOFs, lambdas, pipe, spread), but five new pieces are required:
+
+- **4.10.1** External configuration sources — a typed source of meta values from disk.
+- **4.10.2** Record (struct) meta types — to represent each entry of the config.
+- **4.10.3** `Map<K, V>` meta type (revisited from §8) — for keyed configs.
+- **4.10.4** Multi-model production — one file producing N models.
+- **4.10.5** Meta-`Text` as identifier (sharpened from §5.2 / §8) — to construct generated model paths.
+
+The biggest is §4.10.4 — the only piece that is conceptually new at the workspace level. Everything in §4.1–§4.9 produced compile-time values that splice into existing user-written models. §4.10.4 produces models themselves. The remaining four pieces are type-system extensions that are locally justifiable.
+
+#### 4.10.1 External configuration sources
+
+Need: load a workspace-relative file at compile time and treat its contents as a typed meta value.
+
+**API sketch.**
+
+```
+smelt.config.load_yaml(path: Text, schema: Schema)  -> Schema-typed value
+smelt.config.load_json(path: Text, schema: Schema)  -> Schema-typed value
+smelt.config.load_toml(path: Text, schema: Schema)  -> Schema-typed value
+```
+
+The schema declares the expected shape (§4.10.2); the loader parses the file and validates against the schema. Validation failure produces a compile-time diagnostic anchored to the offending file/line of the YAML.
+
+**Determinism.** Files must live inside the workspace and become Salsa-tracked inputs. No HTTP/network reads, no clock, no env vars without explicit gating. A schema and a file together are a pure function from workspace state to a meta value — same property §6.6 requires for reflection.
+
+**Per-target variants.** dbt has `target.name` and per-target `var()`. A few options:
+
+- (i) Path interpolation in the loader: `load_yaml('configs/{target}/sources.yaml', S)` once string interpolation lands.
+- (ii) Overlay: load `sources.yaml`, merge `sources.{target}.yaml` if present.
+- (iii) Post-load `filter`: load all entries, filter on a per-row `target` field.
+
+Lean: (i) and (iii) as primary. (ii) only if a concrete need surfaces.
+
+**Alternatives for the typing approach:**
+
+- **(a) Untyped, JSON-shaped value.** Returns a dynamic `Json` with `.field`, `.[i]`, `.as_text` operators that may fail. Pro: zero schema authoring. Con: loses static checking, autocompletion, definition-site errors — pushes failures to the use site, which is exactly the dbt failure mode this paper exists to fix.
+- **(b) Schema-typed (proposed).** User declares a schema; loader validates and returns a typed value. Pro: full static typing, hover, autocompletion, failures land at the YAML line that violated the schema. Con: schema authoring required.
+- **(c) Schema inferred from data.** Read the file, infer shape, hand back a typed value. Pro: zero ceremony. Con: schema becomes data-dependent — refactoring the YAML silently changes the type, breaking distant code without a definition-site signal.
+- **(d) Schema inline at the call site only.** `load_yaml(path, { name: Text, columns: List<Text> })`. Pro: schema reads adjacent to use. Con: duplicated when the file is loaded twice; bad for large schemas.
+
+Lean: **(b)**, with both standalone schema declarations (§4.10.2) and inline schemas as sugar. Inline schemas are reasonable when the schema is used once.
+
+**File-format coverage.** YAML is dominant in this ecosystem; ship that first. JSON and TOML ride along cheaply (parsers exist). CSV is tempting (column lists in spreadsheets) but lacks a schema-friendly type system; defer.
+
+#### 4.10.2 Record (struct) meta types
+
+Each loaded config row is a thing with named fields. The meta-language needs a record type.
+
+**Surface candidates:**
+
+- **(i) `Record<{name: Text, columns: List<Text>}>`** — type-as-shape, inline.
+- **(ii) Named declarations.** `smelt.record SourceEntry = { name: Text, columns: List<Text> }`, addressable as `smelt.records.SourceEntry` (or wherever the records namespace lands).
+- **(iii) Reuse the data-world `Struct({...})`** with a meta marker — share the spelling.
+- **(iv) Row types** `{ name :: Text, ... }` — Haskell/Elm-flavour.
+
+Lean: **(i) and (ii) both supported**. Inline records suit one-shot schemas inside a HOF callback; named records suit shapes that recur across files and want their own goto-definition target.
+
+**Why not reuse `Struct({...})`.** Constraint 6 (compile-time only) requires a clean meta/data separation. The user must be able to tell whether a record value persists into runtime; sharing the spelling obscures that. Same reasoning as §3.1's argument for `[a, b, c]` ↔ `Array(T)` disambiguation, applied to records.
+
+**Field access.** `entry.name`, `entry.columns`. Already consistent with the `c.name` accessors §5.2 and §4.8 (reflection's `ColumnRef`) preview.
+
+**Width subtyping.** A record `{a: T, b: U}` is a subtype of `{a: T}`. Lean: yes — the same conservative covariance §4.1 lands on for `List<T>`. Allows passing a richer-than-required record into a HOF expecting a narrower one.
+
+**Equality and ordering.** Structural equality at meta-evaluation. No defined ordering; sorting requires explicit `sort_by(fn r => r.field)` (deferred — `sort_by` is not in the v1 HOF set §4.4).
+
+#### 4.10.3 `Map<K, V>` meta type
+
+YAML mappings naturally produce `Map<K, V>`. The §8 deferral was correct under §1's list-shaped patterns; §4.10 makes `Map` the dominant type at the entry point of many config schemas (e.g. `tenants: { acme: {...}, globex: {...} }`).
+
+**Reduced API:**
+
+| Op | Signature |
+|---|---|
+| `entries` | `Map<K, V> -> List<Record<{key: K, value: V}>>` |
+| `keys` | `Map<K, V> -> List<K>` |
+| `values` | `Map<K, V> -> List<V>` |
+| `get` | `(Map<K, V>, K) -> V` (compile error on missing — or `Optional<V>` if optionals exist) |
+| `has` | `(Map<K, V>, K) -> Boolean` |
+
+The canonical idiom is `m |> entries |> map(fn kv => ...)` — convert to a list of records and run §4.4 HOFs over it. Map-shaped HOFs (`map_values`, `map_entries`) can wait.
+
+**Alternatives:**
+
+- (i) Add `Map<K, V>` with the reduced API. Pro: matches YAML naturally. Con: another type.
+- (ii) Skip; require all configs to be lists-of-records. Pro: minimal change. Con: forces config authors to restructure YAML that is naturally keyed.
+- (iii) `Map<K, V>` as sugar for `List<Record<{key: K, value: V}>>`. Pro: zero new type. Con: lookup is O(n); diverges from user expectation; `get('missing_key')` becomes a runtime-style failure.
+
+Lean: **(i)**.
+
+**Heterogeneous values.** `Map<Text, ?>` (YAML map whose values vary in shape) — same answer as heterogeneous lists in §4.2: must unify under LUB or be rejected. Real heterogeneous maps need sum types, which are out of v1 scope.
+
+#### 4.10.4 Multi-model production
+
+The deepest change. Today: one `.sql` file = one model = one node in the dependency graph. Proposal: one file can produce N models, each a normal node.
+
+**Mechanism options:**
+
+- **(i) Frontmatter directive + body returns `List<ModelDef>`.** The file declares it produces a list of models. The body is a meta-evaluable expression of type `List<ModelDef>`. The compiler synthesises N models in the workspace from the evaluated list.
+
+  ```
+  ---
+  generates: models
+  ---
+  smelt.config.load_yaml('sources.yaml', SourceEntry)
+    |> map(fn e => ModelDef {
+         name: 'staging_' ++ e.name,
+         body: SELECT * FROM smelt.sources.<e.source_table>,
+         materialization: if e.is_incremental then 'incremental' else 'view'
+       })
+  ```
+
+- **(ii) Top-level construct.** `smelt.generate.models { ... }` — a new top-level form alongside `smelt.define`. Pro: explicit syntactic boundary. Con: introduces another top-level form; the symmetry between "this file *is* a model" and "this file *produces* models" is asymmetric to learn.
+- **(iii) External codegen.** Skip the language extension; users run a separate code-gen tool that writes `.sql` files. Pro: zero language change. Con: loses LSP, types, smelt's reason to exist over dbt.
+- **(iv) Implicit per-row materialisation.** A model's body produces `List<Row>` and the planner materialises one model per row. Pro: no new construct. Con: the resulting models lack distinguishability in the workspace; conceptually odd; collides with the data-world `List`/`Array` interpretation.
+
+Lean: **(i)**. Frontmatter is the existing extension point for per-file directives; reusing it is the smallest change. The convention `<name>.gen.sql` (file naming) is optional sugar — the directive is what marks the file.
+
+**The `ModelDef` shape (rough):**
+
+```
+ModelDef = Record<{
+    name: Text,                     -- final segment of the generated path
+    body: TableExpr,                -- the SQL
+    materialization: Text,          -- defaults to view
+    description: Text,              -- optional, for docs
+    tags: List<Text>,               -- for §4.8 reflection-driven filters elsewhere
+    -- frontmatter-equivalent fields
+}>
+```
+
+A `ModelDef` is *not* a `ModelRef` (§4.8). `ModelRef` is a workspace-introspection handle (a pointer to an existing model); `ModelDef` is a constructor (a recipe to make one). They are dual.
+
+**Generated model paths.** Under (i), the natural paths nest under the generator file. A generator at `models/staging/sources.gen.sql` producing a row with `name = 'orders'` yields `smelt.models.staging.sources.orders`. Alternatives:
+
+- **(a)** Path = generator-file's path + `.<name>` (most predictable; can be deep).
+- **(b)** Generator file is "transparent" — generated models live at the parent directory (`smelt.models.staging.<name>`). Cleaner; collisions across generators in the same directory.
+- **(c)** Frontmatter override: `generated_path_prefix: models.staging`. Full control; another knob.
+
+Lean: **(a) by default, (c) as escape hatch**.
+
+**LSP implications.**
+
+- *Workspace queries.* `smelt.models.with_tag('audit')` (§4.8) must include generated models. The Salsa "list all models" query derives both authored and generated.
+- *Goto-definition.* Clicking on `smelt.<staging_orders>` from another file jumps to the generator file with the originating config row contextualised — multi-frame stack: "generated by `staging_orders` `ModelDef` at `sources.gen.sql:9` from `sources.yaml:14`".
+- *Hover.* Shows the generated path, the generator file, the originating config row, and the inferred output schema.
+- *Rename.* Renaming the `name` field of a config row updates the generated model path. References in other models follow the path.
+
+**Cycles.** A generator can produce models that other models (authored or generated) depend on. Standard cycle detection extends naturally — the dependency graph *after* generation is what's checked. The subtle case: generator A's body depends on the schema of a model that generator B produces (cycle in generator evaluation, not just in run-time data). Lean: **forbid initially**; require generators to have static schemas resolvable without other generators having run. Revisit if real use cases appear.
+
+**Determinism.** Same workspace state must produce the same set of generated models with the same paths. Falls out of meta-evaluation purity (constraint 4) and Salsa-tracking of all inputs.
+
+**Comparison with §1.2's "custom materialisations".** Custom materialisations ask "how does *this* model materialise?" (a planner-rule concern). Multi-model production asks "what are the models?" (a workspace-shape concern). The two intersect — a generator declares per-model materialisation in `ModelDef.materialization` — but neither subsumes the other. This proposal commits only to passing the materialisation choice through to existing planner-rule machinery.
+
+#### 4.10.5 Meta-`Text` as identifier
+
+To say `'staging_' ++ e.name` becomes a *path component* of a generated model, the type system must allow a meta `Text` to be used as an identifier in identifier positions. §5.2's `c.name AS c.name` and §5.4's pivot aliases preview this; multi-model production makes it required.
+
+**Constraints:**
+
+- The `Text` must match smelt's identifier grammar (no leading digits, no reserved keywords, etc.). Validation runs at meta-evaluation, on a string-pure function.
+- The `Text` must be deterministic.
+- Validation failure produces a diagnostic anchored to the source span where the bad `Text` was constructed (or the closest enclosing meta evaluation step), via the §6.3 frame stack.
+
+**Surface options:**
+
+- **(i) Implicit lift.** A meta `Text` in identifier position is treated as an identifier. Pro: terse — `'staging_' ++ e.name` just works. Con: errors land at use sites that can be far from the bad input.
+- **(ii) Explicit cast.** `as_ident('staging_' ++ e.name)`. Pro: pinpoints the cast point. Con: ergonomic noise on every interpolation.
+- **(iii) A distinct `Identifier` meta type.** With a partial `Identifier::of(t: Text) -> Identifier`. Pro: type system catches bad-id errors at construction site. Con: more types; users must know when to cast; diverges from §4.2's bidirectional lifting style.
+
+Lean: **(i) implicit, with (ii) explicit available when the user wants the cast point pinned**. Implicit lift is consistent with §4.2's bracket literal lifting to either `Array(T)` or `List<T>` based on context. The frame stack handles the "errors land at use sites" weakness — `to_ident` failures surface at the construction site with a frame "lifted to identifier in `ModelDef.name` position at <path>".
+
+**Narrowness.** The lift permits using a meta `Text` as: a model path segment, a generated column alias, a generated CTE name, an aggregate or function alias. It does *not* permit using a meta `Text` as an arbitrary SQL keyword (e.g. substituting `FROM` with a string), which is string-template territory and re-introduces the dbt failure mode this paper exists to avoid. The distinction is the SQL grammar slot the `Text` occupies — identifier slots only.
+
 ## 5. Worked Examples
 
 This section composes §4 building blocks against the §1 catalogue. Each example shows the full surface; nothing is hand-waved.
@@ -524,6 +706,79 @@ SELECT 'rows with nulls in required columns' AS reason FROM bad
 
 The test asserts that every column in the configured `check_cols` list is non-null. The same test body works for any model and any column set without macro-style duplication.
 
+### 5.7 Generate staging models from a sources YAML (requires §4.10)
+
+```yaml
+# configs/sources.yaml
+- name: orders
+  source_table: raw.orders
+  columns: [id, customer_id, amount, created_at]
+  is_incremental: true
+- name: customers
+  source_table: raw.customers
+  columns: [id, name, email, created_at]
+  is_incremental: false
+```
+
+```sql
+-- models/staging/sources.gen.sql
+---
+generates: models
+---
+smelt.record SourceEntry = {
+    name: Text,
+    source_table: Text,
+    columns: List<Text>,
+    is_incremental: Boolean
+}
+
+smelt.config.load_yaml('configs/sources.yaml', SourceEntry)
+  |> map(fn e => ModelDef {
+       name: 'staging_' ++ e.name,
+       body: SELECT ...map(e.columns, fn c => c)
+             FROM smelt.sources.<e.source_table>,
+       materialization: if e.is_incremental then 'incremental' else 'view'
+     })
+```
+
+This produces two models in the workspace: `staging_orders` (incremental) and `staging_customers` (view). Each can be referenced from other models as `smelt.models.staging.sources.staging_orders` etc., shows up in workspace reflection (§4.8), gets schema inferred (§6.4) — column lists are statically known from the YAML — and supports goto-definition back to the YAML row that produced it.
+
+The `if-then-else` on `materialization` is a small extension not currently in §4 (lean: ship `if expr then a else b` as a meta-world ternary; §9 phase B; non-blocking for the rest).
+
+### 5.8 Per-tenant model variants (requires §4.10)
+
+```yaml
+# configs/tenants.yaml
+acme:
+  schema: acme_prod
+  enabled_features: [billing, audit]
+globex:
+  schema: globex_dev
+  enabled_features: [billing]
+```
+
+```sql
+-- models/per_tenant/orders.gen.sql
+---
+generates: models
+---
+smelt.record TenantConfig = {
+    schema: Text,
+    enabled_features: List<Text>
+}
+
+smelt.config.load_yaml('configs/tenants.yaml', Map<Text, TenantConfig>)
+  |> entries
+  |> filter(fn kv => 'billing' in kv.value.enabled_features)
+  |> map(fn kv => ModelDef {
+       name: 'orders_' ++ kv.key,
+       body: SELECT * FROM smelt.<kv.value.schema>.orders,
+       materialization: 'view'
+     })
+```
+
+The keys-as-tenant-names pattern requires §4.10.3's `Map<K, V>`. Models `orders_acme` and `orders_globex` are produced; both have statically-known schemas inherited from their respective `<schema>.orders` source.
+
 ## 6. Static Analysis & LSP Implications
 
 This is where the proposal earns its keep over Jinja. Each §4 primitive is designed so the LSP can give the user the same ergonomic feedback they get for static SQL.
@@ -617,6 +872,20 @@ Terra (Devito et al.) and MetaML (Taha & Sheard) are the academic precedent for 
 
 **Recursive reflection.** Can a meta function call `smelt.columns_of(t)` where `t` is the model currently being type-checked? Probably yes (the model's schema is a fixed point of its body), but workspace cycles need handling. Defer to reflection spec.
 
+**Schema authoring overhead for config loading.** §4.10.1 lands on schema-typed loading. For one-off configs, schema declarations are a tax. Two ergonomic options worth exploring: (a) inline-only schemas at the call site for one-shot use; (b) a future `infer_schema` mode that produces a schema declaration from a sample file at the user's request (codegen, not runtime inference). Both deferred until shipping reveals the pain.
+
+**Generator file naming.** Is `.gen.sql` (file-extension convention) load-bearing or just sugar? Lean: sugar; the `generates: models` frontmatter is what marks the file. But editor tooling and human readers benefit from the visual distinction. Recommend convention without enforcement.
+
+**Generated model paths — depth vs. flatness.** §4.10.4 leans on nested paths under the generator file. For deep directory trees this gets verbose (`smelt.models.staging.sources.staging_orders`). The frontmatter override (option (c)) is the escape hatch but easy to misuse. Worth a usability pass once a real example workspace exists.
+
+**Generators-of-generators.** §4.10.4 forbids cycles in generator evaluation. The non-cycle multi-stage case — generator B reads YAML produced by generator A — is currently also forbidden by the static-schema rule. This forecloses some valid use cases (e.g. one config file describing other config files). Defer; the simple flat case is far more common and can be shipped first.
+
+**Per-target config overlay.** §4.10.1 lists path interpolation, overlay, and post-load filter. Only one needs to ship initially, but pinning down which is a v1 decision because users will lock in idioms quickly.
+
+**Multi-model identity stability under refactoring.** If a config row's `name` field is renamed, the generated model path changes — every reference elsewhere breaks unless the LSP's rename driver follows the generator and propagates. Refactoring tooling for generators is a non-trivial item; design needs explicit attention.
+
+**Validation diagnostics for schema mismatches.** When a YAML file fails its declared schema, the diagnostic should anchor on the YAML line and column, not on the smelt loader call. Requires the YAML parser to retain source spans through validation. Implementation cost is moderate; deferring it produces a noticeably worse error UX.
+
 ## 9. Sequencing — A Sketch
 
 The full proposal is large. The user has already asked for "literal lists first" as a way to test the lifting/compile-time mechanism without the rest. A plausible sequencing (subject to revision):
@@ -625,7 +894,8 @@ The full proposal is large. The user has already asked for "literal lists first"
 2. **Phase B — HOFs, no reflection.** Add `map`/`filter`/`reduce`, lambdas, contextual reducers. Users can compose user-supplied lists. Pipe operator lands here.
 3. **Phase C — Reflection, narrow.** `smelt.columns_of(t)`, `smelt.config.var(...)`. The smallest reflection surface that unlocks several §1 patterns.
 4. **Phase D — Reflection, wide.** `smelt.models.*`, `smelt.sources.*`, `ModelRef` / `SourceRef`. Full project introspection.
-5. **Phase E — Polish.** Pipe-SQL extension if compelling, parameterised reducers, multi-arg lambdas, meta-let if needed.
+5. **Phase E — Config-driven generation (§4.10).** External config loading, records, `Map<K, V>`, multi-model production, meta-`Text`-as-identifier. Largest individual phase by surface area. Depends on Phase B (HOFs) and overlaps Phase C (`smelt.config.var(...)` is the simplest config primitive). Multi-model production is the substantive item; the type-system additions (records, `Map`) are small in isolation. Plausible to split into E1 (config + records + `Map`, no multi-model) and E2 (multi-model production) if E proves too large in one bite.
+6. **Phase F — Polish.** Pipe-SQL extension if compelling, parameterised reducers, multi-arg lambdas, meta-let if needed, `if-then-else` ternary for the meta-world.
 
 Each phase is committable in isolation, each is non-breaking for the next, each unlocks a meaningful subset of §1.
 
@@ -637,12 +907,13 @@ Build the meta-language. The §4 building blocks have small, locally-justifiable
 
 The dbt parity claim is achievable. The dbt-exceedance claim — full LSP, type-checked HOFs, schema inference for dynamic columns, frame-stack diagnostics into meta — is what justifies the work over staying in `smelt.define`-only territory.
 
-The two highest-leverage open decisions are:
+The three highest-leverage open decisions are:
 
 - **Lambda syntax** (§4.5). Affects every HOF call site. The `=>` clash with named arguments has no costless solution. Lean: keyword-prefixed `fn x => body`, with positional disambiguation as backup.
 - **Reflection API shape** (§4.8). Affects every §1 pattern that depends on workspace introspection. Lean: functional accessors under `smelt.*`, deferred to a follow-up spec, but type shape committed now.
+- **Multi-model production mechanism** (§4.10.4). Affects every §4.10 pattern and is hard to undo once shipped — generated paths, frontmatter shape, LSP integration all hang off this decision. Lean: frontmatter directive `generates: models` + body returning `List<ModelDef>`; generated paths nested under the generator file by default, with a frontmatter override.
 
-Everything else in §4 has a low-regret default that matches the existing language style.
+Everything else in §4 has a low-regret default that matches the existing language style. The §4.10 surface is bigger than §4.1–§4.9 combined; do not commit to it before the open questions in §8 (schema authoring overhead, generator-file naming, generated-path depth, multi-model identity stability under refactoring) have concrete answers.
 
 ## 11. References
 
