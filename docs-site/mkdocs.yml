@@ -49,6 +49,10 @@ nav:
   - Concepts:
     - How smelt Works: concepts/how-it-works.md
     - Project Structure: concepts/project-structure.md
+  - Meta-Language:
+    - Overview: meta-language/index.md
+    - Lists & Spread: meta-language/lists.md
+    - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md
     - Sources: guide/sources.md
