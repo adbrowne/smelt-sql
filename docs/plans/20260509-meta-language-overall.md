@@ -36,7 +36,7 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 | # | Phase | Status | Plan path | Date | Commit |
 |---|-------|--------|-----------|------|--------|
 | 0 | Foundation: spec skeletons + overall plan | done | this file | 2026-05-09 | *(this commit)* |
-| A | `List<T>`, literals `[a,b,c]`, spread `...` | done | `docs/plans/20260509-meta-language-A.md` | 2026-05-10 | (pending commit) |
+| A | `List<T>`, literals `[a,b,c]`, spread `...` | done | `docs/plans/20260509-meta-language-A.md` | 2026-05-10 | fdf51c6 |
 | B | HOFs, lambdas, pipe `\|>`, contextual reducers, `smelt.config.var` | pending | `docs/plans/20260509-meta-language-B.md` | — | — |
 | C | Reflection narrow: `smelt.columns_of`, `ColumnRef` | pending | `docs/plans/20260509-meta-language-C.md` | — | — |
 | D | Reflection wide: `smelt.models.*`, `smelt.sources.*` | pending | `docs/plans/20260509-meta-language-D.md` | — | — |
