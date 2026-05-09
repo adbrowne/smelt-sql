@@ -1162,27 +1162,25 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Tail markers: two DOTs in a row. Decide between
+            // Tail markers: `..` (DOT_DOT token). Decide between
             // `..name` (ROW_TAIL_NAMED) and `..` (ROW_TAIL_ANON) by
             // lookahead, so we only ever open one of the two nodes.
-            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
-                // Peek past the two dots to see if an IDENT follows
+            if self.at(DOT_DOT) {
+                // Peek past the DOT_DOT to see if an IDENT follows
                 // (named tail) or not (anonymous).
                 let is_named = matches!(
-                    self.peek_nth_non_trivia(2),
+                    self.peek_next_non_trivia(),
                     Some(k) if k == IDENT
                 );
                 if is_named {
                     self.start_node(ROW_TAIL_NAMED);
-                    self.advance(); // first DOT
-                    self.advance(); // second DOT
+                    self.advance(); // DOT_DOT
                     self.skip_trivia();
                     self.advance(); // IDENT
                     self.finish_node();
                 } else {
                     self.start_node(ROW_TAIL_ANON);
-                    self.advance(); // first DOT
-                    self.advance(); // second DOT
+                    self.advance(); // DOT_DOT
                     self.finish_node();
                 }
 
@@ -1497,16 +1495,15 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Tail markers: two DOTs.
-            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+            // Tail markers: `..` (DOT_DOT token).
+            if self.at(DOT_DOT) {
                 // ROW_TAIL: either `..ident` (named) or `..` (anonymous).
                 let is_named = matches!(
-                    self.peek_nth_non_trivia(2),
+                    self.peek_next_non_trivia(),
                     Some(k) if k == IDENT
                 );
                 self.start_node(ROW_TAIL);
-                self.advance(); // first DOT
-                self.advance(); // second DOT
+                self.advance(); // DOT_DOT
                 if is_named {
                     self.skip_trivia();
                     // Record the row-variable name for the per-define constraint check.
@@ -1589,11 +1586,10 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Spread item: `..ident`
-            if self.at(DOT) && self.peek_next_non_trivia() == Some(DOT) {
+            // Spread item: `..ident` (DOT_DOT token)
+            if self.at(DOT_DOT) {
                 self.start_node(SPREAD_ITEM);
-                self.advance(); // first DOT
-                self.advance(); // second DOT
+                self.advance(); // DOT_DOT
                 self.skip_trivia();
                 if self.at(IDENT) {
                     self.advance(); // IDENT name
@@ -2014,7 +2010,10 @@ impl<'a> Parser<'a> {
 
         // Parse comma-separated select items (including * and table.*)
         loop {
-            if self.at(STAR) {
+            if self.at(DOT_DOT_DOT) {
+                // List spread in SELECT list: `...metric_exprs`
+                self.parse_list_spread();
+            } else if self.at(STAR) {
                 // Handle SELECT * as a special select item
                 self.start_node(SELECT_ITEM);
                 self.advance();
@@ -2509,7 +2508,13 @@ impl<'a> Parser<'a> {
 
         // Parse comma-separated column list
         loop {
-            self.parse_expression();
+            self.skip_trivia();
+            // List spread in GROUP BY: `GROUP BY ...keys`
+            if self.at(DOT_DOT_DOT) {
+                self.parse_list_spread();
+            } else {
+                self.parse_expression();
+            }
 
             self.skip_trivia();
             if self.at(COMMA) {
@@ -2558,7 +2563,13 @@ impl<'a> Parser<'a> {
 
         // Comma-separated order items
         loop {
-            self.parse_order_by_item();
+            self.skip_trivia();
+            // List spread in ORDER BY: `ORDER BY ...sort_keys`
+            if self.at(DOT_DOT_DOT) {
+                self.parse_list_spread();
+            } else {
+                self.parse_order_by_item();
+            }
 
             self.skip_trivia();
             if self.at(COMMA) {
@@ -2787,7 +2798,12 @@ impl<'a> Parser<'a> {
                     break;
                 }
 
-                self.parse_expression();
+                // List spread in IN list: `x IN (...ids)`
+                if self.at(DOT_DOT_DOT) {
+                    self.parse_list_spread();
+                } else {
+                    self.parse_expression();
+                }
 
                 self.skip_trivia();
                 if self.at(COMMA) {
@@ -3100,6 +3116,12 @@ impl<'a> Parser<'a> {
                 self.start_node_at(checkpoint, EXPRESSION);
                 self.finish_node();
             }
+        } else if self.at(LBRACKET) {
+            // Bracket-only list literal: `[a, b, c]` — Phase 1 meta-language.
+            // The same surface token lifts to either a meta List<T> or a
+            // Data-World Array<U>; the type checker disambiguates (Phase 2/3).
+            // We reuse the ARRAY_LITERAL CST kind per the spec.
+            self.parse_bracket_list_literal();
         } else if self.current().is_literal() || self.at(STAR) {
             // Literal or STAR — wrap in EXPRESSION so Expr::cast() works
             self.start_node(EXPRESSION);
@@ -3190,7 +3212,12 @@ impl<'a> Parser<'a> {
                     if self.at(RPAREN) {
                         break;
                     }
-                    self.parse_expression();
+                    // List spread in VALUES row: `VALUES (...vals)`
+                    if self.at(DOT_DOT_DOT) {
+                        self.parse_list_spread();
+                    } else {
+                        self.parse_expression();
+                    }
                     self.skip_trivia();
                     if self.at(COMMA) {
                         self.advance();
@@ -3234,6 +3261,70 @@ impl<'a> Parser<'a> {
             self.expect(RBRACKET);
         }
         self.finish_node();
+    }
+
+    /// Parse a bracket-only list literal: `[a, b, c]` (Phase 1 meta-language).
+    ///
+    /// Reuses the `ARRAY_LITERAL` CST kind — the type checker distinguishes
+    /// meta `List<T>` from Data-World `Array<U>` in a later phase.
+    ///
+    /// Features:
+    /// - Trailing comma allowed: `[a, b, c,]`
+    /// - Singleton: `[x]`
+    /// - Empty: `[]`
+    /// - Nested: `[[1, 2], [3, 4]]`
+    /// - Spread elements: `[...xs, a]`
+    /// - Error recovery: unterminated `[a, b` does not crash the parser.
+    fn parse_bracket_list_literal(&mut self) {
+        self.start_node(ARRAY_LITERAL);
+        self.advance(); // consume `[`
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACKET) || self.at(EOF) {
+                break;
+            }
+            // Spread inside list literal: `...xs`
+            if self.at(DOT_DOT_DOT) {
+                self.parse_list_spread();
+            } else {
+                self.parse_expression();
+            }
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                // Allow trailing comma — stop if the next token closes the list.
+                if self.at(RBRACKET) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACKET) {
+            self.advance(); // consume `]`
+        } else {
+            self.error("Expected `]` to close list literal".to_string());
+        }
+
+        self.finish_node(); // ARRAY_LITERAL
+    }
+
+    /// Parse a list spread: `...expr`.
+    ///
+    /// Produces a `LIST_SPREAD` CST node wrapping the operand expression.
+    /// Valid in any comma-separated grammar position (SELECT list, GROUP BY,
+    /// ORDER BY, function args, IN-list, VALUES rows, list-literal elements).
+    /// Forbidden-position validation is the type-checker's job (Phase 3).
+    fn parse_list_spread(&mut self) {
+        self.start_node(LIST_SPREAD);
+        self.advance(); // consume `...` (DOT_DOT_DOT)
+        self.skip_trivia();
+        self.parse_expression();
+        self.finish_node(); // LIST_SPREAD
     }
 
     fn parse_row_constructor(&mut self) {
@@ -3562,6 +3653,12 @@ impl<'a> Parser<'a> {
 
     fn parse_argument(&mut self) {
         self.skip_trivia();
+
+        // List spread in function arguments: `...xs`
+        if self.at(DOT_DOT_DOT) {
+            self.parse_list_spread();
+            return;
+        }
 
         // Handle DISTINCT/ALL modifiers for aggregate functions: COUNT(DISTINCT col)
         if self.at(DISTINCT_KW) || self.at(ALL_KW) {
@@ -7932,6 +8029,293 @@ LIMIT 100
         assert!(
             !result.errors.is_empty(),
             "smelt.fn.foo(x) must produce parse errors after Phase 5b; got zero errors"
+        );
+    }
+
+    // ===== Phase 1 (meta-language): list literal [a, b, c] and spread ...xs =====
+
+    #[test]
+    fn parse_list_literal_homogeneous() {
+        // `[1, 2, 3]` parses to one ARRAY_LITERAL node with three child expressions
+        // and no parse errors.
+        let parse = parse("SELECT [1, 2, 3] FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let list_node = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == ARRAY_LITERAL)
+            .expect("must have ARRAY_LITERAL node");
+        let child_count = list_node
+            .children()
+            .filter(|n| n.kind() == EXPRESSION || n.kind() == BINARY_EXPR)
+            .count();
+        assert_eq!(
+            child_count, 3,
+            "expected 3 child expressions, got {}",
+            child_count
+        );
+    }
+
+    #[test]
+    fn parse_list_literal_trailing_comma() {
+        // `[1, 2, 3,]` parses identically — no separator-related diagnostics.
+        let parse = parse("SELECT [1, 2, 3,] FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "trailing comma in list literal should not produce errors: {:?}",
+            parse.errors
+        );
+        let list_node = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == ARRAY_LITERAL)
+            .expect("must have ARRAY_LITERAL node");
+        let child_count = list_node
+            .children()
+            .filter(|n| n.kind() == EXPRESSION || n.kind() == BINARY_EXPR)
+            .count();
+        assert_eq!(
+            child_count, 3,
+            "expected 3 child expressions, got {}",
+            child_count
+        );
+    }
+
+    #[test]
+    fn parse_list_literal_singleton() {
+        // `[x]` parses to one ARRAY_LITERAL node with one child.
+        let parse = parse("SELECT [x] FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let list_node = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == ARRAY_LITERAL)
+            .expect("must have ARRAY_LITERAL node for [x]");
+        let child_count = list_node
+            .children()
+            .filter(|n| n.kind() == EXPRESSION || n.kind() == BINARY_EXPR)
+            .count();
+        assert_eq!(
+            child_count, 1,
+            "expected 1 child expression, got {}",
+            child_count
+        );
+    }
+
+    #[test]
+    fn parse_list_literal_empty() {
+        // `[]` parses to one ARRAY_LITERAL node with zero children, no errors.
+        let parse = parse("SELECT [] FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "empty list literal should produce no errors: {:?}",
+            parse.errors
+        );
+        let list_node = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == ARRAY_LITERAL)
+            .expect("must have ARRAY_LITERAL node for []");
+        let child_count = list_node
+            .children()
+            .filter(|n| n.kind() == EXPRESSION || n.kind() == BINARY_EXPR)
+            .count();
+        assert_eq!(
+            child_count, 0,
+            "expected 0 child expressions, got {}",
+            child_count
+        );
+    }
+
+    #[test]
+    fn parse_list_literal_nested() {
+        // `[[1, 2], [3, 4]]` parses to a nested-list shape.
+        let parse = parse("SELECT [[1, 2], [3, 4]] FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors in nested list literal: {:?}",
+            parse.errors
+        );
+        // Count total ARRAY_LITERAL nodes: should be 3 (outer + 2 inner).
+        let all_array_literals: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == ARRAY_LITERAL)
+            .collect();
+        assert_eq!(
+            all_array_literals.len(),
+            3,
+            "expected 3 ARRAY_LITERAL nodes (1 outer + 2 inner), got {}",
+            all_array_literals.len()
+        );
+    }
+
+    #[test]
+    fn parse_spread_in_select_list() {
+        // `SELECT id, ...metric_exprs, created_at FROM users`
+        // produces a SELECT with a LIST_SPREAD child between two column references.
+        let parse = parse("SELECT id, ...metric_exprs, created_at FROM users");
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let spread = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LIST_SPREAD)
+            .expect("must have a LIST_SPREAD node in SELECT list");
+        // The LIST_SPREAD should contain an EXPRESSION (the identifier)
+        assert!(
+            spread.descendants().any(|n| n.kind() == EXPRESSION),
+            "LIST_SPREAD must contain an EXPRESSION child"
+        );
+    }
+
+    #[test]
+    fn parse_spread_in_function_args() {
+        // `coalesce(...numerics, 0)` produces a function call with one LIST_SPREAD
+        // argument and one literal argument.
+        let parse = parse("SELECT coalesce(...numerics, 0) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        assert!(
+            parse
+                .syntax()
+                .descendants()
+                .any(|n| n.kind() == LIST_SPREAD),
+            "must have a LIST_SPREAD node inside function args"
+        );
+    }
+
+    #[test]
+    fn parse_spread_of_list_literal() {
+        // `SELECT id, ...[a, b, c] FROM t` — LIST_SPREAD wrapping a list-literal node.
+        let parse = parse("SELECT id, ...[a, b, c] FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parse.errors
+        );
+        let spread = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LIST_SPREAD)
+            .expect("must have a LIST_SPREAD node");
+        assert!(
+            spread.descendants().any(|n| n.kind() == ARRAY_LITERAL),
+            "LIST_SPREAD must contain an ARRAY_LITERAL child when operand is [...] literal"
+        );
+    }
+
+    #[test]
+    fn parse_list_literal_error_recovery_unterminated() {
+        // `SELECT [a, b FROM t` — parser does not crash; produces a partial
+        // list-literal node and continues parsing.
+        let parse = parse("SELECT [a, b FROM t");
+        // Must not panic (the test itself proves that).
+        // Must produce a usable FILE node.
+        let _ =
+            File::cast(parse.syntax()).expect("parser must yield FILE even on unterminated list");
+        // We expect at least one error for the unterminated list.
+        assert!(
+            !parse.errors.is_empty(),
+            "unterminated list literal should produce at least one error"
+        );
+    }
+
+    #[test]
+    fn parse_spread_in_group_by() {
+        // `SELECT x FROM t GROUP BY ...keys` — LIST_SPREAD inside the GROUP BY
+        // clause; no parse errors.
+        let parse = parse("SELECT x FROM t GROUP BY ...keys");
+        assert!(
+            parse.errors.is_empty(),
+            "GROUP BY ...keys must parse without errors; got: {:?}",
+            parse.errors
+        );
+        let spread = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LIST_SPREAD)
+            .expect("must have a LIST_SPREAD node in GROUP BY clause");
+        assert!(
+            spread.descendants().any(|n| n.kind() == EXPRESSION),
+            "LIST_SPREAD must contain an EXPRESSION child"
+        );
+    }
+
+    #[test]
+    fn parse_spread_in_order_by() {
+        // `SELECT x FROM t ORDER BY ...sort_keys` — LIST_SPREAD inside the ORDER
+        // BY clause; no parse errors.
+        let parse = parse("SELECT x FROM t ORDER BY ...sort_keys");
+        assert!(
+            parse.errors.is_empty(),
+            "ORDER BY ...sort_keys must parse without errors; got: {:?}",
+            parse.errors
+        );
+        let spread = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LIST_SPREAD)
+            .expect("must have a LIST_SPREAD node in ORDER BY clause");
+        assert!(
+            spread.descendants().any(|n| n.kind() == EXPRESSION),
+            "LIST_SPREAD must contain an EXPRESSION child"
+        );
+    }
+
+    #[test]
+    fn parse_spread_in_in_list() {
+        // `SELECT x FROM t WHERE id IN (...ids)` — LIST_SPREAD inside the
+        // parenthesised IN value list; no parse errors.
+        let parse = parse("SELECT x FROM t WHERE id IN (...ids)");
+        assert!(
+            parse.errors.is_empty(),
+            "IN (...ids) must parse without errors; got: {:?}",
+            parse.errors
+        );
+        let spread = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LIST_SPREAD)
+            .expect("must have a LIST_SPREAD node inside IN list");
+        assert!(
+            spread.descendants().any(|n| n.kind() == EXPRESSION),
+            "LIST_SPREAD must contain an EXPRESSION child"
+        );
+    }
+
+    #[test]
+    fn parse_spread_in_values_row() {
+        // `SELECT * FROM (VALUES (...vals)) AS t(c)` — LIST_SPREAD inside a
+        // VALUES row; no parse errors.
+        let parse = parse("SELECT * FROM (VALUES (...vals)) AS t(c)");
+        assert!(
+            parse.errors.is_empty(),
+            "VALUES (...vals) must parse without errors; got: {:?}",
+            parse.errors
+        );
+        let spread = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LIST_SPREAD)
+            .expect("must have a LIST_SPREAD node inside VALUES row");
+        assert!(
+            spread.descendants().any(|n| n.kind() == EXPRESSION),
+            "LIST_SPREAD must contain an EXPRESSION child"
         );
     }
 }

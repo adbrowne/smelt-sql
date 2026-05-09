@@ -62,6 +62,19 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 COMMA
             }
+            '.' if self.peek_two_chars() == Some(('.', '.')) => {
+                // `...` — list-spread operator (meta-language)
+                self.advance();
+                self.advance();
+                self.advance();
+                DOT_DOT_DOT
+            }
+            '.' if self.peek_char() == Some('.') => {
+                // `..` — struct/row spread (two-dot)
+                self.advance();
+                self.advance();
+                DOT_DOT
+            }
             '.' => {
                 self.advance();
                 DOT
@@ -235,6 +248,16 @@ impl<'a> Lexer<'a> {
 
     fn peek_char(&self) -> Option<char> {
         self.input[self.pos..].chars().nth(1)
+    }
+
+    /// Peek at the two characters *after* the current one (chars 1 and 2
+    /// relative to `self.pos`, i.e. what follows `peek_char`).
+    fn peek_two_chars(&self) -> Option<(char, char)> {
+        let mut chars = self.input[self.pos..].chars();
+        let _current = chars.next()?;
+        let second = chars.next()?;
+        let third = chars.next()?;
+        Some((second, third))
     }
 
     fn advance(&mut self) {
@@ -452,6 +475,61 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== Phase 1 (meta-language): DOT_DOT_DOT token tests =====
+
+    #[test]
+    fn tokenize_triple_dot() {
+        // `...` must lex as a single DOT_DOT_DOT token (length 3).
+        let tokens = tokenize("...");
+        assert_eq!(
+            tokens.len(),
+            1,
+            "expected exactly one token, got: {:?}",
+            tokens
+        );
+        assert_eq!(tokens[0].kind, DOT_DOT_DOT);
+        assert_eq!(tokens[0].len, 3);
+    }
+
+    #[test]
+    fn triple_dot_disambiguates_from_double_dot() {
+        // `..foo` → DOT_DOT IDENT(foo)  (existing struct-spread, now a single DOT_DOT token)
+        let tokens_double = tokenize("..foo");
+        let non_ws: Vec<_> = tokens_double
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws[0].kind, DOT_DOT,
+            "..foo should start with DOT_DOT, got {:?}",
+            non_ws[0].kind
+        );
+        assert_eq!(non_ws[0].len, 2);
+        assert_eq!(
+            non_ws[1].kind, IDENT,
+            "..foo second token should be IDENT, got {:?}",
+            non_ws[1].kind
+        );
+
+        // `...foo` → DOT_DOT_DOT IDENT(foo)  (new list-spread)
+        let tokens_triple = tokenize("...foo");
+        let non_ws: Vec<_> = tokens_triple
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws[0].kind, DOT_DOT_DOT,
+            "...foo should start with DOT_DOT_DOT, got {:?}",
+            non_ws[0].kind
+        );
+        assert_eq!(non_ws[0].len, 3);
+        assert_eq!(
+            non_ws[1].kind, IDENT,
+            "...foo second token should be IDENT, got {:?}",
+            non_ws[1].kind
+        );
+    }
 
     #[test]
     fn test_not_equal_operators() {

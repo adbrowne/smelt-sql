@@ -3213,3 +3213,66 @@ impl SpreadItem {
             .map(|t| t.text().to_string())
     }
 }
+
+// ===== Phase 1 (meta-language): List literals and spread =====
+
+/// A bracket list literal `[a, b, c]` (Phase 1 meta-language).
+///
+/// The same CST kind (`ARRAY_LITERAL`) is shared with `ARRAY[...]` Data-World
+/// array literals. The type checker disambiguates between meta `List<T>` and
+/// Data-World `Array<U>` in a later phase.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ListLiteral(SyntaxNode);
+
+impl ListLiteral {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `ARRAY_LITERAL` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == ARRAY_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Iterate over element expressions in the list literal.
+    pub fn elements(&self) -> impl Iterator<Item = Expr> + '_ {
+        self.0.children().filter_map(Expr::cast)
+    }
+
+    /// Iterate over spread elements inside the list literal.
+    pub fn spread_elements(&self) -> impl Iterator<Item = ListSpread> + '_ {
+        self.0.children().filter_map(ListSpread::cast)
+    }
+}
+
+/// A list spread expression `...expr` (Phase 1 meta-language).
+///
+/// Valid in any comma-separated grammar position: SELECT lists, GROUP BY,
+/// ORDER BY, function arguments, IN-lists, VALUES rows, and list-literal
+/// elements. Forbidden-position validation is the type-checker's job (Phase 3).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ListSpread(SyntaxNode);
+
+impl ListSpread {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `LIST_SPREAD` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LIST_SPREAD {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The operand expression being spread (e.g. `metric_exprs` for `...metric_exprs`).
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}

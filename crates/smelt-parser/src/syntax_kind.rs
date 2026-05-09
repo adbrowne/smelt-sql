@@ -103,6 +103,8 @@ pub enum SyntaxKind {
     RPAREN,       // )
     COMMA,        // ,
     DOT,          // .
+    DOT_DOT,      // .. (struct/row spread)
+    DOT_DOT_DOT,  // ... (list spread)
     STAR,         // *
     EQ,           // =
     NE,           // !=
@@ -248,6 +250,9 @@ pub enum SyntaxKind {
     // Phase 38: smelt.as_struct() call
     SMELT_AS_STRUCT_CALL, // smelt.as_struct(alias [EXCEPT col1, col2, ...])
     EXCEPT_COL_LIST,      // EXCEPT col1, col2, ... inside SMELT_AS_STRUCT_CALL
+
+    // Phase 1 (meta-language): list spread operator `...xs` in comma-separated positions
+    LIST_SPREAD, // `...expr` — spread a List<T> into a comma-separated position
 
     // Phase 13: structured TypeRef children for TableExpr / AggExpr /
     // WindowExpr / SelectItems parameter sorts. These are emitted as
