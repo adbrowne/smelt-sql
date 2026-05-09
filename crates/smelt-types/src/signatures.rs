@@ -150,6 +150,17 @@ pub enum SmeltType {
     /// [`DataType`] or one of the abstract constraints in
     /// [`TypeConstraint`].
     Expr(TypeConstraint),
+    /// `List<T>` — a compile-time meta-list of elements typed `T` (Phase A,
+    /// meta-language). `T` is itself a [`SmeltType`] (enabling `List<List<T>>`
+    /// nesting). No `List<T>` value reaches the database engine.
+    List(Box<SmeltType>),
+    /// Compiler's "already told you about this" type for list elements (Phase A).
+    ///
+    /// `Unknown` is produced when a list literal's element types cannot be
+    /// unified (heterogeneous) or when an empty literal has no target context.
+    /// It does NOT silently become `Any` — downstream consumers see it as a
+    /// known-error marker per `gradual_typing.md` §"List<Unknown> widening".
+    Unknown,
     /// `TableExpr` / `TableExpr<{…}>` — a row-polymorphic table parameter.
     ///
     /// - `TableExpr(None)` — bare `TableExpr` (Phase 15, §16 #7). The
@@ -191,6 +202,50 @@ pub enum SmeltType {
         fields: Vec<(String, DataType)>,
         tail: StructRowTail,
     },
+}
+
+/// Subtype check for [`SmeltType`] (Phase A, meta-language).
+///
+/// Returns `true` iff `sub` is a subtype of `sup` under the following rules:
+///
+/// * Every type is a subtype of itself (reflexivity).
+/// * `Expr<S> <: Expr<T>` iff the `ExprKind` ordering holds per
+///   [`subkind_of`] — but we're checking data-type constraints here, so
+///   `Expr<S> <: Expr<T>` only when `S == T` (concrete equality) or `T` is
+///   an abstract constraint that `S` satisfies.
+/// * `List<S> <: List<T>` iff `S <: T` — lists are **covariant** because
+///   they are immutable compile-time values.
+/// * All other combinations return `false`.
+///
+/// Pure function — no Salsa dependency.
+pub fn is_subtype_of(sub: &SmeltType, sup: &SmeltType) -> bool {
+    match (sub, sup) {
+        // Reflexivity for identical variants.
+        (a, b) if a == b => true,
+        // List covariance: List<S> <: List<T> iff S <: T.
+        (SmeltType::List(s_inner), SmeltType::List(t_inner)) => is_subtype_of(s_inner, t_inner),
+        // Expr<S> <: Expr<T> — the inner constraint determines compatibility.
+        (SmeltType::Expr(s_tc), SmeltType::Expr(t_tc)) => {
+            match (s_tc, t_tc) {
+                // Concrete <: abstract constraint: the concrete type must
+                // satisfy the abstract constraint.
+                (TypeConstraint::Concrete(dt), TypeConstraint::Numeric) => {
+                    TypeConstraint::Numeric.satisfies(dt)
+                }
+                (TypeConstraint::Concrete(dt), TypeConstraint::Ordered) => {
+                    TypeConstraint::Ordered.satisfies(dt)
+                }
+                (TypeConstraint::Concrete(_), TypeConstraint::Any) => true,
+                (TypeConstraint::Numeric, TypeConstraint::Any) => true,
+                (TypeConstraint::Ordered, TypeConstraint::Any) => true,
+                (TypeConstraint::Numeric, TypeConstraint::Ordered) => true,
+                // Any other pair that isn't identical is not a subtype.
+                _ => false,
+            }
+        }
+        // All other cross-sort combinations are not subtypes.
+        _ => false,
+    }
 }
 
 /// Trailing row-polymorphism marker on a `Struct<{…}>` parameter type
@@ -561,18 +616,23 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
                 span_text: text.to_string(),
             });
         }
-        // Other nested sort in an Expr<...> — still malformed from Step 1's
-        // perspective. Surface the outer sort decision first.
-        if sort != "Expr" {
+        // `List<T>` allows a nested generic for T — fall through to sort dispatch
+        // so `List<Expr<Integer>>`, `List<List<Text>>`, etc. parse correctly.
+        if sort == "List" {
+            // Fall through to the sort dispatch match below.
+        } else if sort != "Expr" {
+            // Other nested sort in an Expr<...> — still malformed from Step 1's
+            // perspective. Surface the outer sort decision first.
             return Err(SmeltTypeParseError::UnsupportedSort {
                 sort: sort.to_string(),
                 span_text: text.to_string(),
             });
+        } else {
+            return Err(SmeltTypeParseError::UnknownInner {
+                inner: inner_raw.to_string(),
+                span_text: text.to_string(),
+            });
         }
-        return Err(SmeltTypeParseError::UnknownInner {
-            inner: inner_raw.to_string(),
-            span_text: text.to_string(),
-        });
     }
 
     // Sort dispatch.
@@ -591,6 +651,17 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
                 }
             })?;
             Ok(SmeltType::Expr(constraint))
+        }
+        "List" => {
+            // `List<T>` — recursive parse of the inner type.
+            // `inner_raw` already has the leading `<` / trailing `>` stripped
+            // (they were split off by the lt_idx / gt_idx logic above).
+            let inner_ty =
+                parse_smelt_type(inner_raw).map_err(|_| SmeltTypeParseError::UnknownInner {
+                    inner: inner_raw.to_string(),
+                    span_text: text.to_string(),
+                })?;
+            Ok(SmeltType::List(Box::new(inner_ty)))
         }
         "SelectItems" => {
             // `SelectItems<Kind>` or `SelectItems<Kind, ctx_name>` (Phase 21).
@@ -2935,6 +3006,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
 pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
     match ty {
         SmeltType::Expr(tc) => format!("Expr<{}>", format_type_constraint_hover(tc)),
+        SmeltType::List(inner) => format!("List<{}>", format_smelt_type_hover(inner)),
         SmeltType::TableExpr(None) => "TableExpr".to_string(),
         SmeltType::TableExpr(Some(req)) => {
             let mut s = String::from("TableExpr<{");
@@ -3007,6 +3079,7 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
             s.push('>');
             s
         }
+        SmeltType::Unknown => "Unknown".to_string(),
     }
 }
 
@@ -4153,5 +4226,78 @@ mod tests {
         let res = unify_call_with_expected(sig, std::slice::from_ref(&dt), None, &numeric_lub)
             .expect("unification ok");
         assert_eq!(res.return_type, dt);
+    }
+
+    // === Phase A (meta-language) TDD tests: SmeltType::List ===
+
+    /// `List<Expr<Integer>>` round-trips through `parse_smelt_type` and
+    /// `format_smelt_type_hover`.
+    #[test]
+    fn list_type_round_trip() {
+        let ty = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Integer,
+        ))));
+        // format_smelt_type_hover produces "List<Expr<Integer>>"
+        let rendered = format_smelt_type_hover(&ty);
+        assert_eq!(rendered, "List<Expr<INTEGER>>");
+        // parse_smelt_type parses it back.
+        let parsed = parse_smelt_type(&rendered).expect("List<Expr<Integer>> should parse");
+        assert_eq!(parsed, ty);
+    }
+
+    /// `List<List<Expr<Varchar>>>` round-trips.
+    ///
+    /// Note: `DataType::Text` renders as `"TEXT"` via `to_sql()` but `parse_type("TEXT")`
+    /// returns `Varchar { max_length: None }`, so we use `Varchar` directly for a clean
+    /// round-trip. The types.md annotation surface uses `Varchar` / `TEXT` interchangeably,
+    /// and `DataType::Text` normalises to `Varchar`.
+    #[test]
+    fn list_type_nested() {
+        let inner = SmeltType::Expr(TypeConstraint::Concrete(DataType::Varchar {
+            max_length: None,
+        }));
+        let middle = SmeltType::List(Box::new(inner));
+        let outer = SmeltType::List(Box::new(middle));
+        let rendered = format_smelt_type_hover(&outer);
+        assert_eq!(rendered, "List<List<Expr<VARCHAR>>>");
+        let parsed = parse_smelt_type(&rendered).expect("List<List<Expr<Varchar>>> should parse");
+        assert_eq!(parsed, outer);
+    }
+
+    /// Covariance: `List<Expr<Integer>> <: List<Expr<Numeric>>` (Integer satisfies Numeric).
+    /// Anti-covariance: `List<Expr<Numeric>> <: List<Expr<Integer>>` is false.
+    #[test]
+    fn list_subtype_covariant() {
+        let list_int = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Integer,
+        ))));
+        let list_numeric = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Numeric)));
+
+        // List<Expr<Integer>> <: List<Expr<Numeric>> — Integer satisfies Numeric.
+        assert!(
+            is_subtype_of(&list_int, &list_numeric),
+            "List<Expr<Integer>> must be a subtype of List<Expr<Numeric>>"
+        );
+        // List<Expr<Numeric>> is NOT <: List<Expr<Integer>>.
+        assert!(
+            !is_subtype_of(&list_numeric, &list_int),
+            "List<Expr<Numeric>> must NOT be a subtype of List<Expr<Integer>>"
+        );
+    }
+
+    /// Unrelated element sorts: `List<TableExpr>` is not a subtype of `List<Expr<Numeric>>`.
+    #[test]
+    fn list_subtype_invariant_when_element_unrelated() {
+        let list_table = SmeltType::List(Box::new(SmeltType::TableExpr(None)));
+        let list_numeric = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Numeric)));
+
+        assert!(
+            !is_subtype_of(&list_table, &list_numeric),
+            "List<TableExpr> must NOT be a subtype of List<Expr<Numeric>>"
+        );
+        assert!(
+            !is_subtype_of(&list_numeric, &list_table),
+            "List<Expr<Numeric>> must NOT be a subtype of List<TableExpr>"
+        );
     }
 }

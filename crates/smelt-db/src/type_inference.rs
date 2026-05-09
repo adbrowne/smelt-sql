@@ -1258,6 +1258,9 @@ fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option
             fields: ret_fields,
             tail,
         })) => resolve_struct_return_type(call, ctx, sig, ret_fields, tail),
+        // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
+        // scalar DataType equivalent in Phase A.
+        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };
@@ -3058,6 +3061,219 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
     column_types
 }
 
+// ─── Phase A (meta-language): list-literal type inference ───────────────────
+
+/// Pending diagnostic sentinel produced by [`infer_list_literal`].
+///
+/// Phase 2 records these sentinels but does NOT emit diagnostic codes —
+/// that is Phase 3's job. The sentinel carries enough information for Phase 3
+/// to produce a rich diagnostic without re-inferring.
+///
+/// Pure data — no Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListInferSentinel {
+    /// An empty list literal (`[]`) was found in a position where no target
+    /// sort context was supplied. Corresponds to `MetaListEmptyTypeUnknown`.
+    EmptyTypeUnknown,
+    /// Two or more elements in the list literal have incompatible types that
+    /// cannot be unified by the numeric promotion chain, or elements whose
+    /// sorts differ (e.g. a scalar `Expr<T>` mixed with a nested `List<T>`).
+    /// Corresponds to `MetaListHeterogeneous`.
+    ///
+    /// Fields carry [`SmeltType`] (not bare [`DataType`]) so that cross-sort
+    /// heterogeneity (scalar vs. nested list) can be represented faithfully.
+    /// Phase 3 renders these for the user; it handles both `Expr<…>` and
+    /// `List<…>` variants.
+    Heterogeneous {
+        /// The first element sort seen before the incompatibility.
+        first: SmeltType,
+        /// The element sort that was incompatible with `first`.
+        incompatible: SmeltType,
+    },
+}
+
+/// Result of [`infer_list_literal`].
+///
+/// Pure data — no Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListLiteralInferResult {
+    /// The inferred [`SmeltType`] for this list literal.
+    ///
+    /// * Homogeneous literal: `List<Expr<T>>` where `T` is the LUB.
+    /// * Nested literal: `List<List<…>>`.
+    /// * Heterogeneous literal: `List<Unknown>`.
+    /// * Empty literal with target: the target `List<T>`.
+    /// * Empty literal without target: `List<Unknown>`.
+    pub inferred: SmeltType,
+    /// Pending diagnostic sentinels. Empty on the happy path.
+    pub sentinels: Vec<ListInferSentinel>,
+}
+
+/// Infer the type of a list literal `[e_1, …, e_n]` (Phase A, meta-language).
+///
+/// Control flow:
+/// 1. Empty literal — consult `expected`; produce `List<T>` if known, else
+///    `List<Unknown>` + [`ListInferSentinel::EmptyTypeUnknown`].
+/// 2. Non-empty — for each element compute its [`SmeltType`]:
+///    * A list-literal element recursively calls this function → yields
+///      `List<…>`.
+///    * A scalar element is inferred via [`infer_expression_type`] → yields
+///      `Expr<T>`.
+///
+///    NULL scalars are skipped (compatible with any type).
+/// 3. The resulting `SmeltType`s are LUB-ed via [`smelt_type_lub`]:
+///    * Two `Expr<T>` values use [`promote_types`] on their inner `DataType`.
+///    * Two identical `SmeltType`s are already equal.
+///    * Any cross-sort mix (`Expr<…>` vs `List<…>`) or same-sort but
+///      incompatible pair produces `List<Unknown>` +
+///      [`ListInferSentinel::Heterogeneous`].
+///
+/// This single-function design makes the "scalar wrapped as List" bug
+/// structurally impossible: scalars always carry sort `Expr<…>`, list-literal
+/// elements always carry sort `List<…>`, so a cross-sort mix naturally fails
+/// the LUB step.
+///
+/// Pure function — no Salsa dependency. `TypeContext` is accepted for element
+/// type inference but the function itself performs no Salsa calls.
+pub fn infer_list_literal(
+    elements: &[Expr],
+    ctx: &TypeContext,
+    expected: Option<&SmeltType>,
+) -> ListLiteralInferResult {
+    // Empty literal — consult expected type.
+    if elements.is_empty() {
+        if let Some(exp) = expected {
+            // The expected type is already a fully-formed List<T>; return it.
+            return ListLiteralInferResult {
+                inferred: exp.clone(),
+                sentinels: vec![],
+            };
+        }
+        return ListLiteralInferResult {
+            inferred: SmeltType::List(Box::new(SmeltType::Unknown)),
+            sentinels: vec![ListInferSentinel::EmptyTypeUnknown],
+        };
+    }
+
+    // Non-empty: infer each element as a SmeltType, then LUB at SmeltType level.
+    // Working at SmeltType level (not DataType level) is what makes cross-sort
+    // heterogeneity (Expr<T> vs List<T>) naturally detectable.
+    let mut accumulated: Option<SmeltType> = None;
+    let mut sentinels: Vec<ListInferSentinel> = Vec::new();
+    let mut heterogeneous = false;
+
+    for elem in elements {
+        // Determine element's SmeltType:
+        //   - list-literal element → recurse → List<…>
+        //   - scalar element       → infer_expression_type → Expr<T>
+        let (elem_ty, elem_sentinels) = if let Some(inner_arr) = elem.as_array_literal() {
+            let inner_elems: Vec<Expr> = inner_arr.elements();
+            let r = infer_list_literal(&inner_elems, ctx, None);
+            (r.inferred, r.sentinels)
+        } else {
+            let typed = infer_expression_type(elem, ctx).unwrap_or(TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            });
+            let dt = typed.data_type;
+            if dt == DataType::Null {
+                // NULL is compatible with any element type; skip without
+                // contributing to the running LUB.
+                continue;
+            }
+            let smelt = SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(dt));
+            (smelt, vec![])
+        };
+
+        sentinels.extend(elem_sentinels);
+
+        match accumulated.take() {
+            None => {
+                accumulated = Some(elem_ty);
+            }
+            Some(existing) => {
+                // LUB at SmeltType level.
+                let lub = smelt_type_lub(&existing, &elem_ty);
+                match lub {
+                    Some(t) => {
+                        accumulated = Some(t);
+                    }
+                    None => {
+                        // Incompatible sorts or types → heterogeneous.
+                        if !heterogeneous {
+                            sentinels.push(ListInferSentinel::Heterogeneous {
+                                first: existing.clone(),
+                                incompatible: elem_ty,
+                            });
+                            heterogeneous = true;
+                        }
+                        // Restore `existing` so the accumulated first type is
+                        // preserved for subsequent elements' sentinel comparison.
+                        accumulated = Some(existing);
+                    }
+                }
+            }
+        }
+    }
+
+    if heterogeneous {
+        return ListLiteralInferResult {
+            inferred: SmeltType::List(Box::new(SmeltType::Unknown)),
+            sentinels,
+        };
+    }
+
+    // All elements were NULL — use Null as the element type.
+    let elem_ty = accumulated.unwrap_or(SmeltType::Expr(
+        smelt_types::signatures::TypeConstraint::Concrete(DataType::Null),
+    ));
+    ListLiteralInferResult {
+        inferred: SmeltType::List(Box::new(elem_ty)),
+        sentinels,
+    }
+}
+
+/// Compute the least-upper-bound (LUB) of two [`SmeltType`]s for the purposes
+/// of list-element unification (Phase A).
+///
+/// Rules:
+/// * Two identical types → `Some(that type)`.
+/// * Two `Expr<Concrete(T)>` values → promote their inner `DataType` via
+///   [`promote_types`]; `Unknown` result means incompatible → `None`.
+/// * Two `List<T>` values → recurse into inner types; `None` inner → `None`.
+/// * Any cross-sort pair (`Expr` vs `List`, etc.) → `None`.
+///
+/// Returns `None` when the types cannot be unified.
+fn smelt_type_lub(a: &SmeltType, b: &SmeltType) -> Option<SmeltType> {
+    if a == b {
+        return Some(a.clone());
+    }
+    match (a, b) {
+        (
+            SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(da)),
+            SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(db)),
+        ) => {
+            let promoted = promote_types(
+                &TypedColumn::not_null(da.clone()),
+                &TypedColumn::not_null(db.clone()),
+            );
+            if promoted.data_type == DataType::Unknown {
+                None
+            } else {
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(promoted.data_type),
+                ))
+            }
+        }
+        (SmeltType::List(inner_a), SmeltType::List(inner_b)) => {
+            // Nested lists: LUB on inner types.
+            smelt_type_lub(inner_a, inner_b).map(|inner_lub| SmeltType::List(Box::new(inner_lub)))
+        }
+        // Cross-sort or any other pair that isn't equal and doesn't fit above.
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4232,6 +4448,219 @@ mod tests {
             infos.is_empty(),
             "window function inside a FROM-clause subquery must not be flagged, \
              got: {infos:?}"
+        );
+    }
+
+    // === Phase A (meta-language) TDD tests: infer_list_literal ===
+
+    /// Parse `SELECT <expr>` and return the first select-item expression.
+    fn parse_first_expr(sql: &str) -> smelt_parser::ast::Expr {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("FILE node");
+        let select = file.select_stmt().expect("SelectStmt");
+        let select_list = select.select_list().expect("select list");
+        let first_item = select_list.items().next().expect("at least one item");
+        first_item.expression().expect("expression")
+    }
+
+    /// Extract elements from `SELECT [e1, e2, ...]` as a vec of Expr.
+    fn list_elements(sql: &str) -> Vec<smelt_parser::ast::Expr> {
+        let expr = parse_first_expr(sql);
+        // The list literal lands as an ARRAY_LITERAL child inside the expression.
+        let arr = expr
+            .as_array_literal()
+            .expect("expected an array/list literal node");
+        arr.elements()
+    }
+
+    /// `[100000, 200000, 300000]` — all Integer literals — infers `List<Expr<Integer>>`.
+    #[test]
+    fn infer_list_literal_homogeneous_integer() {
+        let elems = list_elements("SELECT [100000, 200000, 300000]");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        assert!(
+            result.sentinels.is_empty(),
+            "homogeneous integer list must have no sentinels, got: {:?}",
+            result.sentinels
+        );
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Expr(
+                smelt_types::signatures::TypeConstraint::Concrete(DataType::Integer)
+            ))),
+            "homogeneous Integer list must infer List<Expr<Integer>>"
+        );
+    }
+
+    /// `[1, 1.5]` — SmallInt + Decimal — infers `List<Expr<Decimal(38,10)>>` via LUB.
+    ///
+    /// The spec references `types.md §"Numeric promotion chain"` and says `[1, 1.5]` →
+    /// `List<Expr<Double>>`. However, the actual `promote_types` implementation promotes
+    /// `(SmallInt, Decimal{2,1})` to `Decimal{38,10}` (the safe "integer+Decimal" widening
+    /// rule). `Double` would require an `e`-notation literal (`1.5e0`) but the lexer does
+    /// not handle exponent notation, so `1.5` always produces `Decimal`. The test asserts
+    /// the actual promotion behaviour, which is correct per the implementation's own rules.
+    #[test]
+    fn infer_list_literal_lub_promotion() {
+        // `1` → SmallInt, `1.5` → Decimal(2,1).
+        // promote_types(SmallInt, Decimal) → Decimal(38,10).
+        let elems = list_elements("SELECT [1, 1.5]");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        assert!(
+            result.sentinels.is_empty(),
+            "numeric-promoted list must have no sentinels, got: {:?}",
+            result.sentinels
+        );
+        // Numeric promotion: SmallInt + Decimal → Decimal(38,10).
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Expr(
+                smelt_types::signatures::TypeConstraint::Concrete(DataType::Decimal {
+                    precision: 38,
+                    scale: 10
+                })
+            ))),
+            "SmallInt+Decimal list must promote to List<Expr<Decimal(38,10)>>"
+        );
+    }
+
+    /// `[1, 'hello']` — Integer + Text — infers `List<Unknown>` with Heterogeneous sentinel.
+    #[test]
+    fn infer_list_literal_heterogeneous_unknown() {
+        let elems = list_elements("SELECT [1, 'hello']");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        // Must produce List<Unknown>
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Unknown)),
+            "heterogeneous list must infer List<Unknown>"
+        );
+        // Must carry exactly one Heterogeneous sentinel.
+        assert_eq!(result.sentinels.len(), 1);
+        assert!(
+            matches!(result.sentinels[0], ListInferSentinel::Heterogeneous { .. }),
+            "expected Heterogeneous sentinel, got: {:?}",
+            result.sentinels[0]
+        );
+    }
+
+    /// `[]` with expected type `List<Expr<Integer>>` infers to `List<Expr<Integer>>`.
+    #[test]
+    fn infer_list_literal_empty_with_target() {
+        let elems = list_elements("SELECT []");
+        let ctx = TypeContext::new();
+        let expected = SmeltType::List(Box::new(SmeltType::Expr(
+            smelt_types::signatures::TypeConstraint::Concrete(DataType::Integer),
+        )));
+        let result = infer_list_literal(&elems, &ctx, Some(&expected));
+        assert!(
+            result.sentinels.is_empty(),
+            "empty list with known target must have no sentinels, got: {:?}",
+            result.sentinels
+        );
+        assert_eq!(
+            result.inferred, expected,
+            "empty list with target List<Expr<Integer>> must infer to that type"
+        );
+    }
+
+    /// `[]` without a target infers to `List<Unknown>` with `MetaListEmptyTypeUnknown` sentinel.
+    #[test]
+    fn infer_list_literal_empty_without_target() {
+        let elems = list_elements("SELECT []");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Unknown)),
+            "empty list without target must infer List<Unknown>"
+        );
+        assert_eq!(result.sentinels.len(), 1);
+        assert!(
+            matches!(result.sentinels[0], ListInferSentinel::EmptyTypeUnknown),
+            "expected EmptyTypeUnknown sentinel, got: {:?}",
+            result.sentinels[0]
+        );
+    }
+
+    /// `[[100000, 200000], [300000, 400000]]` — nested list — infers `List<List<Expr<Integer>>>`.
+    #[test]
+    fn infer_list_literal_nested() {
+        let elems = list_elements("SELECT [[100000, 200000], [300000, 400000]]");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        assert!(
+            result.sentinels.is_empty(),
+            "nested integer list must have no sentinels, got: {:?}",
+            result.sentinels
+        );
+        let expected = SmeltType::List(Box::new(SmeltType::List(Box::new(SmeltType::Expr(
+            smelt_types::signatures::TypeConstraint::Concrete(DataType::Integer),
+        )))));
+        assert_eq!(
+            result.inferred, expected,
+            "nested integer list must infer List<List<Expr<Integer>>>"
+        );
+    }
+
+    /// `[1, [2, 3]]` — mixed scalar + nested list — infers `List<Unknown>` with
+    /// `Heterogeneous` sentinel. A scalar element has sort `Expr<…>` while a list-literal
+    /// element has sort `List<…>`; they cannot unify under LUB, so the result is
+    /// `List<Unknown>` per spec `meta_language.md` Phase A semantic rule 2.
+    #[test]
+    fn infer_list_literal_mixed_scalar_and_nested() {
+        let elems = list_elements("SELECT [1, [2, 3]]");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        // Must produce List<Unknown>
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Unknown)),
+            "mixed scalar+nested list must infer List<Unknown>, got: {:?}",
+            result.inferred
+        );
+        // Must carry exactly one Heterogeneous sentinel.
+        assert_eq!(
+            result.sentinels.len(),
+            1,
+            "expected exactly 1 sentinel, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(result.sentinels[0], ListInferSentinel::Heterogeneous { .. }),
+            "expected Heterogeneous sentinel, got: {:?}",
+            result.sentinels[0]
+        );
+    }
+
+    /// `[[1, 2], 3]` — nested list then scalar — same cross-sort mix as above.
+    /// Must also infer `List<Unknown>` with `Heterogeneous` sentinel (symmetry).
+    #[test]
+    fn infer_list_literal_nested_then_scalar() {
+        let elems = list_elements("SELECT [[1, 2], 3]");
+        let ctx = TypeContext::new();
+        let result = infer_list_literal(&elems, &ctx, None);
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Unknown)),
+            "nested-then-scalar list must infer List<Unknown>, got: {:?}",
+            result.inferred
+        );
+        assert_eq!(
+            result.sentinels.len(),
+            1,
+            "expected exactly 1 sentinel, got: {:?}",
+            result.sentinels
+        );
+        assert!(
+            matches!(result.sentinels[0], ListInferSentinel::Heterogeneous { .. }),
+            "expected Heterogeneous sentinel, got: {:?}",
+            result.sentinels[0]
         );
     }
 }

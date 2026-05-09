@@ -78,7 +78,7 @@ The meta-language Phase A spec increment landed in this session's earlier commit
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 3d965fb | 2026-05-09 |
-| 2     | pending  |        |      |
+| 2     | done     | (pending commit) | 2026-05-09 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -459,6 +459,10 @@ This phase has no Rust unit tests. The acceptance gate is content review (the re
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 2 plan-text LUB example divergence.** The Phase 2 TDD test list says `[1, 1.5]` infers to `List<Expr<Double>>` per `types.md` §"Numeric promotion chain". The actual implementation produces `List<Expr<Decimal(38,10)>>` because `1.5` lexes as `Decimal(2,1)` and the existing `promote_types(SmallInt, Decimal)` returns `Decimal(38,10)` per the implementation's documented Float/Decimal ordering divergence (see `types.md` Known Divergences — accepted with a follow-up plan). Phase 2's test asserts the actual implementation behaviour; the normative `Decimal < Double` chain is fixed in a separate plan.
+- **Phase 2 `is_subtype_of` not used in nested LUB.** `smelt_type_lub` uses structural `==` then `promote_types` for same-sort comparison. Phase B (HOFs) will need nested LUB to use `is_subtype_of` so that covariant widening (e.g. `[map_returning_Integer, map_returning_BigInt]`) works through `List<Expr<Numeric>>`. Flagged for the Phase B reviewer.
+- **Phase 2 expert review deferred to Phase 7.** Round 1 reviewer subagent flagged a correctness bug in `infer_list_literal_nested` (mixed scalar+nested `[1, [2, 3]]` wrongly succeeded as `List<List<Expr<SmallInt>>>` instead of `List<Unknown>` + `Heterogeneous`). Round 2 fix eliminated the helper, made `infer_list_literal` recursive via `smelt_type_lub`, and added two new tests (`infer_list_literal_mixed_scalar_and_nested`, `infer_list_literal_nested_then_scalar`). Reviewer approved round 2. Phase 7 (expert review loop) will re-validate against type-expert.
 
 ## Verification
 

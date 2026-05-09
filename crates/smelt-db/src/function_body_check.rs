@@ -241,6 +241,9 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         Some(Ok(SmeltType::SelectItems { .. })) => DataType::Unknown,
         // `Struct<{…}>` (Phase 35) params — runtime type unknown until Phase 36.
         Some(Ok(SmeltType::Struct { .. })) => DataType::Unknown,
+        // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
+        // runtime DataType equivalent in Phase A.
+        Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
