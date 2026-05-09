@@ -928,6 +928,94 @@ pub fn passing_body_aggregate_labels() -> Vec<&'static str> {
     vec!["COUNT", "SUM", "AVG", "MIN", "MAX"]
 }
 
+// ── Phase 4: LSP hover helpers for list literals and spread ─────────────────
+//
+// Pure functions over AST + TypeContext. No Salsa calls inside the helper
+// bodies — they delegate to `smelt_db::type_inference::infer_list_literal`
+// and `smelt_db::type_inference::disambiguate_list_literal`, which are
+// themselves pure.
+
+/// Render hover text for a list literal at a position where only the meta-list
+/// interpretation is relevant (either explicitly expected or unconstrained).
+///
+/// Calls `infer_list_literal` and formats the inferred `SmeltType` via
+/// `format_smelt_type_hover`. Safe on partially-parsed literals — falls back
+/// to `List<Unknown>` rather than panicking.
+pub fn hover_text_for_list_literal(
+    elements: &[smelt_parser::ast::Expr],
+    ctx: &smelt_db::TypeContext,
+    expected: Option<&smelt_types::signatures::SmeltType>,
+) -> String {
+    use smelt_db::type_inference::infer_list_literal;
+    let result = infer_list_literal(elements, ctx, expected);
+    format_smelt_type_hover(&result.inferred)
+}
+
+/// Render hover text for a list literal at a position that admits **both**
+/// the meta-list and the Data-World array interpretations.
+///
+/// This occurs when no expected sort is present and the element type is a
+/// concrete `Expr<T>`. Both readings are surfaced in the returned string per
+/// the spec note "literal accepted in two contexts". Meta wins as the primary
+/// reading; the Data-World reading is shown parenthetically.
+///
+/// Falls back to the single meta-reading when the element type is not a
+/// concrete `Expr<Concrete(T)>` (e.g. heterogeneous → `List<Unknown>`).
+pub fn hover_text_for_list_literal_dual(
+    elements: &[smelt_parser::ast::Expr],
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_list_literal;
+    use smelt_types::signatures::{SmeltType, TypeConstraint};
+
+    let result = infer_list_literal(elements, ctx, None);
+    let meta_text = format_smelt_type_hover(&result.inferred);
+
+    // Attempt to surface the Data-World array reading.
+    // Only emit the dual reading when the inferred type is List<Expr<Concrete(T)>>.
+    if let SmeltType::List(inner) = &result.inferred {
+        if let SmeltType::Expr(TypeConstraint::Concrete(dt)) = inner.as_ref() {
+            let array_text = format!("Array<{dt}>");
+            return format!("{meta_text} (or `{array_text}` in array context)");
+        }
+    }
+
+    // Single reading — meta only (e.g. heterogeneous or nested list).
+    meta_text
+}
+
+/// Render hover text for a `...expr` spread expression.
+///
+/// Reads the operand's type. In Phase A, named-variable bindings are not
+/// available, so the only operand shape we can fully resolve is a list
+/// literal. For non-literal operands the fallback is `List<Unknown>`.
+///
+/// Safe on partially-parsed spread nodes — returns `List<Unknown>` rather
+/// than panicking.
+pub fn hover_text_for_list_spread(
+    spread: &smelt_parser::ast::ListSpread,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_list_literal;
+    use smelt_types::signatures::SmeltType;
+
+    let fallback = format_smelt_type_hover(&SmeltType::List(Box::new(SmeltType::Unknown)));
+
+    let Some(operand) = spread.operand() else {
+        return fallback;
+    };
+
+    // If the operand is an array/list literal, infer its type directly.
+    if let Some(arr) = operand.as_array_literal() {
+        let elems: Vec<smelt_parser::ast::Expr> = arr.elements();
+        let result = infer_list_literal(&elems, ctx, None);
+        return format_smelt_type_hover(&result.inferred);
+    }
+
+    // Non-literal operand — Phase A cannot resolve named-variable types.
+    fallback
+}
+
 pub struct Backend {
     client: Client,
     /// The salsa database. `Database: Clone` with internally-Arc'd storage, so
@@ -3782,6 +3870,67 @@ impl LanguageServer for Backend {
                     }
                 }
 
+                // Phase 4 (meta-language): hover on ARRAY_LITERAL — show the
+                // inferred List<T> type (or dual meta + data-world reading).
+                {
+                    use smelt_parser::syntax_kind::SyntaxKind;
+
+                    // Walk descendants to find an ARRAY_LITERAL node that
+                    // contains the cursor offset.
+                    let array_node = file
+                        .syntax()
+                        .descendants()
+                        .filter(|n| n.kind() == SyntaxKind::ARRAY_LITERAL)
+                        .find(|n| {
+                            let start: usize = n.text_range().start().into();
+                            let end: usize = n.text_range().end().into();
+                            cursor_offset >= start && cursor_offset <= end
+                        });
+
+                    if let Some(arr_node) = array_node {
+                        if let Some(arr) = smelt_parser::ast::ArrayLiteral::cast(arr_node) {
+                            let elems: Vec<smelt_parser::ast::Expr> = arr.elements();
+                            let ctx = smelt_db::TypeContext::new();
+
+                            let value = hover_text_for_list_literal_dual(&elems, &ctx);
+
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value,
+                                }),
+                                range: None,
+                            }));
+                        }
+                    }
+
+                    // Phase 4 (meta-language): hover on LIST_SPREAD — show
+                    // the source list's type.
+                    let spread_node = file
+                        .syntax()
+                        .descendants()
+                        .filter(|n| n.kind() == SyntaxKind::LIST_SPREAD)
+                        .find(|n| {
+                            let start: usize = n.text_range().start().into();
+                            let end: usize = n.text_range().end().into();
+                            cursor_offset >= start && cursor_offset <= end
+                        });
+
+                    if let Some(sp_node) = spread_node {
+                        if let Some(spread) = smelt_parser::ast::ListSpread::cast(sp_node) {
+                            let ctx = smelt_db::TypeContext::new();
+                            let value = hover_text_for_list_spread(&spread, &ctx);
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value,
+                                }),
+                                range: None,
+                            }));
+                        }
+                    }
+                }
+
                 // Phase 48: hover on a `smelt.fn.<name>(...)` call site —
                 // surface the declared return type or the parameter binding
                 // for a `PASSING <name> AS (...)` clause.
@@ -4940,5 +5089,135 @@ mod tests {
         let (message, related) = render_expansion_frames(&diag);
         assert_eq!(message, "undefined model `foo`");
         assert!(related.is_none());
+    }
+
+    // ── Phase 4: LSP hover for list literal and spread ──────────────────────
+
+    /// Helper: parse `SELECT <expr>` and extract the first select-item expression,
+    /// then cast it to an ArrayLiteral and return its elements.
+    fn list_literal_elements(sql: &str) -> Vec<smelt_parser::ast::Expr> {
+        use smelt_parser::ast::File as AstFile;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = AstFile::cast(root).expect("FILE node");
+        let select = file.select_stmt().expect("SelectStmt");
+        let select_list = select.select_list().expect("select list");
+        let first_item = select_list.items().next().expect("at least one item");
+        let expr = first_item.expression().expect("expression");
+        let arr = expr
+            .as_array_literal()
+            .expect("expected ARRAY_LITERAL node");
+        arr.elements()
+    }
+
+    /// Helper: parse SQL and find the first `LIST_SPREAD` node anywhere in the
+    /// CST (spread items may not appear as `SelectItem` children depending on
+    /// the grammar position; descendant search is the robust approach).
+    fn parse_list_spread(sql: &str) -> smelt_parser::ast::ListSpread {
+        use smelt_parser::syntax_kind::SyntaxKind;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        root.descendants()
+            .find(|n| n.kind() == SyntaxKind::LIST_SPREAD)
+            .and_then(smelt_parser::ast::ListSpread::cast)
+            .expect("expected LIST_SPREAD node in SQL")
+    }
+
+    /// Hover on `[1, 2, 3]` — all Integer — must return text containing
+    /// `List<Expr<INTEGER>>`.
+    ///
+    /// Note: `format_smelt_type_hover` renders DataType names in SQL uppercase
+    /// (e.g. `INTEGER`, `TEXT`) via `DataType::to_sql()`.
+    #[test]
+    fn hover_list_literal_homogeneous() {
+        let elems = list_literal_elements("SELECT [100000, 200000, 300000]");
+        let ctx = smelt_db::TypeContext::new();
+        let text = hover_text_for_list_literal(&elems, &ctx, None);
+        assert!(
+            text.contains("List<Expr<INTEGER>>"),
+            "hover text for homogeneous integer list must contain `List<Expr<INTEGER>>`, got: {text}"
+        );
+    }
+
+    /// Hover on `[]` at a position expecting `List<Expr<TEXT>>` must return
+    /// `List<Expr<TEXT>>`.
+    ///
+    /// Note: DataType names render in SQL uppercase via `DataType::to_sql()`.
+    #[test]
+    fn hover_list_literal_empty_with_target() {
+        use smelt_types::signatures::{SmeltType, TypeConstraint};
+        use smelt_types::DataType;
+        let elems = list_literal_elements("SELECT []");
+        let ctx = smelt_db::TypeContext::new();
+        let expected = SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+            DataType::Text,
+        ))));
+        let text = hover_text_for_list_literal(&elems, &ctx, Some(&expected));
+        assert!(
+            text.contains("List<Expr<TEXT>>"),
+            "hover text for empty list with TEXT target must contain `List<Expr<TEXT>>`, got: {text}"
+        );
+    }
+
+    /// Hover on `[1, 'hello']` — mixed Integer/Text — must return
+    /// `List<Unknown>` (heterogeneous).
+    #[test]
+    fn hover_list_literal_unknown() {
+        let elems = list_literal_elements("SELECT [1, 'hello']");
+        let ctx = smelt_db::TypeContext::new();
+        let text = hover_text_for_list_literal(&elems, &ctx, None);
+        assert!(
+            text.contains("List<Unknown>"),
+            "hover text for heterogeneous list must contain `List<Unknown>`, got: {text}"
+        );
+    }
+
+    /// Hover on `[1, 2, 3]` at a position admitting both meta-list and
+    /// Data-World array: hover text must surface both readings.
+    ///
+    /// The spec note says "literal accepted in two contexts". When no expected
+    /// sort is present and the element type is a concrete `Expr<T>`, both
+    /// interpretations are valid. The hover must mention both
+    /// `List<Expr<INTEGER>>` (meta) and `Array<INTEGER>` (data-world).
+    ///
+    /// Note: DataType names render in SQL uppercase via `DataType::to_sql()`.
+    #[test]
+    fn hover_list_literal_dual_admissible() {
+        let elems = list_literal_elements("SELECT [100000, 200000, 300000]");
+        let ctx = smelt_db::TypeContext::new();
+        let text = hover_text_for_list_literal_dual(&elems, &ctx);
+        assert!(
+            text.contains("List<Expr<INTEGER>>"),
+            "dual-admissible hover must mention meta reading `List<Expr<INTEGER>>`, got: {text}"
+        );
+        assert!(
+            text.contains("Array<INTEGER>"),
+            "dual-admissible hover must mention data-world reading `Array<INTEGER>`, got: {text}"
+        );
+    }
+
+    /// Hover on `...[1.5, 2.5]` — spread of a numeric list literal.
+    ///
+    /// Note: Phase A cannot bind named variables; the operand is a list literal
+    /// whose inferred type is `List<Expr<Numeric>>` (Decimal via LUB of 1.5 and 2.5).
+    /// The hover must contain the source list type string.
+    #[test]
+    fn hover_spread_returns_source_list_type() {
+        // `...[1.5, 2.5]` — LIST_SPREAD wrapping an ARRAY_LITERAL.
+        // The operand is a list literal; the spread operand's inferred type is
+        // the element type computed from [1.5, 2.5] (Decimal via LUB).
+        let spread = parse_list_spread("SELECT ...[1.5, 2.5]");
+        let ctx = smelt_db::TypeContext::new();
+        let text = hover_text_for_list_spread(&spread, &ctx);
+        // The hover must mention List< something >.
+        assert!(
+            text.contains("List<"),
+            "hover for spread must contain `List<...>`, got: {text}"
+        );
+        // It must NOT be List<Unknown> for a valid homogeneous list.
+        assert!(
+            !text.contains("List<Unknown>"),
+            "hover for spread over homogeneous list must not be List<Unknown>, got: {text}"
+        );
     }
 }

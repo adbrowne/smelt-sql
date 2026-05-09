@@ -80,7 +80,7 @@ The meta-language Phase A spec increment landed in this session's earlier commit
 | 1     | done     | 3d965fb | 2026-05-09 |
 | 2     | done     | 27c5c5d | 2026-05-09 |
 | 3     | done     | 11ca29e | 2026-05-09 |
-| 4     | pending  |        |      |
+| 4     | done     | (pending commit) | 2026-05-10 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
@@ -468,8 +468,8 @@ This phase has no Rust unit tests. The acceptance gate is content review (the re
 - **Phase 3 WHERE-detection orphan-token false-positive.** `check_forbidden_position_spreads` walks parent siblings of `SELECT_STMT` for orphan `DOT_DOT_DOT` tokens when the SELECT has a WHERE clause. A subsequent `smelt.define` body that uses `...xs` validly would be mis-attributed as a spurious `MetaSpreadInForbiddenPosition`. The scan needs a `stop_at_next_model_or_define_statement` guard. Reviewer flagged this in Phase 3 round 1; fix deferred to Phase B.
 - **Phase 3 bidirectional Data-World array routing not wired end-to-end.** `disambiguate_list_literal` returns `ListDisambiguation::DataWorldArray` correctly, but the SELECT-list orchestrator does not yet route to `infer_array_literal_type` on that branch. The Phase A pure-function tests cover the enum value; production-path coverage for the runtime-array reading lands when Phase E2 ships the `Array<U>(…)` constructor and a runtime-array-typed splice point exists.
 - **Phase 3 OriginTag/SynthesizedReason placement.** Currently in `crates/smelt-db/src/type_inference.rs`. `expansion.md` mandates `Synthesized(fn_id, reason)` for codegen-time provenance, but no Rust type for that exists today (only `FrameInfo`/`ExpansionFrames` for type-check-time function expansion). Phase B (HOFs add codegen-level synthesis) or Phase E2 should unify `OriginTag` with the canonical expansion-level provenance type and migrate it to `smelt-types`.
-
-## Verification
+- **Phase 4 hover concrete-type casing follows `DataType::to_sql()`.** `format_smelt_type_hover` renders concrete data types via `DataType::to_sql()` (uppercase, e.g. `INTEGER`, `TEXT`), so hover text reads `List<Expr<INTEGER>>` rather than the spec's prose `List<Expr<Integer>>`. Tests assert the actual implementation output. This is a pre-existing trait choice that the Phase 4 work neither created nor changed; if a Pascal-cased hover format is desired it is a separate cross-cutting change to `format_smelt_type_hover`. Flagged for Phase 7 (lsp-expert / type-expert) to confirm or schedule a follow-up.
+- **Phase 4 hover always treats list literals as dual-admissible at concrete-scalar element types.** The `Backend::hover` dispatch constructs an empty `TypeContext::new()` with `expected = None`, so the dual-reading helper triggers whenever the inferred element type is a concrete `Expr<T>`. A position-aware hover that consulted the splice context (e.g. inside an `Expr<Array<U>>`-typed argument it would surface only the runtime-array reading) is deferred to Phase B+ once parameter binding lands and call-site expected sorts are available to LSP. Phase A's hover correctness criterion ("`List<T>` shown for list literals; source list type for spreads") is met.
 
 How to confirm the spec is satisfied at the end:
 
