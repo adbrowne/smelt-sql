@@ -81,7 +81,7 @@ The meta-language Phase A spec increment landed in this session's earlier commit
 | 2     | done     | 27c5c5d | 2026-05-09 |
 | 3     | done     | 11ca29e | 2026-05-09 |
 | 4     | done     | e69a858 | 2026-05-10 |
-| 5     | done     | (pending commit) | 2026-05-10 |
+| 5     | done     | 21c9a73 | 2026-05-10 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 
