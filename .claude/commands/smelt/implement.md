@@ -31,7 +31,7 @@ For each `pending` phase:
 
 #### 3a. Implementer subagent (red-green TDD)
 
-Spawn a fresh `general-purpose` subagent with a self-contained brief. The brief must include:
+Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise — this command's own `model: opus` is for orchestration, not delegation). The brief must include:
 
 - The phase's section verbatim (Goal, Pre-conditions, TDD tests, Implementation shape, Critical files, Docs touched, Commit message).
 - The spec sections the phase implements (paste them, don't link only — the subagent has no other context).
@@ -47,7 +47,7 @@ Wait for the subagent to report. The expected report is: tests written, tests no
 
 #### 3b. Reviewer subagent (material findings only)
 
-Spawn a fresh `general-purpose` subagent as reviewer. Its brief:
+Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise) as reviewer. Its brief:
 
 - The phase's Review checklist verbatim.
 - The spec sections the phase implements (paste them).
