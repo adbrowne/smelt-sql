@@ -1,7 +1,7 @@
 ---
 feature: types
 status: experimental
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-09
 owners: [andrew]
 ---
 
@@ -54,8 +54,11 @@ Parameter and return positions accept fragment sorts:
 | Table | `TableExpr` or `TableExpr<{col: T, …}>` | `TableExpr<{user_id: Text, ts: Timestamp}>` |
 | Select list | `SelectItems<Kind[, ctx]>` | `SelectItems<Agg, base>` |
 | Open struct value | `Expr<Struct<{f: T, …}>>` | `Expr<Struct<{ts: Timestamp, ..r}>>` |
+| Meta list (Phase A) | `List<T>` | `List<Expr<Numeric>>`, `List<TableExpr>`, `List<List<Text>>` |
 
 `T` is one of: a concrete `DataType`, a `TypeConstraint` (`Numeric`, `Ordered`, `Any`), or — in built-ins / `smelt.extern` only — a generic parameter (`<T: Constraint>`). Row-tail markers on `TableExpr<{…}>` and `Struct<{…}>`: omitted (closed), `..` (anonymous tail accepted), `..r` (named tail bound).
+
+`List<T>` is a meta-only sort: it never appears as a `DataType` in a runtime column, and `Array<U>` is its Data-World counterpart. The element type `T` may be any other fragment sort (including a nested `List<U>`) or a meta-only type introduced by a later phase (`ColumnRef`, `ModelRef`, record types). `List<T>` is **covariant** in `T` — if `S <: T` under the fragment-sort subtyping rules below, then `List<S> <: List<T>`. The runtime witness is `SmeltType::List(Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full Phase A surface and semantics live in `meta_language.md` §"Phase A — `List<T>`, list literals, spread".
 
 `Kind` ∈ `{Scalar, Agg, Window}`. `ctx` is the name of a sibling parameter whose schema scopes the items.
 
@@ -266,6 +269,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 
 - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
 - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
+- `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; this spec only registers the vocabulary entry, the meta-language spec owns the rules.
 
 ### Backend divergence appendix
 
