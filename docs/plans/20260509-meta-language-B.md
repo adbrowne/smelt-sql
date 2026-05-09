@@ -85,7 +85,7 @@ The meta-language Phase B spec increment landed in commit `d4d4586`. The spec au
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 0307d79 | 2026-05-10 |
-| 2     | pending  |        |      |
+| 2     | done     |        | 2026-05-10 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -580,6 +580,7 @@ This phase has no Rust unit tests. The acceptance gate is content review (the re
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - **Phase 1 `LambdaArityNotSupported` is latent in Phase B.** Round 2 reviewer flagged that `is_fn_lambda_start()` originally matched LPAREN, mis-parsing `SELECT fn(x, y) FROM t` as a multi-arg lambda. Fix restricted detection to `Some(IDENT)` only — multi-arg lambda CST nodes are no longer produced in Phase B, so the `LambdaArityNotSupported` diagnostic from the spec cannot fire in Phase B. The diagnostic remains in the spec for Phase F when multi-arg lambdas land. User-facing impact in Phase B: `fn (a, b) => body` produces a generic parse error rather than the targeted `LambdaArityNotSupported` diagnostic. Reviewer judged this acceptable; orchestrator deferred to Phase F.
+- **Phase 2 round 1 reviewer surfaced 3 MUST FIX findings** — `Box::leak` in production HOF inference (LSP server memory leak risk); `comma_sep` empty-identity scattered outside `REDUCER_REGISTRY` (registry-as-single-source-of-truth invariant violated); `types.md` Lambda entry missing the required prohibition phrase. Round 2 fixed all three: `HofSecondArg::Lambda` now owns the `Lambda` (no leak); `EmptyIdentity::EmptySelectItems` added to enum, `comma_sep` registry entry uses it, `reducer_name == "comma_sep"` special-case removed; `types.md` entry now includes the meta-only-not-user-writable prohibition with `LambdaInForbiddenPosition` enforcement note. Grep evidence confirmed: zero `Box::leak`, zero `reducer_name == "comma_sep"` references in `type_inference.rs`. Two round-1 OBSERVATIONs accepted as-is (`or_any`/`and_all` share `EmptyIdentity::Boolean` — type is correct, identity value is codegen concern; FILTER_KW fallback is safe in practice — no other HOF name is a reserved SQL keyword in the lexer).
 
 ## Verification
 

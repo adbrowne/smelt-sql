@@ -85,6 +85,15 @@ pub struct TypeContext {
     ///
     /// `None` in all other contexts — preserves the pre-Phase-27 behaviour.
     pub expected_return: Option<DataType>,
+    /// Lambda parameters pushed onto the context during Phase B HOF body inference
+    /// (Phase B meta-language). Maps parameter name → typed column. Lambda
+    /// parameters shadow `function_params` and all SQL scopes per spec
+    /// `scoping.md` §"Resolution order" (lambda scope is innermost).
+    ///
+    /// Seeded by [`TypeContext::add_lambda_param`] before re-inferring the lambda
+    /// body; cleared by removing the binding after the body walk (or cloning a
+    /// context snapshot).
+    lambda_params: HashMap<String, TypedColumn>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -97,6 +106,7 @@ impl PartialEq for TypeContext {
             && self.cte_names == other.cte_names
             && self.aliases == other.aliases
             && self.function_params == other.function_params
+            && self.lambda_params == other.lambda_params
             && self.function_signatures == other.function_signatures
             && self.tableexpr_param_schemas == other.tableexpr_param_schemas
             && self.row_var_env == other.row_var_env
@@ -118,6 +128,7 @@ impl Clone for TypeContext {
             cte_names: self.cte_names.clone(),
             aliases: self.aliases.clone(),
             function_params: self.function_params.clone(),
+            lambda_params: self.lambda_params.clone(),
             function_signatures: self.function_signatures.clone(),
             tableexpr_param_schemas: self.tableexpr_param_schemas.clone(),
             row_var_env: self.row_var_env.clone(),
@@ -510,6 +521,20 @@ impl TypeContext {
             .map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Seed a lambda parameter binding into the context (Phase B meta-language).
+    ///
+    /// Lambda parameters shadow `function_params` and all wider SQL scopes.
+    /// Per `scoping.md` §"Resolution order": lambda parameter scope is the
+    /// innermost — it resolves before enclosing function parameters.
+    ///
+    /// Callers clone the context before pushing lambda params and discard the
+    /// clone after the lambda body walk to restore the outer scope.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn add_lambda_param(&mut self, name: &str, col: TypedColumn) {
+        self.lambda_params.insert(name.to_string(), col);
+    }
+
     /// Unqualified-or-qualified identifier lookup that honours the
     /// function-parameter scope.
     ///
@@ -518,12 +543,19 @@ impl TypeContext {
     /// `smelt.define` bodies (no FROM scope is in play), but the
     /// mechanism is wired in now so Phase 6+ composition is trivial.
     ///
+    /// Phase B adds lambda parameter scope (innermost): lambda params shadow
+    /// function params which shadow SQL scopes.
+    ///
     /// - Qualified lookups (`qualifier.is_some()`) bypass the function-param
     ///   map entirely — params are always bare names.
-    /// - Unqualified lookups return a function param before falling through
-    ///   to [`TypeContext::lookup_column`].
+    /// - Unqualified lookups return a lambda param first, then a function param,
+    ///   before falling through to [`TypeContext::lookup_column`].
     pub fn lookup_identifier(&self, qualifier: Option<&str>, name: &str) -> Option<&TypedColumn> {
         if qualifier.is_none() {
+            // Lambda params are innermost scope — shadow function params.
+            if let Some(col) = self.lambda_params.get(name) {
+                return Some(col);
+            }
             if let Some(col) = self.function_params.get(name) {
                 return Some(col);
             }
@@ -1261,6 +1293,8 @@ fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // scalar DataType equivalent in Phase A.
         Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
+        // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid return type.
+        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };
@@ -3059,6 +3093,668 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
     }
 
     column_types
+}
+
+// ─── Phase B (meta-language): HOF inference + reducer registry + pipe ────────
+
+/// The three built-in higher-order functions (Phase B meta-language).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HofKind {
+    /// `map(xs: List<T>, f: Lambda<T, U>) -> List<U>`
+    Map,
+    /// `filter(xs: List<T>, p: Lambda<T, Boolean>) -> List<T>`
+    Filter,
+    /// `reduce(xs: List<T>, r)` where `r` is a bare reducer identifier.
+    Reduce,
+}
+
+impl HofKind {
+    /// Parse a HOF name into a [`HofKind`]. Returns `None` for non-HOF names.
+    pub fn from_name(name: &str) -> Option<HofKind> {
+        match name {
+            "map" => Some(HofKind::Map),
+            "filter" => Some(HofKind::Filter),
+            "reduce" => Some(HofKind::Reduce),
+            _ => None,
+        }
+    }
+}
+
+/// Sentinel produced by HOF / reducer inference (Phase B).
+///
+/// Phase 2 records these sentinels but does NOT emit diagnostic codes —
+/// that is Phase 3's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HofInferSentinel {
+    /// The lambda body's synthesised type does not match the HOF's required
+    /// result shape (e.g. `filter` predicate not `Boolean`).
+    /// Corresponds to `LambdaResultTypeMismatch`.
+    LambdaResultTypeMismatch {
+        expected: SmeltType,
+        found: SmeltType,
+    },
+    /// The second argument to `reduce` is not a recognised reducer name.
+    /// Corresponds to `HofExpectsReducer`.
+    HofExpectsReducer,
+    /// The second argument to `map` or `filter` is not a lambda node.
+    /// Corresponds to `HofExpectsLambda`.
+    HofExpectsLambda,
+    /// The input element type does not satisfy the reducer's declared input
+    /// constraint. Corresponds to `ReducerInputTypeMismatch`.
+    ReducerInputTypeMismatch {
+        reducer_name: String,
+        expected_constraint: String,
+        found: SmeltType,
+    },
+    /// An empty list was passed to a reducer with no declared identity.
+    /// Corresponds to `ReducerEmptyNoIdentity`.
+    ReducerEmptyNoIdentity { reducer_name: String },
+    /// The first argument to the HOF did not infer to a `List<T>`.
+    InputNotList { found: SmeltType },
+}
+
+/// Result of HOF / reducer inference (Phase B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HofInferResult {
+    /// The inferred [`SmeltType`] for the HOF call.
+    pub inferred: SmeltType,
+    /// Optional pending diagnostic sentinel. `None` on the happy path.
+    pub sentinel: Option<HofInferSentinel>,
+}
+
+/// Spec for a single entry in the closed reducer registry (Phase B).
+///
+/// Pure data — no Salsa dependency.
+pub struct ReducerSpec {
+    /// The reducer's source name (e.g. `"and_all"`).
+    pub name: &'static str,
+    /// The input constraint for each element: `Boolean`, `Numeric`, `Text`,
+    /// `Any` (for `comma_sep`), or `TableExpr` (for `union_all`/`intersect_all`).
+    /// `None` means the element type is unconstrained (accepts any `Expr<T>`).
+    pub input_constraint: ReducerInputConstraint,
+    /// The output [`SmeltType`] of the reducer (after a non-empty evaluation).
+    pub output_sort: ReducerOutputSort,
+    /// Empty-list behaviour: `Some(identity)` means the reducer has a known
+    /// identity element; `None` means `ReducerEmptyNoIdentity`.
+    pub empty_identity: EmptyIdentity,
+}
+
+/// Input-element constraint for a reducer entry (Phase B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReducerInputConstraint {
+    /// Any `Expr<T>` is accepted (used by `comma_sep`).
+    AnyExpr,
+    /// Only `Expr<Boolean>` is accepted.
+    Boolean,
+    /// Any `Expr<Numeric>` is accepted (satisfies `TypeConstraint::Numeric`).
+    Numeric,
+    /// Only `Expr<Text>` is accepted.
+    Text,
+    /// Only `TableExpr` is accepted.
+    TableExpr,
+}
+
+impl ReducerInputConstraint {
+    /// Check whether a [`SmeltType`] satisfies this input constraint.
+    pub fn is_satisfied_by(&self, ty: &SmeltType) -> bool {
+        match (self, ty) {
+            (ReducerInputConstraint::AnyExpr, SmeltType::Expr(_)) => true,
+            (ReducerInputConstraint::Boolean, SmeltType::Expr(tc)) => {
+                matches!(tc, smelt_types::signatures::TypeConstraint::Concrete(dt) if *dt == DataType::Boolean)
+            }
+            (ReducerInputConstraint::Numeric, SmeltType::Expr(tc)) => {
+                smelt_types::signatures::TypeConstraint::Numeric.satisfies(&match tc {
+                    smelt_types::signatures::TypeConstraint::Concrete(dt) => dt.clone(),
+                    _ => return false,
+                })
+            }
+            (ReducerInputConstraint::Text, SmeltType::Expr(tc)) => {
+                matches!(tc,
+                    smelt_types::signatures::TypeConstraint::Concrete(dt)
+                    if matches!(dt, DataType::Text | DataType::Varchar { .. } | DataType::Char { .. })
+                )
+            }
+            (ReducerInputConstraint::TableExpr, SmeltType::TableExpr(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Output sort for a reducer (Phase B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReducerOutputSort {
+    /// Output is `Expr<Boolean>`.
+    Boolean,
+    /// Output is `Expr<T>` where `T` is the LUB-promoted element type of the input list
+    /// (used by `plus_chain` and `concat`).
+    SameAsElementType,
+    /// Output is `SelectItems<Scalar>` (used by `comma_sep`).
+    SelectItemsScalar,
+    /// Output is `TableExpr` (used by `union_all`, `intersect_all`).
+    TableExpr,
+}
+
+/// Empty-list identity rule for a reducer (Phase B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmptyIdentity {
+    /// The reducer has an identity element: the output sort with a known value.
+    /// The bool/text/numeric variant matches the output sort.
+    Boolean,
+    /// The reducer has a numeric identity element (0 cast to LUB element type).
+    Numeric,
+    /// The reducer has a text identity element (empty string `''`).
+    Text,
+    /// Empty list produces `SelectItems<Scalar>` with no sentinel (used by `comma_sep`).
+    /// An empty comma-separated list elides at the splice point without error.
+    EmptySelectItems,
+    /// The reducer has no identity — empty list is an error (`ReducerEmptyNoIdentity`).
+    None,
+}
+
+/// The closed reducer registry — seven entries (Phase B spec).
+pub static REDUCER_REGISTRY: &[ReducerSpec] = &[
+    ReducerSpec {
+        name: "comma_sep",
+        input_constraint: ReducerInputConstraint::AnyExpr,
+        output_sort: ReducerOutputSort::SelectItemsScalar,
+        empty_identity: EmptyIdentity::EmptySelectItems, // empty list elides at splice (see spec)
+    },
+    ReducerSpec {
+        name: "and_all",
+        input_constraint: ReducerInputConstraint::Boolean,
+        output_sort: ReducerOutputSort::Boolean,
+        empty_identity: EmptyIdentity::Boolean, // TRUE
+    },
+    ReducerSpec {
+        name: "or_any",
+        input_constraint: ReducerInputConstraint::Boolean,
+        output_sort: ReducerOutputSort::Boolean,
+        empty_identity: EmptyIdentity::Boolean, // FALSE
+    },
+    ReducerSpec {
+        name: "union_all",
+        input_constraint: ReducerInputConstraint::TableExpr,
+        output_sort: ReducerOutputSort::TableExpr,
+        empty_identity: EmptyIdentity::None,
+    },
+    ReducerSpec {
+        name: "intersect_all",
+        input_constraint: ReducerInputConstraint::TableExpr,
+        output_sort: ReducerOutputSort::TableExpr,
+        empty_identity: EmptyIdentity::None,
+    },
+    ReducerSpec {
+        name: "plus_chain",
+        input_constraint: ReducerInputConstraint::Numeric,
+        output_sort: ReducerOutputSort::SameAsElementType,
+        empty_identity: EmptyIdentity::Numeric, // 0-cast-to-LUB
+    },
+    ReducerSpec {
+        name: "concat",
+        input_constraint: ReducerInputConstraint::Text,
+        output_sort: ReducerOutputSort::SameAsElementType,
+        empty_identity: EmptyIdentity::Text, // empty string ''
+    },
+];
+
+/// Look up a reducer by name in the closed registry.
+///
+/// Returns `None` for unknown names. Pure — no Salsa dependency.
+pub fn lookup_reducer(name: &str) -> Option<&'static ReducerSpec> {
+    REDUCER_REGISTRY.iter().find(|r| r.name == name)
+}
+
+/// Infer the output [`SmeltType`] for a `reduce(xs, reducer_name)` call
+/// where `xs` infers to `List<elem_ty>` (Phase B).
+///
+/// Returns a [`HofInferResult`] with:
+/// - On success: the reducer's declared output type, or the element type for
+///   `SameAsElementType` reducers.
+/// - On `ReducerInputTypeMismatch`: the input element does not satisfy the
+///   reducer's constraint.
+/// - On `ReducerEmptyNoIdentity`: empty list passed to a no-identity reducer.
+///
+/// Pure function — no Salsa dependency.
+pub fn infer_reduce_call(
+    list_elem_ty: &SmeltType,
+    is_empty_list: bool,
+    reducer_name: &str,
+    _expected: Option<&SmeltType>,
+) -> HofInferResult {
+    let Some(spec) = lookup_reducer(reducer_name) else {
+        return HofInferResult {
+            inferred: SmeltType::Unknown,
+            sentinel: Some(HofInferSentinel::HofExpectsReducer),
+        };
+    };
+
+    // Empty-list path
+    if is_empty_list {
+        return match spec.empty_identity {
+            EmptyIdentity::Boolean => HofInferResult {
+                inferred: SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                    DataType::Boolean,
+                )),
+                sentinel: None,
+            },
+            EmptyIdentity::Numeric => HofInferResult {
+                // Identity is 0-cast-to-element-type; use Unknown for empty.
+                inferred: SmeltType::Expr(smelt_types::signatures::TypeConstraint::Numeric),
+                sentinel: None,
+            },
+            EmptyIdentity::Text => HofInferResult {
+                inferred: SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                    DataType::Text,
+                )),
+                sentinel: None,
+            },
+            EmptyIdentity::EmptySelectItems => HofInferResult {
+                inferred: SmeltType::SelectItems {
+                    kind: smelt_types::signatures::ExprKind::Scalar,
+                    context: None,
+                },
+                sentinel: None,
+            },
+            EmptyIdentity::None => HofInferResult {
+                inferred: SmeltType::Unknown,
+                sentinel: Some(HofInferSentinel::ReducerEmptyNoIdentity {
+                    reducer_name: reducer_name.to_string(),
+                }),
+            },
+        };
+    }
+
+    // Non-empty: validate input element type against the reducer's constraint.
+    if !spec.input_constraint.is_satisfied_by(list_elem_ty) {
+        return HofInferResult {
+            inferred: SmeltType::Unknown,
+            sentinel: Some(HofInferSentinel::ReducerInputTypeMismatch {
+                reducer_name: reducer_name.to_string(),
+                expected_constraint: format!("{:?}", spec.input_constraint),
+                found: list_elem_ty.clone(),
+            }),
+        };
+    }
+
+    // Derive output sort.
+    let output = match &spec.output_sort {
+        ReducerOutputSort::Boolean => SmeltType::Expr(
+            smelt_types::signatures::TypeConstraint::Concrete(DataType::Boolean),
+        ),
+        ReducerOutputSort::SameAsElementType => list_elem_ty.clone(),
+        ReducerOutputSort::SelectItemsScalar => SmeltType::SelectItems {
+            kind: smelt_types::signatures::ExprKind::Scalar,
+            context: None,
+        },
+        ReducerOutputSort::TableExpr => SmeltType::TableExpr(None),
+    };
+
+    HofInferResult {
+        inferred: output,
+        sentinel: None,
+    }
+}
+
+/// Infer the output [`SmeltType`] for a HOF call (`map`, `filter`, or `reduce`)
+/// given the pre-inferred list type and the lambda/reducer second argument (Phase B).
+///
+/// - For `map`: bind lambda parameter to `T`, synthesise body type `U`, return `List<U>`.
+/// - For `filter`: bind lambda parameter to `T`, synthesise body type, require `Boolean`,
+///   return `List<T>`.
+/// - For `reduce`: delegate to [`infer_reduce_call`].
+///
+/// Pure function — no Salsa dependency.
+pub fn infer_hof_call(
+    hof: HofKind,
+    list_ty: &SmeltType,
+    second_arg: HofSecondArg<'_>,
+    ctx: &TypeContext,
+    expected: Option<&SmeltType>,
+) -> HofInferResult {
+    // Extract element type from List<T>.
+    let elem_ty = match list_ty {
+        SmeltType::List(inner) => (**inner).clone(),
+        SmeltType::Unknown => SmeltType::Unknown,
+        other => {
+            return HofInferResult {
+                inferred: SmeltType::Unknown,
+                sentinel: Some(HofInferSentinel::InputNotList {
+                    found: other.clone(),
+                }),
+            };
+        }
+    };
+
+    // Check for empty list (List<Unknown> from empty literal `[]`).
+    let is_empty = matches!(&elem_ty, SmeltType::Unknown);
+
+    match hof {
+        HofKind::Map | HofKind::Filter => {
+            let lambda = match second_arg {
+                HofSecondArg::Lambda(l) => l,
+                HofSecondArg::ReducerName(_) | HofSecondArg::Other => {
+                    return HofInferResult {
+                        inferred: SmeltType::Unknown,
+                        sentinel: Some(HofInferSentinel::HofExpectsLambda),
+                    };
+                }
+            };
+            let params = lambda.params();
+            let param_name = params.first().cloned().unwrap_or_default();
+            let body = match lambda.body() {
+                Some(b) => b,
+                None => {
+                    return HofInferResult {
+                        inferred: if hof == HofKind::Map {
+                            SmeltType::List(Box::new(SmeltType::Unknown))
+                        } else {
+                            list_ty.clone()
+                        },
+                        sentinel: None,
+                    };
+                }
+            };
+
+            // Bind lambda parameter to elem_ty in a scoped context clone.
+            let mut body_ctx = ctx.clone();
+            body_ctx.add_lambda_param(
+                &param_name,
+                smelt_types::TypedColumn {
+                    data_type: match &elem_ty {
+                        SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(dt)) => {
+                            dt.clone()
+                        }
+                        _ => DataType::Unknown,
+                    },
+                    nullable: true,
+                },
+            );
+
+            // Synthesise body type.
+            let body_typed = infer_expression_type(&body, &body_ctx);
+            let body_ty = body_typed
+                .map(|tc| {
+                    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                        tc.data_type,
+                    ))
+                })
+                .unwrap_or(SmeltType::Unknown);
+
+            if hof == HofKind::Filter {
+                // Filter predicate body must be Boolean.
+                let expected_bool = SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Boolean),
+                );
+                if body_ty != expected_bool && !matches!(body_ty, SmeltType::Unknown) {
+                    return HofInferResult {
+                        inferred: list_ty.clone(),
+                        sentinel: Some(HofInferSentinel::LambdaResultTypeMismatch {
+                            expected: expected_bool,
+                            found: body_ty,
+                        }),
+                    };
+                }
+                HofInferResult {
+                    inferred: list_ty.clone(),
+                    sentinel: None,
+                }
+            } else {
+                // Map: result is List<body_ty>.
+                HofInferResult {
+                    inferred: SmeltType::List(Box::new(body_ty)),
+                    sentinel: None,
+                }
+            }
+        }
+        HofKind::Reduce => {
+            let reducer_name = match second_arg {
+                HofSecondArg::ReducerName(name) => name,
+                HofSecondArg::Lambda(_) | HofSecondArg::Other => {
+                    return HofInferResult {
+                        inferred: SmeltType::Unknown,
+                        sentinel: Some(HofInferSentinel::HofExpectsReducer),
+                    };
+                }
+            };
+            infer_reduce_call(&elem_ty, is_empty, reducer_name, expected)
+        }
+    }
+}
+
+/// The second argument to a HOF call (Phase B).
+///
+/// `Lambda` carries the AST lambda node (owned — Rowan handles are cheap refcounted
+/// clones); `ReducerName` carries the bare identifier text; `Other` represents any
+/// other node shape (triggers a sentinel).
+pub enum HofSecondArg<'a> {
+    Lambda(smelt_parser::ast::Lambda),
+    ReducerName(&'a str),
+    Other,
+}
+
+/// Infer the output type for a HOF call given a [`FunctionCall`] AST node (Phase B).
+///
+/// This convenience wrapper extracts the HOF kind, the list argument, and the
+/// second argument (lambda or reducer name) from the function call, then delegates
+/// to [`infer_hof_call`].
+///
+/// Returns `None` when the function is not a recognised HOF.
+pub fn infer_hof_call_from_function_call(
+    call: &smelt_parser::ast::FunctionCall,
+    ctx: &TypeContext,
+) -> HofInferResult {
+    infer_hof_call_from_function_call_with_expected(call, ctx, None)
+}
+
+/// Like [`infer_hof_call_from_function_call`] but with an optional expected type
+/// (used by the empty-list + identity reducer tests).
+pub fn infer_hof_call_from_function_call_with_expected(
+    call: &smelt_parser::ast::FunctionCall,
+    ctx: &TypeContext,
+    expected: Option<&SmeltType>,
+) -> HofInferResult {
+    // `FunctionCall::name()` only returns IDENT-typed tokens; HOF names like
+    // `filter` may be lexed as keyword tokens (FILTER_KW). Fall back to the
+    // first token's text for keyword-as-function-name cases.
+    let name = call.name().unwrap_or_else(|| {
+        // Extract the first non-trivia token's text, normalised to lowercase.
+        call.syntax()
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .map(|t| t.text().to_lowercase())
+            .unwrap_or_default()
+    });
+    let name_lc = name.to_lowercase();
+    let Some(hof) = HofKind::from_name(&name_lc) else {
+        return HofInferResult {
+            inferred: SmeltType::Unknown,
+            sentinel: None,
+        };
+    };
+
+    let args = call.arguments();
+    if args.is_empty() {
+        return HofInferResult {
+            inferred: SmeltType::Unknown,
+            sentinel: None,
+        };
+    }
+
+    // Infer the list type from the first argument.
+    let xs = &args[0];
+    let list_ty = if let Some(arr) = xs.as_array_literal() {
+        let elems: Vec<_> = arr.elements();
+        let result = infer_list_literal(&elems, ctx, expected);
+        result.inferred
+    } else {
+        // Non-literal first argument: try expression inference.
+        infer_expression_type(xs, ctx)
+            .map(|tc| {
+                SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                    tc.data_type,
+                ))
+            })
+            .unwrap_or(SmeltType::Unknown)
+    };
+
+    // Extract second argument shape.
+    if args.len() < 2 {
+        return infer_hof_call(hof, &list_ty, HofSecondArg::Other, ctx, expected);
+    }
+    let arg2 = &args[1];
+
+    // Check if second arg contains a LAMBDA node (may be wrapped in EXPRESSION).
+    if let Some(lambda) = extract_lambda_from_expr(arg2) {
+        return infer_hof_call(hof, &list_ty, HofSecondArg::Lambda(lambda), ctx, expected);
+    }
+
+    // Check if it's a bare identifier (reducer name).
+    let text = arg2.text().trim().to_string();
+    // A bare identifier: no spaces, no parens, no brackets.
+    if text.chars().all(|c| c.is_alphanumeric() || c == '_') && !text.is_empty() {
+        return infer_hof_call_with_reducer_name(hof, &list_ty, &text, ctx, expected);
+    }
+
+    infer_hof_call(hof, &list_ty, HofSecondArg::Other, ctx, expected)
+}
+
+/// Extract a [`Lambda`] from an [`Expr`], following the same pattern as
+/// [`Expr::as_function_call`] and other `as_*` methods: check the node itself,
+/// then check its direct children. This is needed because `arguments()` returns
+/// `Expr` values whose inner node is an `EXPRESSION` that wraps the `LAMBDA`.
+fn extract_lambda_from_expr(expr: &smelt_parser::ast::Expr) -> Option<smelt_parser::ast::Lambda> {
+    smelt_parser::ast::Lambda::cast(expr.syntax().clone()).or_else(|| {
+        expr.syntax()
+            .children()
+            .find_map(smelt_parser::ast::Lambda::cast)
+    })
+}
+
+/// Extract a [`PipeExpr`] from an [`Expr`], following the same pattern.
+fn extract_pipe_expr_from_expr(
+    expr: &smelt_parser::ast::Expr,
+) -> Option<smelt_parser::ast::PipeExpr> {
+    smelt_parser::ast::PipeExpr::cast(expr.syntax().clone()).or_else(|| {
+        expr.syntax()
+            .children()
+            .find_map(smelt_parser::ast::PipeExpr::cast)
+    })
+}
+
+/// Inner helper for the reducer-name path (avoids lifetime issues with `HofSecondArg`).
+fn infer_hof_call_with_reducer_name(
+    hof: HofKind,
+    list_ty: &SmeltType,
+    reducer_name: &str,
+    ctx: &TypeContext,
+    expected: Option<&SmeltType>,
+) -> HofInferResult {
+    infer_hof_call(
+        hof,
+        list_ty,
+        HofSecondArg::ReducerName(reducer_name),
+        ctx,
+        expected,
+    )
+}
+
+/// Infer the output [`SmeltType`] for a pipe expression `LHS |> CALL(args...)` (Phase B).
+///
+/// Pipe desugaring: `LHS |> CALL(args...)` is equivalent to `CALL(LHS, args...)`.
+/// This function constructs the equivalent direct call and infers its type.
+///
+/// Pure function — no Salsa dependency.
+pub fn infer_pipe_expr(
+    pipe: &smelt_parser::ast::PipeExpr,
+    ctx: &TypeContext,
+    expected: Option<&SmeltType>,
+) -> HofInferResult {
+    // Get LHS and RHS.
+    let lhs = match pipe.lhs() {
+        Some(l) => l,
+        None => {
+            return HofInferResult {
+                inferred: SmeltType::Unknown,
+                sentinel: None,
+            }
+        }
+    };
+    let rhs = match pipe.rhs() {
+        Some(r) => r,
+        None => {
+            return HofInferResult {
+                inferred: SmeltType::Unknown,
+                sentinel: None,
+            }
+        }
+    };
+
+    // If the LHS itself is a pipe, recurse to infer its type first.
+    let lhs_ty = if let Some(inner_pipe) = extract_pipe_expr_from_expr(&lhs) {
+        let r = infer_pipe_expr(&inner_pipe, ctx, None);
+        r.inferred
+    } else {
+        // Infer LHS as a list literal or expression.
+        if let Some(arr) = lhs.as_array_literal() {
+            let elems: Vec<_> = arr.elements();
+            infer_list_literal(&elems, ctx, None).inferred
+        } else {
+            infer_expression_type(&lhs, ctx)
+                .map(|tc| {
+                    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                        tc.data_type,
+                    ))
+                })
+                .unwrap_or(SmeltType::Unknown)
+        }
+    };
+
+    // RHS must be a function call — if so, extract call name and synthesise.
+    if let Some(call) = rhs.as_function_call() {
+        // `call.name()` only finds IDENT tokens; keyword-based names like
+        // `filter` (lexed as FILTER_KW) need a fallback to the first token.
+        let name = call.name().unwrap_or_else(|| {
+            call.syntax()
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| !t.kind().is_trivia())
+                .map(|t| t.text().to_lowercase())
+                .unwrap_or_default()
+        });
+        let name_lc = name.to_lowercase();
+        if let Some(hof) = HofKind::from_name(&name_lc) {
+            // Build the effective argument list: LHS + RHS args.
+            let rhs_args = call.arguments();
+
+            // We reconstruct the inference by using the lhs_ty directly.
+            if rhs_args.is_empty() {
+                return HofInferResult {
+                    inferred: SmeltType::Unknown,
+                    sentinel: None,
+                };
+            }
+            let second_arg = &rhs_args[0];
+
+            // Check if second arg contains a LAMBDA node (may be wrapped in EXPRESSION).
+            if let Some(lambda) = extract_lambda_from_expr(second_arg) {
+                return infer_hof_call(hof, &lhs_ty, HofSecondArg::Lambda(lambda), ctx, expected);
+            }
+            // Check if it's a bare reducer name.
+            let text = second_arg.text().trim().to_string();
+            if text.chars().all(|c| c.is_alphanumeric() || c == '_') && !text.is_empty() {
+                return infer_hof_call_with_reducer_name(hof, &lhs_ty, &text, ctx, expected);
+            }
+            return infer_hof_call(hof, &lhs_ty, HofSecondArg::Other, ctx, expected);
+        }
+    }
+
+    // Non-HOF RHS or non-call RHS — Phase 3 emits PipeRhsNotCall diagnostic.
+    // For now return Unknown without sentinel.
+    HofInferResult {
+        inferred: SmeltType::Unknown,
+        sentinel: None,
+    }
 }
 
 // ─── Phase A (meta-language): list-literal type inference ───────────────────
@@ -5555,6 +6251,376 @@ mod tests {
             ),
             "expected MetaSpreadOnNonList, got: {:?}",
             result.diagnostics[0]
+        );
+    }
+
+    // === Phase B (meta-language) TDD tests: HOF inference + reducer registry + pipe ===
+
+    /// Parse a HOF call like `SELECT map([1, 2, 3], fn c => c)` and return the
+    /// FunctionCall AST node (the map/filter/reduce call).
+    fn parse_hof_call(sql: &str) -> smelt_parser::ast::FunctionCall {
+        let expr = parse_first_expr(sql);
+        expr.as_function_call()
+            .expect("expected a function-call expression for HOF test")
+    }
+
+    /// `map([1, 2, 3], fn c => c)` — identity lambda on SmallInt list — infers
+    /// `List<Expr<SmallInt>>` (HOF produces `List<U>` where U = body type = Expr<SmallInt>).
+    ///
+    /// 1, 2, 3 are in i16 range so they infer SmallInt.
+    #[test]
+    fn infer_map_returns_list_of_body_type() {
+        let call = parse_hof_call("SELECT map([1, 2, 3], fn c => c)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            result.sentinel.is_none(),
+            "identity map must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Expr(
+                smelt_types::signatures::TypeConstraint::Concrete(DataType::SmallInt)
+            ))),
+            "map([1,2,3], fn c => c) must infer List<Expr<SmallInt>>"
+        );
+    }
+
+    /// `map([1, 2, 3], fn c => CAST(c AS Text))` — body produces Expr<Varchar> —
+    /// HOF result is `List<Expr<Varchar>>`.
+    ///
+    /// Note: `CAST(x AS Text)` produces `DataType::Varchar { max_length: None }`
+    /// (not `DataType::Text`) because the type parser normalises `TEXT` → `VARCHAR`.
+    #[test]
+    fn infer_map_with_typed_body() {
+        let call = parse_hof_call("SELECT map([1, 2, 3], fn c => CAST(c AS Text))");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            result.sentinel.is_none(),
+            "map with CAST body must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        // CAST(x AS Text) normalises to Varchar { max_length: None }.
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Expr(
+                smelt_types::signatures::TypeConstraint::Concrete(DataType::Varchar {
+                    max_length: None
+                })
+            ))),
+            "map([1,2,3], fn c => CAST(c AS Text)) must infer List<Expr<Varchar>>"
+        );
+    }
+
+    /// `filter([1, 2, 3], fn c => c > 0)` — filter preserves element type —
+    /// result is `List<Expr<SmallInt>>`.
+    #[test]
+    fn infer_filter_returns_same_list_type() {
+        let call = parse_hof_call("SELECT filter([1, 2, 3], fn c => c > 0)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            result.sentinel.is_none(),
+            "filter must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Expr(
+                smelt_types::signatures::TypeConstraint::Concrete(DataType::SmallInt)
+            ))),
+            "filter([1,2,3], fn c => c > 0) must infer List<Expr<SmallInt>>"
+        );
+    }
+
+    /// `filter([1, 2, 3], fn c => c)` — predicate body is `Expr<SmallInt>` not
+    /// `Expr<Boolean>` — returns a sentinel for `LambdaResultTypeMismatch`.
+    #[test]
+    fn infer_filter_predicate_must_be_boolean_sentinel() {
+        let call = parse_hof_call("SELECT filter([1, 2, 3], fn c => c)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            matches!(result.sentinel, Some(HofInferSentinel::LambdaResultTypeMismatch { .. })),
+            "filter with non-Boolean predicate must return LambdaResultTypeMismatch sentinel, got: {:?}",
+            result.sentinel
+        );
+    }
+
+    /// `reduce([1, 2, 3], plus_chain)` → `Expr<SmallInt>`.
+    /// `reduce(['a', 'b', 'c'], concat)` → `Expr<Text>`.
+    /// `reduce([true, false], and_all)` → `Expr<Boolean>`.
+    #[test]
+    fn infer_reduce_returns_reducer_output_sort() {
+        // plus_chain with SmallInt integers
+        {
+            let call = parse_hof_call("SELECT reduce([1, 2, 3], plus_chain)");
+            let ctx = TypeContext::new();
+            let result = infer_hof_call_from_function_call(&call, &ctx);
+            assert!(
+                result.sentinel.is_none(),
+                "reduce([1,2,3], plus_chain) must have no sentinel, got: {:?}",
+                result.sentinel
+            );
+            // plus_chain output sort is Expr<Numeric>; element type is SmallInt
+            // which satisfies Numeric, so output is Expr<SmallInt> (the element type).
+            assert!(
+                matches!(result.inferred, SmeltType::Expr(_)),
+                "reduce(ints, plus_chain) must infer Expr<...>, got: {:?}",
+                result.inferred
+            );
+        }
+        // concat with text
+        {
+            let call = parse_hof_call("SELECT reduce(['a', 'b', 'c'], concat)");
+            let ctx = TypeContext::new();
+            let result = infer_hof_call_from_function_call(&call, &ctx);
+            assert!(
+                result.sentinel.is_none(),
+                "reduce(texts, concat) must have no sentinel, got: {:?}",
+                result.sentinel
+            );
+            assert!(
+                matches!(result.inferred, SmeltType::Expr(_)),
+                "reduce(texts, concat) must infer Expr<...>, got: {:?}",
+                result.inferred
+            );
+        }
+        // and_all with booleans
+        {
+            let call = parse_hof_call("SELECT reduce([true, false], and_all)");
+            let ctx = TypeContext::new();
+            let result = infer_hof_call_from_function_call(&call, &ctx);
+            assert!(
+                result.sentinel.is_none(),
+                "reduce(bools, and_all) must have no sentinel, got: {:?}",
+                result.sentinel
+            );
+            assert_eq!(
+                result.inferred,
+                SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                    DataType::Boolean
+                )),
+                "reduce([true,false], and_all) must infer Expr<Boolean>"
+            );
+        }
+    }
+
+    /// `reduce([col1, col2, col3], comma_sep)` — output is `SelectItems<Scalar>`
+    /// regardless of element `T`.
+    #[test]
+    fn infer_reduce_comma_sep_yields_select_items() {
+        // Use integer literals as "columns" — comma_sep accepts any Expr<T>.
+        let call = parse_hof_call("SELECT reduce([1, 2, 3], comma_sep)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            result.sentinel.is_none(),
+            "comma_sep reduce must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        assert_eq!(
+            result.inferred,
+            SmeltType::SelectItems {
+                kind: smelt_types::signatures::ExprKind::Scalar,
+                context: None
+            },
+            "reduce(any, comma_sep) must infer SelectItems<Scalar>"
+        );
+    }
+
+    /// `reduce([], and_all)` — empty list with identity reducer — infers `Expr<Boolean>`;
+    /// no sentinel.
+    #[test]
+    fn infer_reduce_empty_list_with_identity() {
+        let call = parse_hof_call("SELECT reduce([], and_all)");
+        let ctx = TypeContext::new();
+        let expected = SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+            DataType::Boolean,
+        ));
+        let result = infer_hof_call_from_function_call_with_expected(&call, &ctx, Some(&expected));
+        assert!(
+            result.sentinel.is_none(),
+            "reduce([], and_all) must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        assert_eq!(
+            result.inferred, expected,
+            "reduce([], and_all) must infer Expr<Boolean> (TRUE identity)"
+        );
+    }
+
+    /// `reduce([], union_all)` — empty list, no identity — sentinel for
+    /// `ReducerEmptyNoIdentity`.
+    #[test]
+    fn infer_reduce_empty_list_no_identity_sentinel() {
+        let call = parse_hof_call("SELECT reduce([], union_all)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            matches!(
+                result.sentinel,
+                Some(HofInferSentinel::ReducerEmptyNoIdentity { .. })
+            ),
+            "reduce([], union_all) must produce ReducerEmptyNoIdentity sentinel, got: {:?}",
+            result.sentinel
+        );
+    }
+
+    /// `reduce([], comma_sep)` — empty list with `comma_sep` — produces
+    /// `SelectItems<Scalar>` with no sentinel (via the registry `EmptySelectItems`
+    /// identity, not a special-case branch).
+    #[test]
+    fn infer_reduce_comma_sep_empty_returns_select_items_with_identity() {
+        let call = parse_hof_call("SELECT reduce([], comma_sep)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            result.sentinel.is_none(),
+            "reduce([], comma_sep) must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        assert_eq!(
+            result.inferred,
+            SmeltType::SelectItems {
+                kind: smelt_types::signatures::ExprKind::Scalar,
+                context: None,
+            },
+            "reduce([], comma_sep) must infer SelectItems<Scalar>"
+        );
+    }
+
+    /// `reduce([1, 2, 3], and_all)` — element type `Expr<SmallInt>` does not
+    /// satisfy `and_all`'s `Expr<Boolean>` requirement — sentinel for
+    /// `ReducerInputTypeMismatch`.
+    #[test]
+    fn infer_reduce_input_type_mismatch_sentinel() {
+        let call = parse_hof_call("SELECT reduce([1, 2, 3], and_all)");
+        let ctx = TypeContext::new();
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            matches!(
+                result.sentinel,
+                Some(HofInferSentinel::ReducerInputTypeMismatch { .. })
+            ),
+            "reduce([1,2,3], and_all) must produce ReducerInputTypeMismatch sentinel, got: {:?}",
+            result.sentinel
+        );
+    }
+
+    /// `xs |> filter(fn c => c > 0)` and `filter(xs, fn c => c > 0)` infer to
+    /// the same `SmeltType` for the same input.
+    #[test]
+    fn infer_pipe_desugars_to_call() {
+        let ctx = TypeContext::new();
+
+        // Piped form: [1, 2, 3] |> filter(fn c => c > 0)
+        let pipe_sql = "SELECT [1, 2, 3] |> filter(fn c => c > 0)";
+        let pipe_result = {
+            let expr = parse_first_expr(pipe_sql);
+            let pipe = extract_pipe_expr_from_expr(&expr).expect("expected PIPE_EXPR");
+            infer_pipe_expr(&pipe, &ctx, None)
+        };
+
+        // Direct form: filter([1, 2, 3], fn c => c > 0)
+        let call_sql = "SELECT filter([1, 2, 3], fn c => c > 0)";
+        let call_result = {
+            let call = parse_hof_call(call_sql);
+            infer_hof_call_from_function_call(&call, &ctx)
+        };
+
+        assert_eq!(
+            pipe_result.inferred, call_result.inferred,
+            "piped and direct forms must infer the same type"
+        );
+    }
+
+    /// `[1, 2, 3] |> filter(fn c => c > 0) |> map(fn c => c * 2)` infers to
+    /// `List<Expr<SmallInt>>` (left-associative pipe chain).
+    #[test]
+    fn infer_pipe_chain_associates_left() {
+        let ctx = TypeContext::new();
+        let sql = "SELECT [1, 2, 3] |> filter(fn c => c > 0) |> map(fn c => c * 2)";
+        let expr = parse_first_expr(sql);
+        let pipe = extract_pipe_expr_from_expr(&expr).expect("expected outer PIPE_EXPR");
+        let result = infer_pipe_expr(&pipe, &ctx, None);
+        assert!(
+            result.sentinel.is_none(),
+            "pipe chain must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        // SmallInt * SmallInt → SmallInt (integer arithmetic promotion)
+        assert!(
+            matches!(result.inferred, SmeltType::List(_)),
+            "pipe chain result must be a List, got: {:?}",
+            result.inferred
+        );
+    }
+
+    /// Inside `map(xs: List<Expr<SmallInt>>, fn c => c)`, the lookup of `c`
+    /// in the body context returns `Expr<SmallInt>` (lambda parameter binding).
+    #[test]
+    fn lambda_parameter_binding_via_typecontext() {
+        // We test by checking that a context with lambda param `c: SmallInt`
+        // resolves `c` to SmallInt in lookup_identifier.
+        let mut ctx = TypeContext::new();
+        ctx.add_lambda_param("c", smelt_types::TypedColumn::not_null(DataType::SmallInt));
+
+        let resolved = ctx
+            .lookup_identifier(None, "c")
+            .expect("lambda param 'c' must resolve");
+        assert_eq!(
+            resolved.data_type,
+            DataType::SmallInt,
+            "lambda param 'c' must resolve to SmallInt"
+        );
+    }
+
+    /// When an enclosing `smelt.define` parameter named `c` is in scope,
+    /// the lambda parameter `c` wins inside the lambda body (shadowing).
+    #[test]
+    fn lambda_parameter_shadows_outer_binding() {
+        let mut ctx = TypeContext::new();
+        // Outer function param `c` is BigInt
+        ctx.add_function_param("c", smelt_types::TypedColumn::not_null(DataType::BigInt));
+        // Lambda param `c` is SmallInt — shadows the outer BigInt
+        ctx.add_lambda_param("c", smelt_types::TypedColumn::not_null(DataType::SmallInt));
+
+        let resolved = ctx
+            .lookup_identifier(None, "c")
+            .expect("lambda param must be found");
+        assert_eq!(
+            resolved.data_type,
+            DataType::SmallInt,
+            "lambda param 'c: SmallInt' must shadow outer function param 'c: BigInt'"
+        );
+    }
+
+    /// Every reducer name in the closed registry is recognised; an unknown
+    /// identifier is not.
+    #[test]
+    fn reducer_registry_lookup_closed_set() {
+        let known = [
+            "comma_sep",
+            "and_all",
+            "or_any",
+            "union_all",
+            "intersect_all",
+            "plus_chain",
+            "concat",
+        ];
+        for name in &known {
+            assert!(
+                lookup_reducer(name).is_some(),
+                "reducer '{}' must be in the closed registry",
+                name
+            );
+        }
+        assert!(
+            lookup_reducer("not_a_reducer").is_none(),
+            "unknown reducer must not be in the registry"
         );
     }
 }

@@ -154,6 +154,16 @@ pub enum SmeltType {
     /// meta-language). `T` is itself a [`SmeltType`] (enabling `List<List<T>>`
     /// nesting). No `List<T>` value reaches the database engine.
     List(Box<SmeltType>),
+    /// `Lambda<T, U>` — a meta-language lambda value (Phase B).
+    ///
+    /// Constructed only at HOF positional-argument positions (e.g. the
+    /// second argument of `map`, `filter`). **Meta-only** — not user-writable
+    /// as a `smelt.define` parameter sort or return type. No `Lambda<T, U>`
+    /// value reaches the database engine.
+    ///
+    /// Lambda is **invariant**: `is_subtype_of(Lambda<S1, T1>, Lambda<S2, T2>)`
+    /// is `true` only when `S1 = S2` and `T1 = T2` (byte-equal).
+    Lambda(Box<SmeltType>, Box<SmeltType>),
     /// Compiler's "already told you about this" type for list elements (Phase A).
     ///
     /// `Unknown` is produced when a list literal's element types cannot be
@@ -224,6 +234,12 @@ pub fn is_subtype_of(sub: &SmeltType, sup: &SmeltType) -> bool {
         (a, b) if a == b => true,
         // List covariance: List<S> <: List<T> iff S <: T.
         (SmeltType::List(s_inner), SmeltType::List(t_inner)) => is_subtype_of(s_inner, t_inner),
+        // Lambda invariance: Lambda<S1, T1> <: Lambda<S2, T2> only when S1 = S2 and T1 = T2.
+        // The reflexivity arm above already handles the equal case (`a == b`), so
+        // any non-equal Lambda pair falls through to the `_ => false` arm.
+        // We add this arm for documentation clarity; it is unreachable in practice
+        // because the reflexivity arm already fires for equal Lambdas.
+        (SmeltType::Lambda(_, _), SmeltType::Lambda(_, _)) => false,
         // Expr<S> <: Expr<T> — the inner constraint determines compatibility.
         (SmeltType::Expr(s_tc), SmeltType::Expr(t_tc)) => {
             match (s_tc, t_tc) {
@@ -609,20 +625,23 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
 
     // `<` in the inner means another generic — reject as nested Expr if the
     // inner sort is `Expr`, otherwise unsupported sort.
-    if let Some(inner_lt) = inner_raw.find('<') {
+    if inner_raw.contains('<') {
+        let inner_lt = inner_raw.find('<').unwrap();
         let inner_sort = inner_raw[..inner_lt].trim();
-        if sort == "Expr" && inner_sort == "Expr" {
+        // Also check for comma-prefixed sorts like ", Expr<...>" (second Lambda param).
+        let actual_sort = inner_sort.trim_start_matches(',').trim();
+        if sort == "Expr" && (actual_sort == "Expr") {
             return Err(SmeltTypeParseError::NestedExpr {
                 span_text: text.to_string(),
             });
         }
-        // `List<T>` allows a nested generic for T — fall through to sort dispatch
-        // so `List<Expr<Integer>>`, `List<List<Text>>`, etc. parse correctly.
-        if sort == "List" {
+        // `List<T>` and `Lambda<T, U>` allow nested generics — fall through to
+        // sort dispatch so `List<Expr<Integer>>`, `Lambda<Expr<T>, Expr<U>>`, etc.
+        // parse correctly.
+        if sort == "List" || sort == "Lambda" || sort == "SelectItems" {
             // Fall through to the sort dispatch match below.
         } else if sort != "Expr" {
-            // Other nested sort in an Expr<...> — still malformed from Step 1's
-            // perspective. Surface the outer sort decision first.
+            // Other nested sort — surface the outer sort decision first.
             return Err(SmeltTypeParseError::UnsupportedSort {
                 sort: sort.to_string(),
                 span_text: text.to_string(),
@@ -686,6 +705,27 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
             let context = ctx_part.filter(|s| !s.is_empty()).map(ContextRef);
             Ok(SmeltType::SelectItems { kind, context })
         }
+        "Lambda" => {
+            // `Lambda<T, U>` — parse T and U as two comma-separated SmeltTypes.
+            // `inner_raw` has outer `<>` stripped, e.g. "Expr<INTEGER>, Expr<TEXT>".
+            // We need to split on the comma that separates the two type args,
+            // respecting nested angle brackets.
+            let split_pos =
+                find_lambda_comma(inner_raw).ok_or_else(|| SmeltTypeParseError::Malformed {
+                    span_text: text.to_string(),
+                })?;
+            let t_raw = inner_raw[..split_pos].trim();
+            let u_raw = inner_raw[split_pos + 1..].trim();
+            let t = parse_smelt_type(t_raw).map_err(|_| SmeltTypeParseError::UnknownInner {
+                inner: t_raw.to_string(),
+                span_text: text.to_string(),
+            })?;
+            let u = parse_smelt_type(u_raw).map_err(|_| SmeltTypeParseError::UnknownInner {
+                inner: u_raw.to_string(),
+                span_text: text.to_string(),
+            })?;
+            Ok(SmeltType::Lambda(Box::new(t), Box::new(u)))
+        }
         "TableExpr" | "AggExpr" | "WindowExpr" | "OrderSpec" => {
             Err(SmeltTypeParseError::UnsupportedSort {
                 sort: sort.to_string(),
@@ -702,6 +742,24 @@ pub fn parse_smelt_type(text: &str) -> Result<SmeltType, SmeltTypeParseError> {
             span_text: text.to_string(),
         }),
     }
+}
+
+/// Find the position of the top-level comma separating the two type parameters
+/// in a `Lambda<T, U>` inner string (after the outer `<>` are stripped).
+///
+/// Respects nested angle brackets so `Lambda<Expr<Integer>, Expr<Text>>` correctly
+/// splits at the comma between the two top-level parameters, not at a nested one.
+fn find_lambda_comma(inner: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Recognise the inner payload of an `Expr<...>`.
@@ -3007,6 +3065,11 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
     match ty {
         SmeltType::Expr(tc) => format!("Expr<{}>", format_type_constraint_hover(tc)),
         SmeltType::List(inner) => format!("List<{}>", format_smelt_type_hover(inner)),
+        SmeltType::Lambda(param_ty, body_ty) => format!(
+            "Lambda<{}, {}>",
+            format_smelt_type_hover(param_ty),
+            format_smelt_type_hover(body_ty)
+        ),
         SmeltType::TableExpr(None) => "TableExpr".to_string(),
         SmeltType::TableExpr(Some(req)) => {
             let mut s = String::from("TableExpr<{");
@@ -4298,6 +4361,73 @@ mod tests {
         assert!(
             !is_subtype_of(&list_numeric, &list_table),
             "List<Expr<Numeric>> must NOT be a subtype of List<TableExpr>"
+        );
+    }
+
+    // === Phase B (meta-language) TDD tests: SmeltType::Lambda ===
+
+    /// `Lambda<Expr<Integer>, Expr<Text>>` round-trips through
+    /// `format_smelt_type_hover` and `parse_smelt_type`.
+    ///
+    /// Note: `DataType::Text` renders as `"TEXT"` via `to_sql()` but
+    /// `parse_type("TEXT")` returns `Varchar { max_length: None }`. We use
+    /// `Varchar` directly for a clean round-trip, consistent with `list_type_nested`.
+    #[test]
+    fn lambda_type_round_trip() {
+        let ty = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Varchar { max_length: None },
+            ))),
+        );
+        let rendered = format_smelt_type_hover(&ty);
+        assert_eq!(rendered, "Lambda<Expr<INTEGER>, Expr<VARCHAR>>");
+        let parsed =
+            parse_smelt_type(&rendered).expect("Lambda<Expr<INTEGER>, Expr<VARCHAR>> should parse");
+        assert_eq!(parsed, ty);
+    }
+
+    /// Lambda is invariant: `Lambda<Expr<Integer>, Expr<Text>>` is NOT a subtype of
+    /// `Lambda<Expr<Numeric>, Expr<Text>>` even though `Expr<Integer> <: Expr<Numeric>`.
+    #[test]
+    fn lambda_type_invariant() {
+        let lambda_int_text = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        let lambda_numeric_text = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Numeric)),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        // Lambda is invariant — Integer does NOT widen to Numeric for subtyping.
+        assert!(
+            !is_subtype_of(&lambda_int_text, &lambda_numeric_text),
+            "Lambda<Expr<Integer>, Expr<Text>> must NOT be a subtype of Lambda<Expr<Numeric>, Expr<Text>> (invariant)"
+        );
+        assert!(
+            !is_subtype_of(&lambda_numeric_text, &lambda_int_text),
+            "Lambda<Expr<Numeric>, Expr<Text>> must NOT be a subtype of Lambda<Expr<Integer>, Expr<Text>> (invariant)"
+        );
+    }
+
+    /// `is_subtype_of(L, L) == true` only for byte-equal `L` (reflexivity).
+    #[test]
+    fn lambda_type_equality_only_when_exact() {
+        let lambda = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+        );
+        assert!(
+            is_subtype_of(&lambda, &lambda),
+            "Lambda must be a subtype of itself (reflexivity)"
+        );
+        let lambda2 = SmeltType::Lambda(
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer))),
+            Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))),
+        );
+        assert!(
+            !is_subtype_of(&lambda, &lambda2),
+            "Lambda with different body type must NOT be a subtype"
         );
     }
 }

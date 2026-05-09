@@ -244,6 +244,8 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         // `List<T>` and `Unknown` (Phase A meta-language) — compile-time only; no
         // runtime DataType equivalent in Phase A.
         Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
+        // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid parameter sort.
+        Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }

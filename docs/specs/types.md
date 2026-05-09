@@ -55,10 +55,13 @@ Parameter and return positions accept fragment sorts:
 | Select list | `SelectItems<Kind[, ctx]>` | `SelectItems<Agg, base>` |
 | Open struct value | `Expr<Struct<{f: T, …}>>` | `Expr<Struct<{ts: Timestamp, ..r}>>` |
 | Meta list (Phase A) | `List<T>` | `List<Expr<Numeric>>`, `List<TableExpr>`, `List<List<Text>>` |
+| Lambda (Phase B) | `Lambda<T, U>` | `Lambda<Expr<Integer>, Expr<Boolean>>` |
 
 `T` is one of: a concrete `DataType`, a `TypeConstraint` (`Numeric`, `Ordered`, `Any`), or — in built-ins / `smelt.extern` only — a generic parameter (`<T: Constraint>`). Row-tail markers on `TableExpr<{…}>` and `Struct<{…}>`: omitted (closed), `..` (anonymous tail accepted), `..r` (named tail bound).
 
 `List<T>` is a meta-only sort: it never appears as a `DataType` in a runtime column, and `Array<U>` is its Data-World counterpart. The element type `T` may be any other fragment sort (including a nested `List<U>`) or a meta-only type introduced by a later phase (`ColumnRef`, `ModelRef`, record types). `List<T>` is **covariant** in `T` — if `S <: T` under the fragment-sort subtyping rules below, then `List<S> <: List<T>`. The runtime witness is `SmeltType::List(Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full Phase A surface and semantics live in `meta_language.md` §"Phase A — `List<T>`, list literals, spread".
+
+`Lambda<T, U>` is a meta-only sort representing a compile-time function value with input sort `T` and output sort `U`. It is **invariant** in both `T` and `U`: `Lambda<S1, T1> <: Lambda<S2, T2>` holds only when `S1 = S2` AND `T1 = T2`. `Lambda<T, U>` values are produced by `fn param => body` syntax and consumed by higher-order functions (`map`, `filter`, `reduce`). The runtime witness is `SmeltType::Lambda(Box<SmeltType>, Box<SmeltType>)` in `crates/smelt-types/src/signatures.rs`. Full Phase B surface and semantics live in `meta_language.md` §"Phase B — `Lambda<T, U>`, HOFs, pipe". `Lambda<T, U>` is meta-only — it is not user-writable as a `smelt.define` parameter sort or return type, and is constructed only at HOF positional argument positions; Phase B's `LambdaInForbiddenPosition` diagnostic enforces this.
 
 `Kind` ∈ `{Scalar, Agg, Window}`. `ctx` is the name of a sibling parameter whose schema scopes the items.
 
