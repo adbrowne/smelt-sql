@@ -3375,7 +3375,8 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // All three checks use an empty TypeContext (no column schema
             // available at this point) — consistent with the window-function
             // check above.
-            let spread_result = type_inference::check_select_list_spreads(&select_stmt, &kind_ctx);
+            let spread_result =
+                type_inference::check_select_list_spreads(&select_stmt, &kind_ctx, text);
             for diag in spread_result.diagnostics {
                 DiagnosticAcc(diag).accumulate(db);
             }
@@ -3388,7 +3389,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                             // Use the expression's span for the diagnostic anchor.
                             let span = expr.syntax().text_range();
                             for diag in type_inference::list_literal_sentinels_to_diagnostics(
-                                &elements, &kind_ctx, span,
+                                &elements, &kind_ctx, span, text,
                             ) {
                                 DiagnosticAcc(diag).accumulate(db);
                             }
@@ -3398,7 +3399,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
 
             let forbidden_diags =
-                type_inference::check_forbidden_position_spreads(&select_stmt, &kind_ctx);
+                type_inference::check_forbidden_position_spreads(&select_stmt, &kind_ctx, text);
             for diag in forbidden_diags {
                 DiagnosticAcc(diag).accumulate(db);
             }

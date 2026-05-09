@@ -3143,11 +3143,18 @@ pub fn infer_list_literal(
     // Empty literal — consult expected type.
     if elements.is_empty() {
         if let Some(exp) = expected {
-            // The expected type is already a fully-formed List<T>; return it.
-            return ListLiteralInferResult {
-                inferred: exp.clone(),
-                sentinels: vec![],
-            };
+            // The expected type must be a List<T> to be meaningful context for
+            // an empty list literal. If the caller passes a non-List expected
+            // (e.g. `Expr<Numeric>` at an unconstrained position), fall through
+            // to the unknown-target branch rather than returning a non-List type.
+            if matches!(exp, SmeltType::List(_)) {
+                // Expected is a fully-formed List<T>; return it (spec rule 4).
+                return ListLiteralInferResult {
+                    inferred: exp.clone(),
+                    sentinels: vec![],
+                };
+            }
+            // Expected is not a List<T> — treat as unconstrained.
         }
         return ListLiteralInferResult {
             inferred: SmeltType::List(Box::new(SmeltType::Unknown)),
@@ -3390,28 +3397,25 @@ pub fn disambiguate_list_literal(
 /// sentinels produced by `infer_list_literal` and converts them into
 /// diagnostics anchored at `span` (the list literal's source span).
 ///
+/// `text` is the raw source text of the file — needed to convert
+/// `rowan::TextRange` byte offsets into `Position { line, column }` pairs via
+/// [`smelt_parser::ast::text_range_to_range`]. Pass an empty string `""` in
+/// unit tests where the exact range is not under test.
+///
 /// Pure function — no Salsa dependency. Returns the diagnostics so the
 /// caller can append them to whatever accumulator is in use.
 pub fn list_literal_sentinels_to_diagnostics(
     elements: &[smelt_parser::ast::Expr],
     ctx: &TypeContext,
     span: rowan::TextRange,
+    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_types::signatures::format_smelt_type_hover;
 
     let result = infer_list_literal(elements, ctx, None);
     let mut diags = Vec::new();
 
-    let zero_range = crate::Range {
-        start: crate::Position { line: 0, column: 0 },
-        end: crate::Position { line: 0, column: 0 },
-    };
-    // Use the span if we can convert it to a range — otherwise fall back to
-    // zero. The caller is responsible for providing the real span from the
-    // source text (they have access to the text via `text_range_to_range`).
-    // For tests that don't have the source text, zero range is acceptable.
-    let range = zero_range;
-    let _ = span; // span provided for future use when caller has source text
+    let range = smelt_parser::ast::text_range_to_range(text, span);
 
     for sentinel in &result.sentinels {
         let (code, message) = match sentinel {
@@ -3509,10 +3513,15 @@ pub struct SelectListSpreadResult {
 /// Forbidden-position checking (WHERE, etc.) is handled separately by
 /// [`check_forbidden_position_spreads`].
 ///
+/// `text` is the raw source text — used to convert `rowan::TextRange` byte
+/// offsets into `Position { line, column }` for diagnostics. Pass `""` in unit
+/// tests where the exact range is not under test.
+///
 /// Pure function — no Salsa dependency.
 pub fn check_select_list_spreads(
     select_stmt: &smelt_parser::ast::SelectStmt,
     ctx: &TypeContext,
+    text: &str,
 ) -> SelectListSpreadResult {
     use smelt_parser::SyntaxKind::{LIST_SPREAD, SELECT_LIST};
     use smelt_types::signatures::format_smelt_type_hover;
@@ -3531,11 +3540,6 @@ pub fn check_select_list_spreads(
 
     let Some(sl_node) = select_list_node else {
         return result;
-    };
-
-    let zero_range = crate::Range {
-        start: crate::Position { line: 0, column: 0 },
-        end: crate::Position { line: 0, column: 0 },
     };
 
     for child in sl_node.children() {
@@ -3592,10 +3596,11 @@ pub fn check_select_list_spreads(
                         )
                     }
                 };
+                let span_range = smelt_parser::ast::text_range_to_range(text, spread_span);
                 result.diagnostics.push(crate::Diagnostic {
                     severity: crate::DiagnosticSeverity::Error,
                     message,
-                    range: zero_range,
+                    range: span_range,
                     code: Some(code),
                     data: None,
                 });
@@ -3632,6 +3637,7 @@ pub fn check_select_list_spreads(
                             ),
                         );
                         let actual_str = format_smelt_type_hover(&actual);
+                        let span_range = smelt_parser::ast::text_range_to_range(text, spread_span);
                         result.diagnostics.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: crate::meta_list_diagnostic_message(
@@ -3640,7 +3646,7 @@ pub fn check_select_list_spreads(
                                 Some(&actual_str),
                                 None,
                             ),
-                            range: zero_range,
+                            range: span_range,
                             code: Some(crate::DiagnosticCode::MetaSpreadOnNonList),
                             data: None,
                         });
@@ -3675,18 +3681,19 @@ pub fn check_select_list_spreads(
 ///    `SelectStmt` has a `WHERE` clause — these represent spread-in-WHERE
 ///    parse errors.
 ///
+/// `text` is the raw source text — used to convert `rowan::TextRange` byte
+/// offsets into `Position { line, column }` for diagnostics. Pass `""` in unit
+/// tests where the exact range is not under test.
+///
 /// Pure function — no Salsa dependency.
 pub fn check_forbidden_position_spreads(
     select_stmt: &smelt_parser::ast::SelectStmt,
     _ctx: &TypeContext,
+    text: &str,
 ) -> Vec<crate::Diagnostic> {
     use smelt_parser::SyntaxKind::{DOT_DOT_DOT, LIST_SPREAD, WHERE_CLAUSE};
 
     let mut diags = Vec::new();
-    let zero_range = crate::Range {
-        start: crate::Position { line: 0, column: 0 },
-        end: crate::Position { line: 0, column: 0 },
-    };
 
     let has_where = select_stmt
         .syntax()
@@ -3704,6 +3711,7 @@ pub fn check_forbidden_position_spreads(
         if let Some(wn) = where_node {
             for desc in wn.descendants() {
                 if desc.kind() == LIST_SPREAD {
+                    let range = smelt_parser::ast::text_range_to_range(text, desc.text_range());
                     diags.push(crate::Diagnostic {
                         severity: crate::DiagnosticSeverity::Error,
                         message: crate::meta_list_diagnostic_message(
@@ -3712,7 +3720,7 @@ pub fn check_forbidden_position_spreads(
                             None,
                             Some(SplicePosition::Where.forbidden_position_name()),
                         ),
-                        range: zero_range,
+                        range,
                         code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
                         data: None,
                     });
@@ -3749,6 +3757,7 @@ pub fn check_forbidden_position_spreads(
                 // Look for DOT_DOT_DOT tokens after the SELECT_STMT.
                 if let rowan::NodeOrToken::Token(tok) = &child {
                     if tok.kind() == DOT_DOT_DOT {
+                        let range = smelt_parser::ast::text_range_to_range(text, tok.text_range());
                         diags.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: crate::meta_list_diagnostic_message(
@@ -3757,7 +3766,7 @@ pub fn check_forbidden_position_spreads(
                                 None,
                                 Some(SplicePosition::Where.forbidden_position_name()),
                             ),
-                            range: zero_range,
+                            range,
                             code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
                             data: None,
                         });
@@ -3766,6 +3775,7 @@ pub fn check_forbidden_position_spreads(
                 // Also check for LIST_SPREAD nodes at parent level.
                 if let rowan::NodeOrToken::Node(node) = &child {
                     if node.kind() == LIST_SPREAD {
+                        let range = smelt_parser::ast::text_range_to_range(text, node.text_range());
                         diags.push(crate::Diagnostic {
                             severity: crate::DiagnosticSeverity::Error,
                             message: crate::meta_list_diagnostic_message(
@@ -3774,7 +3784,7 @@ pub fn check_forbidden_position_spreads(
                                 None,
                                 Some(SplicePosition::Where.forbidden_position_name()),
                             ),
-                            range: zero_range,
+                            range,
                             code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
                             data: None,
                         });
@@ -3792,7 +3802,11 @@ pub fn check_forbidden_position_spreads(
     diags
 }
 
-/// Expand a `LIST_SPREAD` node at a specific splice position.
+/// Phase B+ unified entry point for spread expansion.
+///
+/// Phase A wires only SELECT-list via [`check_select_list_spreads`]; this
+/// function will be the integration target for GROUP BY / ORDER BY / function
+/// args / IN-list / VALUES in Phase B.
 ///
 /// This is the general-purpose spread expansion function that handles:
 /// (a) forbidden-position validation → emits `MetaSpreadInForbiddenPosition`
@@ -3804,6 +3818,7 @@ pub fn check_forbidden_position_spreads(
 /// actual element count for valid expansion).
 ///
 /// Pure function — no Salsa dependency.
+#[allow(dead_code)]
 pub fn expand_spread_into_position(
     spread: &smelt_parser::ast::ListSpread,
     ctx: &TypeContext,
@@ -5202,6 +5217,39 @@ mod tests {
         );
     }
 
+    /// `[]` with a non-List expected type (`Expr<Numeric>`) — the caller passed an
+    /// inappropriate expected sort. The function must NOT return the non-List expected
+    /// type; it must fall back to `List<Unknown>` + `EmptyTypeUnknown` sentinel.
+    ///
+    /// Regression test for B-2: without the guard, `infer_list_literal` would
+    /// return `Expr<Numeric>` (a non-List type) when passed any non-None expected,
+    /// which would break the invariant that the function always returns a `List<T>`.
+    #[test]
+    fn infer_list_literal_empty_with_non_list_expected_falls_through() {
+        let elems = list_elements("SELECT []");
+        let ctx = TypeContext::new();
+        // Pass a non-List expected type — should NOT be returned as-is.
+        let non_list_expected = SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+            DataType::Integer,
+        ));
+        let result = infer_list_literal(&elems, &ctx, Some(&non_list_expected));
+        // Must still be List<Unknown>, NOT Expr<Integer>.
+        assert_eq!(
+            result.inferred,
+            SmeltType::List(Box::new(SmeltType::Unknown)),
+            "empty list with non-List expected must fall through to List<Unknown>, \
+             not return the non-List expected type; got: {:?}",
+            result.inferred
+        );
+        // Must emit EmptyTypeUnknown sentinel.
+        assert_eq!(result.sentinels.len(), 1);
+        assert!(
+            matches!(result.sentinels[0], ListInferSentinel::EmptyTypeUnknown),
+            "expected EmptyTypeUnknown sentinel, got: {:?}",
+            result.sentinels[0]
+        );
+    }
+
     /// `[[100000, 200000], [300000, 400000]]` — nested list — infers `List<List<Expr<Integer>>>`.
     #[test]
     fn infer_list_literal_nested() {
@@ -5348,7 +5396,8 @@ mod tests {
         let elems = list_elements("SELECT [1, 'hello']");
         let ctx = TypeContext::new();
         let span = rowan::TextRange::new(7.into(), 20.into()); // approximate span
-        let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span);
+                                                               // Pass "" as text — unit tests don't assert specific line/column ranges.
+        let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span, "");
         assert_eq!(
             diags.len(),
             1,
@@ -5372,7 +5421,8 @@ mod tests {
         let elems = list_elements("SELECT []");
         let ctx = TypeContext::new();
         let span = rowan::TextRange::new(7.into(), 9.into());
-        let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span);
+        // Pass "" as text — unit tests don't assert specific line/column ranges.
+        let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span, "");
         assert_eq!(
             diags.len(),
             1,
@@ -5397,7 +5447,8 @@ mod tests {
         let sql = "SELECT id, ...[a, b], created_at FROM t";
         let select = parse_select_stmt(sql);
         let ctx = TypeContext::new();
-        let result = check_select_list_spreads(&select, &ctx);
+        // Pass "" as text — unit tests don't assert specific line/column ranges.
+        let result = check_select_list_spreads(&select, &ctx, "");
         // Must find the spread and report expanded count = 2 (for a, b)
         assert_eq!(
             result.expanded_item_count, 2,
@@ -5433,7 +5484,8 @@ mod tests {
         let sql = "SELECT id, ...[], created_at FROM t";
         let select = parse_select_stmt(sql);
         let ctx = TypeContext::new();
-        let result = check_select_list_spreads(&select, &ctx);
+        // Pass "" as text — unit tests don't assert specific line/column ranges.
+        let result = check_select_list_spreads(&select, &ctx, "");
         assert_eq!(
             result.expanded_item_count, 0,
             "spread of empty list must expand to 0 items (elision), got: {}",
@@ -5458,7 +5510,8 @@ mod tests {
         let sql = "SELECT x FROM t WHERE x = 1 AND ...preds";
         let select = parse_select_stmt(sql);
         let ctx = TypeContext::new();
-        let diags = check_forbidden_position_spreads(&select, &ctx);
+        // Pass "" as text — unit tests don't assert specific line/column ranges.
+        let diags = check_forbidden_position_spreads(&select, &ctx, "");
         assert!(
             !diags.is_empty(),
             "spread in WHERE must produce MetaSpreadInForbiddenPosition diagnostic"
@@ -5486,7 +5539,8 @@ mod tests {
             "x",
             smelt_types::TypedColumn::not_null(DataType::Integer),
         );
-        let result = check_select_list_spreads(&select, &ctx);
+        // Pass "" as text — unit tests don't assert specific line/column ranges.
+        let result = check_select_list_spreads(&select, &ctx, "");
         assert_eq!(
             result.diagnostics.len(),
             1,
