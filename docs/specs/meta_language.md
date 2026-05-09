@@ -45,7 +45,7 @@ A `List<T>` value is **finite, ordered, immutable**. Length is fixed at construc
 - Trailing comma allowed (`[a, b, c,]`).
 - Singleton `[x]` allowed.
 - Empty `[]` allowed in a position with an inferable target sort; an `[]` in any other position emits `MetaListEmptyTypeUnknown`.
-- Same surface tokens lift to either a meta `List<T>` or a Data-World `Array<U>` literal, disambiguated by target sort at type-check time. The parser produces a single `LIST_LITERAL` CST node; meaning is assigned by the type checker. When both the meta and Data-World readings are valid at a position, **meta wins** (see §Design — Phase A).
+- Same surface tokens lift to either a meta `List<T>` or a Data-World `Array<U>` literal, disambiguated by target sort at type-check time. The parser produces a single `ARRAY_LITERAL` CST node; meaning is assigned by the type checker. When both the meta and Data-World readings are valid at a position, **meta wins** (see §Design — Phase A).
 - Heterogeneous literals (`[1, 'hello']`) emit `MetaListHeterogeneous` (meta path) or `TypeMismatch` (Data-World path) per `types.md` §"Strict-by-default doctrine"; the inferred type is `List<Unknown>` (meta) or `Array<Unknown>` (Data).
 
 #### Spread operator `...xs`
@@ -152,7 +152,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 2. **List literal evaluation.** `[e_1, …, e_n]` evaluates each element `e_i` in the surrounding splice context and produces a `List<T>` value of length `n`. `T` is the LUB of the element types under `types.md` §"Numeric promotion chain". A literal whose elements do not unify is `List<Unknown>` and emits `MetaListHeterogeneous`; downstream consumers of `List<Unknown>` follow the widening rule in `gradual_typing.md` §"List<Unknown> widening".
 
-3. **Bidirectional disambiguation.** The parser produces one `LIST_LITERAL` CST node for `[…]`; meaning is assigned by the type checker:
+3. **Bidirectional disambiguation.** The parser produces one `ARRAY_LITERAL` CST node for `[…]`; meaning is assigned by the type checker:
    - If the surrounding target sort is `List<T>` (meta), the literal evaluates as a meta-list with element type `T`.
    - If the surrounding target sort is `Expr<Array<U>>` (Data-World) or any context that admits an array literal per the existing array-literal rules, the literal evaluates as a runtime array.
    - If both are admissible, **meta-list wins**. Users opt explicitly into the runtime-array meaning by writing the (Phase E2) `Array<U>(…)` constructor.
@@ -170,7 +170,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 9. **Spread on non-list.** `...x` where `x` is not a `List<T>` is `MetaSpreadOnNonList`. The spread is dropped; the surrounding position type-checks as if the spread were absent.
 
-10. **Compile-time-only.** No `List<T>` value reaches the database engine. After meta-evaluation, the Data-World CST handed to codegen contains no `LIST_LITERAL` and no spread node; every list value has been consumed by spread, by a HOF (Phase B), by a reducer (Phase B), or by a record / map / generator (Phase E1+).
+10. **Compile-time-only.** No `List<T>` value reaches the database engine. After meta-evaluation, the Data-World CST handed to codegen contains no `ARRAY_LITERAL` and no spread node; every list value has been consumed by spread, by a HOF (Phase B), by a reducer (Phase B), or by a record / map / generator (Phase E1+).
 
 11. **Termination.** Phase A introduces no meta-recursion. List literal evaluation walks the elements left-to-right exactly once; spread walks the source list exactly once. Wall-clock cost is O(n) in the source length.
 
@@ -254,7 +254,7 @@ Phase A ships the **lifting test** — the smallest slice that exercises the met
 - **Code** *(populated as phases land — Phase A entries are aspirational targets until the implementation plan lands; `/smelt:validate` will pin them once code exists)*:
   - Phase A:
     - `crates/smelt-parser/src/lexer.rs` — adds `LBRACKET`, `RBRACKET`, `DOTDOTDOT` tokens.
-    - `crates/smelt-parser/src/parser.rs` — adds `LIST_LITERAL` and `SPREAD` productions.
+    - `crates/smelt-parser/src/parser.rs` — adds `ARRAY_LITERAL` (reused for list literals) and `LIST_SPREAD` productions.
     - `crates/smelt-parser/src/ast.rs` — typed wrappers for the new CST nodes.
     - `crates/smelt-types/src/signatures.rs` — `SmeltType::List(Box<SmeltType>)` variant.
     - `crates/smelt-db/src/type_inference.rs` — pure inference for list literals and spread (LUB, covariant subtyping, empty-literal handling).
