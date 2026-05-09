@@ -8,9 +8,9 @@
 
 ## How to resume in a fresh session
 
-This plan is the **in-repo committed index** for a multi-day implementation across multiple sessions. The across-session source of truth is `/home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md` (the meta-plan). When a fresh session picks this up:
+This plan is the **in-repo committed index** for a multi-day implementation across multiple sessions. The across-session source of truth is `/home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md` (the meta-plan). When a fresh session picks this up (whether autonomy-loop fired it via `claude -p "continue"` or the user typed `continue` after `/clear`):
 
-1. Read `/home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md` (the meta-plan; full process, expert-reviewer table, stop-the-line conditions).
+1. Read `/home/andrew/.claude/plans/i-would-like-you-optimized-stallman.md` (the meta-plan; full process, expert-reviewer table, stop-the-line conditions, **sentinel emission contract**).
 2. Read this file (the in-repo phase status table).
 3. Find the first non-`done` phase below.
 4. If the per-phase plan exists (`docs/plans/20260509-meta-language-<X>.md`), read it. Otherwise generate it: run `/smelt:spec meta_language` to author the phase's spec increment, then `/smelt:plan meta_language` to derive the phase plan.
@@ -18,7 +18,14 @@ This plan is the **in-repo committed index** for a multi-day implementation acro
 6. After `/smelt:implement` completes, dispatch the expert reviewers listed in the meta-plan §5 with `model: sonnet` (or haiku for examples-curator / docs-reviewer). Roll up material findings into the phase commits.
 7. Run `/smelt:validate meta_language` (and `meta_config_loading` for E1+). Zero drift required.
 8. Update the row below: `pending` → `done`, fill `Date` and `Commit`. Push.
-9. End the session — the next session resumes from the next pending row.
+9. **Emit `<<PHASE_COMPLETE>>`** as part of the final user-facing message (autonomy-loop wrapper greps for it to fire the next iteration). When all phases are done and meta-plan §10 verification holds, emit `<<ALL_DONE>>` instead. If a stop-the-line condition fires, emit `<<PAUSE_FOR_HUMAN>>` with the reason on the line above. See meta-plan "Sentinel emission contract" for the strict rules.
+10. End the session — the next iteration / session resumes from the next pending row.
+
+## Autonomy loop (optional)
+
+To run autonomously: `bash .claude/scripts/autonomy-loop.sh`. The wrapper invokes `claude -p "continue"` in a fresh-context loop, detects the sentinels emitted at the end of each iteration, and either restarts (`<<PHASE_COMPLETE>>`), exits with success (`<<ALL_DONE>>`), or pauses for the user (`<<PAUSE_FOR_HUMAN>>` or unrecognised output). Defaults: max 25 iterations, `bypassPermissions` permission mode, `opus` model. Tunable via `MAX_ITERATIONS`, `PERMISSION_MODE`, `MODEL` env vars. Per-iteration logs land in `~/.claude/logs/meta-language-loop/`.
+
+To run manually instead: `/clear` between phases and type `continue` — the resumability protocol is identical.
 
 **Within-phase reset rule.** If the implementer subagent has been iterating >3 review cycles, the phase scope is wrong. End the session, revise the phase plan or escalate to the user, do not iterate harder.
 
