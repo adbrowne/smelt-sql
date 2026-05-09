@@ -101,3 +101,24 @@ The validator also checks that a `functions/` directory with at least one
   `functions/`, **not** the filename stem. A function `safe_revenue` in
   `functions/revenue.sql` is called as `smelt.functions.safe_revenue(...)`, not
   `smelt.functions.revenue.safe_revenue(...)`. Including the stem is an error.
+
+## Optional: meta-list lift (Phase A surface)
+
+Once the required outputs above are passing, try this extension: `stg_orders`
+joins `raw_customers` and surfaces two VARCHAR identity columns —
+`customer_name` and `country` — that you might repeat across intermediate CTEs.
+Lift that repeated VARCHAR projection into a homogeneous `List<Expr<Text>>`
+literal spread into each SELECT list:
+
+```sql
+-- Spread two same-typed VARCHAR columns from raw_customers
+SELECT order_id, customer_id, ...[customer_name, country], order_date, status, amount
+FROM ...
+```
+
+The smelt LSP will show `List<Expr<TEXT>>` on hover for the literal and emit a helpful
+diagnostic if you mis-shape it — for example `MetaListHeterogeneous` if the
+elements don't all share a common type, or `MetaSpreadInForbiddenPosition` if
+you accidentally place the spread inside a WHERE clause instead of the SELECT
+list.  This extension is not validated by `validate.py`; it is workflow practice
+only.

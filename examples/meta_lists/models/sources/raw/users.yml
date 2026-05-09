@@ -1,0 +1,14 @@
+description: Raw user data for meta-list examples
+columns:
+- name: id
+  type: INTEGER
+  description: Unique user identifier
+- name: name
+  type: VARCHAR
+  description: User display name
+- name: email
+  type: VARCHAR
+  description: User email address
+- name: created_at
+  type: TIMESTAMP
+  description: Account creation timestamp
