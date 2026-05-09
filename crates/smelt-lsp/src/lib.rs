@@ -941,6 +941,12 @@ pub fn passing_body_aggregate_labels() -> Vec<&'static str> {
 /// Calls `infer_list_literal` and formats the inferred `SmeltType` via
 /// `format_smelt_type_hover`. Safe on partially-parsed literals — falls back
 /// to `List<Unknown>` rather than panicking.
+///
+/// Phase A note: not currently called from `Backend::hover`; the dispatch
+/// routes through [`hover_text_for_list_literal_dual`] with `expected = None`.
+/// Position-aware hover (consulting the splice context to choose the meta vs
+/// data-world reading, or to supply the expected sort for an empty literal)
+/// lands in Phase B+.
 pub fn hover_text_for_list_literal(
     elements: &[smelt_parser::ast::Expr],
     ctx: &smelt_db::TypeContext,
@@ -3872,11 +3878,18 @@ impl LanguageServer for Backend {
 
                 // Phase 4 (meta-language): hover on ARRAY_LITERAL — show the
                 // inferred List<T> type (or dual meta + data-world reading).
+                //
+                // Guard: if the matched ARRAY_LITERAL is the operand child of a
+                // LIST_SPREAD node, skip here and let the LIST_SPREAD dispatch
+                // below handle it. This ensures "hover on `[…]` inside `...[…]`
+                // shows the source list type" is honoured by design rather than
+                // by accident (spec rule: hover on spread shows source list type).
                 {
                     use smelt_parser::syntax_kind::SyntaxKind;
 
                     // Walk descendants to find an ARRAY_LITERAL node that
-                    // contains the cursor offset.
+                    // contains the cursor offset and is NOT the operand of a
+                    // LIST_SPREAD parent.
                     let array_node = file
                         .syntax()
                         .descendants()
@@ -3884,7 +3897,16 @@ impl LanguageServer for Backend {
                         .find(|n| {
                             let start: usize = n.text_range().start().into();
                             let end: usize = n.text_range().end().into();
-                            cursor_offset >= start && cursor_offset <= end
+                            if !(cursor_offset >= start && cursor_offset <= end) {
+                                return false;
+                            }
+                            // Skip if this ARRAY_LITERAL is the direct child of a
+                            // LIST_SPREAD — the spread dispatch handles that case.
+                            let parent_is_spread = n
+                                .parent()
+                                .map(|p| p.kind() == SyntaxKind::LIST_SPREAD)
+                                .unwrap_or(false);
+                            !parent_is_spread
                         });
 
                     if let Some(arr_node) = array_node {
@@ -5143,6 +5165,11 @@ mod tests {
     /// `List<Expr<TEXT>>`.
     ///
     /// Note: DataType names render in SQL uppercase via `DataType::to_sql()`.
+    ///
+    /// Tests the Phase B+ position-aware code path (`hover_text_for_list_literal`
+    /// with `expected = Some(…)`); not exercised by `Backend::hover` today —
+    /// the production dispatch always calls `hover_text_for_list_literal_dual`
+    /// with `expected = None`.
     #[test]
     fn hover_list_literal_empty_with_target() {
         use smelt_types::signatures::{SmeltType, TypeConstraint};
@@ -5199,25 +5226,22 @@ mod tests {
     /// Hover on `...[1.5, 2.5]` — spread of a numeric list literal.
     ///
     /// Note: Phase A cannot bind named variables; the operand is a list literal
-    /// whose inferred type is `List<Expr<Numeric>>` (Decimal via LUB of 1.5 and 2.5).
-    /// The hover must contain the source list type string.
+    /// whose inferred type is `List<Expr<DECIMAL(2,1)>>` — both `1.5` and `2.5`
+    /// lex as `Decimal(2,1)` and the LUB of two identical types is that same type.
+    /// The hover must show that exact element type (not the `Decimal(38,10)` that
+    /// promotion would produce for mixed types — these two are the same precision).
     #[test]
     fn hover_spread_returns_source_list_type() {
         // `...[1.5, 2.5]` — LIST_SPREAD wrapping an ARRAY_LITERAL.
-        // The operand is a list literal; the spread operand's inferred type is
-        // the element type computed from [1.5, 2.5] (Decimal via LUB).
+        // Both literals lex as Decimal(2,1); LUB of identical types is the type
+        // itself, so the inferred element type is Decimal(2,1).
         let spread = parse_list_spread("SELECT ...[1.5, 2.5]");
         let ctx = smelt_db::TypeContext::new();
         let text = hover_text_for_list_spread(&spread, &ctx);
-        // The hover must mention List< something >.
+        // Assert the exact inferred type — homogeneous Decimal(2,1) list.
         assert!(
-            text.contains("List<"),
-            "hover for spread must contain `List<...>`, got: {text}"
-        );
-        // It must NOT be List<Unknown> for a valid homogeneous list.
-        assert!(
-            !text.contains("List<Unknown>"),
-            "hover for spread over homogeneous list must not be List<Unknown>, got: {text}"
+            text.contains("List<Expr<DECIMAL(2,1)>>"),
+            "hover for spread of [1.5, 2.5] must be `List<Expr<DECIMAL(2,1)>>`, got: {text}"
         );
     }
 }
