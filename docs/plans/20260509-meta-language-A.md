@@ -20,12 +20,15 @@ You are executing this plan from the start of a new session. Your job is to driv
 
 **For each phase, run the per-phase loop encoded in `/smelt:implement`:** implementer subagent (`model: sonnet`) → reviewer subagent (`model: sonnet`) → iterate → record + commit + push.
 
+**Phase 7 is the expert-reviewer dispatch loop** — after Phases 1–6 commit, dispatch the meta-plan §5 expert reviewers applicable to this phase, address material findings, and re-dispatch each expert until clean (or stop-the-line per meta-plan §7). Do NOT skip Phase 7. The autonomy loop's `<<PHASE_COMPLETE>>` sentinel may only fire once Phase 7's acceptance gate is met.
+
 **When to pause and ask the user:**
 
 - The reviewer surfaces the same material finding across two implementer passes.
 - TDD tests cannot be made green without violating a spec rule.
 - A spec assumption turns out to be wrong (run `/smelt:spec` first to update).
 - `cargo test` or `cargo clippy --all-targets` surfaces a pre-existing failure unrelated to the plan.
+- Phase 7: an expert flags the same material finding on round 3 (per-expert bound), or two different experts flag the same systemic concern in the same round.
 
 **Conventions every phase:**
 - Real-fixture tests under `examples/meta_lists/` — every phase from Phase 5 onward exercises its feature there; earlier phases have unit tests in `crates/`.
@@ -80,6 +83,7 @@ The meta-language Phase A spec increment landed in this session's earlier commit
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
+| 7     | pending  |        |      |
 
 ---
 
@@ -389,6 +393,69 @@ This phase has no Rust unit tests. The acceptance gate is content review (the re
 
 ---
 
+### Phase 7: Expert reviewer dispatch loop
+
+**Goal.** Run each Phase A applicable expert reviewer from meta-plan §5 over the Phase A diff, address material findings, and re-dispatch each expert until it reports clean — or escalate via stop-the-line per the bounds below. This phase is the realisation of the user's original ask: "Use expert reviews by subagents with specific context to help guide the implementation."
+
+**Pre-conditions.** Phases 1–6 complete and committed. Working tree clean. `cargo fmt --all -- --check`, `cargo clippy --all-targets`, `cargo test`, and `cargo test -p smelt-cli --test example_diagnostics` all pass.
+
+**Experts to dispatch (Phase A subset of meta-plan §5).**
+
+| Expert | Model | Scope (file allowlist) | What to verify |
+|---|---|---|---|
+| **parser-expert** | sonnet | `crates/smelt-parser/src/{lexer,parser,ast,syntax_kind}.rs` | `DOT_DOT_DOT` lexer addition does not regress `..` (struct-spread); list-literal vs array-literal CST shape correct; spread accepted only in spec-listed positions; recursive-descent depth/recovery invariants intact. |
+| **type-expert** | sonnet | `crates/smelt-types/src/signatures.rs`, `crates/smelt-db/src/type_inference.rs` | `SmeltType::List<T>` addition is non-breaking (no missed exhaustive matches); LUB rules for homogeneous / Numeric-promotion / heterogeneous lists match `meta_language.md` Phase A semantics; `List<Unknown>` widening matches `gradual_typing.md`; `type_inference.rs` purity preserved (no Salsa imports inside analysis logic). |
+| **lsp-expert** | sonnet | `crates/smelt-lsp/src/lib.rs` and any new LSP code paths from Phase 4 | Hover on a list literal returns `List<T>`; hover on a spread returns the operand list type; spans line up with CST; no regressions in goto-def or completion in adjacent positions. |
+| **examples-curator** | haiku | `examples/meta_lists/` (and any broken sub-fixtures introduced for Phase 3 diagnostics) | Fixture is minimal-but-realistic (no contrived shapes); covers the happy path + at least one edge case (empty literal, spread of literal, heterogeneous error); passes `cargo test -p smelt-cli --test example_diagnostics`. |
+| **docs-reviewer** | haiku | `docs-site/docs/meta-language/{index,lists,reference}.md` | Every Surface item from `meta_language.md` Phase A is documented; every diagnostic code has a "what to fix" hint; reference page is alphabetical and complete; no syntax appears in docs that is not speced. |
+
+**Loop discipline.**
+
+1. **Round 1.** Dispatch all five experts in parallel — single message, multiple Agent tool calls. Each prompt MUST include:
+   - The phase plan path and the spec sections that are the oracle (`docs/specs/meta_language.md` Phase A, plus `types.md` / `gradual_typing.md` cross-touches).
+   - The exact file scope from the table above.
+   - The diff range to review (commits since the start of Phase A — typically `git log --oneline <Phase-A-base>..HEAD`).
+   - Explicit instruction: report only **material** findings (correctness, spec drift, architectural-invariant breaks). Skip nits and stylistic preferences.
+   - Output format: a numbered list of findings with file:line refs, or "no material findings".
+
+2. **Address findings.** For each expert that returns material findings:
+   - If the fix is mechanical (≤~30 lines, single concern), edit directly.
+   - If the fix is non-trivial, dispatch an implementer subagent (`model: sonnet`) scoped to the same file allowlist, with the expert's findings as input. Do NOT widen scope into other phases.
+   - Run `cargo fmt --all`, `cargo clippy --all-targets`, `cargo test`, and `cargo test -p smelt-cli --test example_diagnostics` after each fix batch.
+   - Commit per expert: `review(meta-language-A): address {expert-name} feedback` (e.g. `review(meta-language-A): address parser-expert feedback`).
+   - Push after each commit (so the user sees progress on PR #117).
+
+3. **Re-dispatch.** Re-dispatch only the expert(s) whose findings were addressed, not the whole panel. Provide the same prompt as round 1 plus a diff of what changed since round N−1. If the expert returns "no material findings", that expert is **clean** and exits the loop.
+
+4. **Repeat** step 2 → step 3 until **every** expert is clean.
+
+5. **Bounds (stop-the-line).** Emit `<<PAUSE_FOR_HUMAN>>` (with a one-line reason) and stop the autonomy loop if any of the following fires:
+   - Same expert flags a material finding on round 3 (per-expert bound). The third repeat means the fix is wrong or the spec is wrong; the user must arbitrate.
+   - Two **different** experts flag the same systemic concern in the same round (per meta-plan §7). That's a design problem, not an implementation problem.
+   - An expert's findings would force a spec change. Run `/smelt:spec meta_language` first; if the spec edit is non-trivial or contentious, pause for the user.
+   - A fix surfaces a pre-existing failure unrelated to Phase A. Pause; the autonomy loop should not silently absorb pre-existing breakage.
+
+**Critical files (allowed to touch in this phase).** Anything within an expert's scope per the table above, plus `docs/plans/20260509-meta-language-A.md` (to record the round count and final clean status).
+
+**Docs touched.** None new — fixes may amend `docs-site/docs/meta-language/*` if the docs-reviewer flags a surface drift.
+
+**Review checklist** (material findings only — applied to the expert-dispatch *process*, not to a code diff):
+
+- [ ] All five experts were dispatched at least once.
+- [ ] Every material finding was either fixed or escalated; none silently dropped.
+- [ ] Round count per expert recorded in "Deferred during implementation" below (see acceptance gate).
+- [ ] No fix touched files outside the dispatching expert's scope (no scope creep).
+- [ ] No expert ran more than 3 rounds; if any did, the autonomy loop emitted `<<PAUSE_FOR_HUMAN>>`.
+- [ ] `cargo fmt --all -- --check`, `cargo clippy --all-targets`, `cargo test`, and `cargo test -p smelt-cli --test example_diagnostics` all green at end of phase.
+
+**Acceptance gate.** Append a one-line summary to "Deferred during implementation" of the form:
+
+> Phase 7 expert review: parser-expert clean (R{n}), type-expert clean (R{n}), lsp-expert clean (R{n}), examples-curator clean (R{n}), docs-reviewer clean (R{n}). No stop-the-line fired.
+
+**Commit(s).** Per round, per expert with findings: `review(meta-language-A): address {expert-name} feedback`. If round 1 came back clean for an expert, no commit for that expert. The acceptance-gate summary line lands in the next commit naturally (or in a tiny `chore(meta-language-A): record Phase 7 review summary` if no other phase-7 commits were made).
+
+---
+
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
@@ -403,4 +470,4 @@ How to confirm the spec is satisfied at the end:
 - `cargo test -p smelt-cli --test example_diagnostics` passes — `examples/meta_lists/` clean, broken sub-fixtures report the exact Phase A diagnostic codes.
 - `/smelt:validate meta_language` reports zero drift.
 - Hover in the LSP shows `List<T>` on a list literal and the operand list type on a spread (manual or scripted LSP smoke test in `examples/meta_lists/`).
-- The expert reviewers from meta-plan §5 (parser-expert, type-expert, lsp-expert, examples-curator, docs-reviewer) report no material findings on this phase.
+- Phase 7 acceptance gate met: every applicable expert reviewer (parser-expert, type-expert, lsp-expert, examples-curator, docs-reviewer) reported "no material findings" on its final dispatch, recorded in "Deferred during implementation" with round counts per expert. No stop-the-line condition fired.
