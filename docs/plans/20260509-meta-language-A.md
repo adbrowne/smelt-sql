@@ -83,7 +83,7 @@ The meta-language Phase A spec increment landed in this session's earlier commit
 | 4     | done     | e69a858 | 2026-05-10 |
 | 5     | done     | 21c9a73 | 2026-05-10 |
 | 6     | done     | 70cceb7 | 2026-05-10 |
-| 7     | pending  |        |      |
+| 7     | done     | (pending commit) | 2026-05-10 |
 
 ---
 
@@ -476,6 +476,8 @@ This phase has no Rust unit tests. The acceptance gate is content review (the re
 - **Phase 7 lsp-expert: C-4 tightened assertion uses `DECIMAL(2,1)`, not `DECIMAL(38,10)`.** `[1.5, 2.5]` has both literals lex as `Decimal(2,1)`; LUB of identical types is the type itself, so hover shows `List<Expr<DECIMAL(2,1)>>`. The `Decimal(38,10)` result only arises when two *different* numeric types are promoted — e.g. `SmallInt` + `Decimal(2,1)` → `Decimal(38,10)`. Test updated to assert the actual homogeneous result.
 - **Phase 7 lsp-expert: hover dispatch ordering vs Phase 48 PASSING-clause.** The new `ARRAY_LITERAL` dispatch in `Backend::hover` precedes the Phase 48 PASSING-clause dispatch. Today there is no functional collision (Phase 48 only matches when the cursor is on the parameter name, not the value). If Phase B adds value-position hover for PASSING arguments, the ordering will silently shadow it. Phase B/G should reorder or guard explicitly.
 - **Phase 7 lsp-expert: hover dispatch when cursor inside `[…]` of `...[…]` (fixed in round 1).** Phase 7 round-1 added a guard so the `ARRAY_LITERAL` dispatch yields to the `LIST_SPREAD` dispatch when the literal is the direct operand child of a spread node. This makes the spec rule "hover on spread shows source list type" honoured by design rather than accident.
+
+> Phase 7 expert review: parser-expert clean (R2), type-expert clean (R2), lsp-expert clean (R2), examples-curator clean (R1), docs-reviewer clean (R1). No stop-the-line fired.
 - **Phase 7 type-expert: `expand_spread_into_position` dead in Phase A.** The function is the architectural entry point for Phase B+ unified spread expansion; Phase A wires only the SELECT-list path via `check_select_list_spreads`. Marked `#[allow(dead_code)]` with a doc comment in the meantime. Phase B will wire it into GROUP BY / ORDER BY / function args / IN-list / VALUES and remove the allow attribute.
 - **Phase 7 type-expert: `MetaSpreadOnNonList` cannot fire for `DataType::Unknown` operand.** Both `check_select_list_spreads` and `expand_spread_into_position` silently no-op when `infer_expression_type` returns a `DataType::Unknown` operand, conflating "unresolvable identifier" with "resolved column of unknown type". Distinguishing `None` (unresolvable, suppress) from `Some(Unknown)` (resolved-but-unknown-typed) requires an audit of `infer_expression_type`'s `Unknown` semantics across the type-checker. Phase A keeps the suppression to avoid avalanching diagnostics on unresolvable identifiers; Phase B is the natural place to refine.
 
