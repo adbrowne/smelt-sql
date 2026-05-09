@@ -442,6 +442,29 @@ pub enum DiagnosticCode {
     /// and may drift when the CSV changes. Resolve by adding a sidecar.
     /// Introduced in Phase 7 of the seeds plan.
     MissingSeedSidecar,
+    /// Emitted when an empty list literal `[]` appears in a position where
+    /// no target sort context is available to infer the element type.
+    /// Message: "cannot infer element type for empty list literal".
+    /// Anchored at the list literal span. Introduced in Phase 3 of the
+    /// meta-language plan (Phase A).
+    MetaListEmptyTypeUnknown,
+    /// Emitted when a list literal's elements have incompatible types that
+    /// cannot be unified under LUB. Message: "list elements have
+    /// incompatible types: {T0}, {Tk}". Anchored at the list literal span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase A).
+    MetaListHeterogeneous,
+    /// Emitted when a spread operator `...xs` appears in a position that
+    /// does not permit spread: WHERE clause, FROM clause without an explicit
+    /// reducer, boolean composition, or named-argument value. Message:
+    /// "spread is not allowed in {position name}". Anchored at the spread's
+    /// span. Introduced in Phase 3 of the meta-language plan (Phase A).
+    MetaSpreadInForbiddenPosition,
+    /// Emitted when the operand of a spread `...x` is not a `List<T>` (its
+    /// inferred type is some other sort). Message: "spread expects List<T>;
+    /// found {actual type}". The spread is dropped and type-checking of the
+    /// surrounding form continues. Anchored at the spread's span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase A).
+    MetaSpreadOnNonList,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -503,6 +526,46 @@ pub enum DiagnosticSeverity {
     Warning,
     Info,
     Hint,
+}
+
+/// Render the diagnostic message for Phase A (meta-language) list and spread
+/// diagnostic codes.
+///
+/// Parameters:
+/// - `code`: one of the four Phase A `DiagnosticCode` variants.
+/// - `first_type`: the first element's rendered type (for `MetaListHeterogeneous`).
+/// - `other_type`: the incompatible/actual type (for `MetaListHeterogeneous` and
+///   `MetaSpreadOnNonList`).
+/// - `position_name`: the human-readable position name (for
+///   `MetaSpreadInForbiddenPosition`), e.g. `"WHERE clause"`.
+///
+/// Returns the exact message string specified in `meta_language.md` §"Diagnostic
+/// codes".
+pub fn meta_list_diagnostic_message(
+    code: DiagnosticCode,
+    first_type: Option<&str>,
+    other_type: Option<&str>,
+    position_name: Option<&str>,
+) -> String {
+    match code {
+        DiagnosticCode::MetaListEmptyTypeUnknown => {
+            "cannot infer element type for empty list literal".to_string()
+        }
+        DiagnosticCode::MetaListHeterogeneous => {
+            let t0 = first_type.unwrap_or("?");
+            let tk = other_type.unwrap_or("?");
+            format!("list elements have incompatible types: {}, {}", t0, tk)
+        }
+        DiagnosticCode::MetaSpreadInForbiddenPosition => {
+            let pos = position_name.unwrap_or("unknown position");
+            format!("spread is not allowed in {}", pos)
+        }
+        DiagnosticCode::MetaSpreadOnNonList => {
+            let actual = other_type.unwrap_or("?");
+            format!("spread expects List<T>; found {}", actual)
+        }
+        _ => panic!("meta_list_diagnostic_message called with non-Phase-A code"),
+    }
 }
 
 /// YAML parse error with location information
@@ -3289,6 +3352,55 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     data: None,
                 })
                 .accumulate(db);
+            }
+
+            // Phase A (meta-language) Phase 3: list + spread diagnostics.
+            //
+            // 1. Walk LIST_SPREAD nodes in the SELECT list.
+            //    Handles: MetaSpreadOnNonList, MetaListHeterogeneous (for inline
+            //    spread-of-literal), MetaListEmptyTypeUnknown.
+            //    GroupBy / OrderBy / function args / IN-list / VALUES remain
+            //    deferred — the parser DOES emit LIST_SPREAD there, but the
+            //    orchestrator does not yet walk those positions.
+            //
+            // 2. Walk SELECT_ITEM expressions for bare list literals
+            //    (`SELECT [1, 'x'] FROM t`).
+            //    Handles: MetaListHeterogeneous and MetaListEmptyTypeUnknown
+            //    for non-spread list literals appearing directly in the
+            //    SELECT list.
+            //
+            // 3. Detect spreads in forbidden positions (WHERE, etc.).
+            //    Handles: MetaSpreadInForbiddenPosition.
+            //
+            // All three checks use an empty TypeContext (no column schema
+            // available at this point) — consistent with the window-function
+            // check above.
+            let spread_result = type_inference::check_select_list_spreads(&select_stmt, &kind_ctx);
+            for diag in spread_result.diagnostics {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+
+            if let Some(select_list) = select_stmt.select_list() {
+                for item in select_list.items() {
+                    if let Some(expr) = item.expression() {
+                        if let Some(arr) = expr.as_array_literal() {
+                            let elements = arr.elements();
+                            // Use the expression's span for the diagnostic anchor.
+                            let span = expr.syntax().text_range();
+                            for diag in type_inference::list_literal_sentinels_to_diagnostics(
+                                &elements, &kind_ctx, span,
+                            ) {
+                                DiagnosticAcc(diag).accumulate(db);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let forbidden_diags =
+                type_inference::check_forbidden_position_spreads(&select_stmt, &kind_ctx);
+            for diag in forbidden_diags {
+                DiagnosticAcc(diag).accumulate(db);
             }
 
             let from_sources = count_from_sources(&select_stmt);

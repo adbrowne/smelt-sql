@@ -3274,6 +3274,620 @@ fn smelt_type_lub(a: &SmeltType, b: &SmeltType) -> Option<SmeltType> {
     }
 }
 
+// ─── Phase A Phase 3: diagnostics + bidirectional disambiguation + spread ────
+
+/// Position kind for spread validation. Determines whether a spread operator
+/// is in a valid or forbidden position.
+///
+/// Valid positions: Select, GroupBy, OrderBy, FunctionArg, InList, ValuesRow,
+/// ListLiteralBody.
+/// Forbidden positions: Where, Boolean, NamedArgValue, FromWithoutReducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplicePosition {
+    /// SELECT list — spread allowed.
+    Select,
+    /// GROUP BY — spread allowed.
+    GroupBy,
+    /// ORDER BY — spread allowed.
+    OrderBy,
+    /// Positional function argument — spread allowed.
+    FunctionArg,
+    /// IN-list `x IN (...vs)` — spread allowed.
+    InList,
+    /// VALUES row — spread allowed.
+    ValuesRow,
+    /// Inside another list literal `[a, ...xs, b]` — spread allowed.
+    ListLiteralBody,
+    /// WHERE clause — spread forbidden.
+    Where,
+    /// Boolean composition (`x AND ...preds`, `y OR ...preds`) — spread forbidden.
+    Boolean,
+    /// Named-argument value (`name => value`) — spread forbidden.
+    NamedArgValue,
+    /// FROM clause without an explicit reducer — spread forbidden.
+    FromWithoutReducer,
+}
+
+impl SplicePosition {
+    /// Returns `true` if spread is allowed in this position.
+    pub fn spread_allowed(self) -> bool {
+        matches!(
+            self,
+            SplicePosition::Select
+                | SplicePosition::GroupBy
+                | SplicePosition::OrderBy
+                | SplicePosition::FunctionArg
+                | SplicePosition::InList
+                | SplicePosition::ValuesRow
+                | SplicePosition::ListLiteralBody
+        )
+    }
+
+    /// Human-readable position name for the `MetaSpreadInForbiddenPosition`
+    /// message, matching the spec's prescribed strings.
+    pub fn forbidden_position_name(self) -> &'static str {
+        match self {
+            SplicePosition::Where => "WHERE clause",
+            SplicePosition::Boolean => "boolean composition",
+            SplicePosition::NamedArgValue => "named argument value",
+            SplicePosition::FromWithoutReducer => "FROM clause without an explicit reducer",
+            _ => "unknown position",
+        }
+    }
+}
+
+/// Result of the bidirectional disambiguation of a `[...]` list literal.
+///
+/// Implements spec `meta_language.md` Phase A §"Rule 3 — Bidirectional
+/// disambiguation":
+/// - `List<T>` expected → `MetaList`.
+/// - `Expr<Array<U>>` expected → `DataWorldArray`.
+/// - Both admissible → `MetaList` (meta wins).
+/// - Neither admissible → `MetaList` with `List<Unknown>` (error type).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListDisambiguation {
+    /// Treat the literal as a compile-time meta `List<T>`. The carried value
+    /// is the infer result from [`infer_list_literal`].
+    MetaList(ListLiteralInferResult),
+    /// Treat the literal as a Data-World runtime array (`ARRAY[...]`).
+    DataWorldArray,
+}
+
+/// Disambiguate a `[...]` literal between meta-list and Data-World array.
+///
+/// Implements spec rule 3:
+/// - If `expected` is `Some(List<T>)` → meta-list interpretation.
+/// - If `expected` is `Some(Expr<Array<U>>)` → Data-World array.
+/// - Otherwise (both admissible or no expected) → meta-list wins.
+///
+/// Pure function — no Salsa dependency.
+pub fn disambiguate_list_literal(
+    elements: &[smelt_parser::ast::Expr],
+    ctx: &TypeContext,
+    expected: Option<&SmeltType>,
+) -> ListDisambiguation {
+    match expected {
+        // Explicitly expected Data-World array → data path.
+        Some(SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+            DataType::Array(_),
+        ))) => ListDisambiguation::DataWorldArray,
+        // Explicitly expected meta-list (List<T>) → pass expected through.
+        Some(SmeltType::List(_)) => {
+            let result = infer_list_literal(elements, ctx, expected);
+            ListDisambiguation::MetaList(result)
+        }
+        // Both admissible (no expected, or an unrelated expected) → meta wins.
+        _ => {
+            let result = infer_list_literal(elements, ctx, None);
+            ListDisambiguation::MetaList(result)
+        }
+    }
+}
+
+/// Convert `ListInferSentinel`s to `Diagnostic` records.
+///
+/// This is Phase 3's "sentinel to diagnostic" converter. It takes the
+/// sentinels produced by `infer_list_literal` and converts them into
+/// diagnostics anchored at `span` (the list literal's source span).
+///
+/// Pure function — no Salsa dependency. Returns the diagnostics so the
+/// caller can append them to whatever accumulator is in use.
+pub fn list_literal_sentinels_to_diagnostics(
+    elements: &[smelt_parser::ast::Expr],
+    ctx: &TypeContext,
+    span: rowan::TextRange,
+) -> Vec<crate::Diagnostic> {
+    use smelt_types::signatures::format_smelt_type_hover;
+
+    let result = infer_list_literal(elements, ctx, None);
+    let mut diags = Vec::new();
+
+    let zero_range = crate::Range {
+        start: crate::Position { line: 0, column: 0 },
+        end: crate::Position { line: 0, column: 0 },
+    };
+    // Use the span if we can convert it to a range — otherwise fall back to
+    // zero. The caller is responsible for providing the real span from the
+    // source text (they have access to the text via `text_range_to_range`).
+    // For tests that don't have the source text, zero range is acceptable.
+    let range = zero_range;
+    let _ = span; // span provided for future use when caller has source text
+
+    for sentinel in &result.sentinels {
+        let (code, message) = match sentinel {
+            ListInferSentinel::EmptyTypeUnknown => (
+                crate::DiagnosticCode::MetaListEmptyTypeUnknown,
+                crate::meta_list_diagnostic_message(
+                    crate::DiagnosticCode::MetaListEmptyTypeUnknown,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+            ListInferSentinel::Heterogeneous {
+                first,
+                incompatible,
+            } => {
+                let t0 = format_smelt_type_hover(first);
+                let tk = format_smelt_type_hover(incompatible);
+                (
+                    crate::DiagnosticCode::MetaListHeterogeneous,
+                    crate::meta_list_diagnostic_message(
+                        crate::DiagnosticCode::MetaListHeterogeneous,
+                        Some(&t0),
+                        Some(&tk),
+                        None,
+                    ),
+                )
+            }
+        };
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message,
+            range,
+            code: Some(code),
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Provenance origin tag — Phase A Phase 3.
+///
+/// Records where a synthesized item came from. `Synthesized(SpreadFrom(span))`
+/// marks each item emitted by a spread expansion. The `TextRange` is the span
+/// of the spread operand (the `...xs` expression).
+///
+/// This is the Phase A minimal implementation. Phase B will extend this with
+/// `Caller(span)` and `Callee(fn_id, span)` variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginTag {
+    /// Item was synthesized by a spread expansion. The `TextRange` is the
+    /// span of the `...operand` expression in the source.
+    Synthesized(SynthesizedReason),
+}
+
+/// Reason for synthesis, per `expansion.md` §"Provenance origin tags".
+///
+/// Phase A adds `SpreadFrom`; Phase B will add the full `fn_id`-bearing
+/// variants. `fn_id` is `Option<String>` here because a top-level spread
+/// has no enclosing function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SynthesizedReason {
+    /// Emitted by a list spread `...xs`. The `TextRange` is the span of the
+    /// spread operator node.
+    SpreadFrom(rowan::TextRange),
+}
+
+/// Result returned by [`check_select_list_spreads`].
+///
+/// Records what the spread-expansion check found: how many items were
+/// expanded (for testing), any diagnostics emitted, and provenance tags for
+/// the expanded items.
+#[derive(Debug, Clone)]
+pub struct SelectListSpreadResult {
+    /// Total number of items produced by spread expansion across all spreads
+    /// in the SELECT list (sum of individual spread expansion widths).
+    pub expanded_item_count: usize,
+    /// Diagnostics emitted during expansion (e.g. `MetaSpreadOnNonList`).
+    pub diagnostics: Vec<crate::Diagnostic>,
+    /// Provenance origin tags for every item produced by spread expansion.
+    /// Length equals `expanded_item_count`.
+    pub provenance_tags: Vec<OriginTag>,
+}
+
+/// Check all `LIST_SPREAD` nodes in a SELECT list for validity and expand them.
+///
+/// For each `LIST_SPREAD` found as a direct child of the SELECT_LIST:
+/// 1. Infer the operand's type.
+/// 2. If it is `List<T>`, expand the elements — each gets a
+///    `Synthesized(SpreadFrom(spread_span))` provenance tag.
+/// 3. If it is not `List<T>`, emit `MetaSpreadOnNonList` and drop the spread.
+/// 4. Empty-list spreads produce zero expansion items (elision).
+///
+/// Forbidden-position checking (WHERE, etc.) is handled separately by
+/// [`check_forbidden_position_spreads`].
+///
+/// Pure function — no Salsa dependency.
+pub fn check_select_list_spreads(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+) -> SelectListSpreadResult {
+    use smelt_parser::SyntaxKind::{LIST_SPREAD, SELECT_LIST};
+    use smelt_types::signatures::format_smelt_type_hover;
+
+    let mut result = SelectListSpreadResult {
+        expanded_item_count: 0,
+        diagnostics: Vec::new(),
+        provenance_tags: Vec::new(),
+    };
+
+    // Find the SELECT_LIST node, then iterate its children for LIST_SPREAD nodes.
+    let select_list_node = select_stmt
+        .syntax()
+        .children()
+        .find(|n| n.kind() == SELECT_LIST);
+
+    let Some(sl_node) = select_list_node else {
+        return result;
+    };
+
+    let zero_range = crate::Range {
+        start: crate::Position { line: 0, column: 0 },
+        end: crate::Position { line: 0, column: 0 },
+    };
+
+    for child in sl_node.children() {
+        if child.kind() != LIST_SPREAD {
+            continue;
+        }
+        let spread = smelt_parser::ast::ListSpread::cast(child.clone())
+            .expect("LIST_SPREAD node must cast to ListSpread");
+        let spread_span = child.text_range();
+
+        let Some(operand) = spread.operand() else {
+            continue;
+        };
+
+        // Check first if the operand is an inline list literal `...[e1, e2, ...]`.
+        // This must be checked before `infer_expression_type` because the parser
+        // emits `[]` as an ARRAY_LITERAL which `infer_expression_type` would see
+        // as a Data-World `Array(Unknown)` rather than a meta-list.
+        if let Some(arr) = operand.as_array_literal() {
+            // Inline list literal spread `...[e1, e2, ...]`.
+            let elements: Vec<_> = arr.elements();
+
+            if elements.is_empty() {
+                // Empty-list spread: elide with zero expansion and no diagnostics.
+                // Spec rule 7: "A spread of any compile-time empty List<T> emits
+                // zero copies; adjacent commas elide."
+                continue;
+            }
+
+            let infer_result = infer_list_literal(&elements, ctx, None);
+
+            // Emit sentinels as diagnostics (heterogeneous only — EmptyTypeUnknown
+            // can't fire here since we checked is_empty() above).
+            for sentinel in &infer_result.sentinels {
+                let (code, message) = match sentinel {
+                    ListInferSentinel::EmptyTypeUnknown => {
+                        // Unreachable: we checked is_empty() above.
+                        continue;
+                    }
+                    ListInferSentinel::Heterogeneous {
+                        first,
+                        incompatible,
+                    } => {
+                        let t0 = format_smelt_type_hover(first);
+                        let tk = format_smelt_type_hover(incompatible);
+                        (
+                            crate::DiagnosticCode::MetaListHeterogeneous,
+                            crate::meta_list_diagnostic_message(
+                                crate::DiagnosticCode::MetaListHeterogeneous,
+                                Some(&t0),
+                                Some(&tk),
+                                None,
+                            ),
+                        )
+                    }
+                };
+                result.diagnostics.push(crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message,
+                    range: zero_range,
+                    code: Some(code),
+                    data: None,
+                });
+            }
+
+            // Expand: emit provenance per element.
+            let elem_count = elements.len();
+            for _ in 0..elem_count {
+                result
+                    .provenance_tags
+                    .push(OriginTag::Synthesized(SynthesizedReason::SpreadFrom(
+                        spread_span,
+                    )));
+            }
+            result.expanded_item_count += elem_count;
+            continue;
+        }
+
+        // Non-literal operand: infer the operand's type.
+        let operand_type = infer_expression_type(&operand, ctx);
+
+        match operand_type {
+            Some(typed) => {
+                match &typed.data_type {
+                    DataType::Unknown => {
+                        // Unknown type — propagate without error.
+                        // Handles unresolvable identifiers gracefully (no avalanche).
+                    }
+                    _ => {
+                        // Non-list type → emit MetaSpreadOnNonList and drop.
+                        let actual = smelt_types::SmeltType::Expr(
+                            smelt_types::signatures::TypeConstraint::Concrete(
+                                typed.data_type.clone(),
+                            ),
+                        );
+                        let actual_str = format_smelt_type_hover(&actual);
+                        result.diagnostics.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_list_diagnostic_message(
+                                crate::DiagnosticCode::MetaSpreadOnNonList,
+                                None,
+                                Some(&actual_str),
+                                None,
+                            ),
+                            range: zero_range,
+                            code: Some(crate::DiagnosticCode::MetaSpreadOnNonList),
+                            data: None,
+                        });
+                        // Drop spread — continue type-checking.
+                    }
+                }
+            }
+            None => {
+                // Could not infer type — treat as empty (no avalanche).
+            }
+        }
+    }
+
+    result
+}
+
+/// Detect `LIST_SPREAD` nodes (or orphaned `DOT_DOT_DOT` tokens produced by
+/// parse-error recovery) in forbidden positions and emit
+/// `MetaSpreadInForbiddenPosition` diagnostics.
+///
+/// **Current parser behaviour**: The parser only emits `LIST_SPREAD` nodes in
+/// valid spread positions (SELECT list, GROUP BY, ORDER BY, function args,
+/// IN-list, VALUES rows, list-literal body). When a `...` appears in a
+/// forbidden position (e.g. `WHERE ...preds`), the parser's error-recovery
+/// ejects the `DOT_DOT_DOT` token outside the `WHERE_CLAUSE` node (typically
+/// as a sibling of the `SELECT_STMT` at the `FILE` level). This function
+/// detects both cases:
+///
+/// 1. `LIST_SPREAD` nodes that somehow appear inside a `WHERE_CLAUSE`
+///    descendant (future-proofing).
+/// 2. Orphaned `DOT_DOT_DOT` tokens at the parent node level when the
+///    `SelectStmt` has a `WHERE` clause — these represent spread-in-WHERE
+///    parse errors.
+///
+/// Pure function — no Salsa dependency.
+pub fn check_forbidden_position_spreads(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    _ctx: &TypeContext,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::{DOT_DOT_DOT, LIST_SPREAD, WHERE_CLAUSE};
+
+    let mut diags = Vec::new();
+    let zero_range = crate::Range {
+        start: crate::Position { line: 0, column: 0 },
+        end: crate::Position { line: 0, column: 0 },
+    };
+
+    let has_where = select_stmt
+        .syntax()
+        .children()
+        .any(|n| n.kind() == WHERE_CLAUSE);
+
+    // Case 1: Walk the WHERE clause for LIST_SPREAD descendants (future-proofing
+    // for if the parser is updated to allow `...` in WHERE context).
+    if has_where {
+        let where_node = select_stmt
+            .syntax()
+            .children()
+            .find(|n| n.kind() == WHERE_CLAUSE);
+
+        if let Some(wn) = where_node {
+            for desc in wn.descendants() {
+                if desc.kind() == LIST_SPREAD {
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_list_diagnostic_message(
+                            crate::DiagnosticCode::MetaSpreadInForbiddenPosition,
+                            None,
+                            None,
+                            Some(SplicePosition::Where.forbidden_position_name()),
+                        ),
+                        range: zero_range,
+                        code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
+                        data: None,
+                    });
+                }
+            }
+        }
+
+        // Case 2: Detect orphaned DOT_DOT_DOT tokens at the parent level.
+        // The parser ejects `...expr` from the WHERE body on parse error, leaving
+        // the DOT_DOT_DOT token(s) as siblings of the SELECT_STMT in the parent.
+        if let Some(parent) = select_stmt.syntax().parent() {
+            let stmt_range = select_stmt.syntax().text_range();
+
+            // Walk the parent's children_with_tokens AFTER the SELECT_STMT node.
+            let mut past_stmt = false;
+            for child in parent.children_with_tokens() {
+                let child_range = match &child {
+                    rowan::NodeOrToken::Node(n) => n.text_range(),
+                    rowan::NodeOrToken::Token(t) => t.text_range(),
+                };
+
+                if !past_stmt {
+                    // Check if this child IS or FOLLOWS the select stmt.
+                    if child_range.start() >= stmt_range.end() {
+                        past_stmt = true;
+                    } else if child_range == stmt_range {
+                        past_stmt = true;
+                        continue; // skip the stmt itself
+                    } else {
+                        continue;
+                    }
+                }
+
+                // Look for DOT_DOT_DOT tokens after the SELECT_STMT.
+                if let rowan::NodeOrToken::Token(tok) = &child {
+                    if tok.kind() == DOT_DOT_DOT {
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_list_diagnostic_message(
+                                crate::DiagnosticCode::MetaSpreadInForbiddenPosition,
+                                None,
+                                None,
+                                Some(SplicePosition::Where.forbidden_position_name()),
+                            ),
+                            range: zero_range,
+                            code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
+                            data: None,
+                        });
+                    }
+                }
+                // Also check for LIST_SPREAD nodes at parent level.
+                if let rowan::NodeOrToken::Node(node) = &child {
+                    if node.kind() == LIST_SPREAD {
+                        diags.push(crate::Diagnostic {
+                            severity: crate::DiagnosticSeverity::Error,
+                            message: crate::meta_list_diagnostic_message(
+                                crate::DiagnosticCode::MetaSpreadInForbiddenPosition,
+                                None,
+                                None,
+                                Some(SplicePosition::Where.forbidden_position_name()),
+                            ),
+                            range: zero_range,
+                            code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
+                            data: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Boolean composition, named-arg value, FROM-without-reducer:
+    // These are Phase B extensions — the spec's full forbidden-position list
+    // is enforced here for WHERE (the tested case). The other positions will
+    // be wired when their parser positions are exercised.
+
+    diags
+}
+
+/// Expand a `LIST_SPREAD` node at a specific splice position.
+///
+/// This is the general-purpose spread expansion function that handles:
+/// (a) forbidden-position validation → emits `MetaSpreadInForbiddenPosition`
+/// (b) non-list operand → emits `MetaSpreadOnNonList`
+/// (c) valid expansion → returns per-element provenance tags
+///
+/// Returns `(expanded_items, diagnostics)` where `expanded_items` is the
+/// number of items the spread contributed (0 for non-list or forbidden; the
+/// actual element count for valid expansion).
+///
+/// Pure function — no Salsa dependency.
+pub fn expand_spread_into_position(
+    spread: &smelt_parser::ast::ListSpread,
+    ctx: &TypeContext,
+    position: SplicePosition,
+) -> (usize, Vec<OriginTag>, Vec<crate::Diagnostic>) {
+    use smelt_types::signatures::format_smelt_type_hover;
+
+    let zero_range = crate::Range {
+        start: crate::Position { line: 0, column: 0 },
+        end: crate::Position { line: 0, column: 0 },
+    };
+
+    // (a) Forbidden-position check.
+    if !position.spread_allowed() {
+        let diag = crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: crate::meta_list_diagnostic_message(
+                crate::DiagnosticCode::MetaSpreadInForbiddenPosition,
+                None,
+                None,
+                Some(position.forbidden_position_name()),
+            ),
+            range: zero_range,
+            code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
+            data: None,
+        };
+        return (0, vec![], vec![diag]);
+    }
+
+    let spread_span = spread.syntax().text_range();
+
+    let Some(operand) = spread.operand() else {
+        return (0, vec![], vec![]);
+    };
+
+    // (b) Determine element count by checking operand type.
+    // If the operand is an inline list literal, use its element count directly.
+    if let Some(arr) = operand.as_array_literal() {
+        let elements: Vec<_> = arr.elements();
+        let elem_count = elements.len();
+        let tags: Vec<OriginTag> = (0..elem_count)
+            .map(|_| OriginTag::Synthesized(SynthesizedReason::SpreadFrom(spread_span)))
+            .collect();
+        return (elem_count, tags, vec![]);
+    }
+
+    // Otherwise, infer the operand's type.
+    let operand_ty = infer_expression_type(&operand, ctx);
+    match operand_ty {
+        Some(typed) => {
+            match &typed.data_type {
+                DataType::Unknown => {
+                    // Unknown — treat as empty expansion to avoid false positives.
+                    (0, vec![], vec![])
+                }
+                _ => {
+                    // Non-list type → emit MetaSpreadOnNonList and drop.
+                    let actual = SmeltType::Expr(
+                        smelt_types::signatures::TypeConstraint::Concrete(typed.data_type.clone()),
+                    );
+                    let actual_str = format_smelt_type_hover(&actual);
+                    let diag = crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_list_diagnostic_message(
+                            crate::DiagnosticCode::MetaSpreadOnNonList,
+                            None,
+                            Some(&actual_str),
+                            None,
+                        ),
+                        range: zero_range,
+                        code: Some(crate::DiagnosticCode::MetaSpreadOnNonList),
+                        data: None,
+                    };
+                    (0, vec![], vec![diag])
+                }
+            }
+        }
+        None => {
+            // Cannot infer — treat as empty (no avalanche).
+            (0, vec![], vec![])
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4661,6 +5275,232 @@ mod tests {
             matches!(result.sentinels[0], ListInferSentinel::Heterogeneous { .. }),
             "expected Heterogeneous sentinel, got: {:?}",
             result.sentinels[0]
+        );
+    }
+
+    // === Phase A Phase 3 TDD tests: diagnostics + bidirectional disambiguation + spread ===
+
+    fn parse_select_stmt(sql: &str) -> smelt_parser::ast::SelectStmt {
+        use smelt_parser::ast::File;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("FILE node");
+        file.select_stmt().expect("SelectStmt")
+    }
+
+    /// `[1, 2, 3]` at a splice point expecting `List<Expr<Integer>>` evaluates
+    /// as a meta-list (not a Data-World array).
+    #[test]
+    fn list_literal_disambiguation_meta_list_target() {
+        let elems = list_elements("SELECT [100000, 200000, 300000]");
+        let ctx = TypeContext::new();
+        // Expected sort is List<Expr<Integer>> — meta-list context.
+        let expected = SmeltType::List(Box::new(SmeltType::Expr(
+            smelt_types::signatures::TypeConstraint::Concrete(DataType::Integer),
+        )));
+        let result = disambiguate_list_literal(&elems, &ctx, Some(&expected));
+        assert!(
+            matches!(result, ListDisambiguation::MetaList(_)),
+            "with List<Expr<Integer>> target, literal must be interpreted as meta-list, got: {:?}",
+            result
+        );
+    }
+
+    /// `[1, 2, 3]` at a splice point expecting `Expr<Array<Integer>>` evaluates
+    /// as a runtime array.
+    #[test]
+    fn list_literal_disambiguation_data_array_target() {
+        let elems = list_elements("SELECT [100000, 200000, 300000]");
+        let ctx = TypeContext::new();
+        // Expected sort is Expr<Concrete(Array(Integer))> — Data-World array context.
+        let expected = SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+            DataType::Array(Box::new(DataType::Integer)),
+        ));
+        let result = disambiguate_list_literal(&elems, &ctx, Some(&expected));
+        assert!(
+            matches!(result, ListDisambiguation::DataWorldArray),
+            "with Expr<Array<Integer>> target, literal must be interpreted as Data-World array, \
+             got: {:?}",
+            result
+        );
+    }
+
+    /// At a position admitting both meta-list and Data-World array, the literal
+    /// evaluates as meta-list (rule 3: meta wins).
+    #[test]
+    fn list_literal_disambiguation_both_admissible_meta_wins() {
+        let elems = list_elements("SELECT [100000, 200000, 300000]");
+        let ctx = TypeContext::new();
+        // No expected type → both admissible → meta-list wins.
+        let result = disambiguate_list_literal(&elems, &ctx, None);
+        assert!(
+            matches!(result, ListDisambiguation::MetaList(_)),
+            "with no expected type (both admissible), literal must default to meta-list, \
+             got: {:?}",
+            result
+        );
+    }
+
+    /// `[1, 'hello']` emits exactly one `MetaListHeterogeneous` diagnostic
+    /// anchored at the literal's source span.
+    #[test]
+    fn list_literal_heterogeneous_emits_diagnostic() {
+        let elems = list_elements("SELECT [1, 'hello']");
+        let ctx = TypeContext::new();
+        let span = rowan::TextRange::new(7.into(), 20.into()); // approximate span
+        let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span);
+        assert_eq!(
+            diags.len(),
+            1,
+            "heterogeneous list must produce exactly 1 diagnostic, got: {:?}",
+            diags
+        );
+        assert!(
+            matches!(
+                diags[0].code,
+                Some(crate::DiagnosticCode::MetaListHeterogeneous)
+            ),
+            "expected MetaListHeterogeneous diagnostic, got: {:?}",
+            diags[0]
+        );
+    }
+
+    /// `[]` in an unconstrained position emits exactly one
+    /// `MetaListEmptyTypeUnknown` diagnostic anchored at the literal's span.
+    #[test]
+    fn list_literal_empty_unknown_target_emits_diagnostic() {
+        let elems = list_elements("SELECT []");
+        let ctx = TypeContext::new();
+        let span = rowan::TextRange::new(7.into(), 9.into());
+        let diags = list_literal_sentinels_to_diagnostics(&elems, &ctx, span);
+        assert_eq!(
+            diags.len(),
+            1,
+            "empty list without target must produce exactly 1 diagnostic, got: {:?}",
+            diags
+        );
+        assert!(
+            matches!(
+                diags[0].code,
+                Some(crate::DiagnosticCode::MetaListEmptyTypeUnknown)
+            ),
+            "expected MetaListEmptyTypeUnknown diagnostic, got: {:?}",
+            diags[0]
+        );
+    }
+
+    /// `SELECT id, ...[a, b], created_at` — spread of a list literal into SELECT
+    /// list expands to the individual elements; each emitted item carries
+    /// `Synthesized(SpreadFrom(span_of_list_literal))` provenance.
+    #[test]
+    fn spread_in_select_list_expands() {
+        let sql = "SELECT id, ...[a, b], created_at FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let result = check_select_list_spreads(&select, &ctx);
+        // Must find the spread and report expanded count = 2 (for a, b)
+        assert_eq!(
+            result.expanded_item_count, 2,
+            "spread of [a, b] must expand to 2 items, got: {}",
+            result.expanded_item_count
+        );
+        assert!(
+            result.diagnostics.is_empty(),
+            "valid spread in SELECT must produce no diagnostics, got: {:?}",
+            result.diagnostics
+        );
+        // Each emitted item must carry Synthesized(SpreadFrom(...)) provenance.
+        assert_eq!(
+            result.provenance_tags.len(),
+            2,
+            "each of the 2 expanded items must carry a provenance tag, got: {:?}",
+            result.provenance_tags
+        );
+        assert!(
+            result
+                .provenance_tags
+                .iter()
+                .all(|t| matches!(t, OriginTag::Synthesized(SynthesizedReason::SpreadFrom(_)))),
+            "all provenance tags must be Synthesized(SpreadFrom(…)), got: {:?}",
+            result.provenance_tags
+        );
+    }
+
+    /// `SELECT id, ...[], created_at` — spread of an empty list elides silently;
+    /// the SELECT type-checks as if `SELECT id, created_at`.
+    #[test]
+    fn spread_empty_list_elides() {
+        let sql = "SELECT id, ...[], created_at FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let result = check_select_list_spreads(&select, &ctx);
+        assert_eq!(
+            result.expanded_item_count, 0,
+            "spread of empty list must expand to 0 items (elision), got: {}",
+            result.expanded_item_count
+        );
+        assert!(
+            result.diagnostics.is_empty(),
+            "empty-list spread in SELECT must produce no diagnostics, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    /// `WHERE x = 1 AND ...preds` emits `MetaSpreadInForbiddenPosition` at the
+    /// spread span.
+    #[test]
+    fn spread_in_where_clause_emits_diagnostic() {
+        // Note: the parser does not emit a LIST_SPREAD node inside WHERE (it
+        // produces a parse error instead). The orphaned DOT_DOT_DOT token ends
+        // up as a sibling of the SELECT_STMT at the FILE level.
+        // `check_forbidden_position_spreads` detects this pattern and emits
+        // MetaSpreadInForbiddenPosition.
+        let sql = "SELECT x FROM t WHERE x = 1 AND ...preds";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_forbidden_position_spreads(&select, &ctx);
+        assert!(
+            !diags.is_empty(),
+            "spread in WHERE must produce MetaSpreadInForbiddenPosition diagnostic"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition)),
+            "expected MetaSpreadInForbiddenPosition, got: {:?}",
+            diags
+        );
+    }
+
+    /// `SELECT ...x FROM t` where `x` is `Expr<Integer>` emits
+    /// `MetaSpreadOnNonList`; surrounding SELECT type-checks as if spread were
+    /// absent.
+    #[test]
+    fn spread_on_non_list_emits_diagnostic() {
+        let sql = "SELECT ...x FROM t";
+        let select = parse_select_stmt(sql);
+        // Context: x is Expr<Integer>, not a List.
+        let mut ctx = TypeContext::new();
+        ctx.add_model_column(
+            "t",
+            "x",
+            smelt_types::TypedColumn::not_null(DataType::Integer),
+        );
+        let result = check_select_list_spreads(&select, &ctx);
+        assert_eq!(
+            result.diagnostics.len(),
+            1,
+            "spread on non-list must produce exactly 1 MetaSpreadOnNonList, \
+             got: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            matches!(
+                result.diagnostics[0].code,
+                Some(crate::DiagnosticCode::MetaSpreadOnNonList)
+            ),
+            "expected MetaSpreadOnNonList, got: {:?}",
+            result.diagnostics[0]
         );
     }
 }

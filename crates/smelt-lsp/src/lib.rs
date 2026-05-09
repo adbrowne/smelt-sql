@@ -1062,6 +1062,11 @@ impl Backend {
                 DbCode::ExternFragmentParamUnsupported => "extern-fragment-param-unsupported",
                 DbCode::KindMismatch => "kind-mismatch",
                 DbCode::MissingSeedSidecar => "missing-seed-sidecar",
+                // Phase A (meta-language) diagnostic codes.
+                DbCode::MetaListEmptyTypeUnknown => "meta-list-empty-type-unknown",
+                DbCode::MetaListHeterogeneous => "meta-list-heterogeneous",
+                DbCode::MetaSpreadInForbiddenPosition => "meta-spread-in-forbidden-position",
+                DbCode::MetaSpreadOnNonList => "meta-spread-on-non-list",
             };
             NumberOrString::String(code_str.to_string())
         });

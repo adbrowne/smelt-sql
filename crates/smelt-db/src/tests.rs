@@ -3506,3 +3506,238 @@ fn test_three_way_cycle_recovery() {
     let _diags_b = db.file_diagnostics(b_path);
     let _diags_c = db.file_diagnostics(c_path);
 }
+
+// === Phase A (meta-language) TDD tests: DiagnosticCode variants ===
+
+/// `MetaListEmptyTypeUnknown` exists in the `DiagnosticCode` enum and
+/// renders the spec message format: "cannot infer element type for empty
+/// list literal".
+#[test]
+fn diagnostic_code_meta_list_empty_type_unknown() {
+    let code = DiagnosticCode::MetaListEmptyTypeUnknown;
+    // Pattern-match to confirm the variant is reachable.
+    assert!(matches!(code, DiagnosticCode::MetaListEmptyTypeUnknown));
+    // Render the canonical message via the spec message helper.
+    let msg = meta_list_diagnostic_message(code, None, None, None);
+    assert_eq!(
+        msg, "cannot infer element type for empty list literal",
+        "MetaListEmptyTypeUnknown message must match spec"
+    );
+}
+
+/// `MetaListHeterogeneous` exists in the `DiagnosticCode` enum and
+/// renders the spec message format: "list elements have incompatible
+/// types: {T0}, {Tk}".
+#[test]
+fn diagnostic_code_meta_list_heterogeneous() {
+    let code = DiagnosticCode::MetaListHeterogeneous;
+    assert!(matches!(code, DiagnosticCode::MetaListHeterogeneous));
+    let msg = meta_list_diagnostic_message(code, Some("Expr<Integer>"), Some("Expr<Text>"), None);
+    assert_eq!(
+        msg, "list elements have incompatible types: Expr<Integer>, Expr<Text>",
+        "MetaListHeterogeneous message must match spec"
+    );
+}
+
+/// `MetaSpreadInForbiddenPosition` exists in the `DiagnosticCode` enum and
+/// renders the spec message format: "spread is not allowed in {position name}".
+#[test]
+fn diagnostic_code_meta_spread_in_forbidden_position() {
+    let code = DiagnosticCode::MetaSpreadInForbiddenPosition;
+    assert!(matches!(
+        code,
+        DiagnosticCode::MetaSpreadInForbiddenPosition
+    ));
+    let msg = meta_list_diagnostic_message(code, None, None, Some("WHERE clause"));
+    assert_eq!(
+        msg, "spread is not allowed in WHERE clause",
+        "MetaSpreadInForbiddenPosition message must match spec"
+    );
+}
+
+/// `MetaSpreadOnNonList` exists in the `DiagnosticCode` enum and renders
+/// the spec message format: "spread expects List<T>; found {actual type}".
+#[test]
+fn diagnostic_code_meta_spread_on_non_list() {
+    let code = DiagnosticCode::MetaSpreadOnNonList;
+    assert!(matches!(code, DiagnosticCode::MetaSpreadOnNonList));
+    let msg = meta_list_diagnostic_message(code, None, Some("Expr<Integer>"), None);
+    assert_eq!(
+        msg, "spread expects List<T>; found Expr<Integer>",
+        "MetaSpreadOnNonList message must match spec"
+    );
+}
+
+// === Phase A Phase 3 — production-path (Salsa) tests ===
+//
+// These tests call `db.file_diagnostics()` (the Salsa query path) to verify
+// that the pure meta-language check functions are properly wired into the
+// production diagnostics pipeline.
+//
+// A test MUST go red before the wiring is added, green after. Comments
+// indicate which state each test entered.
+
+/// Production path: `SELECT ...[1, 'x'] FROM t` — heterogeneous inline spread —
+/// must produce exactly one `MetaListHeterogeneous` diagnostic via `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_spread_heterogeneous_list_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT ...[1, 'x'] FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaListHeterogeneous))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT ...[1, 'x'] FROM t must produce exactly 1 MetaListHeterogeneous; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT id, ...[], created_at FROM t` — empty-list spread —
+/// must produce zero meta-language diagnostics via `file_diagnostics`.
+///
+/// Was RED (would fail to call the pure function) before wiring.
+/// After wiring: GREEN — empty spread is valid, no meta diagnostics.
+#[test]
+fn production_path_spread_empty_list_no_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT id, ...[], created_at FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::MetaListHeterogeneous)
+                    | Some(DiagnosticCode::MetaListEmptyTypeUnknown)
+                    | Some(DiagnosticCode::MetaSpreadInForbiddenPosition)
+                    | Some(DiagnosticCode::MetaSpreadOnNonList)
+            )
+        })
+        .collect();
+    assert!(
+        meta_diags.is_empty(),
+        "SELECT id, ...[], created_at FROM t must produce zero meta-language diagnostics; \
+         got: {:?}",
+        meta_diags
+    );
+}
+
+/// Production path: `SELECT id, ...[a, b], created_at FROM t` — valid spread of
+/// homogeneous list — must produce zero meta-language diagnostics via
+/// `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_spread_valid_no_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT id, ...[a, b], created_at FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.code,
+                Some(DiagnosticCode::MetaListHeterogeneous)
+                    | Some(DiagnosticCode::MetaListEmptyTypeUnknown)
+                    | Some(DiagnosticCode::MetaSpreadInForbiddenPosition)
+                    | Some(DiagnosticCode::MetaSpreadOnNonList)
+            )
+        })
+        .collect();
+    assert!(
+        meta_diags.is_empty(),
+        "SELECT id, ...[a, b], created_at FROM t must produce zero meta-language diagnostics; \
+         got: {:?}",
+        meta_diags
+    );
+}
+
+/// Production path: `SELECT * FROM t WHERE x = 1 AND ...preds` — spread in WHERE —
+/// must produce exactly one `MetaSpreadInForbiddenPosition` diagnostic via
+/// `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_spread_in_where_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT * FROM t WHERE x = 1 AND ...preds");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaSpreadInForbiddenPosition))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT * FROM t WHERE x = 1 AND ...preds must produce exactly 1 \
+         MetaSpreadInForbiddenPosition; got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT [1, 'hello'] FROM t` — heterogeneous list literal in a
+/// SELECT-list position (no spread) — must produce exactly one
+/// `MetaListHeterogeneous` diagnostic via `file_diagnostics`.
+///
+/// Was RED before production wiring; GREEN after.
+#[test]
+fn production_path_heterogeneous_literal_in_select_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT [1, 'hello'] FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaListHeterogeneous))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT [1, 'hello'] FROM t must produce exactly 1 MetaListHeterogeneous; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT [] FROM t` — empty list literal in unconstrained
+/// SELECT-list position — must produce exactly one `MetaListEmptyTypeUnknown`
+/// diagnostic via `file_diagnostics`.
+#[test]
+fn production_path_empty_list_literal_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT [] FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaListEmptyTypeUnknown))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT [] FROM t must produce exactly 1 MetaListEmptyTypeUnknown; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
+
+/// Production path: `SELECT ...1 FROM t` — spread of an integer literal (a
+/// non-list operand) — must produce exactly one `MetaSpreadOnNonList`
+/// diagnostic via `file_diagnostics`. Uses a literal rather than a column
+/// reference so the empty `TypeContext` resolves to a concrete non-list type
+/// (an `Unknown` column ref would silently skip the check).
+#[test]
+fn production_path_spread_on_non_list_fires_diagnostic() {
+    let (mut db, path) = setup_single_model("SELECT ...1 FROM t");
+    let diags = db.file_diagnostics(path);
+    let meta_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MetaSpreadOnNonList))
+        .collect();
+    assert_eq!(
+        meta_diags.len(),
+        1,
+        "SELECT ...1 FROM t must produce exactly 1 MetaSpreadOnNonList; \
+         got diagnostics: {:?}",
+        diags
+    );
+}
