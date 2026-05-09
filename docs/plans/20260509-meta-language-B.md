@@ -84,7 +84,7 @@ The meta-language Phase B spec increment landed in commit `d4d4586`. The spec au
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-05-10 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -578,6 +578,8 @@ This phase has no Rust unit tests. The acceptance gate is content review (the re
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 1 `LambdaArityNotSupported` is latent in Phase B.** Round 2 reviewer flagged that `is_fn_lambda_start()` originally matched LPAREN, mis-parsing `SELECT fn(x, y) FROM t` as a multi-arg lambda. Fix restricted detection to `Some(IDENT)` only — multi-arg lambda CST nodes are no longer produced in Phase B, so the `LambdaArityNotSupported` diagnostic from the spec cannot fire in Phase B. The diagnostic remains in the spec for Phase F when multi-arg lambdas land. User-facing impact in Phase B: `fn (a, b) => body` produces a generic parse error rather than the targeted `LambdaArityNotSupported` diagnostic. Reviewer judged this acceptable; orchestrator deferred to Phase F.
 
 ## Verification
 

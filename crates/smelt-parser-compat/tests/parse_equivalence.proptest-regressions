@@ -5,3 +5,7 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc de9a7f49cbb66b57796b69ba0d573a8487c4d43c5aa7eee8c6ab9aa5b3834775 # shrinks to sql = "SELECT for FROM a"
+cc b47f4b876c73d2c93606fdc39717397eaeac384b39a4403b428abde2610434ba # shrinks to sql = "SELECT * FROM fn AS a WHERE EXISTS (SELECT 1 FROM a AS b WHERE a.a = b.a)"
+cc 1049f0dc883abd220490c251cc80ba2158190f85f2c73bd4c92ab585a639fb35 # shrinks to sql = "SELECT fn, ROW_NUMBER() OVER (ORDER BY a) FROM a"
+cc 6e11a4434dec21240be55bc4146dfd71baf103f144e3e4d4f8fa6bb78da76be1 # shrinks to sql = "SELECT a FROM fn UNION SELECT a FROM a_"
+cc f2d156c1b3390cf6d2349b7b6d1f663bb3aec256322108480d8c51804008d017 # shrinks to sql = "SELECT COUNT(fn) AS a FROM a"

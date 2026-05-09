@@ -1521,7 +1521,9 @@ impl Expr {
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | SUBQUERY
             | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL | SMELT_PATH_REF
-            | SMELT_PATH_CALL => Some(Self(node)),
+            | SMELT_PATH_CALL
+            // Phase B (meta-language): lambdas and pipe expressions are expressions.
+            | LAMBDA | PIPE_EXPR => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1539,6 +1541,9 @@ impl Expr {
                             | EXISTS_EXPR
                             | SMELT_PATH_REF
                             | SMELT_PATH_CALL
+                            // Phase B (meta-language)
+                            | LAMBDA
+                            | PIPE_EXPR
                     )
                 }) {
                     Some(Self(node))
@@ -3274,5 +3279,198 @@ impl ListSpread {
     /// The operand expression being spread (e.g. `metric_exprs` for `...metric_exprs`).
     pub fn operand(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+}
+
+// ===== Phase B (meta-language): Lambda and PipeExpr typed wrappers =====
+
+/// A `LAMBDA_PARAM_LIST` node — the parameter list of a Phase B `fn` lambda.
+///
+/// For a single-arg lambda (`fn x => body`) this contains one IDENT token.
+/// For a multi-arg lambda (`fn (a, b) => body`) it contains LPAREN, IDENTs,
+/// and RPAREN tokens.  Multi-arg lambdas are rejected by Phase 3 with
+/// `LambdaArityNotSupported`; the parser accepts them for error recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LambdaParamList(SyntaxNode);
+
+impl LambdaParamList {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `LAMBDA_PARAM_LIST` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LAMBDA_PARAM_LIST {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The parameter names, in order. For `fn x => body` this is `["x"]`.
+    /// For `fn (a, b) => body` this is `["a", "b"]`.
+    pub fn params(&self) -> Vec<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_string())
+            .collect()
+    }
+
+    /// Returns `true` if this is a multi-arg parameter list (parenthesised form).
+    /// Phase 3 rejects multi-arg lambdas with `LambdaArityNotSupported`.
+    pub fn is_multi_arg(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .any(|e| e.as_token().map(|t| t.kind()) == Some(LPAREN))
+    }
+}
+
+/// A Phase B meta-language lambda: `fn IDENT => EXPR`.
+///
+/// CST shape:
+/// ```text
+/// LAMBDA
+///   IDENT "fn"   (contextual keyword; lexes as IDENT)
+///   LAMBDA_PARAM_LIST
+///     IDENT  (single-arg) or LPAREN IDENTs... RPAREN (multi-arg)
+///   ARROW (=>)
+///   EXPRESSION
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Lambda(SyntaxNode);
+
+impl Lambda {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `LAMBDA` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LAMBDA {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The parameter list of this lambda.
+    pub fn param_list(&self) -> Option<LambdaParamList> {
+        self.0.children().find_map(LambdaParamList::cast)
+    }
+
+    /// Convenience: the parameter names (from `param_list()`).
+    pub fn params(&self) -> Vec<String> {
+        self.param_list().map(|p| p.params()).unwrap_or_default()
+    }
+
+    /// The body expression of this lambda.
+    pub fn body(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// `true` if this lambda has a multi-arg parameter list.
+    /// Phase 3 rejects these with `LambdaArityNotSupported`.
+    pub fn is_multi_arg(&self) -> bool {
+        self.param_list().map(|p| p.is_multi_arg()).unwrap_or(false)
+    }
+}
+
+/// A Phase B meta-language pipe expression: `EXPR |> EXPR`.
+///
+/// CST shape:
+/// ```text
+/// PIPE_EXPR
+///   <LHS content>...   (tokens/nodes from the LHS expression)
+///   PIPE_ARROW
+///   EXPRESSION         (the RHS)
+/// ```
+///
+/// Pipe is left-associative and lowest-precedence among meta-language operators.
+/// `a |> b(p) |> c(q)` parses as `((a |> b(p)) |> c(q))`:
+/// the outer PIPE_EXPR's first non-trivia children form the LHS (which is itself
+/// a PIPE_EXPR), followed by `|>`, followed by an EXPRESSION child for the RHS.
+///
+/// The RHS must syntactically be a call expression; Phase 3 emits `PipeRhsNotCall`
+/// for non-call RHS. The parser does not gate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipeExpr(SyntaxNode);
+
+impl PipeExpr {
+    /// Cast from a raw `SyntaxNode`. Returns `Some` only for `PIPE_EXPR` nodes.
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PIPE_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The left-hand side of the pipe: the expression before the `|>` token.
+    ///
+    /// For `a |> b(p) |> c(q)`, the outer `PipeExpr::lhs()` returns the inner
+    /// `PipeExpr` node (`a |> b(p)`) as an `Expr::PipeExpr`. For a simple
+    /// `a |> b()`, `lhs()` returns the `a` reference expression.
+    ///
+    /// Implemented by iterating `children_with_tokens()` and returning the last
+    /// `Expr`-castable node encountered before the `PIPE_ARROW` token.
+    pub fn lhs(&self) -> Option<Expr> {
+        let mut last_expr: Option<Expr> = None;
+        for child in self.0.children_with_tokens() {
+            match child {
+                rowan::NodeOrToken::Token(t) if t.kind() == PIPE_ARROW => break,
+                rowan::NodeOrToken::Node(n) => {
+                    if let Some(e) = Expr::cast(n) {
+                        last_expr = Some(e);
+                    }
+                }
+                _ => {}
+            }
+        }
+        last_expr
+    }
+
+    /// The right-hand side of the pipe: the `EXPRESSION` child that follows
+    /// the `PIPE_ARROW` token.
+    ///
+    /// For chained pipes like `a |> b(p) |> c(q)`, the outer `PipeExpr::rhs()`
+    /// must return the expression containing `c(q)`, NOT the inner pipe.
+    /// Using `find_map(Expr::cast)` on `children()` would incorrectly return
+    /// the inner `PIPE_EXPR` child first, since `Expr::cast` accepts `PIPE_EXPR`.
+    /// This implementation skips past the `PIPE_ARROW` token before casting.
+    pub fn rhs(&self) -> Option<Expr> {
+        // Iterate children_with_tokens; after the PIPE_ARROW, the next node is RHS.
+        let mut past_arrow = false;
+        for child in self.0.children_with_tokens() {
+            if !past_arrow {
+                if let rowan::NodeOrToken::Token(t) = &child {
+                    if t.kind() == PIPE_ARROW {
+                        past_arrow = true;
+                    }
+                }
+            } else if let rowan::NodeOrToken::Node(n) = child {
+                if let Some(e) = Expr::cast(n) {
+                    return Some(e);
+                }
+            }
+        }
+        None
+    }
+
+    /// True when the RHS is a function call expression (the expected case).
+    /// Phase 3 emits `PipeRhsNotCall` when this returns false.
+    pub fn rhs_is_call(&self) -> bool {
+        self.rhs()
+            .map(|e| {
+                e.syntax()
+                    .descendants()
+                    .any(|n| n.kind() == FUNCTION_CALL || n.kind() == SMELT_PATH_CALL)
+            })
+            .unwrap_or(false)
     }
 }

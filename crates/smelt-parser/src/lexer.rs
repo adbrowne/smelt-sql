@@ -167,10 +167,22 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 DOUBLE_COLON
             }
+            // Lex `||` (SQL string concat) before `|>` (meta-language pipe).
+            // The order here is load-bearing: `||` must be checked first so
+            // SQL string concatenation is never mis-tokenised as `|` `>`.
             '|' if self.peek_char() == Some('|') => {
                 self.advance();
                 self.advance();
                 CONCAT
+            }
+            '|' if self.peek_char() == Some('>') => {
+                self.advance();
+                self.advance();
+                PIPE_ARROW
+            }
+            '|' => {
+                self.advance();
+                ERROR
             }
             '[' => {
                 self.advance();
@@ -468,6 +480,11 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "UNPIVOT" => UNPIVOT_KW,
         "LIKE" => LIKE_KW,
         "ILIKE" => ILIKE_KW,
+        // Note: `fn` is a Phase B contextual keyword — it is lexed as IDENT
+        // (not as a dedicated token) so that existing SQL using `fn` as an
+        // identifier continues to parse.  The parser recognises `fn` at
+        // expression / argument positions by checking IDENT text via
+        // at_contextual_keyword("fn"). There is no dedicated FN_KW token kind.
         _ => IDENT,
     }
 }
@@ -582,5 +599,162 @@ mod tests {
         assert_eq!(tokens[0].kind, COMMENT);
         assert_eq!(tokens[1].kind, WHITESPACE); // newline
         assert_eq!(tokens[2].kind, SELECT_KW);
+    }
+
+    // ===== Phase B (meta-language): `fn` keyword + `|>` pipe-arrow token =====
+
+    #[test]
+    fn tokenize_fn_keyword() {
+        // `fn` is a contextual keyword: it lexes as IDENT (not a dedicated token)
+        // so that SQL using `fn` as a column or table name continues to parse.
+        // The parser recognises `fn` in lambda positions by checking IDENT text.
+        let tokens = tokenize("fn");
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(
+            non_ws.len(),
+            1,
+            "expected exactly one token, got: {:?}",
+            non_ws
+        );
+        assert_eq!(
+            non_ws[0].kind, IDENT,
+            "`fn` must lex as IDENT (contextual keyword), got {:?}",
+            non_ws[0].kind
+        );
+        assert_eq!(non_ws[0].len, 2);
+
+        // `fnord` must still lex as a single IDENT (no over-eager keyword match).
+        let tokens_fnord = tokenize("fnord");
+        let non_ws_fnord: Vec<_> = tokens_fnord
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws_fnord.len(),
+            1,
+            "fnord should be a single IDENT token, got: {:?}",
+            non_ws_fnord
+        );
+        assert_eq!(
+            non_ws_fnord[0].kind, IDENT,
+            "fnord should lex as IDENT, got {:?}",
+            non_ws_fnord[0].kind
+        );
+        assert_eq!(non_ws_fnord[0].len, 5);
+    }
+
+    #[test]
+    fn tokenize_pipe_arrow() {
+        // `|>` must lex as a single PIPE_ARROW token (length 2).
+        let tokens = tokenize("|>");
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(
+            non_ws.len(),
+            1,
+            "expected exactly one token, got: {:?}",
+            non_ws
+        );
+        assert_eq!(
+            non_ws[0].kind, PIPE_ARROW,
+            "expected PIPE_ARROW, got {:?}",
+            non_ws[0].kind
+        );
+        assert_eq!(non_ws[0].len, 2);
+    }
+
+    #[test]
+    fn pipe_arrow_disambiguates_from_double_pipe() {
+        // `||` must lex as CONCAT (SQL string concatenation).
+        let tokens_double = tokenize("||");
+        let non_ws_double: Vec<_> = tokens_double
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws_double.len(),
+            1,
+            "|| should be one CONCAT token, got: {:?}",
+            non_ws_double
+        );
+        assert_eq!(
+            non_ws_double[0].kind, CONCAT,
+            "|| should lex as CONCAT, got {:?}",
+            non_ws_double[0].kind
+        );
+
+        // `|>` must lex as PIPE_ARROW.
+        let tokens_pipe = tokenize("|>");
+        let non_ws_pipe: Vec<_> = tokens_pipe
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws_pipe.len(),
+            1,
+            "|> should be one PIPE_ARROW token, got: {:?}",
+            non_ws_pipe
+        );
+        assert_eq!(
+            non_ws_pipe[0].kind, PIPE_ARROW,
+            "|> should lex as PIPE_ARROW, got {:?}",
+            non_ws_pipe[0].kind
+        );
+
+        // `|||>` must lex as CONCAT then PIPE_ARROW.
+        let tokens_both = tokenize("|||>");
+        let non_ws_both: Vec<_> = tokens_both
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws_both.len(),
+            2,
+            "|||> should be CONCAT + PIPE_ARROW, got: {:?}",
+            non_ws_both
+        );
+        assert_eq!(non_ws_both[0].kind, CONCAT, "first token should be CONCAT");
+        assert_eq!(
+            non_ws_both[1].kind, PIPE_ARROW,
+            "second token should be PIPE_ARROW"
+        );
+    }
+
+    #[test]
+    fn pipe_arrow_does_not_collide_with_named_arg() {
+        // `=>` (named-arg arrow) must lex as ARROW; `|>` is PIPE_ARROW.
+        let tokens_arrow = tokenize("=>");
+        let non_ws_arrow: Vec<_> = tokens_arrow
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws_arrow.len(),
+            1,
+            "=> should be one ARROW token, got: {:?}",
+            non_ws_arrow
+        );
+        assert_eq!(
+            non_ws_arrow[0].kind, ARROW,
+            "=> should lex as ARROW (named-arg), got {:?}",
+            non_ws_arrow[0].kind
+        );
+
+        // `|>` is PIPE_ARROW, not a sequence ending in `>` that could be confused
+        // with named-arg arrows.
+        let tokens_pipe = tokenize("|>");
+        let non_ws_pipe: Vec<_> = tokens_pipe
+            .iter()
+            .filter(|t| t.kind != WHITESPACE)
+            .collect();
+        assert_eq!(
+            non_ws_pipe.len(),
+            1,
+            "|> should be one PIPE_ARROW token, got: {:?}",
+            non_ws_pipe
+        );
+        assert_eq!(
+            non_ws_pipe[0].kind, PIPE_ARROW,
+            "|> should lex as PIPE_ARROW"
+        );
     }
 }

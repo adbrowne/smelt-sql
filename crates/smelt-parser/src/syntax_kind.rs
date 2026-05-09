@@ -97,7 +97,6 @@ pub enum SyntaxKind {
     FETCH_KW,
     NEXT_KW,
     ONLY_KW,
-
     // Operators & punctuation
     LPAREN,       // (
     RPAREN,       // )
@@ -253,6 +252,15 @@ pub enum SyntaxKind {
 
     // Phase 1 (meta-language): list spread operator `...xs` in comma-separated positions
     LIST_SPREAD, // `...expr` — spread a List<T> into a comma-separated position
+
+    // Phase B (meta-language): `|>` pipe-arrow token
+    PIPE_ARROW, // `|>` — meta-language pipe operator
+
+    // Phase B (meta-language): lambda and pipe CST nodes
+    // LAMBDA: `fn IDENT => EXPR` or `fn (IDENT, ...) => EXPR` (multi-arg reserved for Phase F)
+    // PIPE_EXPR: `EXPR |> CALL(args...)` — left-associative, lowest meta-language precedence
+    LAMBDA,
+    PIPE_EXPR,
 
     // Phase 13: structured TypeRef children for TableExpr / AggExpr /
     // WindowExpr / SelectItems parameter sorts. These are emitted as

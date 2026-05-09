@@ -230,6 +230,10 @@ impl<'a> Parser<'a> {
 
     /// Check if current token can start an expression
     fn at_expression_start(&self) -> bool {
+        // Phase B (meta-language): `fn` is a contextual keyword (lexed as IDENT).
+        // It starts a lambda expression when encountered in expression position.
+        // We rely on IDENT being in this list — the lambda dispatch in parse_pipe_expr
+        // and parse_argument checks at_contextual_keyword("fn") explicitly.
         self.at_any(&[
             IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXTRACT_KW, EXISTS_KW,
             ARRAY_KW, ROW_KW, STRUCT_KW, MINUS, LBRACE,
@@ -422,6 +426,8 @@ impl<'a> Parser<'a> {
             return false;
         }
         // Find the next non-trivia token: must be IDENT "fn".
+        // `fn` is a contextual keyword that lexes as IDENT, so the check
+        // is purely text-based.
         lookahead += 1;
         while let Some(t) = self.tokens.get(self.pos + lookahead) {
             if t.kind.is_trivia() {
@@ -2646,10 +2652,62 @@ impl<'a> Parser<'a> {
             return;
         }
         self.depth += 1;
-        self.parse_or_expr();
+        // Phase B (meta-language): pipe `|>` is the lowest-precedence
+        // meta-language operator.  `parse_pipe_expr` wraps `parse_or_expr`
+        // and folds left-associative `|>` chains when present.
+        self.parse_pipe_expr();
         self.depth -= 1;
 
         self.finish_node();
+    }
+
+    /// Parse a pipe expression: `EXPR |> EXPR |> ...` (left-associative, lowest
+    /// precedence).  When no `|>` follows, this is a pass-through to
+    /// `parse_or_expr`.  Each `|>` pair is wrapped in a `PIPE_EXPR` node whose
+    /// two `EXPRESSION` children are the LHS and RHS.
+    ///
+    /// Phase B (meta-language): `|>` is meta-world only; Phase 3 rejects pipe
+    /// in Data-World positions.  The parser does not gate — it produces the CST
+    /// node unconditionally.
+    fn parse_pipe_expr(&mut self) {
+        // Use a checkpoint so we can wrap the already-parsed LHS inside
+        // a PIPE_EXPR node when we encounter `|>`.
+        let checkpoint = self.builder.checkpoint();
+
+        // Handle `fn` at the top level of an expression — a lambda that
+        // appears outside a function argument list (Phase 3 will reject with
+        // `LambdaInForbiddenPosition`).
+        if self.is_fn_lambda_start() {
+            self.parse_fn_lambda();
+        } else {
+            self.parse_or_expr();
+        }
+
+        // Fold left-associative pipe operators.
+        while self.at(PIPE_ARROW) {
+            self.start_node_at(checkpoint, PIPE_EXPR);
+            // Wrap the already-parsed LHS in an EXPRESSION node.  The builder
+            // checkpoint mechanism means the LHS tokens are already consumed;
+            // we're retroactively wrapping them.
+            self.advance(); // consume `|>`
+            self.skip_trivia();
+
+            // Parse the RHS as a new EXPRESSION child of PIPE_EXPR.
+            // The parser does not validate that RHS is a call — Phase 3 does.
+            self.start_node(EXPRESSION);
+            self.depth += 1;
+            // RHS may itself be a lambda (unusual but syntactically valid for
+            // error recovery); otherwise it's a normal expression.
+            if self.is_fn_lambda_start() {
+                self.parse_fn_lambda();
+            } else {
+                self.parse_or_expr();
+            }
+            self.depth -= 1;
+            self.finish_node(); // EXPRESSION (RHS)
+
+            self.finish_node(); // PIPE_EXPR
+        }
     }
 
     fn parse_or_expr(&mut self) {
@@ -3677,6 +3735,14 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.parse_expression();
             self.finish_node();
+        } else if self.is_fn_lambda_start() {
+            // Phase B meta-language lambda: `fn IDENT => body` (single-arg only).
+            // Multi-arg (`fn (a, b) => body`) is deferred to Phase F and is not
+            // routed here by is_fn_lambda_start() in Phase B.
+            // Wrap in EXPRESSION so the argument tree structure is consistent.
+            self.start_node(EXPRESSION);
+            self.parse_fn_lambda();
+            self.finish_node(); // EXPRESSION
         } else if self.at(IDENT) && self.is_lambda_single_param() {
             // Single-param lambda: x -> expr
             self.parse_lambda_expr();
@@ -3727,6 +3793,46 @@ impl<'a> Parser<'a> {
             .get(self.pos + lookahead)
             .map(|t| t.kind == LBRACKET)
             .unwrap_or(false)
+    }
+
+    /// Check if the current IDENT is the contextual keyword `fn` AND is followed
+    /// by a valid single-arg lambda parameter (Phase B: IDENT only).
+    ///
+    /// This lookahead avoids mis-treating `SELECT fn FROM t` or `fn(args)` as
+    /// lambda starts. Specifically:
+    ///   - `fn x => body`     → true  (single-arg: IDENT "fn" → IDENT "x")
+    ///   - `SELECT fn FROM t` → false (IDENT "fn" → FROM_KW, not a lambda)
+    ///   - `fn(args)`         → false (IDENT "fn" → LPAREN is a function call)
+    ///   - `fn (a, b) => body` → false (multi-arg deferred to Phase F)
+    ///
+    /// Phase B supports only `fn IDENT => EXPR`. Multi-arg lambdas
+    /// (`fn (a, b) => body`) are reserved for Phase F. The LPAREN branch is
+    /// intentionally excluded so that `fn(x, y)` — where `fn` is used as a
+    /// SQL function name — parses as a regular function call rather than a
+    /// (broken) lambda.
+    fn is_fn_lambda_start(&self) -> bool {
+        if !self.at_contextual_keyword("fn") {
+            return false;
+        }
+        // Skip the `fn` IDENT token and any trivia to see what follows.
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        match self.tokens.get(self.pos + lookahead).map(|t| t.kind) {
+            // `fn <IDENT>` — single-arg lambda: `fn x => body`.
+            // Phase B only supports single-arg lambdas (`fn IDENT => EXPR`).
+            // Multi-arg lambdas (`fn (a, b) => body`) are deferred to Phase F.
+            // `fn(args)` where `fn` is used as a function name must parse as a
+            // regular function call, not as a lambda — so LPAREN is excluded here.
+            Some(IDENT) => true,
+            // Anything else (e.g. LPAREN, FROM_KW, COMMA, EOF) is NOT a lambda.
+            _ => false,
+        }
     }
 
     /// Check if current keyword is followed by LPAREN (skipping trivia)
@@ -3896,6 +4002,80 @@ impl<'a> Parser<'a> {
 
         // Must be -> (MINUS GT)
         self.is_thin_arrow_at(lookahead)
+    }
+
+    /// Parse a Phase B meta-language lambda: `fn IDENT => EXPR` (single-arg only).
+    ///
+    /// Multi-arg lambdas (`fn (IDENT, ...) => EXPR`) are reserved for Phase F;
+    /// `is_fn_lambda_start()` does not route LPAREN cases here in Phase B.
+    ///
+    /// Produces a `LAMBDA` node whose children are:
+    ///   - `IDENT` token (the contextual keyword `fn`, still lexed as IDENT)
+    ///   - `LAMBDA_PARAM_LIST` — a single IDENT for the parameter
+    ///   - `ARROW` token (`=>`)
+    ///   - `EXPRESSION` — the lambda body
+    ///
+    /// The caller must have verified `self.is_fn_lambda_start()` before calling
+    /// this.  `fn` is a **contextual** keyword — it lexes as `IDENT` so that
+    /// existing SQL using `fn` as a column, table, or alias name continues to
+    /// parse without error.  The parser commits to lambda semantics only when it
+    /// sees an IDENT "fn" followed by another IDENT (single-arg).
+    fn parse_fn_lambda(&mut self) {
+        self.start_node(LAMBDA);
+
+        // Consume the `fn` contextual keyword (lexed as IDENT).
+        self.advance(); // IDENT "fn"
+        self.skip_trivia();
+
+        // Parse the parameter list.
+        if self.at(LPAREN) {
+            // Multi-arg lambda: `fn (a, b) => body` — Phase 3 rejects, parser accepts.
+            self.start_node(LAMBDA_PARAM_LIST);
+            self.advance(); // LPAREN
+            self.skip_trivia();
+            loop {
+                if self.at(IDENT) {
+                    self.advance(); // parameter IDENT
+                    self.skip_trivia();
+                }
+                if self.at(COMMA) {
+                    self.advance(); // ,
+                    self.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+            if self.at(RPAREN) {
+                self.advance(); // RPAREN
+            } else {
+                self.error("Expected ')' to close lambda parameter list".to_string());
+            }
+            self.finish_node(); // LAMBDA_PARAM_LIST
+        } else if self.at(IDENT) {
+            // Single-arg lambda: `fn IDENT => body`.
+            self.start_node(LAMBDA_PARAM_LIST);
+            self.advance(); // IDENT
+            self.finish_node(); // LAMBDA_PARAM_LIST
+        } else {
+            self.error("Expected identifier or '(' after 'fn' in lambda expression".to_string());
+            // Emit an empty LAMBDA_PARAM_LIST for error recovery.
+            self.start_node(LAMBDA_PARAM_LIST);
+            self.finish_node();
+        }
+
+        // Expect `=>` (ARROW token).
+        self.skip_trivia();
+        if self.at(ARROW) {
+            self.advance(); // ARROW (=>)
+        } else {
+            self.error("Expected '=>' in lambda expression after parameter".to_string());
+        }
+
+        // Parse the body expression.
+        self.skip_trivia();
+        self.parse_expression();
+
+        self.finish_node(); // LAMBDA
     }
 
     fn parse_lambda_expr(&mut self) {
@@ -4226,10 +4406,11 @@ mod tests {
     #[allow(unused_imports)]
     use crate::ast::{
         ArraySlice, ArraySubscript, BetweenExpr, BinaryExpr, CaseExpr, CastExpr, Cte, ExistsExpr,
-        File, FilterClause, FrameUnit, FunctionCall, GroupByClause, HavingClause, InExpr, JoinType,
-        LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering, OrderByClause, OrderByItem,
-        PartitionByClause, PivotClause, QualifyClause, SelectItem, SelectList, SelectStmt,
-        SortDirection, Subquery, UnpivotClause, WhenClause, WindowFrame, WindowSpec, WithClause,
+        Expr, File, FilterClause, FrameUnit, FunctionCall, GroupByClause, HavingClause, InExpr,
+        JoinType, Lambda, LambdaExpr, LimitClause, LimitValue, NamedParam, NullOrdering,
+        OrderByClause, OrderByItem, PartitionByClause, PipeExpr, PivotClause, QualifyClause,
+        SelectItem, SelectList, SelectStmt, SortDirection, Subquery, UnpivotClause, WhenClause,
+        WindowFrame, WindowSpec, WithClause,
     };
 
     /// Helper: parse SQL, assert no errors, return the SelectStmt
@@ -8317,5 +8498,440 @@ LIMIT 100
             spread.descendants().any(|n| n.kind() == EXPRESSION),
             "LIST_SPREAD must contain an EXPRESSION child"
         );
+    }
+
+    // ===== Phase B (meta-language): fn keyword + pipe-arrow + lambda + pipe CST =====
+
+    #[test]
+    fn parse_lambda_single_arg() {
+        // `map(xs, fn c => c)` — the second argument must be a LAMBDA node
+        // with one parameter (`c`) and a body that is an identifier reference.
+        let parse = parse("SELECT map(xs, fn c => c) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_lambda_single_arg: unexpected errors: {:?}",
+            parse.errors
+        );
+        let lambda = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LAMBDA)
+            .expect("must have a LAMBDA node");
+        // The LAMBDA must have a LAMBDA_PARAM_LIST child with one ident.
+        let param_list = lambda
+            .children()
+            .find(|n| n.kind() == LAMBDA_PARAM_LIST)
+            .expect("LAMBDA must have a LAMBDA_PARAM_LIST child");
+        let params: Vec<_> = param_list
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == IDENT)
+            .collect();
+        assert_eq!(
+            params.len(),
+            1,
+            "expected 1 parameter, got {}",
+            params.len()
+        );
+        assert_eq!(params[0].text(), "c");
+        // The LAMBDA must have an EXPRESSION body child.
+        assert!(
+            lambda.children().any(|n| n.kind() == EXPRESSION),
+            "LAMBDA must have an EXPRESSION body"
+        );
+    }
+
+    #[test]
+    fn parse_lambda_with_complex_body() {
+        // `map(xs, fn c => CAST(c AS Text))` — second argument is a LAMBDA
+        // whose body is a CAST expression.
+        let parse = parse("SELECT map(xs, fn c => CAST(c AS INT)) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_lambda_with_complex_body: unexpected errors: {:?}",
+            parse.errors
+        );
+        let lambda = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == LAMBDA)
+            .expect("must have a LAMBDA node");
+        // Body must contain a CAST_EXPR descendant.
+        assert!(
+            lambda.descendants().any(|n| n.kind() == CAST_EXPR),
+            "LAMBDA body must contain a CAST_EXPR"
+        );
+    }
+
+    #[test]
+    fn parse_fn_paren_does_not_consume_as_lambda() {
+        // `SELECT fn(a, b) FROM t` — `fn` used as a function name followed by
+        // LPAREN must parse as a regular function call, NOT as a lambda.
+        // Phase B is single-arg only; the LPAREN branch is excluded from
+        // is_fn_lambda_start() to avoid mis-consuming valid SQL where `fn` is
+        // a function name.  LambdaArityNotSupported is latent (Phase F) and
+        // will only fire once multi-arg parsing is enabled.
+        let parse = parse("SELECT fn(a, b) FROM t");
+        // Must parse without errors: `fn(a, b)` is a valid SQL function call.
+        assert!(
+            parse.errors.is_empty(),
+            "fn(a, b) must parse as a function call without errors, got: {:?}",
+            parse.errors
+        );
+        // Must NOT produce a LAMBDA CST node — fn(a, b) is a function call.
+        assert!(
+            !parse.syntax().descendants().any(|n| n.kind() == LAMBDA),
+            "fn(a, b) must not produce a LAMBDA CST node (it is a function call)"
+        );
+        // Must produce a FUNCTION_CALL node — fn is the function name.
+        assert!(
+            parse
+                .syntax()
+                .descendants()
+                .any(|n| n.kind() == FUNCTION_CALL),
+            "fn(a, b) must produce a FUNCTION_CALL CST node"
+        );
+    }
+
+    #[test]
+    fn parse_fn_as_function_name_in_select() {
+        // `SELECT fn(x, y) FROM t` — regression test confirming that fn used as
+        // a SQL function name parses successfully as a SELECT with a function call.
+        // This was broken when is_fn_lambda_start() matched LPAREN.
+        let parse = parse("SELECT fn(x, y) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "SELECT fn(x, y) FROM t must parse without errors, got: {:?}",
+            parse.errors
+        );
+        assert!(
+            parse
+                .syntax()
+                .descendants()
+                .any(|n| n.kind() == FUNCTION_CALL),
+            "must have a FUNCTION_CALL node for fn(x, y)"
+        );
+        assert!(
+            !parse.syntax().descendants().any(|n| n.kind() == LAMBDA),
+            "must NOT have a LAMBDA node for fn(x, y) in SELECT"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_expression() {
+        // `xs |> filter(fn c => c)` — must parse to a PIPE_EXPR with
+        // LHS = identifier reference and RHS = function-call expression.
+        let parse = parse("SELECT xs |> filter(fn c => c) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_expression: unexpected errors: {:?}",
+            parse.errors
+        );
+        let pipe = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == PIPE_EXPR)
+            .expect("must have a PIPE_EXPR node");
+        // The PIPE_EXPR must contain a PIPE_ARROW token.
+        assert!(
+            pipe.children_with_tokens()
+                .any(|e| e.as_token().map(|t| t.kind()) == Some(PIPE_ARROW)),
+            "PIPE_EXPR must contain a PIPE_ARROW token"
+        );
+        // The PIPE_EXPR must have a FUNCTION_CALL descendant (the RHS `filter(...)`).
+        assert!(
+            pipe.descendants().any(|n| n.kind() == FUNCTION_CALL),
+            "PIPE_EXPR must have a FUNCTION_CALL descendant (RHS)"
+        );
+        // The PIPE_EXPR must have an EXPRESSION child (the RHS).
+        assert!(
+            pipe.children().any(|n| n.kind() == EXPRESSION),
+            "PIPE_EXPR must have an EXPRESSION child for the RHS"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_chain_left_associative() {
+        // `a |> b(p) |> c(q)` must parse as `((a |> b(p)) |> c(q))`.
+        // The outermost PIPE_EXPR must itself contain a nested PIPE_EXPR (the LHS).
+        let parse = parse("SELECT a |> b(p) |> c(q) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_chain_left_associative: unexpected errors: {:?}",
+            parse.errors
+        );
+        // Find all PIPE_EXPR nodes.
+        let pipes: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == PIPE_EXPR)
+            .collect();
+        // Left-associative chain of 2 `|>` → 2 PIPE_EXPR nodes.
+        assert_eq!(
+            pipes.len(),
+            2,
+            "expected 2 PIPE_EXPR nodes, got {}",
+            pipes.len()
+        );
+        // The outer PIPE_EXPR's span should be larger than the inner one.
+        let outer = pipes
+            .iter()
+            .max_by_key(|n| n.text_range().len())
+            .expect("must have an outer PIPE_EXPR");
+        // The outer PIPE_EXPR must contain the inner PIPE_EXPR as a descendant
+        // (left-associative: `(a |> b(p))` is the LHS of the outer `|> c(q)`).
+        assert!(
+            outer
+                .descendants()
+                .any(|n| n.kind() == PIPE_EXPR && n != *outer),
+            "outer PIPE_EXPR must contain the inner PIPE_EXPR as a descendant (left-associative)"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_lowest_precedence() {
+        // `1 + 2 |> f()` must parse as `(1 + 2) |> f()`, i.e. the arithmetic
+        // expression is the LHS of the pipe, not `2 |> f()` (which would make
+        // `1 + (2 |> f())` — wrong, pipe must have lower precedence than `+`).
+        let parse = parse("SELECT 1 + 2 |> f() FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_lowest_precedence: unexpected errors: {:?}",
+            parse.errors
+        );
+        let pipe = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == PIPE_EXPR)
+            .expect("must have a PIPE_EXPR node");
+        // The PIPE_EXPR must contain a BINARY_EXPR descendant (the LHS `1 + 2`).
+        assert!(
+            pipe.descendants().any(|n| n.kind() == BINARY_EXPR),
+            "PIPE_EXPR must contain a BINARY_EXPR (the 1+2 LHS), confirming pipe is lowest-precedence"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_does_not_cross_statement_boundary() {
+        // `a |> b()` in a SELECT context must produce a PIPE_EXPR without errors.
+        let parse = parse("SELECT a |> b() FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_does_not_cross_statement_boundary: unexpected errors: {:?}",
+            parse.errors
+        );
+        assert!(
+            parse.syntax().descendants().any(|n| n.kind() == PIPE_EXPR),
+            "must have a PIPE_EXPR node"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_rhs_non_call_recovers() {
+        // `xs |> 3 + 4` — the RHS is not a call expression.
+        // The parser must produce a PIPE_EXPR node and recover without crashing;
+        // Phase 3 will emit PipeRhsNotCall.
+        let parse = parse("SELECT xs |> 3 + 4 FROM t");
+        // There may or may not be a parse error; the important assertion is
+        // that a PIPE_EXPR node was produced and the parse did not panic.
+        let _pipe = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == PIPE_EXPR)
+            .expect("xs |> 3 + 4 must produce a PIPE_EXPR node (Phase 3 validates RHS)");
+        // The PIPE_EXPR must have at least one EXPRESSION child (RHS).
+        assert!(
+            _pipe.children().any(|n| n.kind() == EXPRESSION),
+            "PIPE_EXPR must have an EXPRESSION child for RHS even for non-call RHS"
+        );
+    }
+
+    #[test]
+    fn parse_lambda_outside_call_recovers() {
+        // A lambda literal in a non-HOF position — the parser must produce a
+        // LAMBDA node and continue parsing; Phase 3 will emit LambdaInForbiddenPosition.
+        let parse = parse("SELECT fn c => c FROM t");
+        // There may be parse errors (position is unusual), but a LAMBDA node must exist.
+        assert!(
+            parse.syntax().descendants().any(|n| n.kind() == LAMBDA),
+            "fn c => c must produce a LAMBDA node even in a forbidden position"
+        );
+    }
+
+    #[test]
+    fn parse_named_arg_still_works_after_fn_keyword_addition() {
+        // `f(name => value)` — existing named-arg syntax must parse unchanged
+        // after the `fn` / `=>` parser interaction is added.
+        // Use an IDENT name (not a keyword) to avoid keyword token confusion.
+        let parse = parse("SELECT my_func(my_param => a + b > 10) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_named_arg_still_works_after_fn_keyword_addition: unexpected errors: {:?}",
+            parse.errors
+        );
+        let named = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == NAMED_PARAM)
+            .expect("must have a NAMED_PARAM node");
+        // The NAMED_PARAM must start with an IDENT "my_param".
+        let name_token = named
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .expect("NAMED_PARAM must have an IDENT name token");
+        assert_eq!(name_token.text(), "my_param");
+    }
+
+    #[test]
+    fn parse_pipe_chain_rhs_accessor_returns_outer_call() {
+        // For `a |> b(p) |> c(q)`, the outer PipeExpr::rhs() must return the
+        // expression containing `c(q)` — NOT the inner `a |> b(p)` pipe.
+        // The naive `find_map(Expr::cast)` would return the inner PIPE_EXPR
+        // first because PIPE_EXPR is included in Expr::cast's allow-list.
+        // The fixed rhs() iterates past the PIPE_ARROW token before casting.
+        let parse = parse("SELECT a |> b(p) |> c(q) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_chain_rhs_accessor_returns_outer_call: unexpected errors: {:?}",
+            parse.errors
+        );
+        // Find the outer (larger) PIPE_EXPR.
+        let pipes: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == PIPE_EXPR)
+            .collect();
+        assert_eq!(
+            pipes.len(),
+            2,
+            "expected 2 PIPE_EXPR nodes for a chain of 2 |>"
+        );
+        let outer_node = pipes
+            .iter()
+            .max_by_key(|n| n.text_range().len())
+            .expect("must have an outer PIPE_EXPR")
+            .clone();
+        let outer_pipe = PipeExpr::cast(outer_node).expect("outer must cast to PipeExpr");
+        // rhs() must return the expression for `c(q)` (not the inner pipe).
+        let rhs = outer_pipe.rhs().expect("outer PipeExpr must have an rhs()");
+        // rhs() must NOT be a PipeExpr (which would indicate we returned the inner pipe).
+        assert!(
+            rhs.syntax().kind() != PIPE_EXPR,
+            "outer PipeExpr::rhs() returned a PIPE_EXPR — expected the outer call c(q)"
+        );
+        // The rhs must contain a FUNCTION_CALL node (the c(q) call).
+        assert!(
+            rhs.syntax()
+                .descendants()
+                .any(|n| n.kind() == FUNCTION_CALL),
+            "outer PipeExpr::rhs() must contain a FUNCTION_CALL for c(q)"
+        );
+        // The function call name must be `c`, not `b`.
+        let func_call = rhs
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == FUNCTION_CALL)
+            .expect("must have FUNCTION_CALL");
+        let func_name = func_call
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == IDENT)
+            .expect("FUNCTION_CALL must have an IDENT name token");
+        assert_eq!(
+            func_name.text(),
+            "c",
+            "outer PipeExpr::rhs() must point to c(q), not b(p)"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_chain_lhs_accessor_returns_inner_pipe() {
+        // For `a |> b(p) |> c(q)`, the outer PipeExpr::lhs() must return the
+        // inner PipeExpr (`a |> b(p)`), not just `a`.
+        let parse = parse("SELECT a |> b(p) |> c(q) FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_chain_lhs_accessor_returns_inner_pipe: unexpected errors: {:?}",
+            parse.errors
+        );
+        let pipes: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == PIPE_EXPR)
+            .collect();
+        assert_eq!(pipes.len(), 2, "expected 2 PIPE_EXPR nodes");
+        let outer_node = pipes
+            .iter()
+            .max_by_key(|n| n.text_range().len())
+            .expect("must have an outer PIPE_EXPR")
+            .clone();
+        let outer_pipe = PipeExpr::cast(outer_node).expect("outer must cast to PipeExpr");
+        // lhs() must return the inner PIPE_EXPR (a |> b(p)).
+        let lhs = outer_pipe.lhs().expect("outer PipeExpr must have a lhs()");
+        assert_eq!(
+            lhs.syntax().kind(),
+            PIPE_EXPR,
+            "outer PipeExpr::lhs() must return the inner PIPE_EXPR (a |> b(p))"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_simple_lhs_accessor_returns_lhs_expr() {
+        // For `a |> b()`, PipeExpr::lhs() must return the expression for `a`.
+        let parse = parse("SELECT a |> b() FROM t");
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_simple_lhs_accessor_returns_lhs_expr: unexpected errors: {:?}",
+            parse.errors
+        );
+        let pipe_node = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == PIPE_EXPR)
+            .expect("must have a PIPE_EXPR node");
+        let pipe = PipeExpr::cast(pipe_node).expect("must cast to PipeExpr");
+        // lhs() must return something (the `a` reference expression).
+        let lhs = pipe.lhs().expect("PipeExpr must have a lhs()");
+        // The LHS must NOT be a PIPE_EXPR (that would mean we went past the arrow).
+        assert!(
+            lhs.syntax().kind() != PIPE_EXPR,
+            "PipeExpr::lhs() for `a |> b()` must NOT be a PIPE_EXPR itself"
+        );
+    }
+
+    #[test]
+    fn parse_pipe_at_statement_start_is_error() {
+        // `SELECT 1; |> b() FROM t` — `|>` at the start of a new statement
+        // must not silently absorb into the previous statement. The parser
+        // processes each SQL statement separately; `|>` at the start of what
+        // would be the second statement should not produce a valid PIPE_EXPR
+        // spanning statements. Instead, we expect either a parse error or the
+        // `|>` is treated as an error token in the second statement context.
+        //
+        // Note: the smelt parser currently processes the full input as a single
+        // file. When given `SELECT 1; |> b() FROM t`, the `;` ends the first
+        // SELECT and `|> b() FROM t` begins a new (malformed) statement. We
+        // assert that no PIPE_EXPR spans both statements and that a parse error
+        // is recorded (since `|>` cannot appear at the start of a statement).
+        let parse = parse("SELECT 1; |> b() FROM t");
+        // The parse must record an error: `|>` is not valid at statement start.
+        assert!(
+            !parse.errors.is_empty(),
+            "parse_pipe_at_statement_start_is_error: expected parse errors for |> at statement start, got none"
+        );
+        // Any PIPE_EXPR that exists must not span the entire input (i.e. must
+        // not start at position 0, which would imply cross-statement merging).
+        // In practice no valid PIPE_EXPR should exist here.
+        for pipe in parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == PIPE_EXPR)
+        {
+            assert!(
+                u32::from(pipe.text_range().start()) > 0,
+                "PIPE_EXPR must not start at the beginning of the input (would span statements)"
+            );
+        }
     }
 }
