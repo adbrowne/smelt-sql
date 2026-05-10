@@ -2811,6 +2811,7 @@ pub fn walk_select_columns(select_stmt: &SelectStmt, ctx: &TypeContext) {
 /// Check for column references that don't resolve against declared schemas.
 /// Returns diagnostics with accurate source positions.
 /// Structured info about an undeclared column
+#[derive(Debug)]
 pub struct UndeclaredColumnInfo {
     pub message: String,
     pub range: TextRange,
@@ -5715,6 +5716,226 @@ pub fn infer_field_on_column_ref(
     column_ref_field(field_name).cloned()
 }
 
+// ─── Phase C Phase 2: meta-Text-as-identifier lift (narrow rule) ─────────────
+
+/// The four grammar positions where a compile-time meta-`Text` value may lift
+/// to an unquoted SQL identifier (Phase C §"Meta-`Text`-as-identifier lift").
+///
+/// Every other position (function-argument where the parameter sort is
+/// `Expr<Text>`, comparison operands, named-argument values, etc.) is NOT a
+/// lift position; in those positions a meta-`Text` retains its string-value
+/// meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaTextLiftPosition {
+    /// `SELECT c.name FROM t` — the expression itself is in a SELECT-list
+    /// slot where the grammar expects a column reference.  Lift fires when
+    /// the whole select-item expression is a meta-`Text` value with no
+    /// explicit `AS` alias.
+    ColumnReference,
+    /// `AS <meta-Text>` alias of a SELECT item.  Lift fires and treats the
+    /// meta-`Text` value as the output column identifier.  No scope check —
+    /// aliases introduce names, they do not reference existing ones.
+    AsAlias,
+    /// `ORDER BY <meta-Text>` — the expression is the sort key.  Lift fires;
+    /// the lifted identifier is validated against the surrounding
+    /// column-resolution scope.
+    OrderBy,
+    /// `GROUP BY <meta-Text>` — the expression is a grouping key.  Same
+    /// scope rule as `OrderBy`.
+    GroupBy,
+}
+
+impl MetaTextLiftPosition {
+    /// Returns `true` when the lifted identifier must be validated against the
+    /// surrounding column-resolution scope (i.e., `UnknownColumn` is possible).
+    ///
+    /// `AsAlias` returns `false` — aliases introduce names, not reference them.
+    pub fn requires_scope_validation(self) -> bool {
+        !matches!(self, MetaTextLiftPosition::AsAlias)
+    }
+}
+
+/// Returns the lifted identifier text if `expr` is a compile-time
+/// meta-`Text` value — specifically, a `ColumnRef.name` field projection
+/// whose binding is registered as `SmeltType::ColumnRef` in `ctx`.
+///
+/// In Phase C the only producer of compile-time meta-`Text` values is a
+/// `<binding>.name` field access where `<binding>` was declared as
+/// `ColumnRef` (e.g. the lambda parameter `c` in `map(smelt.columns_of(t),
+/// fn c => ...)`) .  All other expressions — including runtime `Expr<Text>`
+/// results like `UPPER('foo')` and SQL string literals like `'foo'` — return
+/// `None`.
+///
+/// When `Some(text)` is returned, `text` is the field-name token in the
+/// source — i.e. the literal identifier `"name"`.  The actual runtime value
+/// of `c.name` (the column name string at expansion time) is determined by
+/// Phase 3's expansion-time materialisation; Phase 2 only recognises the
+/// structural pattern.
+///
+/// Pure — no Salsa dependency.
+pub fn is_meta_text_value(expr: &Expr, ctx: &TypeContext) -> Option<String> {
+    use smelt_types::signatures::SmeltType;
+
+    // Only a bare qualified column-ref of the form `qualifier.field` can be a
+    // meta-Text value in Phase C; complex expressions (function calls, binary
+    // expressions, literals) are all runtime values.
+    let col_ref = smelt_parser::ast::ColumnRef::from_expr(expr)?;
+    let qualifier = col_ref.qualifier()?;
+    let field = col_ref.name();
+
+    // Is the qualifier registered as a ColumnRef-typed binding?
+    let is_column_ref_binding = ctx
+        .lookup_function_param_smelt_type(qualifier)
+        .map(|ty| matches!(ty, SmeltType::ColumnRef))
+        .unwrap_or(false);
+
+    if !is_column_ref_binding {
+        return None;
+    }
+
+    // Is the field the Text-typed `name` field (the only Text-typed member of
+    // the closed ColumnRef field set)?  Other fields (`type` → Unknown,
+    // `is_numeric` → Boolean) are NOT meta-Text and do not lift.
+    use smelt_types::signatures::{column_ref_field, TypeConstraint};
+    let field_ty = column_ref_field(field)?;
+    let is_text_field = matches!(
+        field_ty,
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+    );
+    if !is_text_field {
+        return None;
+    }
+
+    // Return the field name token as the lifted identifier text.  In Phase C
+    // this is always `"name"` because the only Text-typed ColumnRef field is
+    // `name`.  Phase D may introduce additional Text-typed fields; they would
+    // be handled here automatically.
+    Some(field.to_string())
+}
+
+/// Check all four meta-`Text`-as-identifier lift positions in a SELECT
+/// statement and return `UndeclaredColumnInfo` diagnostics for any lifted
+/// identifier that names no in-scope column.
+///
+/// Lift positions checked (Phase C §"Meta-`Text`-as-identifier lift"):
+/// 1. **Column-reference position** — every expression in the SELECT list
+///    that IS itself a meta-`Text` value (i.e. no sub-expressions; the bare
+///    `c.name` is the entire select-item expression).
+/// 2. **ORDER BY column-reference** — every sort-key expression that is a
+///    meta-`Text` value.
+/// 3. **GROUP BY column-reference** — every grouping-key expression that is
+///    a meta-`Text` value.
+/// 4. **AS alias** — detected by inspecting select items whose expression is
+///    a meta-`Text` value; no scope validation is performed for aliases
+///    (aliases introduce names, not reference them).
+///
+/// For positions 1 / 2 / 3: when the lifted field-name text does not resolve
+/// against `ctx` the function emits an `UndeclaredColumnInfo` entry anchored
+/// at the meta-`Text` expression's source span.  No new diagnostic code is
+/// introduced — the caller maps the returned entries to the existing
+/// `UnknownColumn` / `UndeclaredColumn` path.
+///
+/// For position 4 (AS alias): the function simply recognises the lift and
+/// returns no diagnostic (aliases are not validated against scope).
+///
+/// Expressions that are NOT meta-`Text` values are silently skipped; they
+/// continue to be validated by `check_undeclared_columns` through the normal
+/// path.
+///
+/// Pure — no Salsa dependency.
+pub fn check_meta_text_lift_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+) -> Vec<UndeclaredColumnInfo> {
+    let mut out = Vec::new();
+
+    // ── 1. SELECT list (column-reference position & AS-alias position) ──────
+    if let Some(select_list) = select_stmt.select_list() {
+        for item in select_list.items() {
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            let Some(lifted_text) = is_meta_text_value(&expr, ctx) else {
+                // Not a meta-Text expression — skip (normal undeclared-column
+                // check handles it).
+                continue;
+            };
+
+            // For the AS-alias position: the meta-Text value is the alias.
+            // Aliases introduce names rather than referencing them, so no scope
+            // validation is needed.  The lift is simply recognised (no error).
+            if item.alias().is_some() {
+                // Explicit AS alias — the alias text is already determined by
+                // the parser (the IDENT after AS).  This arm is currently
+                // unreachable for the spec'd dotted form `SUM(amount) AS c.name`
+                // because the parser's `alias()` returns only the first IDENT
+                // after AS (parser-shape limitation; see test
+                // `as_alias_lift_is_parser_limited`).  Phase 3 will handle the
+                // SQL-rendering side of the lift; until then this code is a
+                // forward-compatibility placeholder.  No scope validation
+                // applies to AS-alias positions (aliases introduce names, not
+                // reference them), so the skip is also semantically correct.
+                continue;
+            }
+
+            // Column-reference position (the entire select-item expression is a
+            // meta-Text value, no explicit alias).  Validate the lifted identifier.
+            check_lifted_identifier(&lifted_text, &expr, ctx, &mut out);
+        }
+    }
+
+    // ── 2. ORDER BY position ─────────────────────────────────────────────────
+    if let Some(order_by) = select_stmt.order_by_clause() {
+        for item in order_by.items() {
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            let Some(lifted_text) = is_meta_text_value(&expr, ctx) else {
+                continue;
+            };
+            check_lifted_identifier(&lifted_text, &expr, ctx, &mut out);
+        }
+    }
+
+    // ── 3. GROUP BY position ─────────────────────────────────────────────────
+    if let Some(group_by) = select_stmt.group_by_clause() {
+        for expr in group_by.expressions() {
+            let Some(lifted_text) = is_meta_text_value(&expr, ctx) else {
+                continue;
+            };
+            check_lifted_identifier(&lifted_text, &expr, ctx, &mut out);
+        }
+    }
+
+    out
+}
+
+/// Validate that a lifted identifier (`lifted_text`) names a column in scope
+/// (`ctx`).  If not, push an `UndeclaredColumnInfo` anchored at `expr`'s span.
+///
+/// Used by `check_meta_text_lift_diagnostics` for lift positions that require
+/// scope validation (column-reference, ORDER BY, GROUP BY).
+fn check_lifted_identifier(
+    lifted_text: &str,
+    expr: &Expr,
+    ctx: &TypeContext,
+    out: &mut Vec<UndeclaredColumnInfo>,
+) {
+    if ctx.lookup_identifier(None, lifted_text).is_some() {
+        return; // Lifted identifier resolves — no error.
+    }
+    let message = format!(
+        "Column '{}' not found in any source, model, or CTE",
+        lifted_text
+    );
+    out.push(UndeclaredColumnInfo {
+        message,
+        range: expr.text_range(),
+        qualifier: None,
+        column_name: lifted_text.to_string(),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8297,6 +8518,397 @@ mod tests {
                 column: 12
             },
             "diagnostic must end after `foo` (col 12)"
+        );
+    }
+
+    // ─── Phase C Phase 2: meta-Text-as-identifier lift tests ─────────────────
+
+    /// Helper: build a TypeContext with a ColumnRef binding `c` and columns
+    /// `{name: Text, amount: Numeric}` in scope.
+    fn make_column_ref_ctx() -> TypeContext {
+        let mut ctx = TypeContext::new();
+        // Register `c` as a ColumnRef-typed lambda parameter.
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx.add_lambda_param(
+            "c",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+        // Seed two in-scope columns via a fake model.
+        ctx.add_model_column(
+            "t",
+            "name",
+            TypedColumn {
+                data_type: DataType::Text,
+                nullable: true,
+            },
+        );
+        ctx.add_model_column(
+            "t",
+            "amount",
+            TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            },
+        );
+        ctx.add_alias("t", "t");
+        ctx
+    }
+
+    /// `is_meta_text_value` predicate: `c.name` with `c: ColumnRef` → `Some("name")`.
+    #[test]
+    fn is_meta_text_value_recognises_column_ref_name_projection() {
+        let ctx = make_column_ref_ctx();
+
+        // c.name → Some("name")
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_stmt(sql);
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+        let expr = item.expression().expect("expression");
+        let result = is_meta_text_value(&expr, &ctx);
+        assert_eq!(
+            result,
+            Some("name".to_string()),
+            "c.name with c: ColumnRef must be recognised as meta-Text, got: {:?}",
+            result
+        );
+    }
+
+    /// `is_meta_text_value` predicate: `c.is_numeric` returns `None` (Boolean field,
+    /// not Text).
+    #[test]
+    fn is_meta_text_value_rejects_non_text_field() {
+        let ctx = make_column_ref_ctx();
+
+        // c.is_numeric → None (Boolean field, not Text)
+        let sql = "SELECT c.is_numeric FROM t";
+        let select = parse_select_stmt(sql);
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+        let expr = item.expression().expect("expression");
+        let result = is_meta_text_value(&expr, &ctx);
+        assert_eq!(
+            result, None,
+            "c.is_numeric is Boolean, not Text — must NOT be recognised as meta-Text; got: {:?}",
+            result
+        );
+    }
+
+    /// `is_meta_text_value` predicate: a runtime `Expr<Text>` like `UPPER('foo')` returns `None`.
+    #[test]
+    fn no_lift_for_runtime_expr_text() {
+        let ctx = make_column_ref_ctx();
+
+        // UPPER('foo') is a runtime Expr<Text> — not a meta-Text, lift must not fire.
+        let sql = "SELECT UPPER('foo') FROM t";
+        let select = parse_select_stmt(sql);
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+        let expr = item.expression().expect("expression");
+        let result = is_meta_text_value(&expr, &ctx);
+        assert_eq!(
+            result, None,
+            "UPPER('foo') is a runtime Expr<Text> — must NOT be recognised as meta-Text; got: {:?}",
+            result
+        );
+    }
+
+    /// `is_meta_text_value` predicate: a SQL string literal `'foo'` returns `None`.
+    #[test]
+    fn lift_only_for_compile_time_meta_text() {
+        let ctx = make_column_ref_ctx();
+
+        // 'foo' is a string literal — not a meta-Text projection.
+        let sql = "SELECT 'foo' FROM t";
+        let select = parse_select_stmt(sql);
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+        let expr = item.expression().expect("expression");
+        let result = is_meta_text_value(&expr, &ctx);
+        assert_eq!(
+            result, None,
+            "'foo' is a SQL string literal — must NOT be recognised as meta-Text; got: {:?}",
+            result
+        );
+    }
+
+    /// `is_meta_text_value` predicate: `UPPER(c.name)` — the argument c.name is a
+    /// meta-Text but the outer UPPER call is NOT.  `no_lift_in_function_argument_position`
+    /// verifies that the lift does not fire for the function-call expression.
+    #[test]
+    fn no_lift_in_function_argument_position() {
+        let ctx = make_column_ref_ctx();
+
+        // UPPER(c.name) — the outer expression is a function call, not a meta-Text.
+        let sql = "SELECT UPPER(c.name) FROM t";
+        let select = parse_select_stmt(sql);
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+        let expr = item.expression().expect("expression");
+
+        // The outer expression (UPPER(...)) must NOT be a meta-Text value.
+        let result = is_meta_text_value(&expr, &ctx);
+        assert_eq!(
+            result, None,
+            "UPPER(c.name) outer expression must NOT be meta-Text (lift doesn't fire for function calls); got: {:?}",
+            result
+        );
+
+        // No UnknownColumn expected from check_meta_text_lift_diagnostics for UPPER(c.name),
+        // because UPPER(c.name) is not a lift-position expression.
+        let diags = check_meta_text_lift_diagnostics(&select, &ctx);
+        assert!(
+            diags.is_empty(),
+            "UPPER(c.name) must not produce lift diagnostics (not in lift position); got: {:?}",
+            diags
+        );
+    }
+
+    /// `lift_in_column_reference_position_resolves_to_column`:
+    /// `c.name` (meta-Text, field "name") in column-reference position with "name"
+    /// in scope → no UnknownColumn.
+    /// `c.name` with "name" NOT in scope → UnknownColumn at the c.name span.
+    #[test]
+    fn lift_in_column_reference_position_resolves_to_column() {
+        // ── Part 1: "name" IS in scope — no UnknownColumn ─────────────────────
+        let ctx_with_name = make_column_ref_ctx(); // has `name` and `amount` columns
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_stmt(sql);
+        let diags = check_meta_text_lift_diagnostics(&select, &ctx_with_name);
+        assert!(
+            diags.is_empty(),
+            "c.name in column-ref position with 'name' in scope must produce no lift diagnostics; got: {:?}",
+            diags
+        );
+
+        // ── Part 2: "name" NOT in scope — UnknownColumn ───────────────────────
+        // Build a context with only `amount` — no `name` column.
+        let mut ctx_without_name = TypeContext::new();
+        ctx_without_name.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx_without_name.add_lambda_param(
+            "c",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx_without_name.add_model_column(
+            "t",
+            "amount",
+            TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            },
+        );
+
+        let diags_no_name = check_meta_text_lift_diagnostics(&select, &ctx_without_name);
+        assert!(
+            !diags_no_name.is_empty(),
+            "c.name lifted to 'name' which is NOT in scope must produce UnknownColumn; got: {:?}",
+            diags_no_name
+        );
+        // The lifted identifier should be reported as "name" (not "c" or "c.name").
+        assert_eq!(
+            diags_no_name[0].column_name, "name",
+            "UnknownColumn column_name must be the lifted identifier 'name', got: {:?}",
+            diags_no_name[0].column_name
+        );
+    }
+
+    /// `as_alias_lift_is_parser_limited`:
+    /// The spec describes `SUM(amount) AS c.name` as an AS-alias lift position
+    /// (Phase C §"Meta-Text-as-identifier lift", position 2).  At Phase C the
+    /// parser cannot represent `c.name` as a multi-token alias: `SelectItem::alias()`
+    /// captures only the first IDENT after `AS`, so `SUM(amount) AS c.name` yields
+    /// alias `"c"` and the `c.name` is silently truncated.
+    ///
+    /// This test documents that parser limitation: the AS-alias arm of
+    /// `check_meta_text_lift_diagnostics` (the `item.alias().is_some()` branch)
+    /// cannot be reached by any syntactically valid Phase-C input.  The arm is
+    /// retained as a Phase-3-pending code path with a comment; its behaviour is
+    /// verified here via a parser-limitation assertion rather than an end-to-end
+    /// lift test.
+    ///
+    /// TODO(Phase-3): once the parser supports `AS <dotted-identifier>`, replace
+    /// this test with a positive fixture that uses `SUM(amount) AS c.name` and
+    /// verifies that no scope-check error is emitted (aliases introduce names,
+    /// they do not reference them).
+    #[test]
+    fn as_alias_lift_is_parser_limited() {
+        // `SUM(amount) AS c.name` — the parser captures only "c" as the alias.
+        let sql = "SELECT SUM(amount) AS c_name FROM t";
+        let select = parse_select_stmt(sql);
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+
+        // alias() returns the single IDENT immediately after AS.
+        let alias = item.alias();
+        assert!(
+            alias.is_some(),
+            "SELECT SUM(...) AS c_name must have an alias; got: {:?}",
+            alias
+        );
+        // Confirm the EXPRESSION of this item is NOT a meta-Text value —
+        // SUM(amount) is a function-call, so is_meta_text_value returns None.
+        let ctx = make_column_ref_ctx();
+        let expr = item.expression().expect("expression");
+        assert_eq!(
+            is_meta_text_value(&expr, &ctx),
+            None,
+            "SUM(amount) is a function call, not a meta-Text value; got: {:?}",
+            is_meta_text_value(&expr, &ctx)
+        );
+
+        // No lift diagnostics from check_meta_text_lift_diagnostics — SUM(amount)
+        // is not a meta-Text expression so the AS-alias arm never fires.
+        let diags = check_meta_text_lift_diagnostics(&select, &ctx);
+        assert!(
+            diags.is_empty(),
+            "no lift diagnostics expected for SUM(amount) AS c_name; got: {:?}",
+            diags
+        );
+    }
+
+    /// `lift_in_column_reference_position_no_alias`:
+    /// `SELECT c.name FROM t` (no explicit AS alias, `name` in scope):
+    /// the meta-Text lift fires in column-reference position and emits no error.
+    /// `infer_select_output_schema` infers `"name"` as the output column name.
+    #[test]
+    fn lift_in_column_reference_position_no_alias() {
+        let ctx = make_column_ref_ctx();
+
+        // c.name as the select expression — the lifted identifier "name" is the
+        // inferred output column name.  No UnknownColumn should be emitted.
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_stmt(sql);
+
+        // Confirm lift predicate fires.
+        let list = select.select_list().expect("SelectList");
+        let item = list.items().next().expect("first select item");
+        let expr = item.expression().expect("expression");
+        assert_eq!(
+            is_meta_text_value(&expr, &ctx),
+            Some("name".to_string()),
+            "c.name must be detected as meta-Text"
+        );
+
+        // No explicit alias on this select item.
+        assert!(
+            item.alias().is_none(),
+            "SELECT c.name FROM t must have no explicit alias"
+        );
+
+        // No lift diagnostic — "name" is in scope.
+        let diags = check_meta_text_lift_diagnostics(&select, &ctx);
+        assert!(
+            diags.is_empty(),
+            "c.name in SELECT list (column-ref position) with 'name' in scope must not produce diagnostics; got: {:?}",
+            diags
+        );
+    }
+
+    /// `lift_in_order_by_position_resolves_to_column`:
+    /// `ORDER BY c.name` with `name` in scope → no UnknownColumn.
+    /// `ORDER BY c.name` with `name` NOT in scope → UnknownColumn.
+    #[test]
+    fn lift_in_order_by_position_resolves_to_column() {
+        let ctx_with_name = make_column_ref_ctx();
+
+        // ── Part 1: "name" in scope ────────────────────────────────────────────
+        let sql = "SELECT name FROM t ORDER BY c.name";
+        let select = parse_select_stmt(sql);
+        let diags = check_meta_text_lift_diagnostics(&select, &ctx_with_name);
+        assert!(
+            diags.is_empty(),
+            "ORDER BY c.name with 'name' in scope must produce no diagnostics; got: {:?}",
+            diags
+        );
+
+        // ── Part 2: "name" NOT in scope ────────────────────────────────────────
+        let mut ctx_no_name = TypeContext::new();
+        ctx_no_name.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx_no_name.add_lambda_param(
+            "c",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx_no_name.add_model_column(
+            "t",
+            "amount",
+            TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            },
+        );
+
+        let diags_err = check_meta_text_lift_diagnostics(&select, &ctx_no_name);
+        assert!(
+            !diags_err.is_empty(),
+            "ORDER BY c.name with 'name' NOT in scope must produce UnknownColumn; got: {:?}",
+            diags_err
+        );
+        assert_eq!(
+            diags_err[0].column_name, "name",
+            "lifted column_name must be 'name', got: {:?}",
+            diags_err[0].column_name
+        );
+    }
+
+    /// `lift_in_group_by_position_resolves_to_column`:
+    /// `GROUP BY c.name` with `name` in scope → no UnknownColumn.
+    /// `GROUP BY c.name` with `name` NOT in scope → UnknownColumn.
+    #[test]
+    fn lift_in_group_by_position_resolves_to_column() {
+        let ctx_with_name = make_column_ref_ctx();
+
+        // ── Part 1: "name" in scope ────────────────────────────────────────────
+        let sql = "SELECT c.name FROM t GROUP BY c.name";
+        let select = parse_select_stmt(sql);
+        let diags = check_meta_text_lift_diagnostics(&select, &ctx_with_name);
+        assert!(
+            diags.is_empty(),
+            "GROUP BY c.name with 'name' in scope must produce no diagnostics; got: {:?}",
+            diags
+        );
+
+        // ── Part 2: "name" NOT in scope ────────────────────────────────────────
+        let mut ctx_no_name = TypeContext::new();
+        ctx_no_name.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx_no_name.add_lambda_param(
+            "c",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx_no_name.add_model_column(
+            "t",
+            "amount",
+            TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            },
+        );
+
+        let sql_no_name = "SELECT c.name FROM t GROUP BY c.name";
+        let select_no_name = parse_select_stmt(sql_no_name);
+        let diags_err = check_meta_text_lift_diagnostics(&select_no_name, &ctx_no_name);
+        // GROUP BY c.name appears once, SELECT c.name appears once (col-ref position)
+        // Both positions fire lift diagnostics for "name" not in scope.
+        assert!(
+            !diags_err.is_empty(),
+            "GROUP BY c.name with 'name' NOT in scope must produce UnknownColumn; got: {:?}",
+            diags_err
+        );
+        assert!(
+            diags_err.iter().any(|d| d.column_name == "name"),
+            "at least one UnknownColumn for lifted 'name', got: {:?}",
+            diags_err
         );
     }
 }

@@ -27,8 +27,9 @@ use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
-    check_undeclared_columns, infer_cte_columns, infer_expression_kind, infer_expression_type,
-    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
+    check_meta_text_lift_diagnostics, check_undeclared_columns, infer_cte_columns,
+    infer_expression_kind, infer_expression_type, walk_expression_columns_with_visitor,
+    walk_select_columns_with_visitor, TypeContext,
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
@@ -279,8 +280,19 @@ fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
         // HOF inference can recover `SmeltType::List(...)` rather than
         // collapsing to `DataType::Unknown`.  The scalar projection stored in
         // `function_params` is insufficient for HOF first-argument inference.
+        //
+        // Phase C: also register `ColumnRef` params so that
+        // `is_meta_text_value` (called from `check_meta_text_lift_diagnostics`)
+        // can recognise `<param>.name` as a meta-Text lift and
+        // `check_function_select_body` can suppress the spurious
+        // `UnknownIdentifier` that `check_undeclared_columns` would otherwise
+        // emit for the qualified reference `<param>.name` before the lift check
+        // runs.
         if let Some(Ok(smelt_ty)) = &p.type_ref {
-            if matches!(smelt_ty, SmeltType::List(_) | SmeltType::Unknown) {
+            if matches!(
+                smelt_ty,
+                SmeltType::List(_) | SmeltType::Unknown | SmeltType::ColumnRef
+            ) {
                 ctx.add_function_param_smelt_type(&p.name, smelt_ty.clone());
             }
         }
@@ -1608,7 +1620,59 @@ fn check_function_select_body(
     //    SELECT references that does not resolve in `body_ctx` emits
     //    `UnknownIdentifier`. Select-list aliases are handled by
     //    `check_undeclared_columns` already.
+    //
+    //    Phase C (meta-Text-as-identifier lift): `check_undeclared_columns`
+    //    sees `<columnref-param>.<field>` (e.g. `c.name`) as an unresolved
+    //    qualified column reference — it looks up `c.name` in model / source /
+    //    CTE scopes, finds nothing, and would emit a spurious `UnknownIdentifier`
+    //    before the lift check gets a chance to reinterpret the expression.
+    //    To avoid the double-diagnostic, we suppress any
+    //    `check_undeclared_columns` entry whose `qualifier` is the name of a
+    //    `ColumnRef`-typed function parameter.  The lift check below then emits
+    //    its own diagnostic (anchored at the correct span) if the lifted
+    //    identifier does not resolve.
     for info in check_undeclared_columns(select_stmt, body_ctx) {
+        // Suppress spurious UnknownIdentifier for `<columnref-binding>.<field>`
+        // references where `<field>` is a recognised ColumnRef field (i.e.
+        // `column_ref_field(field)` returns `Some`).  These references are
+        // handled by the lift check in step 1b instead; suppressing them here
+        // avoids double-diagnostics for the valid meta-Text lift case (`c.name`).
+        //
+        // Unrecognised fields (e.g. `c.foo`) are NOT suppressed — they fall
+        // through and emit `UnknownIdentifier` as normal.
+        if let Some(qualifier) = &info.qualifier {
+            use smelt_types::signatures::{column_ref_field, SmeltType};
+            let qualifier_is_column_ref = body_ctx
+                .lookup_function_param_smelt_type(qualifier)
+                .map(|ty| matches!(ty, SmeltType::ColumnRef))
+                .unwrap_or(false);
+            if qualifier_is_column_ref && column_ref_field(&info.column_name).is_some() {
+                // This is a `<columnref-param>.<recognised-field>` reference.
+                // Skip — the lift check (step 1b) validates the lifted identifier.
+                continue;
+            }
+        }
+        diagnostics.push(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: format!(
+                "Unknown identifier `{}` — not a parameter or in any enclosing scope",
+                info.column_name
+            ),
+            range: to_range(info.range, text),
+            code: Some(DiagnosticCode::UnknownIdentifier),
+            data: None,
+        });
+    }
+
+    // 1b. Meta-Text-as-identifier lift diagnostics (Phase C §"Meta-Text-as-
+    //     identifier lift").  For each expression in SELECT / ORDER BY / GROUP BY
+    //     that is a meta-Text value (`<columnref-param>.name`), validate the
+    //     lifted identifier against the body context and emit `UnknownIdentifier`
+    //     if it does not resolve.
+    //
+    //     This runs AFTER the suppression above so that one and only one
+    //     diagnostic is emitted per unresolvable `c.name` reference.
+    for info in check_meta_text_lift_diagnostics(select_stmt, body_ctx) {
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!(
@@ -2724,6 +2788,205 @@ mod tests {
             frame_diag.is_some(),
             "walk_hof_lambda_body_with_anonymous_frame with nested=Some must stamp \
              a <map> anonymous frame (angle-bracketed); got: {diags:?}"
+        );
+    }
+
+    // ─── Phase C Phase 2: pipeline integration tests ──────────────────────────
+    //
+    // These tests verify that `check_function_select_body` (called from the real
+    // diagnostic pipeline) correctly handles `<columnref-param>.<field>` references:
+    //   - No spurious `UnknownIdentifier` emitted by `check_undeclared_columns`.
+    //   - Lift diagnostics from `check_meta_text_lift_diagnostics` are wired in.
+    //
+    // We call `check_function_select_body` directly (it is private but we are in
+    // the same module) rather than going through the full Salsa pipeline, which
+    // would require a real database and file system.
+    //
+    // `check_function_select_body` accepts `_sig: &FunctionSig` but does NOT
+    // inspect it internally (the leading underscore is intentional); we parse a
+    // minimal smelt.define and use the extracted sig purely to satisfy the type.
+
+    /// Parse a minimal `smelt.define` to obtain a `FunctionSig` for passing to
+    /// `check_function_select_body`.  The sig is not inspected by the function.
+    fn minimal_sig() -> FunctionSig {
+        let text = "smelt.define test_fn(x: Expr<Integer>) AS (x)\n";
+        let clean = smelt_parser::strip_frontmatter(text).to_string();
+        let p = smelt_parser::parse(&clean);
+        let ast = AstFile::cast(p.syntax()).expect("FILE");
+        extract_function_signatures(&ast, &clean)
+            .into_iter()
+            .next()
+            .expect("one define")
+    }
+
+    /// Build a `TypeContext` seeded with:
+    ///   - `c: ColumnRef` (function parameter via `add_function_param_smelt_type`)
+    ///   - `c` also as an `Unknown`-typed `function_param` so bare `c` resolves
+    ///   - model columns `t.name (Text)` and `t.amount (Double)`
+    ///   - alias `t → t`
+    fn make_pipeline_ctx() -> TypeContext {
+        use smelt_types::signatures::SmeltType;
+        let mut ctx = TypeContext::new();
+        // Register the ColumnRef smelt-type so is_meta_text_value fires and
+        // the suppression check in check_function_select_body triggers.
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        // Also register `c` as an Unknown-typed function param so bare `c`
+        // resolves via lookup_identifier (prevents a spurious UnknownIdentifier
+        // for the bare qualifier itself).
+        ctx.add_function_param(
+            "c",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx.add_model_column(
+            "t",
+            "name",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Text,
+                nullable: true,
+            },
+        );
+        ctx.add_model_column(
+            "t",
+            "amount",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Double,
+                nullable: true,
+            },
+        );
+        ctx.add_alias("t", "t");
+        ctx
+    }
+
+    /// Parse a SELECT statement from a bare SQL string (no smelt.define wrapper).
+    fn parse_select_for_pipeline(sql: &str) -> smelt_parser::ast::SelectStmt {
+        let parse = smelt_parser::parse(sql);
+        let ast = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
+        ast.select_stmt().expect("one SELECT")
+    }
+
+    /// `check_function_select_body` with `c: ColumnRef` and body
+    /// `SELECT c.name FROM t` where `name` is in scope must emit ZERO diagnostics —
+    /// no spurious `UnknownIdentifier` from `check_undeclared_columns` and no
+    /// lift error from `check_meta_text_lift_diagnostics`.
+    #[test]
+    fn pipeline_column_ref_name_in_scope_produces_no_diagnostics() {
+        let sig = minimal_sig();
+        let ctx = make_pipeline_ctx();
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_for_pipeline(sql);
+
+        let no_op_nested: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
+
+        assert!(
+            diags.is_empty(),
+            "SELECT c.name FROM t with c: ColumnRef and 'name' in scope must produce \
+             ZERO diagnostics from the pipeline — no spurious UnknownIdentifier and no \
+             lift error; got: {diags:?}"
+        );
+    }
+
+    /// `check_function_select_body` with `c: ColumnRef` and body
+    /// `SELECT c.foo FROM t` where `foo` is NOT a recognised ColumnRef field must
+    /// emit EXACTLY ONE `UnknownIdentifier`.
+    ///
+    /// The suppression gate checks BOTH that the qualifier is a ColumnRef param
+    /// AND that the field name is a recognised ColumnRef field (via
+    /// `column_ref_field`).  Since `foo` is not a recognised field, the
+    /// suppression does NOT fire and `check_undeclared_columns` emits its normal
+    /// `UnknownIdentifier`.
+    #[test]
+    fn pipeline_column_ref_non_text_field_emits_unknown_identifier() {
+        let sig = minimal_sig();
+        let ctx = make_pipeline_ctx();
+        let sql = "SELECT c.foo FROM t";
+        let select = parse_select_for_pipeline(sql);
+
+        let no_op_nested: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
+
+        // `c.foo` — `foo` is not a recognised ColumnRef field (`column_ref_field("foo")` = None).
+        // The suppression gate requires BOTH qualifier=ColumnRef AND field=recognised ColumnRef field.
+        // Since `foo` fails the field check, the suppression does NOT fire.
+        // `check_undeclared_columns` emits UnknownIdentifier for `c.foo`.
+        assert_eq!(
+            diags.len(),
+            1,
+            "SELECT c.foo FROM t must produce exactly one UnknownIdentifier — \
+             foo is not a recognised ColumnRef field so the suppression does not fire; \
+             got: {diags:?}"
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(DiagnosticCode::UnknownIdentifier),
+            "diagnostic must be UnknownIdentifier; got: {:?}",
+            diags[0].code
+        );
+    }
+
+    /// `check_function_select_body` with `c: ColumnRef` and body
+    /// `SELECT c.name FROM t` where the lifted identifier `name` is NOT present
+    /// in the model columns must emit EXACTLY ONE `UnknownIdentifier` from the
+    /// lift check — not a double-diagnostic.
+    #[test]
+    fn pipeline_column_ref_name_not_in_scope_emits_single_lift_diagnostic() {
+        use smelt_types::signatures::SmeltType;
+
+        let sig = minimal_sig();
+
+        // Build a context where `c` is ColumnRef but the model has NO `name` column.
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx.add_function_param(
+            "c",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Unknown,
+                nullable: true,
+            },
+        );
+        // Only `amount` — no `name`.
+        ctx.add_model_column(
+            "t",
+            "amount",
+            smelt_types::TypedColumn {
+                data_type: smelt_types::DataType::Double,
+                nullable: true,
+            },
+        );
+        ctx.add_alias("t", "t");
+
+        let sql = "SELECT c.name FROM t";
+        let select = parse_select_for_pipeline(sql);
+
+        let no_op_nested: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
+
+        // Exactly one diagnostic: the lift check says "name" is not in scope.
+        // `check_undeclared_columns` is suppressed for the ColumnRef qualifier `c`.
+        // No double-diagnostic.
+        assert_eq!(
+            diags.len(),
+            1,
+            "SELECT c.name FROM t with 'name' NOT in scope must produce exactly ONE \
+             UnknownIdentifier from the lift check (not a double-diagnostic); got: {diags:?}"
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(DiagnosticCode::UnknownIdentifier),
+            "the single diagnostic must be UnknownIdentifier; got: {:?}",
+            diags[0].code
+        );
+        // The message should reference "name" (the lifted identifier).
+        assert!(
+            diags[0].message.contains("name"),
+            "diagnostic message must mention the lifted identifier 'name'; got: {:?}",
+            diags[0].message
         );
     }
 }
