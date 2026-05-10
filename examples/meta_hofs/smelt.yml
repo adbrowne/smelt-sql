@@ -1,0 +1,19 @@
+name: meta_hofs
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+vars:
+  region: us-west-2
+  min_revenue: 100
+  flag: true
+  nullable: ~

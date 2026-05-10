@@ -1,0 +1,13 @@
+name: meta_hofs_broken_lambda_in_forbidden_position
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

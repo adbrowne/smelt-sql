@@ -1,0 +1,26 @@
+description: Raw user data for meta-HOF examples
+columns:
+- name: id
+  type: INTEGER
+  description: Unique user identifier
+- name: name
+  type: VARCHAR
+  description: User display name
+- name: email
+  type: VARCHAR
+  description: User email address
+- name: is_active
+  type: BOOLEAN
+  description: Whether the account is active
+- name: is_paid
+  type: BOOLEAN
+  description: Whether the user has a paid subscription
+- name: is_validated
+  type: BOOLEAN
+  description: Whether the user email is validated
+- name: revenue
+  type: DOUBLE
+  description: Lifetime revenue from this user
+- name: created_at
+  type: TIMESTAMP
+  description: Account creation timestamp

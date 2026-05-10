@@ -5185,6 +5185,161 @@ pub fn check_hof_position_diagnostics(
     diags
 }
 
+/// Walk all `SMELT_PATH_CALL` descendants of `root` whose path is `config.var`.
+/// For each such call:
+/// - If the argument is not a string literal → `ConfigVarNameNotLiteral`.
+/// - If the argument is a string literal but `vars_map` does not contain that key
+///   → `ConfigVarNotFound`.
+/// - If the argument resolves to a YAML `null` value → `ConfigVarNullCoercion` (Warning).
+///
+/// `vars_map` is the parsed `vars:` block from `smelt.yml` (pass empty map when absent).
+/// `text` is the raw source file text (used for span → range conversion; pass `""`
+/// in tests where range accuracy is not needed).
+///
+/// Pure function — no Salsa dependency.
+pub fn check_config_var_call_diagnostics(
+    root: &smelt_parser::syntax_kind::SyntaxNode,
+    vars_map: &std::collections::BTreeMap<String, serde_yaml::Value>,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+
+    let mut diags = Vec::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    for node in root.descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let call = match SmeltPathCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Only handle `smelt.config.var(...)`.
+        let segs = call.segments();
+        if segs.len() != 2 || segs[0].to_lowercase() != "config" || segs[1].to_lowercase() != "var"
+        {
+            continue;
+        }
+
+        let call_range = to_range(node.text_range());
+
+        // Extract the first positional argument expression.
+        let first_arg = call
+            .arg_list()
+            .and_then(|args| args.positional_args().into_iter().next());
+
+        let Some(arg_expr) = first_arg else {
+            // No argument at all — emit ConfigVarNameNotLiteral so the user
+            // gets a useful diagnostic rather than a silent no-op.
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: crate::meta_hof_diagnostic_message(
+                    crate::DiagnosticCode::ConfigVarNameNotLiteral,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                range: call_range,
+                code: Some(crate::DiagnosticCode::ConfigVarNameNotLiteral),
+                data: None,
+            });
+            continue;
+        };
+
+        // Check: is the argument a string literal?
+        if !crate::config_vars::is_string_literal_expr(&arg_expr) {
+            let arg_range = to_range(arg_expr.syntax().text_range());
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: crate::meta_hof_diagnostic_message(
+                    crate::DiagnosticCode::ConfigVarNameNotLiteral,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                range: arg_range,
+                code: Some(crate::DiagnosticCode::ConfigVarNameNotLiteral),
+                data: None,
+            });
+            continue;
+        }
+
+        // Extract the string value.
+        let var_name = match crate::config_vars::extract_string_literal_value(&arg_expr) {
+            Some(n) => n,
+            None => continue, // should not happen if is_string_literal_expr returned true
+        };
+
+        // Look up in vars_map.
+        match vars_map.get(&var_name) {
+            None => {
+                diags.push(crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: crate::meta_hof_diagnostic_message(
+                        crate::DiagnosticCode::ConfigVarNotFound,
+                        None,
+                        Some(&var_name),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                    range: call_range,
+                    code: Some(crate::DiagnosticCode::ConfigVarNotFound),
+                    data: None,
+                });
+            }
+            Some(val) => {
+                // Coerce and check for null.
+                let (_text_val, warn_name) =
+                    crate::config_vars::coerce_yaml_scalar_to_text(val, &var_name);
+                if let Some(null_var) = warn_name {
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Warning,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::ConfigVarNullCoercion,
+                            None,
+                            Some(&null_var),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: call_range,
+                        code: Some(crate::DiagnosticCode::ConfigVarNullCoercion),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
+    diags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

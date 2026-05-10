@@ -122,3 +122,47 @@ elements don't all share a common type, or `MetaSpreadInForbiddenPosition` if
 you accidentally place the spread inside a WHERE clause instead of the SELECT
 list.  This extension is not validated by `validate.py`; it is workflow practice
 only.
+
+## Optional: HOF pipeline and config vars (Phase B surface)
+
+After the Phase A lift, try using Phase B HOFs and `smelt.config.var` together.
+Add a `vars:` block to your `smelt.yml`:
+
+```yaml
+vars:
+  min_revenue: 50
+```
+
+Then use `smelt.config.var` in a model to read it at compile time, and compose
+HOFs with the pipe operator to filter and map a list of amounts inline:
+
+```sql
+-- Filter out low-revenue orders, then double each remaining amount for illustration
+SELECT [10, 75, 200, 30, 120]
+         |> filter(fn x => x > smelt.config.var('min_revenue'))
+         |> map(fn x => x * 2)
+```
+
+You can also fold a boolean column list with `and_all` or `or_any` reducers:
+
+```sql
+-- True if every order in a hardcoded set is above the threshold
+SELECT reduce([75, 200, 120], and_all)
+```
+
+Wait — `and_all` expects `List<Boolean>`, not `List<Numeric>`. The LSP will
+surface `ReducerInputTypeMismatch`. Fix it by adjusting the list to booleans:
+
+```sql
+SELECT reduce([true, true, false], or_any)
+```
+
+Key Phase B diagnostics to watch for:
+
+- `ReducerInputTypeMismatch` — list element type doesn't match the reducer's expected input
+- `ReducerEmptyNoIdentity` — `reduce([], union_all)` where `union_all` has no identity
+- `HofExpectsLambda` — passing a bare name instead of `fn x => ...` to `map` or `filter`
+- `ConfigVarNotFound` — referencing a `vars:` key that doesn't exist in `smelt.yml`
+- `PipeRhsNotCall` — `list |> 3 + 4` (RHS of `|>` must be a call expression)
+
+This extension is not validated by `validate.py`; it is workflow practice only.

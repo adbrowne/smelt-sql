@@ -398,6 +398,269 @@ fn meta_lists_broken_spread_forbidden() {
     );
 }
 
+// ===== Phase B (meta-language) TDD tests =====
+//
+// Layout mirrors Phase A: one clean workspace + one broken workspace per diagnostic code.
+//   - `examples/meta_hofs/`                         — happy-path models only
+//   - `examples/meta_hofs_broken_*/`                — one broken model per Phase B code
+//
+// The clean workspace test uses `check_workspace_no_diagnostics`.
+// The broken-workspace tests use `check_workspace_emits_exactly_one_phase_b_diagnostic` which
+// asserts exactly one Phase B code fires in the named file.
+
+/// The Phase B diagnostic codes. Used to filter diagnostics in the broken-workspace helper.
+const PHASE_B_CODES: &[smelt_db::DiagnosticCode] = &[
+    smelt_db::DiagnosticCode::LambdaInForbiddenPosition,
+    smelt_db::DiagnosticCode::LambdaArityNotSupported,
+    smelt_db::DiagnosticCode::LambdaResultTypeMismatch,
+    smelt_db::DiagnosticCode::HofExpectsLambda,
+    smelt_db::DiagnosticCode::HofExpectsReducer,
+    smelt_db::DiagnosticCode::HofNameShadowed,
+    smelt_db::DiagnosticCode::ReducerNameShadowed,
+    smelt_db::DiagnosticCode::PipeRhsNotCall,
+    smelt_db::DiagnosticCode::PipeInDataPosition,
+    smelt_db::DiagnosticCode::ReducerInputTypeMismatch,
+    smelt_db::DiagnosticCode::ReducerEmptyNoIdentity,
+    smelt_db::DiagnosticCode::ConfigVarNotFound,
+    smelt_db::DiagnosticCode::ConfigVarNameNotLiteral,
+    smelt_db::DiagnosticCode::ConfigVarNullCoercion,
+];
+
+/// Helper: loads `example_dir` as a workspace, checks that exactly one Phase B diagnostic
+/// fires for the file ending in `expected_file`, and that no other file emits Phase B codes.
+fn check_workspace_emits_exactly_one_phase_b_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_phase_b: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_phase_b: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_phase_b = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| PHASE_B_CODES.contains(c))
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_phase_b(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_b.push(d.clone());
+            } else {
+                other_phase_b.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_phase_b(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_b.push(d.0.clone());
+            } else {
+                other_phase_b.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_phase_b.is_empty(),
+        "expected zero Phase B diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_phase_b.len(),
+        other_phase_b
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_b.len(),
+        1,
+        "expected exactly 1 Phase B diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_phase_b.len(),
+        target_phase_b
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_b[0].code,
+        Some(expected_code),
+        "expected Phase B diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_phase_b[0].code,
+        target_phase_b[0].message
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs/` produces zero diagnostics (excluding intentional
+/// `ConfigVarNullCoercion` warnings if a fixture exercises null coercion).
+#[test]
+fn meta_hofs_clean_workspace() {
+    check_workspace_no_diagnostics("examples/meta_hofs");
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_lambda_in_forbidden_position/` produces exactly
+/// one `LambdaInForbiddenPosition` diagnostic.
+#[test]
+fn meta_hofs_broken_lambda_in_forbidden_position() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_lambda_in_forbidden_position",
+        "models/lambda_in_forbidden_position.sql",
+        smelt_db::DiagnosticCode::LambdaInForbiddenPosition,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_lambda_arity_not_supported/` produces exactly
+/// one `LambdaArityNotSupported` diagnostic.
+///
+/// NOTE: Phase B deferred multi-arg lambda CST production — `fn (a, b) => body` now produces
+/// a generic parse error rather than a `LambdaArityNotSupported` targeted diagnostic
+/// (see "Deferred during implementation" in docs/plans/20260509-meta-language-B.md).
+/// This test is marked `#[ignore]` until Phase F lands multi-arg lambda support.
+#[test]
+#[ignore = "LambdaArityNotSupported deferred to Phase F: multi-arg lambda CST not produced in Phase B"]
+fn meta_hofs_broken_lambda_arity_not_supported() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_lambda_arity_not_supported",
+        "models/lambda_arity_not_supported.sql",
+        smelt_db::DiagnosticCode::LambdaArityNotSupported,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_lambda_result_type_mismatch/` produces exactly
+/// one `LambdaResultTypeMismatch` diagnostic.
+#[test]
+fn meta_hofs_broken_lambda_result_type_mismatch() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_lambda_result_type_mismatch",
+        "models/lambda_result_type_mismatch.sql",
+        smelt_db::DiagnosticCode::LambdaResultTypeMismatch,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_hof_expects_lambda/` produces exactly
+/// one `HofExpectsLambda` diagnostic.
+#[test]
+fn meta_hofs_broken_hof_expects_lambda() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_hof_expects_lambda",
+        "models/hof_expects_lambda.sql",
+        smelt_db::DiagnosticCode::HofExpectsLambda,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_hof_expects_reducer/` produces exactly
+/// one `HofExpectsReducer` diagnostic.
+#[test]
+fn meta_hofs_broken_hof_expects_reducer() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_hof_expects_reducer",
+        "models/hof_expects_reducer.sql",
+        smelt_db::DiagnosticCode::HofExpectsReducer,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_hof_name_shadowed/` produces exactly
+/// one `HofNameShadowed` diagnostic.
+#[test]
+fn meta_hofs_broken_hof_name_shadowed() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_hof_name_shadowed",
+        "functions/shadowed_hof.sql",
+        smelt_db::DiagnosticCode::HofNameShadowed,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_pipe_rhs_not_call/` produces exactly
+/// one `PipeRhsNotCall` diagnostic.
+#[test]
+fn meta_hofs_broken_pipe_rhs_not_call() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_pipe_rhs_not_call",
+        "models/pipe_rhs_not_call.sql",
+        smelt_db::DiagnosticCode::PipeRhsNotCall,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_reducer_input_type_mismatch/` produces exactly
+/// one `ReducerInputTypeMismatch` diagnostic.
+#[test]
+fn meta_hofs_broken_reducer_input_type_mismatch() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_reducer_input_type_mismatch",
+        "models/reducer_input_type_mismatch.sql",
+        smelt_db::DiagnosticCode::ReducerInputTypeMismatch,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_reducer_empty_no_identity/` produces exactly
+/// one `ReducerEmptyNoIdentity` diagnostic.
+#[test]
+fn meta_hofs_broken_reducer_empty_no_identity() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_reducer_empty_no_identity",
+        "models/reducer_empty_no_identity.sql",
+        smelt_db::DiagnosticCode::ReducerEmptyNoIdentity,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_config_var_not_found/` produces exactly
+/// one `ConfigVarNotFound` diagnostic.
+#[test]
+fn meta_hofs_broken_config_var_not_found() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_config_var_not_found",
+        "models/config_var_not_found.sql",
+        smelt_db::DiagnosticCode::ConfigVarNotFound,
+    );
+}
+
 // ===== Phase 5b TDD tests =====
 
 /// Phase 5b TDD Test 3: After broken/ fixtures are migrated to `smelt.functions.*`,

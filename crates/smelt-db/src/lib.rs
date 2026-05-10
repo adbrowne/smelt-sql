@@ -2231,6 +2231,18 @@ pub fn smelt_fn_call_diagnostics_for_file(
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::SMELT_PATH_CALL)
         .filter(|n| {
+            // Skip `smelt.config.var(...)` — those are handled by
+            // `check_config_var_call_diagnostics` in `check_file_diagnostics`,
+            // not by the smelt-function call checker.
+            if let Some(call) = SmeltPathCall::cast(n.clone()) {
+                let segs = call.segments();
+                if segs.len() == 2
+                    && segs[0].to_lowercase() == "config"
+                    && segs[1].to_lowercase() == "var"
+                {
+                    return false;
+                }
+            }
             let inside_define_body = n.ancestors().any(|a| a.kind() == SyntaxKind::DEFINE_BODY);
             if !inside_define_body {
                 return true; // Top-level call site — always check.
@@ -3337,6 +3349,42 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         DiagnosticAcc(diag).accumulate(db);
     }
 
+    // Phase B (meta-language) — smelt.config.var diagnostic wiring.
+    //
+    // Walk all SMELT_PATH_CALL nodes in the file for `smelt.config.var(...)` calls.
+    // Emits: ConfigVarNameNotLiteral, ConfigVarNotFound, ConfigVarNullCoercion.
+    // Requires the project-level vars map so this lives in check_file_diagnostics
+    // (not check_type_diagnostics) where the project context is available.
+    {
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+        let vars_map = project
+            .map(|p| smelt_yml_vars_query(db, p))
+            .unwrap_or_default();
+        for diag in type_inference::check_config_var_call_diagnostics(&syntax, &vars_map, text) {
+            DiagnosticAcc(diag).accumulate(db);
+        }
+    }
+
+    // Phase B (meta-language) Phase 3: smelt.define name-shadowing.
+    //
+    // Check each smelt.define declaration for names that shadow built-in
+    // HOFs (map, filter, reduce) or reducers (comma_sep, and_all, …).
+    // Fires unconditionally so function-only files (functions/*.sql with no
+    // SELECT statement) also surface these diagnostics before the early return.
+    // Emits HofNameShadowed or ReducerNameShadowed at the name token.
+    {
+        let parse = parse_file(db, file);
+        let syntax = parse.syntax();
+        if let Some(ast) = AstFile::cast(syntax) {
+            for define in ast.defines() {
+                for diag in type_inference::check_define_name_shadowing(&define, text) {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+        }
+    }
+
     // Check if model is valid
     if parse_model(db, file).is_none() {
         let path_str = path.to_str().unwrap_or("");
@@ -3639,17 +3687,6 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
             }
         }
-
-        // Phase B (meta-language) Phase 3: smelt.define name-shadowing.
-        //
-        // Check each smelt.define declaration for names that shadow built-in
-        // HOFs (map, filter, reduce) or reducers (comma_sep, and_all, …).
-        // Emits HofNameShadowed or ReducerNameShadowed at the name token.
-        for define in ast.defines() {
-            for diag in type_inference::check_define_name_shadowing(&define, text) {
-                DiagnosticAcc(diag).accumulate(db);
-            }
-        }
     }
 }
 
@@ -3719,7 +3756,13 @@ fn check_expression_types(expr: &smelt_parser::ast::Expr, db: &dyn salsa::Databa
     if let Some(func) = expr.as_function_call() {
         if let Some(name) = func.name() {
             let upper_name = name.to_uppercase();
-            if func.namespace().is_none()
+            // Phase B (meta-language): exempt HOF names (`map`, `filter`,
+            // `reduce`) from the UnrecognizedFunction warning — they are
+            // meta-language constructs, not SQL built-ins, and are validated
+            // by `check_hof_position_diagnostics` instead.
+            let is_hof = type_inference::HofKind::from_name(&name.to_lowercase()).is_some();
+            if !is_hof
+                && func.namespace().is_none()
                 && smelt_types::SqlFunction::from_name(&upper_name).is_none()
             {
                 DiagnosticAcc(Diagnostic {
