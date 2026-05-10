@@ -559,12 +559,11 @@ fn meta_hofs_broken_lambda_in_forbidden_position() {
 /// Phase B TDD: `examples/meta_hofs_broken_lambda_arity_not_supported/` produces exactly
 /// one `LambdaArityNotSupported` diagnostic.
 ///
-/// NOTE: Phase B deferred multi-arg lambda CST production — `fn (a, b) => body` now produces
-/// a generic parse error rather than a `LambdaArityNotSupported` targeted diagnostic
-/// (see "Deferred during implementation" in docs/plans/20260509-meta-language-B.md).
-/// This test is marked `#[ignore]` until Phase F lands multi-arg lambda support.
+/// The parser does not produce a multi-arg LAMBDA CST node in Phase B; instead the
+/// diagnostic fires via a text shape check on the HOF's second argument
+/// (`type_inference.rs::check_hof_position_diagnostics`). Phase F will replace the
+/// heuristic with structural detection on a real LAMBDA CST node.
 #[test]
-#[ignore = "LambdaArityNotSupported deferred to Phase F: multi-arg lambda CST not produced in Phase B"]
 fn meta_hofs_broken_lambda_arity_not_supported() {
     check_workspace_emits_exactly_one_phase_b_diagnostic(
         "examples/meta_hofs_broken_lambda_arity_not_supported",
