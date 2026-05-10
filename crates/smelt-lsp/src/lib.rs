@@ -807,12 +807,30 @@ pub fn render_expansion_frames(
     };
     let mut related: Vec<DiagnosticRelatedInformation> = Vec::new();
     for frame in frames.iter().rev() {
-        message.push_str(&format!(
-            "\nin expansion of `{}`, `{}` was bound to {}",
-            frame.function, frame.param, frame.bound_type,
-        ));
+        // Anonymous HOF frames (fn_id is None) have an empty `param` and
+        // `bound_type`; rendering them with the named-frame template produces
+        // awkward text like `"`, `` was bound to "`.  Use a shorter form that
+        // names only the HOF (matching the spec for anonymous expansion frames).
+        let is_anonymous = frame.fn_id.is_none();
+        let trailer = if is_anonymous {
+            format!("\nin expansion of `{}` call", frame.function)
+        } else {
+            format!(
+                "\nin expansion of `{}`, `{}` was bound to {}",
+                frame.function, frame.param, frame.bound_type,
+            )
+        };
+        message.push_str(&trailer);
         if let (Some(path), Some(range)) = (&frame.decl_path, frame.decl_range.as_ref()) {
             if let Ok(uri) = Url::from_file_path(path) {
+                let related_msg = if is_anonymous {
+                    format!("in expansion of `{}` call", frame.function)
+                } else {
+                    format!(
+                        "in expansion of `{}`, `{}` was bound to {}",
+                        frame.function, frame.param, frame.bound_type,
+                    )
+                };
                 related.push(DiagnosticRelatedInformation {
                     location: Location {
                         uri,
@@ -827,10 +845,7 @@ pub fn render_expansion_frames(
                             },
                         },
                     },
-                    message: format!(
-                        "in expansion of `{}`, `{}` was bound to {}",
-                        frame.function, frame.param, frame.bound_type,
-                    ),
+                    message: related_msg,
                 });
             }
         }
@@ -1178,6 +1193,23 @@ pub fn find_var_line_in_smelt_yml(smelt_yml_text: &str, var_name: &str) -> Optio
     None
 }
 
+/// Return the name of a HOF function call, handling the case where `filter`
+/// is lexed as `FILTER_KW` rather than `IDENT`.
+///
+/// `FunctionCall::name()` only returns `IDENT`-typed tokens.  Because the
+/// lexer emits `filter` as `FILTER_KW`, we fall back to the first
+/// non-trivia token's text — mirroring the identical fallback in
+/// `smelt_db::type_inference::infer_hof_call_from_function_call_with_expected`.
+pub fn hof_call_name(call: &smelt_parser::ast::FunctionCall) -> Option<String> {
+    call.name().or_else(|| {
+        call.syntax()
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .map(|t| t.text().to_lowercase())
+    })
+}
+
 /// Return the text range (in the source file) of the binding occurrence of
 /// lambda parameter `param_name` in the given lambda node.
 ///
@@ -1378,10 +1410,7 @@ pub fn hover_text_for_hof_meta_language(
                                     found = smelt_parser::ast::FunctionCall::cast(node.clone())
                                         .filter(|c| {
                                             matches!(
-                                                c.name()
-                                                    .map(|n| n.to_lowercase())
-                                                    .as_deref()
-                                                    .unwrap_or(""),
+                                                hof_call_name(c).as_deref().unwrap_or(""),
                                                 "map" | "filter" | "reduce"
                                             )
                                         });
@@ -1392,15 +1421,50 @@ pub fn hover_text_for_hof_meta_language(
                             found
                         };
                         use smelt_types::signatures::SmeltType;
+                        // Infer the INPUT element type from the HOF's first
+                        // argument (the list being iterated).  Using the HOF
+                        // result type would be wrong for `map`, which returns
+                        // `List<U>` (the OUTPUT type); we want `T` from
+                        // `List<T>`.  `filter` preserves the element type so
+                        // the result would coincidentally be correct, but
+                        // deriving it from the first arg is more principled and
+                        // correct for all three HOFs.
                         let elem_ty = hof_call
                             .as_ref()
                             .and_then(|c| {
+                                let args = c.arguments();
+                                let first_arg = args.first()?;
                                 let ctx = smelt_db::TypeContext::new();
-                                let list_result =
-                                    smelt_db::type_inference::infer_hof_call_from_function_call(
-                                        c, &ctx,
-                                    );
-                                if let SmeltType::List(inner) = list_result.inferred {
+                                // If the first arg is an array literal, use
+                                // `infer_list_literal` to get `List<T>` then
+                                // extract `T`.
+                                let list_ty = if let Some(arr) = first_arg.as_array_literal() {
+                                    let elems: Vec<_> = arr.elements();
+                                    smelt_db::type_inference::infer_list_literal(&elems, &ctx, None)
+                                        .inferred
+                                } else {
+                                    // Non-literal first argument: fall back to
+                                    // the full HOF inference path and extract
+                                    // the list_ty it would have computed.
+                                    // For `filter`, the result IS `List<T>`.
+                                    // For `map`, the result is `List<U>` so we
+                                    // cannot recover `T` from it — return
+                                    // Unknown in that case.
+                                    let result =
+                                        smelt_db::type_inference::infer_hof_call_from_function_call(
+                                            c, &ctx,
+                                        );
+                                    // For `filter`, result type == input list type.
+                                    // For `map`/`reduce`, result type is different;
+                                    // we accept Unknown for those non-literal cases.
+                                    let hof_name = hof_call_name(c).unwrap_or_default();
+                                    if hof_name == "filter" {
+                                        result.inferred
+                                    } else {
+                                        SmeltType::Unknown
+                                    }
+                                };
+                                if let SmeltType::List(inner) = list_ty {
                                     Some(*inner)
                                 } else {
                                     None
@@ -1436,7 +1500,7 @@ pub fn hover_text_for_hof_meta_language(
             .and_then(smelt_parser::ast::FunctionCall::cast)
             .filter(|c| {
                 matches!(
-                    c.name().map(|n| n.to_lowercase()).as_deref().unwrap_or(""),
+                    hof_call_name(c).as_deref().unwrap_or(""),
                     "map" | "filter" | "reduce"
                 )
             });
@@ -2685,6 +2749,9 @@ impl LanguageServer for Backend {
             LambdaParam {
                 binder_start: u32,
                 binder_col: u32,
+                /// End column of the binder token (exclusive), so the
+                /// full param name is highlighted, not just the first char.
+                binder_end_col: u32,
             },
             /// smelt.config.var('x') — resolves to a line in smelt.yml (Phase B).
             ConfigVarYml {
@@ -2895,6 +2962,32 @@ impl LanguageServer for Backend {
                                     if let Some(binder_range) =
                                         lambda_param_binder_range(&lambda, &param_name)
                                     {
+                                        // Only navigate when the cursor is on the binder
+                                        // itself or on a body-use IDENT with the same
+                                        // name.  Without this guard, any cursor position
+                                        // inside the lambda (e.g. on `=>`, whitespace,
+                                        // or an unrelated sub-expression) would jump.
+                                        let binder_s: usize = binder_range.start().into();
+                                        let binder_e: usize = binder_range.end().into();
+                                        let on_binder =
+                                            cursor_offset >= binder_s && cursor_offset <= binder_e;
+                                        let on_body_use = lambda.body().is_some_and(|body| {
+                                            body.syntax()
+                                                .descendants_with_tokens()
+                                                .filter_map(|e| e.into_token())
+                                                .filter(|t| {
+                                                    t.kind() == SyntaxKind::IDENT
+                                                        && t.text() == param_name.as_str()
+                                                })
+                                                .any(|t| {
+                                                    let s: usize = t.text_range().start().into();
+                                                    let e: usize = t.text_range().end().into();
+                                                    cursor_offset >= s && cursor_offset <= e
+                                                })
+                                        });
+                                        if !on_binder && !on_body_use {
+                                            continue;
+                                        }
                                         // Convert the binder range to an LSP Range.
                                         let pr = smelt_parser::ast::text_range_to_range(
                                             &text,
@@ -2903,6 +2996,7 @@ impl LanguageServer for Backend {
                                         return Some(GotoTarget::LambdaParam {
                                             binder_start: pr.start.line,
                                             binder_col: pr.start.column,
+                                            binder_end_col: pr.end.column,
                                         });
                                     }
                                 }
@@ -3020,13 +3114,14 @@ impl LanguageServer for Backend {
             Some(GotoTarget::LambdaParam {
                 binder_start,
                 binder_col,
+                binder_end_col,
             }) => {
                 if let Ok(target_uri) = Url::from_file_path(&path) {
                     Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri: target_uri,
                         range: Range {
                             start: Position::new(binder_start, binder_col),
-                            end: Position::new(binder_start, binder_col + 1),
+                            end: Position::new(binder_start, binder_end_col),
                         },
                     })))
                 } else {
@@ -4636,6 +4731,34 @@ impl LanguageServer for Backend {
                     }
                 }
 
+                // Phase B: meta-language hover (reducer name, lambda param binder/body
+                // use, HOF result type, smelt.config.var).  All four sub-cases are
+                // handled by the `hover_text_for_hof_meta_language` pure helper so
+                // they can be tested without a live Backend.
+                //
+                // NOTE: this block MUST run before the PIPE_EXPR check below.
+                // A pipe expression like `[1,2,3] |> filter(fn c => c > 0)` has a
+                // PIPE_EXPR ancestor that spans `c`.  If pipe hover ran first it
+                // would intercept the lambda-param hover for `c`.
+                {
+                    let project_root = file_project_root(&db, &effective_path);
+                    let project = lookup_project(&db, &project_root);
+                    let smelt_yml = project
+                        .map(|p| p.smelt_yml_text(&db).clone())
+                        .unwrap_or_default();
+                    if let Some(value) =
+                        hover_text_for_hof_meta_language(&file, cursor_offset, &smelt_yml)
+                    {
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value,
+                            }),
+                            range: None,
+                        }));
+                    }
+                }
+
                 // Phase B: hover on a PIPE_EXPR node — show result type of the
                 // desugared call.
                 {
@@ -4661,29 +4784,6 @@ impl LanguageServer for Backend {
                                 range: None,
                             }));
                         }
-                    }
-                }
-
-                // Phase B: meta-language hover (reducer name, lambda param binder/body
-                // use, HOF result type, smelt.config.var).  All four sub-cases are
-                // handled by the `hover_text_for_hof_meta_language` pure helper so
-                // they can be tested without a live Backend.
-                {
-                    let project_root = file_project_root(&db, &effective_path);
-                    let project = lookup_project(&db, &project_root);
-                    let smelt_yml = project
-                        .map(|p| p.smelt_yml_text(&db).clone())
-                        .unwrap_or_default();
-                    if let Some(value) =
-                        hover_text_for_hof_meta_language(&file, cursor_offset, &smelt_yml)
-                    {
-                        return Ok(Some(Hover {
-                            contents: HoverContents::Markup(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value,
-                            }),
-                            range: None,
-                        }));
                     }
                 }
             }
@@ -5910,6 +6010,60 @@ mod tests {
         let (message, related) = render_expansion_frames(&diag);
         assert_eq!(message, "undefined model `foo`");
         assert!(related.is_none());
+    }
+
+    /// Phase B reviewer finding 5 — anonymous HOF expansion frames (fn_id = None,
+    /// param = "", bound_type = "") must render as `"in expansion of `<map>` call"`
+    /// rather than the malformed `"`, `` was bound to "` produced by the old
+    /// named-frame template.
+    #[test]
+    fn lsp_anonymous_hof_frame_renders_without_empty_fragments() {
+        // Build an anonymous frame (fn_id = None, empty param / bound_type).
+        let path = PathBuf::from("/tmp/smelt-lsp-test-anon-hof.sql");
+        let anon_frame = FrameInfo {
+            function: "<map>".to_string(),
+            param: String::new(),
+            bound_type: String::new(),
+            decl_path: Some(path),
+            decl_range: Some(make_db_range(0, 0)),
+            call_site_range: Some(make_db_range(10, 0)),
+            fn_id: None, // marks frame as anonymous
+            element_index: None,
+        };
+        let diag = make_db_diag("type mismatch in lambda body", vec![anon_frame]);
+
+        let (message, related) = render_expansion_frames(&diag);
+
+        // 1. The trailer must NOT contain the empty-fragment patterns.
+        assert!(
+            !message.contains("`` was bound to"),
+            "anonymous frame must not render empty param fragment; got: {message}"
+        );
+        assert!(
+            !message.contains("was bound to \"\""),
+            "anonymous frame must not render empty bound_type fragment; got: {message}"
+        );
+
+        // 2. The trailer must mention the HOF name.
+        assert!(
+            message.contains("<map>"),
+            "anonymous frame trailer must include the HOF name; got: {message}"
+        );
+
+        // 3. The trailer must use the shorter "call" form.
+        assert!(
+            message.contains("in expansion of `<map>` call"),
+            "anonymous frame trailer must use the short form; got: {message}"
+        );
+
+        // 4. The related-info message must also use the short form.
+        let related = related.expect("anonymous frame with a decl_path must produce related_info");
+        assert_eq!(related.len(), 1);
+        assert!(
+            related[0].message.contains("in expansion of `<map>` call"),
+            "related-info message must use the short form; got: {}",
+            related[0].message
+        );
     }
 
     // ── Phase 4: LSP hover for list literal and spread ──────────────────────
