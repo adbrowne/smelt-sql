@@ -80,7 +80,7 @@ The meta-language Phase C spec increment landed in commit `3ec025d`. The spec au
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 4e891c4 | 2026-05-11 |
-| 2     | done     |        | 2026-05-11 |
+| 2     | done     | 386d455 | 2026-05-11 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
