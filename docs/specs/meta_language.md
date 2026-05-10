@@ -6,7 +6,7 @@ owners: [andrew]
 phases:
   A: spec-authored
   B: spec-authored
-  C: deferred
+  C: spec-authored
   D: deferred
   E1: deferred
   E2: deferred
@@ -201,9 +201,73 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 
 
-### Phase C — Narrow reflection: `smelt.columns_of`, `ColumnRef` *(deferred to Phase C)*
+### Phase C — Narrow reflection: `smelt.columns_of`, `ColumnRef`
 
-Will define `ColumnRef` meta record type (`name: Text`, `type: DataType`, `is_numeric: Boolean`, …) and the `smelt.columns_of(t: TableExpr) -> List<ColumnRef>` accessor.
+#### `smelt.columns_of` accessor
+
+`smelt.columns_of(t: TableExpr) -> List<ColumnRef>`
+
+A meta-only accessor that returns the column list of a `TableExpr`-valued meta value. The argument may be:
+
+- A `smelt.<path>` reference resolving to a model, source, or seed (the existing schema-resolution machinery in `crates/smelt-db/src/schema.rs` supplies the `ModelSchema`).
+- A `smelt.define` parameter declared `TableExpr` or `TableExpr<{…}>`. At body-check time the result type is `List<ColumnRef>` parametrically; at expansion time at each call site the concrete schema is bound and the list is materialised.
+- The result of any other `TableExpr`-typed expression resolved through prior expansion (a CTE alias, a subquery alias).
+
+`smelt.columns_of` is called as an ordinary positional function with exactly one argument; named arguments emit `ColumnsOfNamedArgument` at the named-arg span. The single positional argument's evaluated type must be assignable to `TableExpr`; mismatches emit `ColumnsOfRequiresTableExpr` at the argument expression. A `TableExpr` whose schema cannot be statically resolved at expansion time emits `ColumnsOfUnresolvableSchema` at the call and the surrounding HOF call drops its splice without further diagnostics (same drop-on-error policy as `MetaSpreadInForbiddenPosition`).
+
+#### `ColumnRef` meta record type
+
+`ColumnRef` is a closed meta-only record type with three fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `Text` | The column's identifier as it appears in the source schema (un-quoted; case-preserved) |
+| `type` | `DataType` (meta literal) | The column's `DataType` from `types.md` §"`DataType` vocabulary" |
+| `is_numeric` | `Boolean` | `TRUE` iff `type` is in the `Numeric` constraint set per `types.md` §"Type constraints" |
+
+Field access uses dot-notation (`c.name`, `c.type`, `c.is_numeric`). Field access on any other identifier emits `ColumnRefFieldUnknown` at the field span. `ColumnRef` is **closed**: the v1 field set is exactly these three fields. Adding a field requires a spec edit and a compiler change; the registry pattern matches the closed reducer registry of Phase B.
+
+`ColumnRef` is meta-only. It is not user-writable as a `smelt.define` parameter or return type, not a list element type users construct in literals, and not a value that reaches the database engine. The internal `SmeltType` witness behind `ColumnRef` is unspeced at the user surface; users never write `Record<{name: Text, type: DataType, is_numeric: Boolean}>` and never need to. Phase E1's user-writable record surface (`smelt.record Name = { … }`) is a separate construct that does not retroactively expose `ColumnRef`'s structure.
+
+#### Meta-`Text`-as-identifier lift (narrow rule)
+
+A meta-`Text` value spliced into a position where the Data-World SQL grammar expects an unquoted identifier lifts to that identifier. The lift positions are exactly:
+
+| Position | Example |
+|---|---|
+| Column-reference position inside an expression | `COALESCE(c.name, 0)` — `c.name` lifts |
+| `AS` alias of a SELECT item | `SUM(amount) AS c.name` — `c.name` lifts |
+| `ORDER BY` column reference | `ORDER BY c.name` — `c.name` lifts |
+| `GROUP BY` column reference | `GROUP BY c.name` — `c.name` lifts |
+
+In **any other position** — function arguments where the parameter sort is `Expr<Text>`, comparison operands typed `Text`, string-literal positions, named-argument values — a meta-`Text` retains its string-value meaning. The lift is grammar-position-driven, not user-annotated; there is no inverse cast and no opt-in marker.
+
+A lifted identifier is then re-validated against the surrounding splice context's column-resolution scope per `scoping.md`'s standard column-resolution rule. A lifted identifier naming a column not in the surrounding scope emits the existing `UnknownColumn` diagnostic at the lifted identifier's source span (the meta expression's CST node, not the lifted text).
+
+The lift applies **only to compile-time meta-`Text` values**, not to runtime `Expr<Text>` values. A runtime `Expr<Text>` (e.g. `UPPER('foo')`) in an identifier position remains a Data-World type error per existing splice-context rules; the meta lift does not extend to evaluated SQL expressions.
+
+#### Diagnostic codes (new in Phase C)
+
+Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offending CST span):
+
+| Code | When | Message shape |
+|------|------|---------------|
+| `ColumnsOfRequiresTableExpr` | `smelt.columns_of(x)` whose `x` synthesises to a type not assignable to `TableExpr` | `smelt.columns_of expects TableExpr; found {actual}` |
+| `ColumnsOfNamedArgument` | `smelt.columns_of` called with a named argument | `smelt.columns_of takes one positional argument; named arguments are not supported` |
+| `ColumnsOfUnresolvableSchema` | At expansion time, `smelt.columns_of(t)` whose `t` resolves to an `Unknown` schema | `cannot resolve column list for {t}; upstream schema is unknown` |
+| `ColumnRefFieldUnknown` | Field access on a `ColumnRef` value with an identifier outside the closed field set | `ColumnRef has no field {name}; expected one of: name, type, is_numeric` |
+
+#### LSP support required by Phase C
+
+- **Hover** on `smelt.columns_of(t)` shows `List<ColumnRef>` and (when `t`'s schema is statically resolvable) the resolved column count plus the first five column names.
+- **Hover** on a `ColumnRef`-typed binding (a lambda parameter inside a `columns_of` HOF chain) shows `ColumnRef` plus the closed field list with each field's type.
+- **Hover** on a field projection `c.name` / `c.type` / `c.is_numeric` shows the field's declared type (and, when the projection is reached at expansion time over a resolvable list, its concrete value at the current call site).
+- **Hover** on a lifted identifier (a meta-`Text` in one of the four lift positions) shows the lift target (`Text → identifier`) and the resolved column when traceable.
+- **Goto-definition** on `smelt.columns_of` resolves to the reference page (URL hint, graceful no-op when the client lacks support).
+- **Goto-definition** on a lifted identifier resolves to the source column's declaration site in the upstream model / source / seed when the column can be statically traced; otherwise no-op.
+- **Completion** at a field-projection site (`c.<cursor>`) offers the closed field list (`name`, `type`, `is_numeric`).
+- **Completion** at a `smelt.columns_of(<cursor>)` argument position offers in-scope `TableExpr`-valued names (`smelt.<path>` references and the enclosing function's `TableExpr` parameters).
+- **Diagnostics with frame stacks**: a type error inside a HOF lambda body whose source list comes from `smelt.columns_of(t)` carries the existing Phase B anonymous frame plus an optional `column_origin` field on the per-element entry, recording the source column's declaration span when statically traceable. The `expansion.md` Phase C touch registers this extension.
 
 ### Phase D — Wide reflection: workspace introspection *(deferred to Phase D)*
 
@@ -320,7 +384,42 @@ The two worlds intersect at **splice points** — places where a meta value mate
     - `smelt.config.var` is a single map lookup.
     - Lambda bodies are checked once parametrically and evaluated once per HOF iteration; they admit no recursive HOF call against their bound parameter (a lambda body containing a HOF call is permitted, but the inner HOF's source list must come from outer scope — a lambda cannot construct a list whose iteration includes itself).
 
-*[deferred to phases C–F]*
+#### Phase C — Narrow reflection: `smelt.columns_of`, `ColumnRef`
+
+1. **`smelt.columns_of` is a Salsa-cached pure function of workspace state.** The accessor's resolved value is invariant for a given workspace input snapshot. Re-evaluation across two runs over the same workspace produces byte-equal results. The implementation is a Salsa query (per the `smelt-db` Salsa-wrapper rule in `CLAUDE.md`) that reads the upstream schema via the existing `ModelSchema` resolution machinery.
+
+2. **Body-check vs expansion-time evaluation.** `smelt.columns_of(t)` is evaluated in two regimes:
+   - **At body-check time** (inside a `smelt.define` body, where `t` is a parameter declared `TableExpr` or `TableExpr<{…}>`): the result type synthesises to `List<ColumnRef>` parametrically. The lambda body of any HOF over the result checks against `ColumnRef` per element. No concrete column list is materialised at body-check time.
+   - **At expansion time** (when the function is inlined at a call site with a concrete `t`): the call-site schema for `t` is resolved via the standard `smelt.<path>` resolution (`architecture.md` §"Resolution"), the list of `ColumnRef` values is materialised, HOF lambdas are walked per element, and any meta-`Text`-as-identifier lifts are validated against the surrounding splice context's column-resolution scope.
+
+3. **Source-schema resolution.** `smelt.columns_of(t)` resolves `t`'s schema through the same path as Data-World column-reference resolution:
+   - `smelt.<path>` to a model / source / seed → the `ModelSchema` for that path.
+   - A `smelt.define` `TableExpr` / `TableExpr<{…}>` parameter at expansion time → the call-site argument's resolved schema (per `expansion.md`'s body-walk-with-bound-parameters rule).
+   - A CTE alias inside the same body → the CTE's synthesised schema.
+   - Any other `TableExpr`-typed expression (a subquery, a join expression) → the standard schema-resolution path; if no schema can be derived (e.g. upstream `Unknown`), the expansion emits `ColumnsOfUnresolvableSchema`.
+   - A `TableExpr<{required columns}>` parameter contributes only the *required* columns to body-check-time `columns_of` reasoning. At expansion time the call-site schema (which may include extra columns under the row-tail per `types.md` §"`TableExpr` row polymorphism") supplies the full list.
+
+4. **`ColumnRef` field projection.** Inside any context where a `ColumnRef`-typed value is in scope (a lambda parameter bound by a HOF over `List<ColumnRef>`), the dot-notation `c.<field>` synthesises the declared field's type:
+   - `c.name : Text` (a meta-`Text` value)
+   - `c.type : DataType` (a meta literal — comparable for equality, usable in checks like `c.type == Integer`; not user-writable in Data-World annotations per `types.md`)
+   - `c.is_numeric : Boolean`
+   Any other field name emits `ColumnRefFieldUnknown` at the field span.
+
+5. **`ColumnRef` ordering.** The `List<ColumnRef>` produced by `smelt.columns_of(t)` preserves the source schema's declared column order. For models, sources, and seeds this is the order columns appear in their schema declaration. For function `TableExpr` parameters at expansion time this is the order columns appear in the call-site argument's schema.
+
+6. **Meta-`Text`-as-identifier lift.** A meta-`Text` value spliced into one of the four lift positions (column-reference, AS-alias, ORDER BY column-reference, GROUP BY column-reference) is rendered as that identifier in the produced SQL. The lifted identifier is then validated against the surrounding splice context's column-resolution scope per `scoping.md`'s standard column-resolution rule (`UnknownColumn` if the lifted identifier names no in-scope column). The lift produces no expansion-time diagnostic of its own; it is invisible to the type system except as the identity transform `Text → identifier`.
+
+7. **Lift narrowness.** The lift applies only to meta-`Text` values, not to runtime `Expr<Text>` values. A runtime `Expr<Text>` in an identifier position remains a Data-World type error per existing splice-context rules. The lift applies only in the four enumerated positions; in any other position a meta-`Text` retains its `Text` value (e.g. as the operand of `||`, as a function argument typed `Expr<Text>`, as a comparison RHS).
+
+8. **`ColumnRef` is not user-constructible.** `ColumnRef` values originate only from `smelt.columns_of` (Phase C) and from later reflection accessors (Phase D). The internal `SmeltType` witness behind `ColumnRef` is unspeced at the user surface; user code may not construct, deconstruct, or annotate against the witness. Phase E1's user-writable record surface is a separate construct that does not retroactively expose `ColumnRef`'s structure.
+
+9. **Reflection determinism.** Reflection results are deterministic functions of workspace state (per the load-bearing meta-evaluation rule in §"Two worlds, one program"). `smelt.columns_of` performs no I/O, makes no network call, observes no clock or random source. The Salsa query layer guarantees re-evaluation produces identical results until the workspace input changes; LSP responsiveness is preserved by automatic invalidation when an upstream schema changes.
+
+10. **Termination (Phase C).** `smelt.columns_of` performs a single bounded lookup of the source schema's column list. Field projection is a single named-field lookup. Identifier lift is a single tag transformation at expansion time. All three are O(1) per invocation; the surrounding HOF walks the resulting `List<ColumnRef>` once per Phase B's existing termination rule.
+
+11. **HOF inline-expansion frame (Phase C extension).** The anonymous expansion frame from Phase B (`function = "<hof>"`, `fn_id = None`, optional `element_index`) is extended for `columns_of`-sourced lists with an additional optional field `column_origin`: the source span of the column's declaration in the upstream `ModelSchema`. When a diagnostic surfaces from inside a HOF lambda body whose source list came from `smelt.columns_of(t)`, the frame's `column_origin` carries the source column's span when statically resolvable. The `expansion.md` Phase C touch registers this extension; producers populate the field, the v1 LSP renderer surfaces it as a "from column declared at <span>" trailer when present.
+
+*[deferred to phases D–F]*
 
 ## Design
 
@@ -374,7 +473,23 @@ Phase B is the **iteration test**: the smallest slice that lets a meta `List<T>`
 
 **Why HOF and reducer names are reserved rather than overloadable.** Allowing a `smelt.define` named `map` would force the type checker to disambiguate at every call site between the built-in HOF and the user's function. The disambiguation rule would be either "user wins" (which silently retires the built-in for that workspace) or "built-in wins for two-arg calls with a lambda" (which couples disambiguation to argument shape, propagating into error messages). Reserving the names produces an immediate, anchored diagnostic at the conflicting `smelt.define` declaration. The cost is that workspaces with pre-existing functions named `map` must rename them; the benefit is that every meta-language user reads `map(xs, f)` as the same operation, regardless of workspace. The same argument applies to reducer names.
 
-*[deferred to phases C–F; expanded as each phase lands]*
+#### Phase C — why narrow reflection now
+
+Phase C ships the **smallest reflection slice** that exercises the meta-`Text`-as-identifier lift and the per-call-site schema-resolution machinery. Once Phase C ships, every later reflection accessor (Phase D `smelt.models.*`, Phase E1 record loaders, Phase E2 multi-model production) plugs into the same expansion-time evaluation regime. Sequencing wide reflection (Phase D) before narrow reflection (Phase C) was rejected because the narrow accessor exposes a smaller integration surface — one accessor, one record type, one identifier-lift family — and the wide accessor's `ModelRef` inherits the integration patterns Phase C commits to.
+
+**Why `ColumnRef` is a closed record.** Research §4.8 sketched `ColumnRef` as a meta-only type with `name`, `type`, `is_numeric` accessors. Two alternatives were considered: (i) expose `ColumnRef` as a `Record<{…}>` instance (anticipating Phase E1's record surface) and let users do generic record operations on it; (ii) keep `ColumnRef` as an opaque type with a closed accessor set. Option (i) entangles Phase C with Phase E1's record surface (which has its own design uncertainties) and leaks the per-field representation into a v1-stable user surface; option (ii) is the closed-registry pattern that worked for Phase B reducers. The closed surface keeps Phase C self-contained and matches the `LambdaInForbiddenPosition` discipline — a v1-internal type with a narrowly-typed surface, expanded only when concrete demand arises.
+
+**Why `c.is_numeric` is a derived field rather than `c.type.is_numeric`.** The latter requires elevating `DataType` to a meta value with method-call surface (`Integer.is_numeric`), which is a substantial type-system change with no Phase C–F use case. The former is a single accessor whose semantics are pinned by `types.md` §"Type constraints" — the spec rule "is_numeric iff `type` ∈ Numeric constraint set" tells the user exactly what they get. Adding `is_ordered`, `is_temporal`, etc. follows the same pattern when concrete demand arises; the closed-registry contract makes the addition explicit.
+
+**Why the meta-`Text`-as-identifier lift is narrow.** Research §8 noted that `c.name` in `COALESCE(c.name, 0) AS c.name` plays both as a column reference and an identifier alias, and that the crossing rule needs adversarial testing. The narrow rule — lift in exactly four enumerated grammar positions (column-reference, AS-alias, ORDER BY, GROUP BY) — is the smallest commitment that handles the §5.2 `coalesce_numeric` pattern without committing to a general `Text → identifier` cast. Wider rules considered: (i) lift everywhere a syntactic identifier could appear (CTE names, table aliases, function names) — rejected because it gives users an implicit lift in positions they don't expect, and the resulting Jinja-style "string-becomes-anything" surface defeats the type-system guarantees; (ii) require an explicit `as_identifier(c.name)` cast — rejected because it adds friction at the most common Phase C use case (per-column SELECTs in HOF bodies) without payback. The narrow rule is the dial that can widen later under concrete pressure; widening is a spec edit with named additions to the lift positions table.
+
+**Why the lift operates on meta-`Text` only and not `Expr<Text>`.** A runtime `Expr<Text>` (`UPPER('foo')`) cannot be evaluated at compile time, so its "string value" is unknown at the splice point. Lifting it would require executing the expression at compile time (forbidden by §"Meta-evaluation rules" determinism) or generating SQL that uses the expression as an identifier (which is not standard SQL — an identifier must be a parse-time identifier, not a runtime value). The lift is a strictly compile-time operation on compile-time text. Users wanting runtime identifier construction must use a different mechanism; the language deliberately does not provide one.
+
+**Why `smelt.columns_of` accepts only `TableExpr` (not strings, paths, or model names).** Allowing string-typed arguments (`smelt.columns_of('orders')`) would require the type checker to resolve a `Text` value to a model at type-check time, which couples the meta-language to the path-resolution machinery in a non-`TableExpr` axis. Accepting `smelt.<path>` resolves through the existing pipe (every `smelt.<path>` evaluates to a `TableExpr`); accepting `smelt.define` parameters captures the function-body case. The single-axis surface (one parameter type) pins the resolution path through the existing Data-World schema-resolution machinery without minting a parallel one.
+
+**Why expansion-time evaluation rather than body-check-time.** A `smelt.define` body is type-checked once parametrically; resolving `smelt.columns_of(t)` at body-check time would require type-checking the body once *per call site*, which is the opposite of how `expansion.md` partitions checking from inlining. Expansion-time evaluation matches the existing two-tier model: the body checks against `List<ColumnRef>` parametrically, and the inliner walks the per-call-site list to produce concrete SQL. This also matches research §6.4's promise: "the output schema of a model using `coalesce_numeric` is therefore *known at compile time*" — the inliner statically computes the per-call schema, and that schema is what flows downstream to model schemas.
+
+*[deferred to phases D–F; expanded as each phase lands]*
 
 ## Constraints & Invariants
 
@@ -406,6 +521,19 @@ Phase B is the **iteration test**: the smallest slice that lets a meta `List<T>`
 - **`SmeltType::Lambda` is invariant in its parameters.** `Lambda<S, T>` and `Lambda<S', T'>` unify only when `S = S'` and `T = T'`. No subtyping rule applies. The HOF's type-checking rule binds the lambda's parameter and synthesises its return; it does not need lambda subtyping.
 - **`Reducer<T>` is not a user-writable type.** The internal type-system witness for reducer identifiers is unspeced at the user surface. The v1 surface presents reducers as bare identifiers with closed-registry membership; future user-defined reducers would have to surface a `Reducer<T>` type, but that is post-plan.
 
+### Phase C invariants
+
+- **`smelt.columns_of` is a Salsa-cached pure function of workspace state.** The accessor performs no I/O, observes no clock or random source, and re-evaluates byte-equal across runs on the same workspace input.
+- **`ColumnRef` is a closed record.** The v1 field set is exactly `{name: Text, type: DataType, is_numeric: Boolean}`. Adding a field requires a spec edit and a compiler change.
+- **`ColumnRef` is not user-constructible.** Values originate only from reflection accessors (`smelt.columns_of` in Phase C; `smelt.models.*` and friends in Phase D). User code cannot construct a `ColumnRef` literal; the internal `SmeltType` witness is not part of the user surface.
+- **`ColumnRef` has no first-class user-writable surface.** The type is not a writable `smelt.define` parameter or return type, not a list element type users construct in literals, and not a YAML-loadable record. Phase E1's record surface does not retroactively expose `ColumnRef`'s structure.
+- **Meta-`Text`-as-identifier lift is narrow and grammar-position-driven.** Lift applies in exactly the four enumerated positions (column-reference, AS-alias, ORDER BY column-reference, GROUP BY column-reference); in any other position a meta-`Text` retains its `Text` value. The lift surface is the dial that may widen under concrete demand; widening requires a spec edit with explicit additions to the position table.
+- **Identifier lift is meta-only.** Runtime `Expr<Text>` values cannot lift to identifiers; only compile-time-known meta-`Text` values lift. This preserves the invariant that SQL identifiers are parse-time identifiers, not runtime values.
+- **Reflection results preserve source ordering.** `smelt.columns_of(t)` returns columns in the order they appear in `t`'s schema declaration. Order is observable by users; reordering would invalidate `coalesce_numeric`-style HOF chains that depend on positional column behaviour.
+- **Body-check time produces parametric `List<ColumnRef>`; expansion time materialises the concrete list.** This invariant matches `expansion.md`'s body-walk-with-bound-parameters rule and is the load-bearing decision that lets Phase C ship without per-call-site re-checking of function bodies.
+- **Field-projection diagnostics anchor at the field span.** `ColumnRefFieldUnknown` reports at the offending `c.<bad>` field token, not at the lambda parameter or the source list expression.
+- **HOF-frame `column_origin` extension is producer-side until renderer follow-up.** The new optional field on the anonymous expansion frame is populated by the type-checker; the v1 LSP renderer surfaces it as an optional trailer when present. Future renderer work expands the surfacing without breaking the producer-side contract.
+
 ### Out-of-scope by deliberate choice
 
 - **Pipe-SQL extension** (research §4.6 alternative b) — porting the pipe operator into Data-World queries is a separate paper.
@@ -418,9 +546,9 @@ Phase B is the **iteration test**: the smallest slice that lets a meta `List<T>`
 ## Known Divergences / Open Questions
 
 - **Spec is incremental.** Sections A–G are filled phase by phase. Until the corresponding phase ships, the section says `[deferred to Phase X]`. Code may not exist yet for those sections — that is the intended state.
-- **Phase B code does not yet exist.** The Phase B surface and semantics in this spec are normative now (the implementation plan derives from them), but the parser additions (`fn` keyword, `|>` token, lambda CST, pipe CST), the `SmeltType::Lambda` variant, the closed reducer registry, the HOF type-inference rules, the `smelt.config.var` resolver, and every Phase B diagnostic code have not yet landed. Until the Phase B plan completes, every "Phase B" reference under §References is a target. `/smelt:validate meta_language` will report this gap until Phase B's implementation phase commits.
-- **Cross-spec touches required for Phase B.** The Phase B plan must land three adjacent-spec touches alongside the implementation: (i) `expansion.md` registers the anonymous-frame form (`function = "<hof>"`, `fn_id = None`, optional `element_index`); (ii) `scoping.md` registers lambda parameters as a new scope kind (resolved before any wider scope inside the lambda body); (iii) `types.md` adds the `Lambda<T, U>` entry to its `smelt.define type annotations` enumeration with the "meta-only, not user-writable as a parameter sort" note. The meta-language spec is incomplete until all three land.
-- **Phase A code does not yet exist.** The Phase A surface and semantics in this spec are normative now (the implementation plan derives from them), but `crates/smelt-parser/src/{lexer,parser,ast}.rs`, `SmeltType::List`, and the four Phase A diagnostic codes have not yet landed. Until the Phase A plan completes, every "Phase A" reference under §References is a target, not a check-pinable artifact. `/smelt:validate meta_language` will report this gap until Phase A's implementation phase commits.
+- **Phase A and B landed.** Their surfaces, semantics, invariants, and the cross-spec touches they required are pinned in code. See Phase A / Phase B entries under §References for the implementation paths and tests; see `docs/plans/20260509-meta-language-A.md` / `-B.md` for implementation history.
+- **Phase C code does not yet exist.** The Phase C surface and semantics in this spec are normative now (the implementation plan derives from them), but the `ColumnRef` `SmeltType` witness, the closed `COLUMN_REF_FIELDS` registry, the `smelt.columns_of` Salsa query, the meta-`Text`-as-identifier lift evaluator, the four Phase C diagnostic codes, the `column_origin` extension to the anonymous expansion frame, and the LSP hover/goto/completion paths for ColumnRef and lifted identifiers have not yet landed. Until the Phase C plan completes, every "Phase C" reference under §References is a target. `/smelt:validate meta_language` will report this gap until Phase C's implementation phase commits.
+- **Cross-spec touches required for Phase C.** The Phase C plan must land two adjacent-spec touches alongside the implementation: (i) `expansion.md` registers the `column_origin` extension to the anonymous-frame form (a per-element optional source-column span on the HOF frame); (ii) `lsp.md` registers Phase C's per-construct LSP obligations (hover for ColumnRef field projection, completion for the closed field set, goto-def into source columns from lifted identifiers, hover for lifted identifiers). `schema_evolution.md` records (informationally, not normatively) the implication that a column added to a source must propagate to `smelt.columns_of`-sourced HOF outputs; this is observable behaviour falling out of Phase C's expansion-time evaluation rule, not a separate behavioural change.
 - **`Array<U>(…)` runtime-array constructor surface deferred.** §Per-phase semantic rules Phase A rule 3 references the `Array<U>(…)` constructor as the explicit opt-in for the runtime-array reading of `[…]`. That constructor is Phase E2's spec increment; until then, the only Data-World path to a runtime array is the existing `[1, 2, 3]` literal in an `Expr<Array<U>>` position (governed by `types.md`).
 - **Lambda surface finalised at Phase B as `fn x => body`.** Research §4.5 leaned `fn` with position-based disambiguation as backup; this spec commits to the keyword form. The disambiguation backup is not part of v1 surface.
 - **HOF expansion frames are anonymous in v1.** Producers populate the `function` field with the HOF name, but the frame has no `fn_id` (HOFs are built-ins, not user-defined functions). The v1 LSP renderer reads only `call_site_range`; the per-element-index field is producer-side until a renderer follow-up surfaces it. Tracked here so future planner / renderer work preserves the contract.
@@ -450,6 +578,13 @@ Phase B is the **iteration test**: the smallest slice that lets a meta `List<T>`
     - `crates/smelt-db/src/lib.rs::DiagnosticCode` — every Phase B diagnostic code listed in §"Diagnostic codes (new in Phase B)".
     - `crates/smelt-db/src/lib.rs` — closed reducer registry (`REDUCER_REGISTRY`) and `smelt.config.var` resolver query against `smelt.yml` `vars:`.
     - `crates/smelt-lsp/src/lib.rs` — hover for lambdas, HOF calls, pipe expressions, reducer names, and `smelt.config.var`; goto-def for lambda parameters and `smelt.config.var` arguments; completion in lambda bodies and reducer-argument positions.
+  - Phase C:
+    - `crates/smelt-types/src/signatures.rs` — meta-only `ColumnRef` `SmeltType` witness (the spec leaves the exact variant shape — dedicated `ColumnRef` variant vs internal `Record` instantiation — to the implementation, subject to the closed-field invariant).
+    - `crates/smelt-db/src/type_inference.rs` — pure inference for `smelt.columns_of` (synthesises `List<ColumnRef>` from a `TableExpr` argument); `ColumnRef` field projection (closed lookup against the v1 field set); meta-`Text`-as-identifier lift detection at the four enumerated grammar positions.
+    - `crates/smelt-db/src/lib.rs` — `smelt.columns_of` Salsa query (resolves source schema via existing `ModelSchema` machinery); closed `COLUMN_REF_FIELDS` registry.
+    - `crates/smelt-db/src/lib.rs::DiagnosticCode` — `ColumnsOfRequiresTableExpr`, `ColumnsOfNamedArgument`, `ColumnsOfUnresolvableSchema`, `ColumnRefFieldUnknown`.
+    - `crates/smelt-db/src/function_body_check.rs` — `column_origin` extension on the anonymous expansion frame; per-element provenance stamping for `columns_of`-sourced HOF iterations; expansion-time materialisation of `List<ColumnRef>` from a resolved `TableExpr` schema.
+    - `crates/smelt-lsp/src/lib.rs` — hover for `smelt.columns_of`, ColumnRef field projection, and lifted identifiers; goto-def from a lifted identifier to the source column declaration; completion for the closed ColumnRef field set and `smelt.columns_of` argument positions.
 - **Tests**:
   - Phase A:
     - `crates/smelt-parser/src/{lexer,parser}.rs::tests` — token, production, and error-recovery cases.
@@ -460,9 +595,14 @@ Phase B is the **iteration test**: the smallest slice that lets a meta `List<T>`
     - `crates/smelt-db/src/type_inference.rs::tests` — HOF dispatch, lambda parameter binding, reducer input-type checking, empty-list identity, pipe desugaring, `smelt.config.var` resolution and YAML scalar coercion.
     - `crates/smelt-db/src/function_body_check.rs::tests` — anonymous-frame stamping, multi-frame chains crossing a HOF, lambda parameter scoping under `TableExpr` parameters.
     - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/meta_hofs/` acceptance gate.
+  - Phase C:
+    - `crates/smelt-db/src/type_inference.rs::tests` — `smelt.columns_of` argument-type checking (TableExpr-only), `ColumnRef` field projection (closed-set lookup), lift-position grammar checks (the four enumerated positions accept; all others reject), lift narrowness rejection cases (runtime `Expr<Text>` in identifier position remains a Data-World type error).
+    - `crates/smelt-db/src/function_body_check.rs::tests` — `column_origin` frame stamping for `columns_of`-sourced HOF lambda bodies, expansion-time materialisation of `List<ColumnRef>` from a resolved schema, `ColumnsOfUnresolvableSchema` recovery (drop-on-error), per-element provenance through the lift.
+    - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/meta_columns/` acceptance gate.
 - **User docs**:
   - Phase A: `docs-site/docs/meta-language/index.md`, `docs-site/docs/meta-language/lists.md`, `docs-site/docs/meta-language/reference.md` (alphabetical reference; populated incrementally per phase).
   - Phase B: `docs-site/docs/meta-language/hofs.md`, `docs-site/docs/meta-language/lambdas.md`, `docs-site/docs/meta-language/pipes.md`, `docs-site/docs/meta-language/reducers.md`, `docs-site/docs/meta-language/config-vars.md`; `reference.md` extended with every HOF, reducer, and `smelt.config.var`.
+  - Phase C: `docs-site/docs/meta-language/reflection.md` (new — covers `smelt.columns_of`, `ColumnRef`, the closed field set, the four-position identifier lift, the `coalesce_numeric` worked example); `reference.md` extended with `smelt.columns_of`, `ColumnRef`, and the lift positions table.
 - **Plans (history)**:
   - `docs/plans/20260509-meta-language-overall.md` — meta-plan / phase status table
   - `docs/plans/20260509-meta-language-A.md` — Phase A *(when written)*
