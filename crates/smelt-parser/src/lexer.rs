@@ -480,11 +480,10 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "UNPIVOT" => UNPIVOT_KW,
         "LIKE" => LIKE_KW,
         "ILIKE" => ILIKE_KW,
-        // Note: `fn` is a Phase B contextual keyword — it is lexed as IDENT
-        // (not as a dedicated token) so that existing SQL using `fn` as an
-        // identifier continues to parse.  The parser recognises `fn` at
-        // expression / argument positions by checking IDENT text via
-        // at_contextual_keyword("fn"). There is no dedicated FN_KW token kind.
+        // Phase B (meta-language): `fn` is a reserved keyword; any SQL that
+        // previously used `fn` as a column, table, or alias name must now quote it
+        // (e.g. `"fn"` or backtick-quoted `\`fn\``).
+        "FN" => FN_KW,
         _ => IDENT,
     }
 }
@@ -605,9 +604,8 @@ mod tests {
 
     #[test]
     fn tokenize_fn_keyword() {
-        // `fn` is a contextual keyword: it lexes as IDENT (not a dedicated token)
-        // so that SQL using `fn` as a column or table name continues to parse.
-        // The parser recognises `fn` in lambda positions by checking IDENT text.
+        // `fn` is a reserved keyword: it lexes as FN_KW (not IDENT).
+        // SQL that previously used `fn` as a column or table name must now quote it.
         let tokens = tokenize("fn");
         let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
         assert_eq!(
@@ -617,8 +615,8 @@ mod tests {
             non_ws
         );
         assert_eq!(
-            non_ws[0].kind, IDENT,
-            "`fn` must lex as IDENT (contextual keyword), got {:?}",
+            non_ws[0].kind, FN_KW,
+            "`fn` must lex as FN_KW (reserved keyword), got {:?}",
             non_ws[0].kind
         );
         assert_eq!(non_ws[0].len, 2);

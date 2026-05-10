@@ -3288,8 +3288,8 @@ impl ListSpread {
 ///
 /// For a single-arg lambda (`fn x => body`) this contains one IDENT token.
 /// For a multi-arg lambda (`fn (a, b) => body`) it contains LPAREN, IDENTs,
-/// and RPAREN tokens.  Multi-arg lambdas are rejected by Phase 3 with
-/// `LambdaArityNotSupported`; the parser accepts them for error recovery.
+/// and RPAREN tokens.  Multi-arg lambdas produce a generic parse error in
+/// Phase B (the form is reserved for Phase F).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LambdaParamList(SyntaxNode);
 
@@ -3332,7 +3332,7 @@ impl LambdaParamList {
 /// CST shape:
 /// ```text
 /// LAMBDA
-///   IDENT "fn"   (contextual keyword; lexes as IDENT)
+///   FN_KW    (reserved `fn` keyword)
 ///   LAMBDA_PARAM_LIST
 ///     IDENT  (single-arg) or LPAREN IDENTs... RPAREN (multi-arg)
 ///   ARROW (=>)

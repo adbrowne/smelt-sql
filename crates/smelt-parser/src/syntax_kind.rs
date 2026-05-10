@@ -74,6 +74,8 @@ pub enum SyntaxKind {
     REPEATABLE_KW,
     // Phase 15: Aggregate function keywords
     FILTER_KW,
+    // Phase B (meta-language): `fn` reserved keyword
+    FN_KW,
     // SQL data type/constructor keywords
     ARRAY_KW,
     VALUES_KW,
@@ -359,6 +361,7 @@ impl SyntaxKind {
                 | SYSTEM_KW
                 | REPEATABLE_KW
                 | FILTER_KW
+                | FN_KW
                 | ARRAY_KW
                 | VALUES_KW
                 | STRUCT_KW

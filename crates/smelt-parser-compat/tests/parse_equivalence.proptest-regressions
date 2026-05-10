@@ -9,3 +9,4 @@ cc b47f4b876c73d2c93606fdc39717397eaeac384b39a4403b428abde2610434ba # shrinks to
 cc 1049f0dc883abd220490c251cc80ba2158190f85f2c73bd4c92ab585a639fb35 # shrinks to sql = "SELECT fn, ROW_NUMBER() OVER (ORDER BY a) FROM a"
 cc 6e11a4434dec21240be55bc4146dfd71baf103f144e3e4d4f8fa6bb78da76be1 # shrinks to sql = "SELECT a FROM fn UNION SELECT a FROM a_"
 cc f2d156c1b3390cf6d2349b7b6d1f663bb3aec256322108480d8c51804008d017 # shrinks to sql = "SELECT COUNT(fn) AS a FROM a"
+cc fd3d421cdbf8d641c1c9a4ad48c74c16aa12718c7b91ef880e7362686071d39e # shrinks to sql = "SELECT a, COUNT(a) FROM a WHERE a = fn AND a = a GROUP BY a"

@@ -99,7 +99,7 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 
 - `fn IDENT => EXPR` — single-argument lambda binding `IDENT` for use inside `EXPR`.
 - The body `EXPR` is any meta-evaluable expression: a `smelt.<path>(...)` call, a HOF call, a pipe chain, a list literal, a record-field projection (Phase E1+), a SQL expression involving the bound name as a value or — when the bound type is a `ColumnRef` (Phase C+) — as an identifier in a splice position.
-- Multi-argument lambdas (`fn (a, b) => body`) are reserved syntactically for Phase F; an attempt to declare one in Phase B emits `LambdaArityNotSupported` at the parameter list.
+- Multi-argument lambdas (`fn (a, b) => body`) are reserved syntactically for Phase F. In Phase B, attempting to declare one produces a generic parse error (the parser does not yet recognise the form); Phase F will introduce both the CST shape and the targeted `LambdaArityNotSupported` diagnostic.
 - A lambda is a value of meta-only type `Lambda<T, U>` (parameter type `T`, return type `U`). It can only be constructed in a HOF positional argument position; a lambda literal in any other position (top-level expression, named-arg value, list element, splice point, `smelt.define` argument) emits `LambdaInForbiddenPosition` at the `fn` keyword.
 - A lambda cannot be assigned to a name and is never the declared sort of a `smelt.define` parameter or return type — `Lambda<T, U>` is not part of the user-writable annotation surface.
 
@@ -171,7 +171,7 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 | Code | When | Message shape |
 |------|------|---------------|
 | `LambdaInForbiddenPosition` | `fn x => body` outside a HOF positional argument | `lambda is only valid as an argument to a higher-order function` |
-| `LambdaArityNotSupported` | `fn (a, b) => body` (multi-arg) in Phase B | `multi-argument lambdas are not supported in v1; use a single parameter` |
+| `LambdaArityNotSupported` | `fn (a, b) => body` (multi-arg) — deferred to Phase F; Phase B produces a generic parse error instead | `multi-argument lambdas are not supported in v1; use a single parameter` |
 | `LambdaResultTypeMismatch` | lambda body type incompatible with HOF's required result shape | `{hof} requires lambda result {expected}; found {actual}` |
 | `HofExpectsLambda` | second argument to `map`/`filter` is not a `Lambda<…>` | `{hof} expects a lambda; found {actual type}` |
 | `HofExpectsReducer` | second argument to `reduce` is not a registered reducer | `reduce expects a reducer; found {actual}` |
@@ -276,7 +276,7 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 #### Phase B — HOFs, lambdas, pipe, contextual reducers, `smelt.config.var`
 
-1. **Lambda formation.** `fn x => body` constructs a `Lambda<T, U>` value where `T` is the HOF-supplied parameter type and `U` is the synthesised type of `body` under the binding `x : T`. A lambda outside a HOF positional-argument position is `LambdaInForbiddenPosition`; a lambda with multi-argument syntax is `LambdaArityNotSupported`. Lambdas are values only — they have no declaration site, no name, no `smelt.<path>` reachability.
+1. **Lambda formation.** `fn x => body` constructs a `Lambda<T, U>` value where `T` is the HOF-supplied parameter type and `U` is the synthesised type of `body` under the binding `x : T`. A lambda outside a HOF positional-argument position is `LambdaInForbiddenPosition`; a lambda with multi-argument syntax is reserved for Phase F (no Phase B diagnostic — Phase B produces a generic parse error for the unrecognised form). Lambdas are values only — they have no declaration site, no name, no `smelt.<path>` reachability.
 
 2. **Lambda parameter scoping.** Inside `body`, a bare reference to `x` resolves to the lambda parameter before any wider scope (function parameters, CTE columns, `TableExpr`-parameter columns, upstream schemas — see `scoping.md` §"Resolution order"). Lambda parameters are pushed onto the body's `TypeContext` for the duration of the body walk and popped on exit. A lambda parameter shadowing a `smelt.define` parameter or a sibling lambda parameter is permitted (lexical shadowing is the standard meaning); the inner binding wins. The `scoping.md` Phase B touch registers lambda parameters as a new scope kind.
 

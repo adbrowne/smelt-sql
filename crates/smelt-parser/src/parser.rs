@@ -230,13 +230,11 @@ impl<'a> Parser<'a> {
 
     /// Check if current token can start an expression
     fn at_expression_start(&self) -> bool {
-        // Phase B (meta-language): `fn` is a contextual keyword (lexed as IDENT).
-        // It starts a lambda expression when encountered in expression position.
-        // We rely on IDENT being in this list — the lambda dispatch in parse_pipe_expr
-        // and parse_argument checks at_contextual_keyword("fn") explicitly.
+        // Phase B (meta-language): `fn` is a reserved keyword (FN_KW) and can
+        // start a lambda expression when encountered in expression position.
         self.at_any(&[
             IDENT, NUMBER, STRING, LPAREN, NOT_KW, CASE_KW, CAST_KW, EXTRACT_KW, EXISTS_KW,
-            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS, LBRACE,
+            ARRAY_KW, ROW_KW, STRUCT_KW, MINUS, LBRACE, FN_KW,
         ])
     }
 
@@ -439,15 +437,8 @@ impl<'a> Parser<'a> {
         let Some(tok) = self.tokens.get(self.pos + lookahead) else {
             return false;
         };
-        if tok.kind != IDENT {
-            return false;
-        }
-        let mut offset = self.offset;
-        for prior in 0..lookahead {
-            offset += self.tokens[self.pos + prior].len;
-        }
-        let text = &self.input[offset..offset + tok.len];
-        text.eq_ignore_ascii_case("fn")
+        // `fn` is now a reserved keyword (FN_KW), so we check for that token kind.
+        tok.kind == FN_KW
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is
@@ -3482,9 +3473,11 @@ impl<'a> Parser<'a> {
         self.start_node(WHEN_CLAUSE);
         self.expect(WHEN_KW);
 
-        // Parse condition (full expression including OR/AND for searched CASE)
+        // Parse condition (full expression including OR/AND and pipe for searched CASE).
+        // Use parse_pipe_expr so that `|>` inside WHEN conditions produces a PIPE_EXPR
+        // CST node; Phase 3 then emits PipeInDataPosition for the semantic error.
         self.skip_trivia();
-        self.parse_or_expr();
+        self.parse_pipe_expr();
 
         // Expect THEN
         self.skip_trivia();
@@ -3492,9 +3485,10 @@ impl<'a> Parser<'a> {
             self.error("Expected THEN in WHEN clause".to_string());
         }
 
-        // Parse result expression (full expression, WHEN/ELSE/END terminate naturally)
+        // Parse result expression (full expression, WHEN/ELSE/END terminate naturally).
+        // Use parse_pipe_expr so that `|>` inside THEN results produces a PIPE_EXPR node.
         self.skip_trivia();
-        self.parse_or_expr();
+        self.parse_pipe_expr();
 
         self.finish_node();
     }
@@ -3795,15 +3789,13 @@ impl<'a> Parser<'a> {
             .unwrap_or(false)
     }
 
-    /// Check if the current IDENT is the contextual keyword `fn` AND is followed
-    /// by a valid single-arg lambda parameter (Phase B: IDENT only).
+    /// Check if the current token is the reserved keyword `fn` (FN_KW) AND is
+    /// followed by a valid single-arg lambda parameter (Phase B: IDENT only).
     ///
-    /// This lookahead avoids mis-treating `SELECT fn FROM t` or `fn(args)` as
-    /// lambda starts. Specifically:
-    ///   - `fn x => body`     → true  (single-arg: IDENT "fn" → IDENT "x")
-    ///   - `SELECT fn FROM t` → false (IDENT "fn" → FROM_KW, not a lambda)
-    ///   - `fn(args)`         → false (IDENT "fn" → LPAREN is a function call)
-    ///   - `fn (a, b) => body` → false (multi-arg deferred to Phase F)
+    /// This lookahead avoids mis-treating `fn(args)` as a lambda start:
+    ///   - `fn x => body`     → true  (single-arg: FN_KW → IDENT "x")
+    ///   - `fn(args)`         → false (FN_KW → LPAREN is a function call)
+    ///   - `fn (a, b) => body` → false (multi-arg: deferred to Phase F)
     ///
     /// Phase B supports only `fn IDENT => EXPR`. Multi-arg lambdas
     /// (`fn (a, b) => body`) are reserved for Phase F. The LPAREN branch is
@@ -3811,10 +3803,10 @@ impl<'a> Parser<'a> {
     /// SQL function name — parses as a regular function call rather than a
     /// (broken) lambda.
     fn is_fn_lambda_start(&self) -> bool {
-        if !self.at_contextual_keyword("fn") {
+        if !self.at(FN_KW) {
             return false;
         }
-        // Skip the `fn` IDENT token and any trivia to see what follows.
+        // Skip the FN_KW token and any trivia to see what follows.
         let mut lookahead = 1;
         while let Some(t) = self.tokens.get(self.pos + lookahead) {
             if t.kind.is_trivia() {
@@ -3855,6 +3847,9 @@ impl<'a> Parser<'a> {
     fn at_keyword_as_function_name(&self) -> bool {
         if !self.at_any(&[
             FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW, VALUES_KW, LEFT_KW, RIGHT_KW,
+            // Phase B: FN_KW — `fn(args)` where `fn` is used as a SQL function name.
+            // is_fn_lambda_start() excludes LPAREN already, so fn(args) reaches here.
+            FN_KW,
         ]) {
             return false;
         }
@@ -4010,21 +4005,19 @@ impl<'a> Parser<'a> {
     /// `is_fn_lambda_start()` does not route LPAREN cases here in Phase B.
     ///
     /// Produces a `LAMBDA` node whose children are:
-    ///   - `IDENT` token (the contextual keyword `fn`, still lexed as IDENT)
+    ///   - `FN_KW` token (the reserved `fn` keyword)
     ///   - `LAMBDA_PARAM_LIST` — a single IDENT for the parameter
     ///   - `ARROW` token (`=>`)
     ///   - `EXPRESSION` — the lambda body
     ///
     /// The caller must have verified `self.is_fn_lambda_start()` before calling
-    /// this.  `fn` is a **contextual** keyword — it lexes as `IDENT` so that
-    /// existing SQL using `fn` as a column, table, or alias name continues to
-    /// parse without error.  The parser commits to lambda semantics only when it
-    /// sees an IDENT "fn" followed by another IDENT (single-arg).
+    /// this.  `fn` is a **reserved** keyword (FN_KW); any SQL using `fn` as a
+    /// column, table, or alias name must now quote it.
     fn parse_fn_lambda(&mut self) {
         self.start_node(LAMBDA);
 
-        // Consume the `fn` contextual keyword (lexed as IDENT).
-        self.advance(); // IDENT "fn"
+        // Consume the `fn` reserved keyword (FN_KW).
+        self.advance(); // FN_KW
         self.skip_trivia();
 
         // Parse the parameter list.
@@ -8933,5 +8926,37 @@ LIMIT 100
                 "PIPE_EXPR must not start at the beginning of the input (would span statements)"
             );
         }
+    }
+
+    #[test]
+    fn parse_pipe_in_when_clause_produces_pipe_expr_node() {
+        // `CASE WHEN xs |> filter(fn x => x > 0) THEN 1 ELSE 0 END`
+        //
+        // The WHEN condition contains a `|>` expression.  The parser must
+        // produce a PIPE_EXPR CST node so that the Phase-3 semantic check can
+        // fire PipeInDataPosition for the diagnostic.  If parse_when_clause
+        // called parse_or_expr() instead of parse_pipe_expr(), the `|>` token
+        // would be left in the stream and the parser would emit a confusing
+        // "Expected THEN" error instead.
+        let parse = parse("SELECT CASE WHEN xs |> filter(fn x => x > 0) THEN 1 ELSE 0 END FROM t");
+        // There should be no parse errors — the pipe expression is structurally
+        // valid (Phase 3 handles the semantic rejection via PipeInDataPosition).
+        assert!(
+            parse.errors.is_empty(),
+            "parse_pipe_in_when_clause_produces_pipe_expr_node: unexpected errors: {:?}",
+            parse.errors
+        );
+        // A PIPE_EXPR CST node must be produced inside the WHEN_CLAUSE.
+        let when_clause = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == WHEN_CLAUSE)
+            .expect("must have a WHEN_CLAUSE node");
+        assert!(
+            when_clause
+                .descendants()
+                .any(|n| n.kind() == PIPE_EXPR),
+            "WHEN_CLAUSE must contain a PIPE_EXPR node (parse_pipe_expr must be used, not parse_or_expr)"
+        );
     }
 }
