@@ -37,7 +37,7 @@ To run manually instead: `/clear` between phases and type `continue` — the res
 |---|-------|--------|-----------|------|--------|
 | 0 | Foundation: spec skeletons + overall plan | done | this file | 2026-05-09 | *(this commit)* |
 | A | `List<T>`, literals `[a,b,c]`, spread `...` | done | `docs/plans/20260509-meta-language-A.md` | 2026-05-10 | fdf51c6 |
-| B | HOFs, lambdas, pipe `\|>`, contextual reducers, `smelt.config.var` | pending | `docs/plans/20260509-meta-language-B.md` | — | — |
+| B | HOFs, lambdas, pipe `\|>`, contextual reducers, `smelt.config.var` | done | `docs/plans/20260509-meta-language-B.md` | 2026-05-10 | 7380a94 |
 | C | Reflection narrow: `smelt.columns_of`, `ColumnRef` | pending | `docs/plans/20260509-meta-language-C.md` | — | — |
 | D | Reflection wide: `smelt.models.*`, `smelt.sources.*` | pending | `docs/plans/20260509-meta-language-D.md` | — | — |
 | E1 | Records, `Map<K,V>`, YAML/JSON loaders | pending | `docs/plans/20260509-meta-language-E1.md` | — | — |
