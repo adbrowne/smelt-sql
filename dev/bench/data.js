@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778442230467,
+  "lastUpdate": 1778442233495,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -21128,6 +21128,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.715021958880875,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f1d4c19560e8bd59bd1762475a4c69997d68d7c9",
+          "message": "db: cache project paths via Salsa to fix O(N^2) resolve_ref_path\n\n`file_path_tuple` was calling `smelt_core::Config::load(project_root)` on\nevery iteration of `resolve_ref_path`'s workspace-file loop, doing a fresh\ndisk read and YAML parse per file. With ~1000 workspace files and a few\npath-form refs per file, per-file diagnostics scaled as O(N^2) and the CI\nbench job turned a sub-second pass into a 5h35m run (reported Salsa\nInitial Load / Full Diagnostics ~10M ms on both base and PR columns).\n\nAdd `project_paths(db, project) -> Arc<Vec<String>>` — a Salsa-tracked\nquery that parses `ProjectInput::smelt_yml_text` once and caches the\n`paths:` list. `resolve_ref_path` now fetches it once per project and\nthreads it into `file_path_tuple` as a parameter. The two analogous\none-shot `Config::load` calls in `function_body_diagnostics_for_file` and\n`smelt_fn_call_diagnostics_for_file` go through the cached query too —\nthey were only one disk read each, not N, but the leak was the same shape\nand routing them through Salsa also makes them invalidate on smelt.yml\nedits.\n\nEmpty-on-error fallback in `project_paths` preserves the previous\n`.unwrap_or_default()` semantics in the resolver: workspaces with no\nparseable config still get an empty scan-root list (so no prefix\nstripping), matching the existing `resolve_ref_path_form_returns_model_schema`\ntest.\n\nLocal bench on the default 1000-SQL-model spec:\n\n  Salsa Initial Load:     9,966,623 ms -> 385 ms   (~26,000x)\n  Salsa Full Diagnostics: 10,003,050 ms -> 404 ms  (~25,000x)\n\nAdds `resolve_ref_path_does_not_scale_quadratically` regression test:\n200-file workspace + realistic-size smelt.yml; pre-fix takes 25,168 ms,\npost-fix ~30 ms.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-11T05:42:04+10:00",
+          "tree_id": "8bbe61ab5da6adfc3d806e04a8dbc77f79309415",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f1d4c19560e8bd59bd1762475a4c69997d68d7c9"
+        },
+        "date": 1778442232640,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.662022242755125,
             "unit": "MB/s"
           }
         ]
