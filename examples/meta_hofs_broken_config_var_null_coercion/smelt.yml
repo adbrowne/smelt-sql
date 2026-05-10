@@ -1,0 +1,16 @@
+name: meta_hofs_broken_config_var_null_coercion
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+vars:
+  region: ~

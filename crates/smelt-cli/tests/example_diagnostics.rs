@@ -661,6 +661,50 @@ fn meta_hofs_broken_config_var_not_found() {
     );
 }
 
+/// Phase B TDD: `examples/meta_hofs_broken_reducer_name_shadowed/` produces exactly
+/// one `ReducerNameShadowed` diagnostic.
+#[test]
+fn meta_hofs_broken_reducer_name_shadowed() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_reducer_name_shadowed",
+        "functions/shadowed_reducer.sql",
+        smelt_db::DiagnosticCode::ReducerNameShadowed,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_pipe_in_data_position/` produces exactly
+/// one `PipeInDataPosition` diagnostic.
+#[test]
+fn meta_hofs_broken_pipe_in_data_position() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_pipe_in_data_position",
+        "models/pipe_in_data_position.sql",
+        smelt_db::DiagnosticCode::PipeInDataPosition,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_config_var_name_not_literal/` produces exactly
+/// one `ConfigVarNameNotLiteral` diagnostic.
+#[test]
+fn meta_hofs_broken_config_var_name_not_literal() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_config_var_name_not_literal",
+        "models/config_var_name_not_literal.sql",
+        smelt_db::DiagnosticCode::ConfigVarNameNotLiteral,
+    );
+}
+
+/// Phase B TDD: `examples/meta_hofs_broken_config_var_null_coercion/` produces exactly
+/// one `ConfigVarNullCoercion` diagnostic (a warning).
+#[test]
+fn meta_hofs_broken_config_var_null_coercion() {
+    check_workspace_emits_exactly_one_phase_b_diagnostic(
+        "examples/meta_hofs_broken_config_var_null_coercion",
+        "models/config_var_null_coercion.sql",
+        smelt_db::DiagnosticCode::ConfigVarNullCoercion,
+    );
+}
+
 // ===== Phase 5b TDD tests =====
 
 /// Phase 5b TDD Test 3: After broken/ fixtures are migrated to `smelt.functions.*`,
