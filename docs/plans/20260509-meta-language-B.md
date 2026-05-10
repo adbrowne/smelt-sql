@@ -89,7 +89,7 @@ The meta-language Phase B spec increment landed in commit `d4d4586`. The spec au
 | 3     | done     | 59a425a | 2026-05-10 |
 | 4     | done     | 33821f5 | 2026-05-10 |
 | 5     | done     | cbe369e | 2026-05-10 |
-| 6     | done     |        | 2026-05-10 |
+| 6     | done     | f9fbafc | 2026-05-10 |
 | 7     | pending  |        |      |
 
 ---
