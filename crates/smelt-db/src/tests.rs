@@ -3741,3 +3741,183 @@ fn production_path_spread_on_non_list_fires_diagnostic() {
         diags
     );
 }
+
+// ── Phase B (meta-language) diagnostic code existence + message tests ────────
+
+/// `LambdaInForbiddenPosition` exists in `DiagnosticCode` and renders the
+/// spec message format.
+#[test]
+fn diagnostic_code_lambda_in_forbidden_position() {
+    let code = DiagnosticCode::LambdaInForbiddenPosition;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(
+        msg,
+        "lambda is only valid as an argument to a higher-order function"
+    );
+}
+
+/// `LambdaArityNotSupported` exists and renders the spec message.
+#[test]
+fn diagnostic_code_lambda_arity_not_supported() {
+    let code = DiagnosticCode::LambdaArityNotSupported;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(
+        msg,
+        "multi-argument lambdas are not supported in v1; use a single parameter"
+    );
+}
+
+/// `LambdaResultTypeMismatch` exists and renders the spec message with substitutions.
+#[test]
+fn diagnostic_code_lambda_result_type_mismatch() {
+    let code = DiagnosticCode::LambdaResultTypeMismatch;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        Some("filter"),
+        None,
+        Some("Expr<Boolean>"),
+        Some("Expr<Integer>"),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        msg,
+        "filter requires lambda result Expr<Boolean>; found Expr<Integer>"
+    );
+}
+
+/// `HofExpectsLambda` exists and renders the spec message.
+#[test]
+fn diagnostic_code_hof_expects_lambda() {
+    let code = DiagnosticCode::HofExpectsLambda;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        Some("map"),
+        None,
+        None,
+        Some("Expr<Integer>"),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(msg, "map expects a lambda; found Expr<Integer>");
+}
+
+/// `HofExpectsReducer` exists and renders the spec message.
+#[test]
+fn diagnostic_code_hof_expects_reducer() {
+    let code = DiagnosticCode::HofExpectsReducer;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        Some("some_lambda"),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(msg, "reduce expects a reducer; found some_lambda");
+}
+
+/// `HofNameShadowed` exists and renders the spec message.
+#[test]
+fn diagnostic_code_hof_name_shadowed() {
+    let code = DiagnosticCode::HofNameShadowed;
+    let msg = meta_hof_diagnostic_message(code, None, Some("map"), None, None, None, None, None);
+    assert_eq!(msg, "map is a reserved higher-order function name");
+}
+
+/// `ReducerNameShadowed` exists and renders the spec message.
+#[test]
+fn diagnostic_code_reducer_name_shadowed() {
+    let code = DiagnosticCode::ReducerNameShadowed;
+    let msg =
+        meta_hof_diagnostic_message(code, None, Some("and_all"), None, None, None, None, None);
+    assert_eq!(msg, "and_all is a reserved reducer name");
+}
+
+/// `PipeRhsNotCall` exists and renders the spec message.
+#[test]
+fn diagnostic_code_pipe_rhs_not_call() {
+    let code = DiagnosticCode::PipeRhsNotCall;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(msg, "pipe right-hand side must be a function call");
+}
+
+/// `PipeInDataPosition` exists and renders the spec message.
+#[test]
+fn diagnostic_code_pipe_in_data_position() {
+    let code = DiagnosticCode::PipeInDataPosition;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(msg, "|> is meta-only; use SQL composition in this position");
+}
+
+/// `ReducerInputTypeMismatch` exists and renders the spec message.
+#[test]
+fn diagnostic_code_reducer_input_type_mismatch() {
+    let code = DiagnosticCode::ReducerInputTypeMismatch;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        None,
+        None,
+        None,
+        None,
+        Some("and_all"),
+        Some("Expr<Boolean>"),
+        Some("Expr<Integer>"),
+    );
+    assert_eq!(
+        msg,
+        "reducer and_all expects List<Expr<Boolean>>; found List<Expr<Integer>>"
+    );
+}
+
+/// `ReducerEmptyNoIdentity` exists and renders the spec message.
+#[test]
+fn diagnostic_code_reducer_empty_no_identity() {
+    let code = DiagnosticCode::ReducerEmptyNoIdentity;
+    let msg =
+        meta_hof_diagnostic_message(code, None, None, None, None, Some("union_all"), None, None);
+    assert_eq!(msg, "reducer union_all has no identity for an empty list");
+}
+
+/// `ConfigVarNotFound` exists and renders the spec message.
+#[test]
+fn diagnostic_code_config_var_not_found() {
+    let code = DiagnosticCode::ConfigVarNotFound;
+    let msg = meta_hof_diagnostic_message(code, None, Some("my_var"), None, None, None, None, None);
+    assert_eq!(
+        msg,
+        "compile-time variable my_var not declared in smelt.yml vars"
+    );
+}
+
+/// `ConfigVarNameNotLiteral` exists and renders the spec message.
+#[test]
+fn diagnostic_code_config_var_name_not_literal() {
+    let code = DiagnosticCode::ConfigVarNameNotLiteral;
+    let msg = meta_hof_diagnostic_message(code, None, None, None, None, None, None, None);
+    assert_eq!(msg, "smelt.config.var name must be a string literal");
+}
+
+/// `ConfigVarNullCoercion` exists and renders the spec message (Warning severity).
+#[test]
+fn diagnostic_code_config_var_null_coercion() {
+    let code = DiagnosticCode::ConfigVarNullCoercion;
+    let msg = meta_hof_diagnostic_message(
+        code,
+        None,
+        Some("nullable_var"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        msg,
+        "null variable nullable_var coerced to empty string; declare a default in smelt.yml"
+    );
+}

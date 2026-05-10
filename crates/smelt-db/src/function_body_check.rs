@@ -136,6 +136,65 @@ pub fn walk_body_with_ctx(
     diagnostics
 }
 
+/// Phase B (meta-language): walk a HOF lambda body for type errors and stamp
+/// each resulting diagnostic with an **anonymous expansion frame** whose
+/// `fn_id = None` and `function = hof_name`.
+///
+/// This is the HOF equivalent of `check_function_body_with_expansion`: whereas
+/// `smelt.define` expansions produce named frames (`fn_id = Some(sig.name)`),
+/// HOF expansions produce anonymous frames because the HOF has no user-declared
+/// function body — it is a built-in operator.
+///
+/// The frame stack entry:
+/// - `function` = `hof_name` (e.g. `"map"`)
+/// - `fn_id` = `None` (anonymous — no declaring file)
+/// - `call_site_range` = `call_range` (span of the outer HOF call expression)
+/// - `param`, `bound_type`, `decl_path`, `decl_range`, `element_index` = defaults
+///
+/// Pure function — no Salsa dependency.
+pub fn walk_hof_lambda_body_with_anonymous_frame(
+    lambda_body: &Expr,
+    lambda_ctx: &TypeContext,
+    text: &str,
+    hof_name: &str,
+    call_range: Option<Range>,
+) -> Vec<Diagnostic> {
+    let mut inner_diags = Vec::new();
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, None);
+
+    // Stamp every inner diagnostic with an anonymous HOF expansion frame.
+    if inner_diags.is_empty() {
+        return inner_diags;
+    }
+
+    let frame = FrameInfo {
+        function: hof_name.to_string(),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: None,
+        decl_range: None,
+        call_site_range: call_range,
+        fn_id: None, // anonymous — HOF has no declaring file
+        element_index: None,
+    };
+
+    inner_diags
+        .into_iter()
+        .map(|mut d| {
+            let frames = match d.data.take() {
+                Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+                    // Prepend the anonymous HOF frame (innermost-first ordering).
+                    existing.insert(0, frame.clone());
+                    existing
+                }
+                _ => vec![frame.clone()],
+            };
+            d.data = Some(DiagnosticData::ExpansionFrames(frames));
+            d
+        })
+        .collect()
+}
+
 fn check_function_body_inner(
     sig: &FunctionSig,
     body: &Expr,
@@ -1292,6 +1351,8 @@ pub fn check_smelt_path_call(
                 decl_path: decl_path.clone(),
                 decl_range,
                 call_site_range,
+                fn_id: Some(sig.name.clone()),
+                element_index: None,
             });
         } else {
             frames.push(FrameInfo {
@@ -1301,6 +1362,8 @@ pub fn check_smelt_path_call(
                 decl_path: decl_path.clone(),
                 decl_range,
                 call_site_range,
+                fn_id: Some(sig.name.clone()),
+                element_index: None,
             });
         }
         d.data = Some(DiagnosticData::ExpansionFrames(frames));
@@ -2559,5 +2622,40 @@ mod tests {
         );
         let diags = check_function_body(&sig, &body, &text);
         assert!(diags.is_empty(), "expected no diagnostics: {diags:?}");
+    }
+
+    // === Phase B (meta-language Phase 3) TDD tests: HOF expansion frames ===
+
+    /// A type error inside a HOF lambda body carries an `ExpansionFrames` payload
+    /// whose innermost frame has `function = "map"`, `fn_id = None`, and
+    /// `call_site_range` set to the span of the `map(...)` call.
+    ///
+    /// This exercises the anonymous-frame stamping: HOF calls push a frame with
+    /// `fn_id = None` (anonymous) before walking the lambda body diagnostics.
+    #[test]
+    fn hof_lambda_body_diagnostic_carries_anonymous_frame() {
+        use crate::type_inference::{check_hof_position_diagnostics, TypeContext};
+
+        // Parse a SELECT containing a map HOF whose lambda body has a type error:
+        // `fn c => c + 'hello'` — `c` is SmallInt (from [1,2,3]), `'hello'` is Text.
+        let sql = "SELECT map([1, 2, 3], fn c => c + 'hello') FROM t";
+        let parse = smelt_parser::parse(sql);
+        let ast = smelt_parser::ast::File::cast(parse.syntax()).expect("file");
+        let select = ast.select_stmt().expect("one SELECT");
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, sql);
+
+        // There must be at least one diagnostic stamped with an anonymous HOF frame.
+        let frame_diag = diags.iter().find(|d| {
+            matches!(
+                &d.data,
+                Some(crate::DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.fn_id.is_none() && f.function == "map")
+            )
+        });
+        assert!(
+            frame_diag.is_some(),
+            "HOF lambda body diagnostic must carry an anonymous map frame; got: {diags:?}"
+        );
     }
 }

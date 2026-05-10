@@ -1161,6 +1161,21 @@ impl Backend {
                 DbCode::MetaListHeterogeneous => "meta-list-heterogeneous",
                 DbCode::MetaSpreadInForbiddenPosition => "meta-spread-in-forbidden-position",
                 DbCode::MetaSpreadOnNonList => "meta-spread-on-non-list",
+                // Phase B (meta-language) diagnostic codes.
+                DbCode::LambdaInForbiddenPosition => "lambda-in-forbidden-position",
+                DbCode::LambdaArityNotSupported => "lambda-arity-not-supported",
+                DbCode::LambdaResultTypeMismatch => "lambda-result-type-mismatch",
+                DbCode::HofExpectsLambda => "hof-expects-lambda",
+                DbCode::HofExpectsReducer => "hof-expects-reducer",
+                DbCode::HofNameShadowed => "hof-name-shadowed",
+                DbCode::ReducerNameShadowed => "reducer-name-shadowed",
+                DbCode::PipeRhsNotCall => "pipe-rhs-not-call",
+                DbCode::PipeInDataPosition => "pipe-in-data-position",
+                DbCode::ReducerInputTypeMismatch => "reducer-input-type-mismatch",
+                DbCode::ReducerEmptyNoIdentity => "reducer-empty-no-identity",
+                DbCode::ConfigVarNotFound => "config-var-not-found",
+                DbCode::ConfigVarNameNotLiteral => "config-var-name-not-literal",
+                DbCode::ConfigVarNullCoercion => "config-var-null-coercion",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -4985,6 +5000,8 @@ mod tests {
             decl_path: Some(path),
             decl_range: Some(make_db_range(decl_line, 0)),
             call_site_range: Some(make_db_range(decl_line + 10, 0)),
+            fn_id: Some(function.to_string()),
+            element_index: None,
         }
     }
 

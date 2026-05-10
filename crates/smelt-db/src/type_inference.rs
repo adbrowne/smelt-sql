@@ -4599,6 +4599,592 @@ pub fn expand_spread_into_position(
     }
 }
 
+// ─── Phase B (meta-language): HOF position checks + diagnostic emission ──────
+
+/// Check a `smelt.define` declaration for name-shadowing of built-in HOFs or reducers.
+///
+/// The set of protected HOF names is `{map, filter, reduce}`.
+/// The set of protected reducer names is `{comma_sep, and_all, or_any, union_all,
+/// intersect_all, plus_chain, concat}`.
+///
+/// Emits:
+/// - `HofNameShadowed` when the declared name is a built-in HOF.
+/// - `ReducerNameShadowed` when the declared name is a built-in reducer.
+///
+/// Pure function — no Salsa dependency.
+pub fn check_define_name_shadowing(
+    define: &smelt_parser::ast::SmeltDefine,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::ast::text_range_to_range;
+
+    const HOF_NAMES: &[&str] = &["map", "filter", "reduce"];
+    const REDUCER_NAMES: &[&str] = &[
+        "comma_sep",
+        "and_all",
+        "or_any",
+        "union_all",
+        "intersect_all",
+        "plus_chain",
+        "concat",
+    ];
+
+    let mut diags = Vec::new();
+    let Some(name) = define.name() else {
+        return diags;
+    };
+    let name_lc = name.to_lowercase();
+
+    let range = define
+        .name_range()
+        .map(|r| {
+            if text.is_empty() {
+                crate::Range {
+                    start: smelt_parser::ast::Position { line: 0, column: 0 },
+                    end: smelt_parser::ast::Position { line: 0, column: 0 },
+                }
+            } else {
+                text_range_to_range(text, r)
+            }
+        })
+        .unwrap_or(crate::Range {
+            start: smelt_parser::ast::Position { line: 0, column: 0 },
+            end: smelt_parser::ast::Position { line: 0, column: 0 },
+        });
+
+    if HOF_NAMES.contains(&name_lc.as_str()) {
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: crate::meta_hof_diagnostic_message(
+                crate::DiagnosticCode::HofNameShadowed,
+                Some(&name),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            range,
+            code: Some(crate::DiagnosticCode::HofNameShadowed),
+            data: None,
+        });
+    } else if REDUCER_NAMES.contains(&name_lc.as_str()) {
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: crate::meta_hof_diagnostic_message(
+                crate::DiagnosticCode::ReducerNameShadowed,
+                None,
+                Some(&name),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            range,
+            code: Some(crate::DiagnosticCode::ReducerNameShadowed),
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Walk a `SelectStmt` and emit Phase B HOF-related diagnostics:
+///
+/// - `LambdaInForbiddenPosition`: a `LAMBDA` CST node whose parent is not a
+///   HOF positional argument.
+/// - `LambdaArityNotSupported`: a `LAMBDA` whose parameter list contains more
+///   than one identifier.
+/// - `LambdaResultTypeMismatch`: `filter` predicate body not `Boolean`.
+/// - `HofExpectsLambda`: second arg to `map`/`filter` is not a `LAMBDA`.
+/// - `HofExpectsReducer`: second arg to `reduce` is not a registered reducer.
+/// - `PipeRhsNotCall`: RHS of `|>` is not a call expression.
+/// - `ReducerInputTypeMismatch`: reducer applied to incompatible input type.
+/// - `ReducerEmptyNoIdentity`: `union_all`/`intersect_all` reducing an empty list.
+///
+/// Pure function — no Salsa dependency. `text` is the raw source for span
+/// conversion; pass `""` in unit tests where exact position is not under test.
+pub fn check_hof_position_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::SyntaxKind::{FUNCTION_CALL, LAMBDA, PIPE_EXPR};
+    use smelt_types::signatures::format_smelt_type_hover;
+
+    let mut diags: Vec<crate::Diagnostic> = Vec::new();
+
+    // Helper: get function name from a FunctionCall node, including keyword-named
+    // functions like `filter` which lex as FILTER_KW rather than IDENT.
+    let call_name_lc = |call: &smelt_parser::ast::FunctionCall| -> String {
+        call.name()
+            .unwrap_or_else(|| {
+                // `FunctionCall::name()` only finds IDENT tokens; HOF names like
+                // `filter` are lexed as keyword tokens (FILTER_KW). Fall back to the
+                // first non-trivia token's text.
+                call.syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia())
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default()
+            })
+            .to_lowercase()
+    };
+
+    // Collect every descendant of the select statement for inspection.
+    // We perform a depth-first walk; each node is examined individually.
+    let root = select_stmt.syntax();
+
+    // Helper: range from a Rowan TextRange, text may be "" in tests.
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    // Walk all descendants.
+    for node in root.descendants() {
+        match node.kind() {
+            // ── LAMBDA node ────────────────────────────────────────────────
+            LAMBDA => {
+                let lambda = smelt_parser::ast::Lambda::cast(node.clone()).unwrap();
+                let lambda_range = to_range(node.text_range());
+
+                // Arity check: does the LAMBDA have a multi-arg parameter list?
+                let has_multi_arg = lambda.is_multi_arg();
+
+                if has_multi_arg {
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::LambdaArityNotSupported,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: lambda_range,
+                        code: Some(crate::DiagnosticCode::LambdaArityNotSupported),
+                        data: None,
+                    });
+                    // Still check for forbidden position below.
+                }
+
+                // Position check: is this LAMBDA inside a HOF positional argument?
+                // A lambda is valid only when it is inside an EXPRESSION that is a
+                // direct child of an ARG_LIST that belongs to a known HOF FUNCTION_CALL.
+                //
+                // Parent chain: LAMBDA → EXPRESSION → ARG_LIST → FUNCTION_CALL
+                // We walk up through EXPRESSION and ARG_LIST wrappers.
+                let in_valid_hof_position = {
+                    let mut parent_opt = node.parent();
+                    let mut valid = false;
+
+                    // Walk up through EXPRESSION / ARG_LIST wrappers.
+                    while let Some(p) = parent_opt {
+                        match p.kind() {
+                            FUNCTION_CALL => {
+                                // Reached a function call — check it's a known HOF.
+                                let call =
+                                    smelt_parser::ast::FunctionCall::cast(p.clone()).unwrap();
+                                let name = call_name_lc(&call);
+                                if HofKind::from_name(&name).is_some() {
+                                    valid = true;
+                                }
+                                break;
+                            }
+                            smelt_parser::SyntaxKind::EXPRESSION
+                            | smelt_parser::SyntaxKind::ARG_LIST => {
+                                // Keep walking up through transparent wrapper nodes.
+                                parent_opt = p.parent();
+                            }
+                            _ => break,
+                        }
+                    }
+                    valid
+                };
+
+                if !in_valid_hof_position {
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::LambdaInForbiddenPosition,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: lambda_range,
+                        code: Some(crate::DiagnosticCode::LambdaInForbiddenPosition),
+                        data: None,
+                    });
+                }
+            }
+
+            // ── FUNCTION_CALL node: validate HOF argument shapes ───────────
+            FUNCTION_CALL => {
+                let call = match smelt_parser::ast::FunctionCall::cast(node.clone()) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let call_name = call_name_lc(&call);
+                let Some(hof) = HofKind::from_name(&call_name) else {
+                    continue;
+                };
+
+                let args = call.arguments();
+                if args.is_empty() {
+                    continue;
+                }
+
+                // First arg: infer list type.
+                let first_arg = &args[0];
+                let lhs_ty = if let Some(arr) = first_arg.as_array_literal() {
+                    let elems: Vec<_> = arr.elements();
+                    infer_list_literal(&elems, ctx, None).inferred
+                } else {
+                    infer_expression_type(first_arg, ctx)
+                        .map(|tc| {
+                            SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                                tc.data_type,
+                            ))
+                        })
+                        .unwrap_or(SmeltType::Unknown)
+                };
+
+                let call_range = to_range(node.text_range());
+
+                match hof {
+                    HofKind::Map | HofKind::Filter => {
+                        if args.len() < 2 {
+                            continue;
+                        }
+                        let second_arg = &args[1];
+
+                        // Check if second arg contains a LAMBDA node (including multi-arg).
+                        let has_any_lambda = second_arg
+                            .syntax()
+                            .descendants()
+                            .any(|n| n.kind() == LAMBDA)
+                            || second_arg.syntax().kind() == LAMBDA;
+
+                        // Check if second arg contains a valid single-arg LAMBDA.
+                        let has_valid_lambda = extract_lambda_from_expr(second_arg).is_some();
+
+                        // Check if second arg is a multi-arg lambda written as `fn (a, b) => …`.
+                        // The parser does NOT produce a LAMBDA node for `fn LPAREN …`, instead
+                        // it falls through to parsing `fn` as an IDENT and `(a, b)` as an arg
+                        // list (a function call to a function named "fn"). We detect this by
+                        // checking if the second arg text starts with "fn " followed by "(".
+                        let arg_text_trimmed = second_arg.text().trim().to_string();
+                        let is_multi_arg_lambda_text = {
+                            let t = arg_text_trimmed.as_str();
+                            // Strip leading "fn " and check for "("
+                            t.starts_with("fn(")
+                                || t.starts_with("fn (")
+                                || (t.starts_with("fn")
+                                    && t.get(2..3).is_some_and(|c| c == "(" || c == " "))
+                        };
+
+                        if is_multi_arg_lambda_text && !has_any_lambda {
+                            // Multi-arg lambda written as `fn (a, b) => …` — emit LambdaArityNotSupported.
+                            diags.push(crate::Diagnostic {
+                                severity: crate::DiagnosticSeverity::Error,
+                                message: crate::meta_hof_diagnostic_message(
+                                    crate::DiagnosticCode::LambdaArityNotSupported,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                range: to_range(second_arg.text_range()),
+                                code: Some(crate::DiagnosticCode::LambdaArityNotSupported),
+                                data: None,
+                            });
+                        } else if !has_any_lambda {
+                            // HofExpectsLambda — not a lambda at all.
+                            let actual = infer_expression_type(second_arg, ctx)
+                                .map(|tc| {
+                                    format_smelt_type_hover(&SmeltType::Expr(
+                                        smelt_types::signatures::TypeConstraint::Concrete(
+                                            tc.data_type,
+                                        ),
+                                    ))
+                                })
+                                .unwrap_or_else(|| "unknown".to_string());
+                            diags.push(crate::Diagnostic {
+                                severity: crate::DiagnosticSeverity::Error,
+                                message: crate::meta_hof_diagnostic_message(
+                                    crate::DiagnosticCode::HofExpectsLambda,
+                                    Some(&call_name),
+                                    None,
+                                    None,
+                                    Some(&actual),
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                range: to_range(second_arg.text_range()),
+                                code: Some(crate::DiagnosticCode::HofExpectsLambda),
+                                data: None,
+                            });
+                        } else if has_valid_lambda {
+                            // Valid single-arg lambda in map or filter.
+                            // (a) For filter: check body is Boolean.
+                            if hof == HofKind::Filter {
+                                let second_hof_arg = extract_lambda_from_expr(second_arg)
+                                    .map(HofSecondArg::Lambda)
+                                    .unwrap_or(HofSecondArg::Other);
+                                let result =
+                                    infer_hof_call(hof, &lhs_ty, second_hof_arg, ctx, None);
+                                if let Some(HofInferSentinel::LambdaResultTypeMismatch {
+                                    expected,
+                                    found,
+                                }) = result.sentinel
+                                {
+                                    let exp_str = format_smelt_type_hover(&expected);
+                                    let act_str = format_smelt_type_hover(&found);
+                                    diags.push(crate::Diagnostic {
+                                        severity: crate::DiagnosticSeverity::Error,
+                                        message: crate::meta_hof_diagnostic_message(
+                                            crate::DiagnosticCode::LambdaResultTypeMismatch,
+                                            Some(&call_name),
+                                            None,
+                                            Some(&exp_str),
+                                            Some(&act_str),
+                                            None,
+                                            None,
+                                            None,
+                                        ),
+                                        range: call_range,
+                                        code: Some(crate::DiagnosticCode::LambdaResultTypeMismatch),
+                                        data: None,
+                                    });
+                                }
+                            }
+
+                            // (b) Walk the lambda body for type errors and stamp
+                            // with an anonymous HOF expansion frame.
+                            if let Some(lambda) = extract_lambda_from_expr(second_arg) {
+                                let param_name =
+                                    lambda.params().into_iter().next().unwrap_or_default();
+                                let elem_ty = match &lhs_ty {
+                                    SmeltType::List(inner) => match inner.as_ref() {
+                                        SmeltType::Expr(
+                                            smelt_types::signatures::TypeConstraint::Concrete(dt),
+                                        ) => Some(smelt_types::TypedColumn {
+                                            data_type: dt.clone(),
+                                            nullable: false,
+                                        }),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let (Some(elem), Some(body_expr)) = (elem_ty, lambda.body()) {
+                                    let mut lambda_ctx = ctx.clone();
+                                    lambda_ctx.add_lambda_param(&param_name, elem);
+                                    let body_diags = crate::function_body_check::walk_hof_lambda_body_with_anonymous_frame(
+                                        &body_expr,
+                                        &lambda_ctx,
+                                        text,
+                                        &call_name,
+                                        Some(call_range),
+                                    );
+                                    diags.extend(body_diags);
+                                }
+                            }
+                        }
+                        // If has_any_lambda but !has_valid_lambda: it's a multi-arg lambda.
+                        // The LAMBDA node walk above will emit LambdaArityNotSupported.
+                    }
+
+                    HofKind::Reduce => {
+                        if args.len() < 2 {
+                            continue;
+                        }
+                        let second_arg = &args[1];
+
+                        // Second arg must be a bare reducer identifier.
+                        let arg_text = second_arg.text().trim().to_string();
+                        let is_reducer = arg_text.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            && !arg_text.is_empty()
+                            && lookup_reducer(&arg_text).is_some();
+
+                        // But is it a lambda? (wrong type for reduce)
+                        let is_lambda = extract_lambda_from_expr(second_arg).is_some();
+
+                        if is_lambda || !is_reducer {
+                            diags.push(crate::Diagnostic {
+                                severity: crate::DiagnosticSeverity::Error,
+                                message: crate::meta_hof_diagnostic_message(
+                                    crate::DiagnosticCode::HofExpectsReducer,
+                                    None,
+                                    None,
+                                    None,
+                                    Some(&arg_text),
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                                range: to_range(second_arg.text_range()),
+                                code: Some(crate::DiagnosticCode::HofExpectsReducer),
+                                data: None,
+                            });
+                        } else {
+                            // Valid reducer name — check input type compatibility.
+                            // Re-infer with actual element type.
+                            let elem_ty = match &lhs_ty {
+                                SmeltType::List(inner) => (**inner).clone(),
+                                _ => SmeltType::Unknown,
+                            };
+                            let is_empty = matches!(&elem_ty, SmeltType::Unknown);
+                            let result = infer_reduce_call(&elem_ty, is_empty, &arg_text, None);
+
+                            match &result.sentinel {
+                                Some(HofInferSentinel::ReducerInputTypeMismatch {
+                                    reducer_name,
+                                    expected_constraint,
+                                    found,
+                                }) => {
+                                    let found_str = format_smelt_type_hover(found);
+                                    diags.push(crate::Diagnostic {
+                                        severity: crate::DiagnosticSeverity::Error,
+                                        message: crate::meta_hof_diagnostic_message(
+                                            crate::DiagnosticCode::ReducerInputTypeMismatch,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            Some(reducer_name),
+                                            Some(expected_constraint),
+                                            Some(&found_str),
+                                        ),
+                                        range: to_range(second_arg.text_range()),
+                                        code: Some(crate::DiagnosticCode::ReducerInputTypeMismatch),
+                                        data: None,
+                                    });
+                                }
+                                Some(HofInferSentinel::ReducerEmptyNoIdentity { reducer_name }) => {
+                                    diags.push(crate::Diagnostic {
+                                        severity: crate::DiagnosticSeverity::Error,
+                                        message: crate::meta_hof_diagnostic_message(
+                                            crate::DiagnosticCode::ReducerEmptyNoIdentity,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            Some(reducer_name),
+                                            None,
+                                            None,
+                                        ),
+                                        range: call_range,
+                                        code: Some(crate::DiagnosticCode::ReducerEmptyNoIdentity),
+                                        data: None,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── PIPE_EXPR node: validate RHS is a call + check data position ─
+            PIPE_EXPR => {
+                let pipe = match smelt_parser::ast::PipeExpr::cast(node.clone()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // Check: is this pipe expression inside a Data-World grammar slot?
+                // A pipe in a WHERE clause, JOIN condition, or HAVING clause
+                // (any ancestor is a WHERE_CLAUSE node) emits PipeInDataPosition.
+                let in_data_position = {
+                    let mut parent_opt = node.parent();
+                    let mut in_data = false;
+                    while let Some(p) = parent_opt {
+                        if p.kind() == smelt_parser::SyntaxKind::WHERE_CLAUSE {
+                            in_data = true;
+                            break;
+                        }
+                        // Stop at statement boundaries.
+                        if p.kind() == smelt_parser::SyntaxKind::SELECT_STMT
+                            || p.kind() == smelt_parser::SyntaxKind::FILE
+                        {
+                            break;
+                        }
+                        parent_opt = p.parent();
+                    }
+                    in_data
+                };
+
+                if in_data_position {
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::PipeInDataPosition,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range: to_range(node.text_range()),
+                        code: Some(crate::DiagnosticCode::PipeInDataPosition),
+                        data: None,
+                    });
+                }
+
+                if !pipe.rhs_is_call() {
+                    let range = pipe
+                        .rhs()
+                        .map(|r| to_range(r.text_range()))
+                        .unwrap_or_else(|| to_range(node.text_range()));
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_hof_diagnostic_message(
+                            crate::DiagnosticCode::PipeRhsNotCall,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        range,
+                        code: Some(crate::DiagnosticCode::PipeRhsNotCall),
+                        data: None,
+                    });
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    diags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6621,6 +7207,295 @@ mod tests {
         assert!(
             lookup_reducer("not_a_reducer").is_none(),
             "unknown reducer must not be in the registry"
+        );
+    }
+
+    // === Phase 3 (meta-language Phase B) TDD tests: diagnostic emission ===
+
+    /// A `fn x => body` lambda not in a HOF positional argument position emits
+    /// `LambdaInForbiddenPosition`. We check via `check_hof_position_diagnostics`.
+    #[test]
+    fn lambda_outside_hof_position_emits_diagnostic() {
+        // A lambda in a plain expression position — not inside a HOF call.
+        let sql = "SELECT fn c => c FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::LambdaInForbiddenPosition)),
+            "lambda in SELECT (non-HOF position) must emit LambdaInForbiddenPosition, \
+             got: {:?}",
+            diags
+        );
+    }
+
+    /// `map(xs, fn (a, b) => a)` — multi-arg lambda — emits `LambdaArityNotSupported`.
+    #[test]
+    fn multi_arg_lambda_emits_arity_diagnostic() {
+        // map call with multi-arg lambda (two params)
+        let sql = "SELECT map([1, 2, 3], fn (a, b) => a) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::LambdaArityNotSupported)),
+            "map with multi-arg lambda must emit LambdaArityNotSupported, got: {:?}",
+            diags
+        );
+    }
+
+    /// `filter([1,2,3], fn c => c)` — predicate body is `Expr<SmallInt>` not Boolean —
+    /// emits `LambdaResultTypeMismatch`.
+    #[test]
+    fn filter_predicate_non_boolean_emits_lambda_result_mismatch() {
+        let sql = "SELECT filter([1, 2, 3], fn c => c) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::LambdaResultTypeMismatch)),
+            "filter with non-Boolean predicate must emit LambdaResultTypeMismatch, got: {:?}",
+            diags
+        );
+    }
+
+    /// `map(xs, 42)` — non-lambda second arg — emits `HofExpectsLambda`.
+    #[test]
+    fn map_with_non_lambda_second_arg_emits_hof_expects_lambda() {
+        let sql = "SELECT map([1, 2, 3], 42) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::HofExpectsLambda)),
+            "map with non-lambda second arg must emit HofExpectsLambda, got: {:?}",
+            diags
+        );
+    }
+
+    /// `reduce(xs, fn c => c)` — lambda where reducer expected — emits `HofExpectsReducer`.
+    #[test]
+    fn reduce_with_non_reducer_second_arg_emits_hof_expects_reducer() {
+        let sql = "SELECT reduce([1, 2, 3], fn c => c) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::HofExpectsReducer)),
+            "reduce with lambda second arg must emit HofExpectsReducer, got: {:?}",
+            diags
+        );
+    }
+
+    /// `xs |> 3 + 4` — non-call RHS — emits `PipeRhsNotCall`.
+    #[test]
+    fn pipe_rhs_not_call_emits_diagnostic() {
+        let sql = "SELECT [1, 2, 3] |> 3 + 4 FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::PipeRhsNotCall)),
+            "pipe with non-call RHS must emit PipeRhsNotCall, got: {:?}",
+            diags
+        );
+    }
+
+    /// `reduce([1,2,3], and_all)` — Integer input, but and_all requires Boolean —
+    /// emits `ReducerInputTypeMismatch`.
+    #[test]
+    fn reduce_input_type_mismatch_emits_diagnostic() {
+        let sql = "SELECT reduce([1, 2, 3], and_all) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ReducerInputTypeMismatch)),
+            "reduce([1,2,3], and_all) must emit ReducerInputTypeMismatch, got: {:?}",
+            diags
+        );
+    }
+
+    /// `reduce([], union_all)` — empty list, no identity — emits `ReducerEmptyNoIdentity`.
+    #[test]
+    fn reduce_empty_no_identity_emits_diagnostic() {
+        let sql = "SELECT reduce([], union_all) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ReducerEmptyNoIdentity)),
+            "reduce([], union_all) must emit ReducerEmptyNoIdentity, got: {:?}",
+            diags
+        );
+    }
+
+    // === Phase 3: `smelt.config.var` resolver tests ===
+
+    /// `smelt.config.var('region')` over a workspace with `vars: { region: us-west-2 }`
+    /// resolves to a `Text` value `'us-west-2'` (no diagnostics).
+    #[test]
+    fn config_var_resolves_string_scalar() {
+        use crate::config_vars::{coerce_yaml_scalar_to_text, parse_vars_from_yaml};
+
+        let yaml = "name: my_project\nvars:\n  region: us-west-2\ntargets: {}\n";
+        let vars = parse_vars_from_yaml(yaml);
+        let vars = vars.expect("vars must parse successfully");
+        let val = vars.get("region").expect("region must be present");
+        let (text_val, warning) = coerce_yaml_scalar_to_text(val, "region");
+        assert_eq!(text_val, "us-west-2", "region must resolve to 'us-west-2'");
+        assert!(
+            warning.is_none(),
+            "string scalar must not warn, got: {:?}",
+            warning
+        );
+    }
+
+    /// `smelt.config.var('flag')` over `vars: { flag: true }` resolves to `'true'`;
+    /// integer `42` resolves to `'42'`.
+    #[test]
+    fn config_var_coerces_yaml_boolean() {
+        use crate::config_vars::{coerce_yaml_scalar_to_text, parse_vars_from_yaml};
+
+        let yaml = "name: my_project\nvars:\n  flag: true\n  count: 42\ntargets: {}\n";
+        let vars = parse_vars_from_yaml(yaml).expect("vars must parse");
+        {
+            let val = vars.get("flag").expect("flag must be present");
+            let (text_val, warning) = coerce_yaml_scalar_to_text(val, "flag");
+            assert_eq!(text_val, "true", "boolean true must coerce to 'true'");
+            assert!(warning.is_none());
+        }
+        {
+            let val = vars.get("count").expect("count must be present");
+            let (text_val, warning) = coerce_yaml_scalar_to_text(val, "count");
+            assert_eq!(text_val, "42", "integer 42 must coerce to '42'");
+            assert!(warning.is_none());
+        }
+    }
+
+    /// `smelt.config.var('nullable')` over `vars: { nullable: ~ }` resolves to `''`
+    /// and emits `ConfigVarNullCoercion` warning sentinel.
+    #[test]
+    fn config_var_null_emits_warning() {
+        use crate::config_vars::{coerce_yaml_scalar_to_text, parse_vars_from_yaml};
+
+        let yaml = "name: my_project\nvars:\n  nullable: ~\ntargets: {}\n";
+        let vars = parse_vars_from_yaml(yaml).expect("vars must parse");
+        let val = vars.get("nullable").expect("nullable must be present");
+        let (text_val, warning) = coerce_yaml_scalar_to_text(val, "nullable");
+        assert_eq!(text_val, "", "null must coerce to empty string");
+        assert!(
+            warning.is_some(),
+            "null coercion must produce a ConfigVarNullCoercion warning sentinel"
+        );
+    }
+
+    /// `smelt.config.var('not_declared')` over a workspace whose `vars:` lacks `not_declared`
+    /// emits `ConfigVarNotFound`.
+    #[test]
+    fn config_var_not_found_emits_diagnostic() {
+        use crate::config_vars::parse_vars_from_yaml;
+
+        let yaml = "name: my_project\nvars:\n  region: us-east-1\ntargets: {}\n";
+        let vars = parse_vars_from_yaml(yaml).expect("vars must parse");
+        let result = vars.get("not_declared");
+        assert!(
+            result.is_none(),
+            "not_declared must not be present in vars, got: {:?}",
+            result
+        );
+        // The diagnostic emission path is tested in the production path (lib.rs).
+    }
+
+    /// `smelt.config.var(some_var)` (non-literal) — detection of non-literal arg.
+    /// We test the helper that detects whether an Expr is a string literal.
+    #[test]
+    fn config_var_non_literal_arg_emits_diagnostic() {
+        use crate::config_vars::is_string_literal_expr;
+
+        // A column reference "some_var" is not a string literal.
+        let col_expr = parse_first_expr("SELECT some_var FROM t");
+        assert!(
+            !is_string_literal_expr(&col_expr),
+            "column reference must NOT be a string literal"
+        );
+
+        // A string literal 'region' IS a string literal.
+        let str_expr = parse_first_expr("SELECT 'region' FROM t");
+        assert!(
+            is_string_literal_expr(&str_expr),
+            "quoted string must be a string literal"
+        );
+    }
+
+    /// `smelt.define map(...)` — re-declaring a HOF name — emits `HofNameShadowed`.
+    #[test]
+    fn smelt_define_named_map_emits_hof_name_shadowed() {
+        // Parse a file with a smelt.define named 'map' and check the name-shadowing
+        // diagnostic via check_define_name_shadowing.
+        use smelt_parser::ast::SmeltDefine;
+        let sql = "smelt.define map(x: Expr<Integer>) AS (x + 1)\n";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
+        let define: SmeltDefine = file.defines().next().expect("one smelt.define");
+        let diags = check_define_name_shadowing(&define, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::HofNameShadowed)),
+            "smelt.define named 'map' must emit HofNameShadowed, got: {:?}",
+            diags
+        );
+    }
+
+    /// `smelt.define concat(...)` — re-declaring a reducer name — emits `ReducerNameShadowed`.
+    #[test]
+    fn smelt_define_named_concat_emits_reducer_name_shadowed() {
+        use smelt_parser::ast::SmeltDefine;
+        let sql = "smelt.define concat(x: Expr<Text>) AS (x)\n";
+        let parse = smelt_parser::parse(sql);
+        let file = smelt_parser::ast::File::cast(parse.syntax()).expect("FILE");
+        let define: SmeltDefine = file.defines().next().expect("one smelt.define");
+        let diags = check_define_name_shadowing(&define, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ReducerNameShadowed)),
+            "smelt.define named 'concat' must emit ReducerNameShadowed, got: {:?}",
+            diags
+        );
+    }
+
+    /// `WHERE a |> b()` — pipe in a Data-World position (WHERE predicate) — emits
+    /// `PipeInDataPosition`.
+    #[test]
+    fn pipe_in_where_clause_emits_diagnostic() {
+        let sql = "SELECT x FROM t WHERE [1, 2, 3] |> map(fn c => c + 1)";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_hof_position_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::PipeInDataPosition)),
+            "pipe in WHERE clause must emit PipeInDataPosition, got: {:?}",
+            diags
         );
     }
 }

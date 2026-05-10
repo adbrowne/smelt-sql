@@ -876,6 +876,15 @@ pub struct FrameInfo {
     /// file that *contains* the call — distinct from `decl_path`, which
     /// points at where the callee is defined).
     pub call_site_range: Option<Range>,
+    /// Identifier of the declaring function in the function registry.
+    /// `None` for anonymous frames (e.g. HOF inline-expansion frames produced
+    /// by `map`, `filter`, `reduce`). Named `smelt.define` frames carry `Some`.
+    pub fn_id: Option<String>,
+    /// Zero-based index into the source list literal at the HOF call site,
+    /// identifying which element the expanded lambda body was operating on.
+    /// `None` when the source list was not a literal or the information is
+    /// not statically available (the common v1 case).
+    pub element_index: Option<usize>,
 }
 
 /// Tier of a function, derived from annotation completeness.
@@ -3892,6 +3901,8 @@ mod tests {
             decl_path: None,
             decl_range: None,
             call_site_range: None,
+            fn_id: None,
+            element_index: None,
         };
         assert!(frame.decl_path.is_none());
         assert!(frame.decl_range.is_none());

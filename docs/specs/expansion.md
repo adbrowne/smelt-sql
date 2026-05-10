@@ -26,12 +26,16 @@ The following are the only outputs of expansion that a user can observe:
 
 | Field | Meaning |
 |---|---|
-| `function` | Name of the function whose expansion produced the frame. |
-| `param` | Name of the parameter whose binding produced the inner error. |
-| `bound_type` | Concrete bound type, rendered for display via `DataType::to_string()`. |
-| `decl_path` | Path to the file declaring the function (`Option`; `None` on degraded sig-lookup). |
-| `decl_range` | Source range of the declaration's name token. |
-| `call_site_range` | Source range of the call-path span that produced this frame. |
+| `function` | Name of the function whose expansion produced the frame. For HOF anonymous frames this is the HOF name (`"map"`, `"filter"`, `"reduce"`). |
+| `param` | Name of the parameter whose binding produced the inner error. Empty string for anonymous HOF frames. |
+| `bound_type` | Concrete bound type, rendered for display via `DataType::to_string()`. Empty string for anonymous HOF frames. |
+| `decl_path` | Path to the file declaring the function (`Option`; `None` on degraded sig-lookup and always `None` for anonymous HOF frames). |
+| `decl_range` | Source range of the declaration's name token. `None` for anonymous HOF frames. |
+| `call_site_range` | Source range of the call-path span that produced this frame. For HOF frames this is the span of the HOF call expression. |
+| `fn_id` | Function identifier in the registry (`Option<String>`). `None` for anonymous HOF frames — HOFs are built-in and have no declaring file. `Some(name)` for `smelt.define` frames. |
+| `element_index` | Zero-based index into the source list literal, identifying which element the lambda body operated on. `None` when the source was not a literal or the information is not statically available (the common v1 case). |
+
+**Anonymous-frame form** (Phase B, HOF inline-expansion): `map`, `filter`, and `reduce` produce anonymous frames when a type error surfaces inside a lambda body. The anonymous form has `fn_id = None`, `decl_path = None`, `decl_range = None`, and `param = ""`. Renderers should handle `fn_id = None` by omitting the "defined in" link and displaying only the HOF name.
 
 The renderer is permitted to read fewer fields than are populated; producers must populate every field they have available regardless of what the current renderer reads.
 
@@ -67,6 +71,7 @@ Whenever a diagnostic surfaces from inside an expanded body, the compiler stamps
 3. **The frame stack is populated even when the renderer ignores it.** A v1 LSP renderer reading only `frames.last()` is permitted; a producer that populates only the outermost frame is **not** permitted. Multi-level rendering reads more of the same vector without changes elsewhere.
 4. **A diagnostic that did not arise from an expansion carries no `ExpansionFrames` payload.** The `data` field is left `None`. A defensively-pushed empty frame stack is forbidden — it would mislead the renderer into showing an empty "in expansion of" line.
 5. **Frame ordering is deterministic.** When a single frame's `param_bindings` contains multiple bindings (e.g. several parameters bound at the same call), the producer chooses an order — currently the parameter-declaration order via `frame_bindings.first()` — and the renderer relies on that determinism for snapshot stability.
+6. **HOF anonymous frames obey the same stack-ordering rules.** A lambda body type error inside `map(xs, fn c => bad_expr)` carries one anonymous frame at `frames[0]` (innermost). If the `map` call itself is inside a `smelt.define` body that was expanded at Tier 1, the HOF anonymous frame is prepended (innermost) and the enclosing `smelt.define` frame follows it. The renderer walks the same vector in reverse to present outermost-first.
 
 ### Hygiene v1
 

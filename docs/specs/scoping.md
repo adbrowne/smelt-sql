@@ -60,12 +60,15 @@ These rules are normative.
 
 Bare-name resolution inside a `smelt.define` body proceeds in this order, and stops at the first match:
 
-1. **Function parameters** (the function's declared parameter list).
-2. **CTE columns** for any CTE in scope at the reference site (a `WITH name AS (...)` binding earlier in the body).
-3. **FROM-scope columns** contributed by `TableExpr` parameters in scope. A bare column resolves only when **exactly one** `TableExpr` exposes a column of that name; ties are reported as ambiguity (currently surfaced as `UnknownIdentifier` with a hint until a dedicated `AmbiguousColumn` code lands — see Known Divergences).
-4. **Upstream model and source schemas** reachable through `TableExpr`-parameter values (e.g. when a `TableExpr` is bound to a `smelt.<path>` referent, the resolved entity's columns are reachable through SQL FROM resolution against the bound argument; this applies uniformly to models, seeds, and sources).
+1. **Lambda parameters** (Phase B). Inside the body of a `fn x => expr` lambda, the lambda parameter `x` is innermost scope and shadows everything else. Lambda parameters are bound by `TypeContext::add_lambda_param` and looked up before any other scope. A lambda parameter always shadows a same-named function parameter, CTE column, or FROM-scope column. To reach a shadowed outer name inside a lambda body, authors must assign the outer binding to an intermediate before the lambda, or use a qualified reference.
+2. **Function parameters** (the function's declared parameter list).
+3. **CTE columns** for any CTE in scope at the reference site (a `WITH name AS (...)` binding earlier in the body).
+4. **FROM-scope columns** contributed by `TableExpr` parameters in scope. A bare column resolves only when **exactly one** `TableExpr` exposes a column of that name; ties are reported as ambiguity (currently surfaced as `UnknownIdentifier` with a hint until a dedicated `AmbiguousColumn` code lands — see Known Divergences).
+5. **Upstream model and source schemas** reachable through `TableExpr`-parameter values (e.g. when a `TableExpr` is bound to a `smelt.<path>` referent, the resolved entity's columns are reachable through SQL FROM resolution against the bound argument; this applies uniformly to models, seeds, and sources).
 
-A qualified reference (`alias.column`) skips step 1 and resolves against the named alias's schema directly. This is the explicit escape hatch when a parameter shadows a desired column.
+A qualified reference (`alias.column`) skips steps 1–2 and resolves against the named alias's schema directly. This is the explicit escape hatch when a parameter shadows a desired column.
+
+**Lambda parameter scoping rule.** Lambda parameters are purely lexical. Each `fn x => expr` creates a new scope that lasts exactly for the extent of `expr`. Nested lambdas (currently rejected by `LambdaArityNotSupported` in v1) would each push their own scope. The implementation uses `TypeContext::add_lambda_param` (which mutates a clone of the outer context) and discards the clone after the lambda body walk.
 
 ### Parameter shadow warning
 

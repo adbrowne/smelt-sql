@@ -31,6 +31,7 @@ use smelt_types::{parse_type, DataType};
 
 pub mod backends;
 pub mod code_actions;
+pub mod config_vars;
 pub mod function_body_check;
 pub mod provenance_validator;
 pub mod references;
@@ -465,6 +466,85 @@ pub enum DiagnosticCode {
     /// surrounding form continues. Anchored at the spread's span.
     /// Introduced in Phase 3 of the meta-language plan (Phase A).
     MetaSpreadOnNonList,
+
+    // ── Phase B (meta-language) diagnostic codes ─────────────────────────
+    /// Emitted when a `fn x => body` lambda appears outside a HOF positional
+    /// argument position (e.g. top-level expression, list element, named-arg
+    /// value). Anchored at the `fn` keyword span. Message:
+    /// "lambda is only valid as an argument to a higher-order function".
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    LambdaInForbiddenPosition,
+    /// Emitted when a lambda with more than one parameter (`fn (a, b) => body`)
+    /// is used in Phase B. Multi-arg lambdas are reserved for Phase F.
+    /// Message: "multi-argument lambdas are not supported in v1; use a single parameter".
+    /// Anchored at the lambda parameter list span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    LambdaArityNotSupported,
+    /// Emitted when the lambda body's synthesised type is incompatible with
+    /// the HOF's required result shape (e.g. `filter` requires `Boolean`).
+    /// Message: "{hof} requires lambda result {expected}; found {actual}".
+    /// Anchored at the body expression span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    LambdaResultTypeMismatch,
+    /// Emitted when the second argument to `map` or `filter` is not a lambda.
+    /// Message: "{hof} expects a lambda; found {actual type}".
+    /// Anchored at the second-argument span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    HofExpectsLambda,
+    /// Emitted when the second argument to `reduce` is not a registered reducer.
+    /// Message: "reduce expects a reducer; found {actual}".
+    /// Anchored at the second-argument span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    HofExpectsReducer,
+    /// Emitted when a `smelt.define` declaration uses a HOF name (`map`, `filter`,
+    /// `reduce`). Message: "{name} is a reserved higher-order function name".
+    /// Anchored at the declaration's name token.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    HofNameShadowed,
+    /// Emitted when a `smelt.define` declaration uses a reducer name from the
+    /// closed registry. Message: "{name} is a reserved reducer name".
+    /// Anchored at the declaration's name token.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    ReducerNameShadowed,
+    /// Emitted when the RHS of `|>` is not syntactically a call expression.
+    /// Message: "pipe right-hand side must be a function call".
+    /// Anchored at the RHS span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    PipeRhsNotCall,
+    /// Emitted when a pipe expression `|>` appears in a Data-World grammar
+    /// position (e.g. inside a WHERE predicate). Message:
+    /// "|> is meta-only; use SQL composition in this position".
+    /// Anchored at the pipe expression span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    PipeInDataPosition,
+    /// Emitted when a reducer is applied to a list whose element type is
+    /// incompatible with the reducer's declared input constraint.
+    /// Message: "reducer {r} expects List<{T_in}>; found List<{T_actual}>".
+    /// Anchored at the second-argument (reducer name) span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    ReducerInputTypeMismatch,
+    /// Emitted when `union_all` or `intersect_all` reduces an empty list
+    /// (no identity element). Message: "reducer {r} has no identity for an empty list".
+    /// Anchored at the `reduce` call span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    ReducerEmptyNoIdentity,
+    /// Emitted when `smelt.config.var(<name>)` is called and `<name>` is not
+    /// present in `smelt.yml` `vars:`. Message:
+    /// "compile-time variable {name} not declared in smelt.yml vars".
+    /// Anchored at the call site.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    ConfigVarNotFound,
+    /// Emitted when `smelt.config.var` is called with a non-literal-Text argument.
+    /// Message: "smelt.config.var name must be a string literal".
+    /// Anchored at the argument expression span.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    ConfigVarNameNotLiteral,
+    /// Emitted (Warning) when a YAML `null` value is coerced to empty string
+    /// at a `smelt.config.var` site. Message:
+    /// "null variable {name} coerced to empty string; declare a default in smelt.yml".
+    /// Anchored at the call site.
+    /// Introduced in Phase 3 of the meta-language plan (Phase B).
+    ConfigVarNullCoercion,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -565,6 +645,98 @@ pub fn meta_list_diagnostic_message(
             format!("spread expects List<T>; found {}", actual)
         }
         _ => panic!("meta_list_diagnostic_message called with non-Phase-A code"),
+    }
+}
+
+/// Render the diagnostic message for Phase B (meta-language) HOF, lambda, pipe,
+/// reducer, and `smelt.config.var` diagnostic codes.
+///
+/// Parameters:
+/// - `code`: one of the fourteen Phase B `DiagnosticCode` variants.
+/// - `hof`: HOF name for `LambdaResultTypeMismatch`, `HofExpectsLambda` (e.g. `"map"`).
+/// - `name`: function/reducer/variable name for `HofNameShadowed`, `ReducerNameShadowed`,
+///   `ConfigVarNotFound`, `ConfigVarNullCoercion`.
+/// - `expected`: expected type string for `LambdaResultTypeMismatch`.
+/// - `actual`: actual type string for `LambdaResultTypeMismatch`, `HofExpectsLambda`,
+///   `HofExpectsReducer`.
+/// - `reducer`: reducer name for `ReducerInputTypeMismatch`, `ReducerEmptyNoIdentity`.
+/// - `t_in`: expected input element type string for `ReducerInputTypeMismatch`.
+/// - `t_actual`: actual input element type string for `ReducerInputTypeMismatch`.
+///
+/// Returns the exact message string specified in `meta_language.md` §"Diagnostic
+/// codes (new in Phase B)".
+#[allow(clippy::too_many_arguments)]
+pub fn meta_hof_diagnostic_message(
+    code: DiagnosticCode,
+    hof: Option<&str>,
+    name: Option<&str>,
+    expected: Option<&str>,
+    actual: Option<&str>,
+    reducer: Option<&str>,
+    t_in: Option<&str>,
+    t_actual: Option<&str>,
+) -> String {
+    match code {
+        DiagnosticCode::LambdaInForbiddenPosition => {
+            "lambda is only valid as an argument to a higher-order function".to_string()
+        }
+        DiagnosticCode::LambdaArityNotSupported => {
+            "multi-argument lambdas are not supported in v1; use a single parameter".to_string()
+        }
+        DiagnosticCode::LambdaResultTypeMismatch => {
+            let h = hof.unwrap_or("HOF");
+            let exp = expected.unwrap_or("?");
+            let act = actual.unwrap_or("?");
+            format!("{} requires lambda result {}; found {}", h, exp, act)
+        }
+        DiagnosticCode::HofExpectsLambda => {
+            let h = hof.unwrap_or("HOF");
+            let act = actual.unwrap_or("?");
+            format!("{} expects a lambda; found {}", h, act)
+        }
+        DiagnosticCode::HofExpectsReducer => {
+            let act = actual.unwrap_or("?");
+            format!("reduce expects a reducer; found {}", act)
+        }
+        DiagnosticCode::HofNameShadowed => {
+            let n = name.unwrap_or("?");
+            format!("{} is a reserved higher-order function name", n)
+        }
+        DiagnosticCode::ReducerNameShadowed => {
+            let n = name.unwrap_or("?");
+            format!("{} is a reserved reducer name", n)
+        }
+        DiagnosticCode::PipeRhsNotCall => {
+            "pipe right-hand side must be a function call".to_string()
+        }
+        DiagnosticCode::PipeInDataPosition => {
+            "|> is meta-only; use SQL composition in this position".to_string()
+        }
+        DiagnosticCode::ReducerInputTypeMismatch => {
+            let r = reducer.unwrap_or("?");
+            let ti = t_in.unwrap_or("?");
+            let ta = t_actual.unwrap_or("?");
+            format!("reducer {} expects List<{}>; found List<{}>", r, ti, ta)
+        }
+        DiagnosticCode::ReducerEmptyNoIdentity => {
+            let r = reducer.unwrap_or("?");
+            format!("reducer {} has no identity for an empty list", r)
+        }
+        DiagnosticCode::ConfigVarNotFound => {
+            let n = name.unwrap_or("?");
+            format!("compile-time variable {} not declared in smelt.yml vars", n)
+        }
+        DiagnosticCode::ConfigVarNameNotLiteral => {
+            "smelt.config.var name must be a string literal".to_string()
+        }
+        DiagnosticCode::ConfigVarNullCoercion => {
+            let n = name.unwrap_or("?");
+            format!(
+                "null variable {} coerced to empty string; declare a default in smelt.yml",
+                n
+            )
+        }
+        _ => panic!("meta_hof_diagnostic_message called with non-Phase-B code"),
     }
 }
 
@@ -744,6 +916,24 @@ pub fn project_active_backends(
     project: ProjectInput,
 ) -> Option<Vec<String>> {
     smelt_core::parse_active_backends(project.smelt_yml_text(db))
+}
+
+/// Return the `vars:` block from `smelt.yml` as a `BTreeMap<String, serde_yaml::Value>`.
+///
+/// Returns an empty map when the `vars:` key is absent or the YAML cannot be
+/// parsed. The `None` case is mapped to an empty map to avoid bubbling parse
+/// errors into callers — callers that need to distinguish "vars absent" from
+/// "vars present but empty" should use `config_vars::parse_vars_from_yaml` directly.
+///
+/// Reads from `ProjectInput::smelt_yml_text`, which is tracked by Salsa.
+/// Automatically invalidated and re-evaluated whenever `smelt.yml` changes.
+#[salsa::tracked]
+pub fn smelt_yml_vars_query(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Arc<std::collections::BTreeMap<String, serde_yaml::Value>> {
+    let text = project.smelt_yml_text(db);
+    Arc::new(config_vars::parse_vars_from_yaml(text).unwrap_or_default())
 }
 
 /// Discover seed CSV files for a project root and infer their column types.
@@ -3404,6 +3594,20 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 DiagnosticAcc(diag).accumulate(db);
             }
 
+            // Phase B (meta-language) Phase 3: HOF + lambda + pipe diagnostics.
+            //
+            // Walks every LAMBDA, FUNCTION_CALL (HOF), and PIPE_EXPR descendant.
+            // Covers: LambdaInForbiddenPosition, LambdaArityNotSupported,
+            //   LambdaResultTypeMismatch, HofExpectsLambda, HofExpectsReducer,
+            //   PipeRhsNotCall, PipeInDataPosition, ReducerInputTypeMismatch,
+            //   ReducerEmptyNoIdentity.
+            // Uses an empty TypeContext (consistent with spread/window checks above).
+            let hof_diags =
+                type_inference::check_hof_position_diagnostics(&select_stmt, &kind_ctx, text);
+            for diag in hof_diags {
+                DiagnosticAcc(diag).accumulate(db);
+            }
+
             let from_sources = count_from_sources(&select_stmt);
             if from_sources > 1 {
                 if let Some(select_list) = select_stmt.select_list() {
@@ -3433,6 +3637,17 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         }
                     }
                 }
+            }
+        }
+
+        // Phase B (meta-language) Phase 3: smelt.define name-shadowing.
+        //
+        // Check each smelt.define declaration for names that shadow built-in
+        // HOFs (map, filter, reduce) or reducers (comma_sep, and_all, …).
+        // Emits HofNameShadowed or ReducerNameShadowed at the name token.
+        for define in ast.defines() {
+            for diag in type_inference::check_define_name_shadowing(&define, text) {
+                DiagnosticAcc(diag).accumulate(db);
             }
         }
     }
