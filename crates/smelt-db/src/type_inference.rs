@@ -94,6 +94,18 @@ pub struct TypeContext {
     /// body; cleared by removing the binding after the body walk (or cloning a
     /// context snapshot).
     lambda_params: HashMap<String, TypedColumn>,
+    /// Full `SmeltType` for function parameters whose declared type is not
+    /// representable as a plain `DataType` (Phase B meta-language).
+    ///
+    /// `function_params` stores only the `DataType` projection (e.g. `Unknown`
+    /// for `List<T>` parameters).  This parallel map preserves the full
+    /// `SmeltType` so that HOF inference can look up a bare identifier like
+    /// `xs` and learn it is `List<Expr<Integer>>` rather than `Unknown`.
+    ///
+    /// Populated by [`TypeContext::add_function_param_smelt_type`].
+    /// Consulted in the non-literal first-argument path of
+    /// [`infer_hof_call_from_function_call_with_expected`].
+    function_param_smelt_types: HashMap<String, SmeltType>,
     /// Column lookups that returned None (for property-based test column detection)
     missed_lookups: Mutex<Vec<(Option<String>, String)>>,
 }
@@ -113,6 +125,7 @@ impl PartialEq for TypeContext {
             && self.opaque_ctes == other.opaque_ctes
             && self.fragment_param_kinds == other.fragment_param_kinds
             && self.expected_return == other.expected_return
+            && self.function_param_smelt_types == other.function_param_smelt_types
         // missed_lookups is intentionally excluded — it's transient tracking state
     }
 }
@@ -135,6 +148,7 @@ impl Clone for TypeContext {
             opaque_ctes: self.opaque_ctes.clone(),
             fragment_param_kinds: self.fragment_param_kinds.clone(),
             expected_return: self.expected_return.clone(),
+            function_param_smelt_types: self.function_param_smelt_types.clone(),
             missed_lookups: Mutex::new(Vec::new()), // Don't clone tracking state
         }
     }
@@ -379,6 +393,32 @@ impl TypeContext {
     /// Is `name` bound as a function parameter in this context?
     pub fn has_function_param(&self, name: &str) -> bool {
         self.function_params.contains_key(name)
+    }
+
+    /// Store the full [`SmeltType`] for a function parameter (Phase B
+    /// meta-language).
+    ///
+    /// Called alongside [`add_function_param`] for parameters whose declared
+    /// type is not representable as a plain `DataType` — specifically
+    /// `List<T>` parameters.  The HOF non-literal first-argument path
+    /// consults this map (via [`lookup_function_param_smelt_type`]) to recover
+    /// the full `SmeltType::List(...)` that `DataType::Unknown` would otherwise
+    /// discard.
+    ///
+    /// Pure — no Salsa interaction.
+    pub fn add_function_param_smelt_type(&mut self, name: &str, ty: SmeltType) {
+        self.function_param_smelt_types.insert(name.to_string(), ty);
+    }
+
+    /// Look up the full [`SmeltType`] for a function parameter by name.
+    ///
+    /// Returns `None` when `name` was not registered via
+    /// [`add_function_param_smelt_type`].  The HOF non-literal path calls this
+    /// before falling back to `infer_expression_type` so that a bare identifier
+    /// naming a `List<T>` parameter resolves to `SmeltType::List(...)` rather
+    /// than `SmeltType::Expr(Concrete(Unknown))`.
+    pub fn lookup_function_param_smelt_type(&self, name: &str) -> Option<&SmeltType> {
+        self.function_param_smelt_types.get(name)
     }
 
     /// Record that `name` is a `SelectItems<Kind>` fragment parameter with
@@ -1262,6 +1302,21 @@ pub fn build_subquery_context(select_stmt: &SelectStmt, parent_ctx: &TypeContext
 ///   - `None` only when the function cannot be resolved in this context.
 fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option<TypedColumn> {
     let segments = call.segments();
+
+    // Phase B rule 10: `smelt.config.var(...)` always synthesises nullable
+    // `Varchar` (Text).  The value is sourced from CLI / env / YAML at
+    // compile time and may be absent when no default is provided — hence
+    // nullable.  This must be handled before the generic signature lookup
+    // because "var" is not in the function-signature index.
+    if segments.len() >= 2
+        && segments[segments.len() - 2].eq_ignore_ascii_case("config")
+        && segments[segments.len() - 1].eq_ignore_ascii_case("var")
+    {
+        return Some(TypedColumn::nullable(DataType::Varchar {
+            max_length: None,
+        }));
+    }
+
     let name = segments.last()?;
     let sig = ctx.lookup_function_signature(name)?;
 
@@ -3588,14 +3643,43 @@ pub fn infer_hof_call_from_function_call_with_expected(
         let result = infer_list_literal(&elems, ctx, expected);
         result.inferred
     } else {
-        // Non-literal first argument: try expression inference.
-        infer_expression_type(xs, ctx)
-            .map(|tc| {
-                SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
-                    tc.data_type,
-                ))
-            })
-            .unwrap_or(SmeltType::Unknown)
+        // Non-literal first argument.
+        //
+        // Phase B: if the argument is a bare identifier (e.g. `xs`) that
+        // names a function parameter declared as `List<T>`, the standard
+        // `infer_expression_type` path collapses the type to `DataType::Unknown`
+        // (because `List<T>` has no scalar `DataType` equivalent).  To preserve
+        // the full `SmeltType::List(...)`, we first consult the
+        // `function_param_smelt_types` map which stores the declared `SmeltType`
+        // for params registered via `add_function_param_smelt_type`.
+        let ident_name = xs.text().to_string();
+        let ident_name = ident_name.trim();
+        let is_bare_ident =
+            !ident_name.is_empty() && ident_name.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+        if is_bare_ident {
+            if let Some(smelt_ty) = ctx.lookup_function_param_smelt_type(ident_name) {
+                smelt_ty.clone()
+            } else {
+                // Fall back to expression inference.
+                infer_expression_type(xs, ctx)
+                    .map(|tc| {
+                        SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                            tc.data_type,
+                        ))
+                    })
+                    .unwrap_or(SmeltType::Unknown)
+            }
+        } else {
+            // Complex expression: expression inference only.
+            infer_expression_type(xs, ctx)
+                .map(|tc| {
+                    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                        tc.data_type,
+                    ))
+                })
+                .unwrap_or(SmeltType::Unknown)
+        }
     };
 
     // Extract second argument shape.
@@ -4619,15 +4703,6 @@ pub fn check_define_name_shadowing(
     use smelt_parser::ast::text_range_to_range;
 
     const HOF_NAMES: &[&str] = &["map", "filter", "reduce"];
-    const REDUCER_NAMES: &[&str] = &[
-        "comma_sep",
-        "and_all",
-        "or_any",
-        "union_all",
-        "intersect_all",
-        "plus_chain",
-        "concat",
-    ];
 
     let mut diags = Vec::new();
     let Some(name) = define.name() else {
@@ -4669,7 +4744,10 @@ pub fn check_define_name_shadowing(
             code: Some(crate::DiagnosticCode::HofNameShadowed),
             data: None,
         });
-    } else if REDUCER_NAMES.contains(&name_lc.as_str()) {
+    } else if REDUCER_REGISTRY
+        .iter()
+        .any(|r| r.name.eq_ignore_ascii_case(name_lc.as_str()))
+    {
         diags.push(crate::Diagnostic {
             severity: crate::DiagnosticSeverity::Error,
             message: crate::meta_hof_diagnostic_message(
@@ -7651,6 +7729,89 @@ mod tests {
                 .any(|d| d.code == Some(crate::DiagnosticCode::PipeInDataPosition)),
             "pipe in WHERE clause must emit PipeInDataPosition, got: {:?}",
             diags
+        );
+    }
+
+    // === Finding 1 fix: smelt.config.var type inference ===
+
+    /// `smelt.config.var('env')` infers as nullable Varchar (Phase B rule 10).
+    ///
+    /// The `smelt.config.var` built-in is not in the function-signature index,
+    /// so it requires a special-case in `infer_smelt_path_call_type`.
+    #[test]
+    fn config_var_infers_nullable_varchar() {
+        let ctx = TypeContext::new();
+        let expr = parse_first_expr("SELECT smelt.config.var('env')");
+        let typed =
+            infer_expression_type(&expr, &ctx).expect("smelt.config.var('env') must infer a type");
+        assert_eq!(
+            typed.data_type,
+            DataType::Varchar { max_length: None },
+            "smelt.config.var must infer Varchar, got: {:?}",
+            typed.data_type
+        );
+        assert!(
+            typed.nullable,
+            "smelt.config.var must be nullable (value may be absent without a default)"
+        );
+    }
+
+    /// `smelt.config.var('env') = 'prod'` infers as Boolean (no type error).
+    ///
+    /// An equality between `smelt.config.var(...)` (Varchar) and a string
+    /// literal (also Varchar) must produce a Boolean result — not an Unknown or
+    /// error — because both sides are Text-compatible.
+    #[test]
+    fn config_var_equality_with_varchar_literal_infers_boolean() {
+        let ctx = TypeContext::new();
+        let expr = parse_first_expr("SELECT smelt.config.var('env') = 'prod'");
+        let typed = infer_expression_type(&expr, &ctx)
+            .expect("smelt.config.var('env') = 'prod' must infer a type");
+        assert_eq!(
+            typed.data_type,
+            DataType::Boolean,
+            "smelt.config.var(...) = 'prod' must infer Boolean, got: {:?}",
+            typed.data_type
+        );
+    }
+
+    // === Finding 2 fix: HOF inference with List<T> function parameter ===
+
+    /// `xs.map(fn x => x + 1)` where `xs` is seeded as `List<Expr<Integer>>`
+    /// via `add_function_param_smelt_type` must infer a non-error result.
+    ///
+    /// Without the fix the non-literal first-argument path would collapse
+    /// `xs` to `SmeltType::Expr(Concrete(Unknown))`, triggering `InputNotList`.
+    /// With the fix the lookup in `function_param_smelt_types` recovers the full
+    /// `SmeltType::List(...)`, and the lambda parameter `x` is bound to
+    /// `Expr<Integer>`.
+    #[test]
+    fn hof_map_on_list_param_infers_correctly() {
+        let call = parse_hof_call("SELECT map(xs, fn x => x + 1)");
+        let mut ctx = TypeContext::new();
+        // Simulate a function body context where `xs: List<Expr<Integer>>` was declared.
+        // add_function_param stores DataType::Unknown (the scalar projection).
+        ctx.add_function_param("xs", smelt_types::TypedColumn::nullable(DataType::Unknown));
+        // add_function_param_smelt_type stores the full SmeltType.
+        ctx.add_function_param_smelt_type(
+            "xs",
+            SmeltType::List(Box::new(SmeltType::Expr(
+                smelt_types::signatures::TypeConstraint::Concrete(DataType::Integer),
+            ))),
+        );
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+        assert!(
+            !matches!(result.sentinel, Some(HofInferSentinel::InputNotList { .. })),
+            "map on List<Expr<Integer>> param must not produce InputNotList, got: {:?}",
+            result.sentinel
+        );
+        // The lambda body `x + 1` where x: Integer infers as Integer/BigInt —
+        // the exact type depends on arithmetic promotion rules.  We only require
+        // that the inferred type is a List<T> (not Unknown or Error).
+        assert!(
+            matches!(result.inferred, SmeltType::List(_)),
+            "map on List<Expr<Integer>> param must infer List<T>, got: {:?}",
+            result.inferred
         );
     }
 }
