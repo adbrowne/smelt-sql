@@ -1022,6 +1022,488 @@ pub fn hover_text_for_list_spread(
     fallback
 }
 
+// ============================================================================
+// Phase B (meta-language): hover / goto-def / completion pure helpers
+//
+// These are `pub fn` (not methods) so they can be tested directly from
+// the `mod tests` block below without spinning up a full `Backend`.
+// ============================================================================
+
+/// Render hover text for a lambda parameter inside a HOF body.
+///
+/// The `elem_ty` is the element type inferred for the list that the HOF
+/// is operating on — this becomes the parameter's bound type.
+///
+/// Safe on partial parses (body absent, params absent). Returns a
+/// description string even when information is incomplete.
+pub fn hover_text_for_lambda_param(
+    param_name: &str,
+    elem_ty: &smelt_types::signatures::SmeltType,
+    _lambda: &smelt_parser::ast::Lambda,
+    _ctx: &smelt_db::TypeContext,
+) -> String {
+    let type_str = format_smelt_type_hover(elem_ty);
+    format!("**`{param_name}`** (lambda parameter)\n\n`{param_name}: {type_str}`")
+}
+
+/// Render hover text for a HOF call (`map`, `filter`, or `reduce`).
+///
+/// Infers the output type of the HOF call using `infer_hof_call_from_function_call`
+/// and formats it via `format_smelt_type_hover`. Safe on partial parses.
+pub fn hover_text_for_hof_call(
+    call: &smelt_parser::ast::FunctionCall,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_hof_call_from_function_call;
+    let result = infer_hof_call_from_function_call(call, ctx);
+    format_smelt_type_hover(&result.inferred)
+}
+
+/// Render hover text for a pipe expression `lhs |> rhs(...)`.
+///
+/// Desugars the pipe to the equivalent direct call and infers its type.
+/// Returns the same text as [`hover_text_for_hof_call`] on the equivalent call.
+pub fn hover_text_for_pipe_expr(
+    pipe: &smelt_parser::ast::PipeExpr,
+    ctx: &smelt_db::TypeContext,
+) -> String {
+    use smelt_db::type_inference::infer_pipe_expr;
+    let result = infer_pipe_expr(pipe, ctx, None);
+    format_smelt_type_hover(&result.inferred)
+}
+
+/// Render hover text for a reducer name in the second-argument position of
+/// `reduce(xs, reducer_name)`.
+///
+/// Shows: input element constraint, output sort, and empty-list identity rule.
+/// Returns `"unknown reducer"` for names not in the closed registry.
+pub fn hover_text_for_reducer_name(name: &str) -> String {
+    use smelt_db::type_inference::{
+        EmptyIdentity, ReducerInputConstraint, ReducerOutputSort, REDUCER_REGISTRY,
+    };
+
+    let Some(spec) = REDUCER_REGISTRY.iter().find(|r| r.name == name) else {
+        return format!("**`{name}`** — unknown reducer");
+    };
+
+    let input_desc = match &spec.input_constraint {
+        ReducerInputConstraint::AnyExpr => "Expr<T> (any element type)".to_string(),
+        ReducerInputConstraint::Boolean => "Expr<Boolean>".to_string(),
+        ReducerInputConstraint::Numeric => "Expr<Numeric>".to_string(),
+        ReducerInputConstraint::Text => "Expr<Text>".to_string(),
+        ReducerInputConstraint::TableExpr => "TableExpr".to_string(),
+    };
+
+    let output_desc = match &spec.output_sort {
+        ReducerOutputSort::Boolean => "Expr<Boolean>".to_string(),
+        ReducerOutputSort::SameAsElementType => "Expr<T> (same as element type)".to_string(),
+        ReducerOutputSort::SelectItemsScalar => "SelectItems<Scalar>".to_string(),
+        ReducerOutputSort::TableExpr => "TableExpr".to_string(),
+    };
+
+    let identity_desc = match &spec.empty_identity {
+        EmptyIdentity::Boolean => "TRUE".to_string(),
+        EmptyIdentity::Numeric => "0 (cast to element type)".to_string(),
+        EmptyIdentity::Text => "''".to_string(),
+        EmptyIdentity::EmptySelectItems => "empty SelectItems".to_string(),
+        EmptyIdentity::None => "no identity".to_string(),
+    };
+
+    format!(
+        "**`{name}`** (reducer)\n\n\
+         - Input: `{input_desc}`\n\
+         - Output: `{output_desc}`\n\
+         - Identity: `{identity_desc}`"
+    )
+}
+
+/// Render hover text for `smelt.config.var('x')`.
+///
+/// Always shows `Text` as the type. When the variable is present in the
+/// `vars:` block of `smelt_yml_text`, also shows the resolved value.
+/// When absent, shows a hint that the variable is not declared.
+pub fn hover_text_for_config_var(var_name: &str, smelt_yml_text: &str) -> String {
+    use smelt_db::config_vars::{coerce_yaml_scalar_to_text, parse_vars_from_yaml};
+
+    let vars = parse_vars_from_yaml(smelt_yml_text).unwrap_or_default();
+    match vars.get(var_name) {
+        Some(val) => {
+            let (text_val, _warn) = coerce_yaml_scalar_to_text(val, var_name);
+            format!(
+                "**`smelt.config.var('{var_name}')`**\n\n\
+                 Type: `Text`\n\n\
+                 Resolved value: `'{text_val}'`"
+            )
+        }
+        None => {
+            format!(
+                "**`smelt.config.var('{var_name}')`**\n\n\
+                 Type: `Text`\n\n\
+                 Variable `{var_name}` is not declared in `smelt.yml` vars"
+            )
+        }
+    }
+}
+
+/// Find the 0-indexed line number of `key:` within the `vars:` block of
+/// raw `smelt.yml` text.
+///
+/// Returns `None` if the key is not found under `vars:`.
+/// Used by goto-definition for `smelt.config.var('x')` arguments.
+pub fn find_var_line_in_smelt_yml(smelt_yml_text: &str, var_name: &str) -> Option<u32> {
+    let mut in_vars = false;
+    for (i, line) in smelt_yml_text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == "vars:" {
+            in_vars = true;
+            continue;
+        }
+        if in_vars {
+            // A non-indented non-comment line resets the vars context.
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !line.starts_with(' ')
+                && !line.starts_with('\t')
+            {
+                in_vars = false;
+                continue;
+            }
+            // Match `  key: value` or `  key:` patterns.
+            let key_prefix = format!("{}:", var_name);
+            if trimmed.starts_with(&key_prefix) {
+                return Some(i as u32);
+            }
+        }
+    }
+    None
+}
+
+/// Return the text range (in the source file) of the binding occurrence of
+/// lambda parameter `param_name` in the given lambda node.
+///
+/// The binding occurrence is the IDENT token inside the `LAMBDA_PARAM_LIST`
+/// that bears the parameter name. This is used by goto-definition to jump
+/// from a use of the parameter in the body to its binding site.
+///
+/// Returns `None` when the parameter is not found (e.g., partial parse).
+pub fn lambda_param_binder_range(
+    lambda: &smelt_parser::ast::Lambda,
+    param_name: &str,
+) -> Option<smelt_parser::TextRange> {
+    use smelt_parser::SyntaxKind;
+    let param_list = lambda.param_list()?;
+    for child in param_list.syntax().children_with_tokens() {
+        // `children_with_tokens` yields `rowan::NodeOrToken` items — match on Token variant.
+        if child
+            .as_token()
+            .map(|t| t.kind() == SyntaxKind::IDENT && t.text() == param_name)
+            == Some(true)
+        {
+            return child.as_token().map(|t| t.text_range());
+        }
+    }
+    None
+}
+
+/// Return the parameter names of a lambda for use as completion items.
+///
+/// The first parameter is the most important — it should appear first in the
+/// completion list when the cursor is inside the lambda body.
+pub fn lambda_params_for_completion(lambda: &smelt_parser::ast::Lambda) -> Vec<String> {
+    lambda.params()
+}
+
+/// Return the reducer names from the closed registry that are compatible with
+/// the given list type's element type, for use as completion items at the
+/// second-argument position of `reduce(xs, _)`.
+///
+/// When `list_ty` is `None` or `Unknown`, returns the full registry (all names).
+/// Otherwise filters by `ReducerInputConstraint::is_satisfied_by` on the element type.
+pub fn reducer_completions_for_element_type(
+    list_ty: Option<&smelt_types::signatures::SmeltType>,
+) -> Vec<String> {
+    use smelt_db::type_inference::REDUCER_REGISTRY;
+    use smelt_types::signatures::SmeltType;
+
+    let elem_ty: Option<SmeltType> = match list_ty {
+        Some(SmeltType::List(inner)) => Some((**inner).clone()),
+        _ => None,
+    };
+
+    REDUCER_REGISTRY
+        .iter()
+        .filter(|spec| {
+            match &elem_ty {
+                Some(et) if !matches!(et, SmeltType::Unknown) => {
+                    spec.input_constraint.is_satisfied_by(et)
+                }
+                // Unknown element type or no list type — offer all reducers.
+                _ => true,
+            }
+        })
+        .map(|spec| spec.name.to_string())
+        .collect()
+}
+
+/// Pure dispatch for HOF / lambda / reducer / config-var hover in the
+/// meta-language layer.
+///
+/// Separated from [`Backend::hover`] so it can be tested without spinning up
+/// a full tower-lsp `Client` or `Backend`.
+///
+/// # Dispatch order (most-specific first)
+///
+/// 1. **Reducer name** — cursor on the second positional argument of a
+///    `reduce(xs, name)` call that is a registered reducer.
+/// 2. **Lambda parameter** — cursor on a lambda parameter IDENT, either at
+///    the binding site (`fn c =>` — the `c` after `fn`) or at any use of
+///    that name in the lambda body.
+/// 3. **HOF result type** — cursor anywhere inside a `map(...)` /
+///    `filter(...)` / `reduce(...)` call, shows the inferred output type.
+/// 4. **`smelt.config.var`** — cursor on a `smelt.config.var('x')` call,
+///    shows the resolved value from `smelt_yml_text`.
+///
+/// Returns `Some(hover_markdown_text)` when a match is found, `None` otherwise.
+pub fn hover_text_for_hof_meta_language(
+    file: &smelt_parser::ast::File,
+    cursor_offset: usize,
+    smelt_yml_text: &str,
+) -> Option<String> {
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    // ── 1. Reducer name in second arg of reduce(xs, name) ─────────────────
+    // Must run BEFORE the HOF result-type check because both match on a
+    // `reduce(...)` FUNCTION_CALL node — the reducer-name hover is the
+    // more-specific case and must win.
+    {
+        let reduce_call = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::FUNCTION_CALL)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            })
+            .and_then(smelt_parser::ast::FunctionCall::cast)
+            .filter(|c| {
+                c.name()
+                    .map(|n| n.to_lowercase() == "reduce")
+                    .unwrap_or(false)
+            });
+
+        if let Some(call) = reduce_call {
+            let args = call.arguments();
+            if let Some(second_arg) = args.get(1) {
+                let arg_start: usize = second_arg.text_range().start().into();
+                let arg_end: usize = second_arg.text_range().end().into();
+                if cursor_offset >= arg_start && cursor_offset <= arg_end {
+                    let reducer_name = second_arg
+                        .syntax()
+                        .children_with_tokens()
+                        .filter_map(|c| c.into_token())
+                        .find(|t| t.kind() == SyntaxKind::IDENT)
+                        .map(|t| t.text().to_string())
+                        .unwrap_or_default();
+                    if !reducer_name.is_empty() {
+                        return Some(hover_text_for_reducer_name(&reducer_name));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 2. Lambda parameter (binder OR body use) ───────────────────────────
+    // Must run BEFORE the HOF result-type check because a lambda is nested
+    // inside the HOF call node; the HOF check would otherwise shadow it.
+    {
+        let lambda_node = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            });
+
+        if let Some(ln) = lambda_node {
+            if let Some(lambda) = smelt_parser::ast::Lambda::cast(ln.clone()) {
+                let params = lambda.params();
+                for param_name in &params {
+                    // Check binder position.
+                    let on_binder = lambda_param_binder_range(&lambda, param_name)
+                        .map(|r| {
+                            let s: usize = r.start().into();
+                            let e: usize = r.end().into();
+                            cursor_offset >= s && cursor_offset <= e
+                        })
+                        .unwrap_or(false);
+
+                    // Check uses in the lambda body: any IDENT token with
+                    // the same name that sits inside the body subtree.
+                    let on_body_use = lambda.body().is_some_and(|body| {
+                        body.syntax()
+                            .descendants_with_tokens()
+                            .filter_map(|e| e.into_token())
+                            .filter(|t| {
+                                t.kind() == SyntaxKind::IDENT && t.text() == param_name.as_str()
+                            })
+                            .any(|t| {
+                                let s: usize = t.text_range().start().into();
+                                let e: usize = t.text_range().end().into();
+                                cursor_offset >= s && cursor_offset <= e
+                            })
+                    });
+
+                    if on_binder || on_body_use {
+                        // Infer the element type from the enclosing HOF call.
+                        // Walk up through any intermediate nodes (EXPRESSION,
+                        // ARG_LIST, etc.) until we find a FUNCTION_CALL ancestor.
+                        let hof_call = {
+                            let mut cur = ln.parent();
+                            let mut found = None;
+                            while let Some(node) = cur {
+                                if node.kind() == SyntaxKind::FUNCTION_CALL {
+                                    found = smelt_parser::ast::FunctionCall::cast(node.clone())
+                                        .filter(|c| {
+                                            matches!(
+                                                c.name()
+                                                    .map(|n| n.to_lowercase())
+                                                    .as_deref()
+                                                    .unwrap_or(""),
+                                                "map" | "filter" | "reduce"
+                                            )
+                                        });
+                                    break;
+                                }
+                                cur = node.parent();
+                            }
+                            found
+                        };
+                        use smelt_types::signatures::SmeltType;
+                        let elem_ty = hof_call
+                            .as_ref()
+                            .and_then(|c| {
+                                let ctx = smelt_db::TypeContext::new();
+                                let list_result =
+                                    smelt_db::type_inference::infer_hof_call_from_function_call(
+                                        c, &ctx,
+                                    );
+                                if let SmeltType::List(inner) = list_result.inferred {
+                                    Some(*inner)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(SmeltType::Unknown);
+                        let ctx = smelt_db::TypeContext::new();
+                        return Some(hover_text_for_lambda_param(
+                            param_name, &elem_ty, &lambda, &ctx,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 3. HOF result type (map / filter / reduce) ─────────────────────────
+    {
+        let hof_call = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::FUNCTION_CALL)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            })
+            .and_then(smelt_parser::ast::FunctionCall::cast)
+            .filter(|c| {
+                matches!(
+                    c.name().map(|n| n.to_lowercase()).as_deref().unwrap_or(""),
+                    "map" | "filter" | "reduce"
+                )
+            });
+
+        if let Some(call) = hof_call {
+            let ctx = smelt_db::TypeContext::new();
+            return Some(hover_text_for_hof_call(&call, &ctx));
+        }
+    }
+
+    // ── 4. smelt.config.var('x') ───────────────────────────────────────────
+    {
+        let config_call = file
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::FUNCTION_CALL)
+            .filter(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                cursor_offset >= s && cursor_offset <= e
+            })
+            .min_by_key(|n| {
+                let s: usize = n.text_range().start().into();
+                let e: usize = n.text_range().end().into();
+                e - s
+            })
+            .and_then(smelt_parser::ast::FunctionCall::cast)
+            .filter(|c| {
+                let raw = c
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| t.kind() == SyntaxKind::IDENT)
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default();
+                raw == "smelt"
+                    || (c.namespace().as_deref() == Some("smelt")
+                        && c.name().as_deref() == Some("config"))
+            });
+
+        if let Some(call) = config_call {
+            let full_text = call.text();
+            if full_text.contains("config.var") || full_text.contains("config") {
+                let var_call = call
+                    .syntax()
+                    .descendants()
+                    .filter_map(smelt_parser::ast::FunctionCall::cast)
+                    .find(|c| c.name().as_deref() == Some("var"));
+                if let Some(vc) = var_call {
+                    let args = vc.arguments();
+                    if let Some(arg) = args.first() {
+                        if smelt_db::config_vars::is_string_literal_expr(arg) {
+                            if let Some(var_name) =
+                                smelt_db::config_vars::extract_string_literal_value(arg)
+                            {
+                                return Some(hover_text_for_config_var(&var_name, smelt_yml_text));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 pub struct Backend {
     client: Client,
     /// The salsa database. `Database: Clone` with internally-Arc'd storage, so
@@ -2199,6 +2681,16 @@ impl LanguageServer for Backend {
             SameFile(Range),
             /// Column definitions (potentially multiple for ambiguous refs)
             ColumnDefs(Vec<ColumnDefLocation>),
+            /// Lambda parameter binder in the same file (Phase B).
+            LambdaParam {
+                binder_start: u32,
+                binder_col: u32,
+            },
+            /// smelt.config.var('x') — resolves to a line in smelt.yml (Phase B).
+            ConfigVarYml {
+                yml_path: PathBuf,
+                line: u32,
+            },
         }
 
         let target = {
@@ -2376,6 +2868,91 @@ impl LanguageServer for Backend {
                         }
                         None => None,
                     }
+                    // Fall through to Phase B checks when symbol_at_cursor returned None
+                    // (lambda params and config.var args are not yet handled by the symbol scanner).
+                    .or_else(|| {
+                        use smelt_parser::syntax_kind::SyntaxKind;
+
+                        // Phase B: goto-def on a lambda parameter IDENT in the body —
+                        // jump to the binding occurrence in LAMBDA_PARAM_LIST.
+                        let lambda_node = file
+                            .syntax()
+                            .descendants()
+                            .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+                            .filter(|n| {
+                                let s: usize = n.text_range().start().into();
+                                let e: usize = n.text_range().end().into();
+                                cursor_offset >= s && cursor_offset <= e
+                            })
+                            .min_by_key(|n| {
+                                let s: usize = n.text_range().start().into();
+                                let e: usize = n.text_range().end().into();
+                                e - s
+                            });
+                        if let Some(ln) = lambda_node {
+                            if let Some(lambda) = smelt_parser::ast::Lambda::cast(ln) {
+                                for param_name in lambda.params() {
+                                    if let Some(binder_range) =
+                                        lambda_param_binder_range(&lambda, &param_name)
+                                    {
+                                        // Convert the binder range to an LSP Range.
+                                        let pr = smelt_parser::ast::text_range_to_range(
+                                            &text,
+                                            binder_range,
+                                        );
+                                        return Some(GotoTarget::LambdaParam {
+                                            binder_start: pr.start.line,
+                                            binder_col: pr.start.column,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Phase B: goto-def on `smelt.config.var('x')` argument —
+                        // jump to `vars.x:` line in smelt.yml.
+                        let var_call = file
+                            .syntax()
+                            .descendants()
+                            .filter_map(smelt_parser::ast::FunctionCall::cast)
+                            .find(|c| {
+                                c.name().as_deref() == Some("var") && {
+                                    let s: usize = c.syntax().text_range().start().into();
+                                    let e: usize = c.syntax().text_range().end().into();
+                                    cursor_offset >= s && cursor_offset <= e
+                                }
+                            });
+                        if let Some(vc) = var_call {
+                            let args = vc.arguments();
+                            if let Some(arg) = args.first() {
+                                if smelt_db::config_vars::is_string_literal_expr(arg) {
+                                    if let Some(var_name) =
+                                        smelt_db::config_vars::extract_string_literal_value(arg)
+                                    {
+                                        let project_root = file_project_root(&db, &effective_path);
+                                        let project = lookup_project(&db, &project_root);
+                                        let smelt_yml_text = project
+                                            .map(|p| p.smelt_yml_text(&db).clone())
+                                            .unwrap_or_default();
+                                        // Only navigate when the variable is actually declared
+                                        // in smelt.yml; return None for undeclared vars so we
+                                        // don't silently land at the top of the file.
+                                        if let Some(line) =
+                                            find_var_line_in_smelt_yml(&smelt_yml_text, &var_name)
+                                        {
+                                            let yml_path = project_root.join("smelt.yml");
+                                            return Some(GotoTarget::ConfigVarYml {
+                                                yml_path,
+                                                line,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        None
+                    })
                 } else {
                     None
                 }
@@ -2437,6 +3014,37 @@ impl LanguageServer for Backend {
                         locations.into_iter().next().unwrap(),
                     ))),
                     _ => Ok(Some(GotoDefinitionResponse::Array(locations))),
+                }
+            }
+            // Phase B: lambda param binder — jump to binder in same file.
+            Some(GotoTarget::LambdaParam {
+                binder_start,
+                binder_col,
+            }) => {
+                if let Ok(target_uri) = Url::from_file_path(&path) {
+                    Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: Position::new(binder_start, binder_col),
+                            end: Position::new(binder_start, binder_col + 1),
+                        },
+                    })))
+                } else {
+                    Ok(None)
+                }
+            }
+            // Phase B: config.var goto — jump to vars.<name>: in smelt.yml.
+            Some(GotoTarget::ConfigVarYml { yml_path, line }) => {
+                if let Ok(target_uri) = Url::from_file_path(&yml_path) {
+                    Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: Position::new(line, 0),
+                            end: Position::new(line, 0),
+                        },
+                    })))
+                } else {
+                    Ok(None)
                 }
             }
             None => Ok(None),
@@ -4027,6 +4635,57 @@ impl LanguageServer for Backend {
                         }
                     }
                 }
+
+                // Phase B: hover on a PIPE_EXPR node — show result type of the
+                // desugared call.
+                {
+                    use smelt_parser::syntax_kind::SyntaxKind;
+                    let pipe_node = file
+                        .syntax()
+                        .descendants()
+                        .filter(|n| n.kind() == SyntaxKind::PIPE_EXPR)
+                        .find(|n| {
+                            let start: usize = n.text_range().start().into();
+                            let end: usize = n.text_range().end().into();
+                            cursor_offset >= start && cursor_offset <= end
+                        });
+                    if let Some(pn) = pipe_node {
+                        if let Some(pipe) = smelt_parser::ast::PipeExpr::cast(pn) {
+                            let ctx = smelt_db::TypeContext::new();
+                            let value = hover_text_for_pipe_expr(&pipe, &ctx);
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value,
+                                }),
+                                range: None,
+                            }));
+                        }
+                    }
+                }
+
+                // Phase B: meta-language hover (reducer name, lambda param binder/body
+                // use, HOF result type, smelt.config.var).  All four sub-cases are
+                // handled by the `hover_text_for_hof_meta_language` pure helper so
+                // they can be tested without a live Backend.
+                {
+                    let project_root = file_project_root(&db, &effective_path);
+                    let project = lookup_project(&db, &project_root);
+                    let smelt_yml = project
+                        .map(|p| p.smelt_yml_text(&db).clone())
+                        .unwrap_or_default();
+                    if let Some(value) =
+                        hover_text_for_hof_meta_language(&file, cursor_offset, &smelt_yml)
+                    {
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value,
+                            }),
+                            range: None,
+                        }));
+                    }
+                }
             }
         }
 
@@ -4082,6 +4741,129 @@ impl LanguageServer for Backend {
             }
             offset
         };
+
+        // Phase B: check for reduce second-arg position BEFORE the standard
+        // context dispatch — this is a meta-language-specific completion that
+        // should be offered regardless of the SQL-level context.
+        {
+            use smelt_parser::syntax_kind::SyntaxKind;
+            let file_input = lookup_file(&db, &effective_path);
+            let parse = file_input.map(|f| smelt_db::parse_file(&db, f));
+            if let Some(syntax) = parse.as_ref().map(|p| p.syntax()) {
+                if let Some(file) = AstFile::cast(syntax) {
+                    // Find a `reduce(...)` call where the cursor is in the second-arg position.
+                    let reduce_call = file
+                        .syntax()
+                        .descendants()
+                        .filter_map(smelt_parser::ast::FunctionCall::cast)
+                        .find(|c| {
+                            c.name().as_deref() == Some("reduce") || {
+                                // keyword-name fallback (same as infer_hof)
+                                c.syntax()
+                                    .children_with_tokens()
+                                    .filter_map(|e| e.into_token())
+                                    .find(|t| matches!(t.kind(), SyntaxKind::IDENT))
+                                    .map(|t| t.text().to_lowercase() == "reduce")
+                                    .unwrap_or(false)
+                            }
+                        });
+                    if let Some(reduce) = reduce_call {
+                        let args = reduce.arguments();
+                        if !args.is_empty() {
+                            // Check if cursor is after the first comma inside the call.
+                            // We approximate: cursor > end of first argument.
+                            let first_end: usize = args
+                                .first()
+                                .map(|a| a.text_range().end().into())
+                                .unwrap_or(0);
+                            let call_end: usize = reduce.syntax().text_range().end().into();
+                            let call_start: usize = reduce.syntax().text_range().start().into();
+                            if cursor_offset > first_end
+                                && cursor_offset <= call_end
+                                && cursor_offset >= call_start
+                            {
+                                // We're in the second-arg position. Infer first-arg list type.
+                                let ctx = smelt_db::TypeContext::new();
+                                use smelt_types::signatures::SmeltType;
+                                let list_ty: Option<SmeltType> = args.first().and_then(|a| {
+                                    if let Some(arr) = a.as_array_literal() {
+                                        let elems = arr.elements();
+                                        let r = smelt_db::type_inference::infer_list_literal(
+                                            &elems, &ctx, None,
+                                        );
+                                        Some(r.inferred)
+                                    } else {
+                                        None
+                                    }
+                                });
+                                let names = reducer_completions_for_element_type(list_ty.as_ref());
+                                let items: Vec<CompletionItem> = names
+                                    .into_iter()
+                                    .map(|name| CompletionItem {
+                                        label: name.clone(),
+                                        kind: Some(CompletionItemKind::FUNCTION),
+                                        detail: Some(format!("reducer: {}", name)),
+                                        ..Default::default()
+                                    })
+                                    .collect();
+                                if !items.is_empty() {
+                                    return Ok(Some(CompletionResponse::Array(items)));
+                                }
+                            }
+                        }
+                    }
+
+                    // Phase B: check if cursor is inside a lambda body — prepend
+                    // the bound lambda parameter to the completion list.
+                    let lambda_node = file
+                        .syntax()
+                        .descendants()
+                        .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+                        .filter(|n| {
+                            let s: usize = n.text_range().start().into();
+                            let e: usize = n.text_range().end().into();
+                            cursor_offset >= s && cursor_offset <= e
+                        })
+                        .min_by_key(|n| {
+                            let s: usize = n.text_range().start().into();
+                            let e: usize = n.text_range().end().into();
+                            e - s
+                        });
+                    if let Some(ln) = lambda_node {
+                        if let Some(lambda) = smelt_parser::ast::Lambda::cast(ln) {
+                            // Only inject param completions when cursor is in the BODY,
+                            // i.e. past the lambda arrow token.
+                            let arrow_pos: Option<usize> =
+                                lambda.syntax().children_with_tokens().find_map(|c| {
+                                    c.as_token()
+                                        .filter(|t| t.kind() == SyntaxKind::ARROW)
+                                        .map(|t| t.text_range().end().into())
+                                });
+                            if arrow_pos.map(|p| cursor_offset >= p).unwrap_or(false) {
+                                let params = lambda_params_for_completion(&lambda);
+                                if !params.is_empty() {
+                                    // Build param completions — they will be prepended
+                                    // to the standard column completions below.
+                                    let param_items: Vec<CompletionItem> = params
+                                        .iter()
+                                        .map(|p| CompletionItem {
+                                            label: p.clone(),
+                                            kind: Some(CompletionItemKind::VARIABLE),
+                                            detail: Some("lambda parameter".to_string()),
+                                            sort_text: Some(format!("0_{p}")), // sort first
+                                            ..Default::default()
+                                        })
+                                        .collect();
+                                    // Return the param completions immediately so they
+                                    // appear first in the list.
+                                    return Ok(Some(CompletionResponse::Array(param_items)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Determine completion context
         let context = determine_completion_context(&text, cursor_offset);
@@ -5259,6 +6041,417 @@ mod tests {
         assert!(
             text.contains("List<Expr<DECIMAL(2,1)>>"),
             "hover for spread of [1.5, 2.5] must be `List<Expr<DECIMAL(2,1)>>`, got: {text}"
+        );
+    }
+
+    // ── Phase B: LSP hover/goto-def/completion for HOFs, lambdas, pipe, reducers, config.var ──
+
+    /// Parse SQL that contains a HOF call and extract the FunctionCall node.
+    fn parse_hof_call(sql: &str) -> smelt_parser::ast::FunctionCall {
+        use smelt_parser::ast::File as AstFile;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = AstFile::cast(root).expect("FILE node");
+        // Find the first FUNCTION_CALL node anywhere in the tree.
+        file.syntax()
+            .descendants()
+            .find_map(smelt_parser::ast::FunctionCall::cast)
+            .expect("expected a FUNCTION_CALL node in SQL")
+    }
+
+    /// Parse SQL and extract the first LAMBDA node.
+    fn parse_lambda(sql: &str) -> smelt_parser::ast::Lambda {
+        use smelt_parser::syntax_kind::SyntaxKind;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        root.descendants()
+            .find(|n| n.kind() == SyntaxKind::LAMBDA)
+            .and_then(smelt_parser::ast::Lambda::cast)
+            .expect("expected a LAMBDA node in SQL")
+    }
+
+    /// Parse SQL and extract the first PIPE_EXPR node.
+    fn parse_pipe_expr(sql: &str) -> smelt_parser::ast::PipeExpr {
+        use smelt_parser::syntax_kind::SyntaxKind;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        root.descendants()
+            .find(|n| n.kind() == SyntaxKind::PIPE_EXPR)
+            .and_then(smelt_parser::ast::PipeExpr::cast)
+            .expect("expected a PIPE_EXPR node in SQL")
+    }
+
+    /// Hover on `c` inside `map([1, 2, 3], fn c => c)` returns text containing
+    /// the parameter type (`Expr<INTEGER>` bound from list element type).
+    #[test]
+    fn hover_lambda_parameter_in_body() {
+        let call = parse_hof_call("SELECT map([100000, 200000, 300000], fn c => c)");
+        let ctx = smelt_db::TypeContext::new();
+        let text = hover_text_for_hof_call(&call, &ctx);
+        assert!(
+            text.contains("List"),
+            "hover for map([ints], fn c => c) must contain `List`, got: {text}"
+        );
+        // Also test hover_text_for_lambda_param directly with a known element type
+        use smelt_types::signatures::{SmeltType, TypeConstraint};
+        use smelt_types::DataType;
+        let int_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+        let lambda = parse_lambda("SELECT map([1, 2, 3], fn c => c)");
+        let param_text = hover_text_for_lambda_param("c", &int_ty, &lambda, &ctx);
+        assert!(
+            param_text.contains("Expr<INTEGER>"),
+            "hover for lambda param `c` bound to Integer must contain `Expr<INTEGER>`, got: {param_text}"
+        );
+    }
+
+    /// Hover on the `map(...)` call expression returns `List<U>` where
+    /// `U` is the lambda body's synthesised type.
+    #[test]
+    fn hover_hof_call_returns_result_type() {
+        let call = parse_hof_call("SELECT map([100000, 200000, 300000], fn c => c)");
+        let ctx = smelt_db::TypeContext::new();
+        let text = hover_text_for_hof_call(&call, &ctx);
+        assert!(
+            text.contains("List<Expr<INTEGER>>"),
+            "hover for map([ints], fn c => c) must be `List<Expr<INTEGER>>`, got: {text}"
+        );
+    }
+
+    /// Hover on `xs |> filter(fn c => c > 0)` returns the same type as
+    /// hover on `filter(xs, fn c => c > 0)`.
+    #[test]
+    fn hover_pipe_expression_returns_unpiped_type() {
+        // Build a pipe expression and the direct equivalent call
+        let pipe = parse_pipe_expr("SELECT [100000, 200000, -1] |> filter(fn c => c > 0)");
+        let ctx = smelt_db::TypeContext::new();
+        let pipe_text = hover_text_for_pipe_expr(&pipe, &ctx);
+        assert!(
+            pipe_text.contains("List"),
+            "hover for pipe expression must contain `List`, got: {pipe_text}"
+        );
+        // The direct equivalent call should give the same result
+        let direct = parse_hof_call("SELECT filter([100000, 200000, -1], fn c => c > 0)");
+        let direct_text = hover_text_for_hof_call(&direct, &ctx);
+        assert_eq!(
+            pipe_text, direct_text,
+            "pipe hover must equal direct-call hover: pipe={pipe_text} direct={direct_text}"
+        );
+    }
+
+    /// Hover on `union_all` in `reduce(xs, union_all)` returns text containing
+    /// the input element type (`TableExpr`), output sort (`TableExpr`), and
+    /// identity rule (`no identity`).
+    #[test]
+    fn hover_reducer_name_in_reduce_position() {
+        let text = hover_text_for_reducer_name("union_all");
+        assert!(
+            text.contains("TableExpr"),
+            "hover for union_all must mention `TableExpr` input, got: {text}"
+        );
+        assert!(
+            text.contains("no identity"),
+            "hover for union_all must mention `no identity`, got: {text}"
+        );
+    }
+
+    /// Hover on `and_all` returns identity `TRUE`.
+    #[test]
+    fn hover_reducer_name_with_identity() {
+        let text = hover_text_for_reducer_name("and_all");
+        assert!(
+            text.contains("TRUE"),
+            "hover for and_all must mention identity `TRUE`, got: {text}"
+        );
+    }
+
+    /// Hover on `smelt.config.var('region')` over a workspace with
+    /// `vars: { region: us-west-2 }` returns text containing `Text` and
+    /// the resolved value `'us-west-2'`.
+    #[test]
+    fn hover_smelt_config_var_resolved() {
+        let smelt_yml = "name: test_project\nvars:\n  region: us-west-2\n";
+        let text = hover_text_for_config_var("region", smelt_yml);
+        assert!(
+            text.contains("Text"),
+            "hover for config.var must contain `Text`, got: {text}"
+        );
+        assert!(
+            text.contains("us-west-2"),
+            "hover for config.var('region') must contain resolved value `us-west-2`, got: {text}"
+        );
+    }
+
+    /// Hover on `smelt.config.var('not_declared')` returns `Text` and a hint
+    /// that the variable is not declared (no crash).
+    #[test]
+    fn hover_smelt_config_var_unresolved() {
+        let smelt_yml = "name: test_project\nvars:\n  region: us-west-2\n";
+        let text = hover_text_for_config_var("not_declared", smelt_yml);
+        assert!(
+            text.contains("Text"),
+            "hover for unresolved config.var must still contain `Text`, got: {text}"
+        );
+        assert!(
+            text.contains("not declared")
+                || text.contains("not found")
+                || text.contains("undefined"),
+            "hover for unresolved config.var must indicate the variable is missing, got: {text}"
+        );
+    }
+
+    /// Goto-def on `c` inside the body of `map(xs, fn c => c)` resolves to
+    /// the `c` token in the lambda parameter list.
+    ///
+    /// We test the pure helper `lambda_param_binder_range` that returns the
+    /// text range of the binding occurrence given the parameter name.
+    #[test]
+    fn goto_def_lambda_parameter_resolves_to_binder() {
+        use smelt_parser::syntax_kind::SyntaxKind;
+        let sql = "SELECT map([1, 2, 3], fn c => c)";
+        let lambda = parse_lambda(sql);
+        let result = lambda_param_binder_range(&lambda, "c");
+        assert!(
+            result.is_some(),
+            "lambda_param_binder_range for `c` in `fn c => c` must return Some, got None"
+        );
+        // The binder range must contain the IDENT "c" at a token of kind IDENT.
+        let range = result.unwrap();
+        // Range should be non-zero sized (the `c` token occupies at least one char)
+        assert!(
+            range.end() > range.start(),
+            "binder range must be non-empty, got {:?}",
+            range
+        );
+        // Verify the token at that range is the "c" identifier.
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let text_str: String = root.text().to_string();
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        let token_text = &text_str[start..end];
+        assert_eq!(
+            token_text, "c",
+            "binder token text must be `c`, got `{token_text}`"
+        );
+        let _ = SyntaxKind::IDENT; // ensure import
+    }
+
+    /// Goto-def on the argument `'region'` of `smelt.config.var('region')`
+    /// returns a Location pointing at the `vars.region:` line in `smelt.yml`.
+    #[test]
+    fn goto_def_smelt_config_var_resolves_to_yml_line() {
+        let smelt_yml = "name: test_project\nvars:\n  region: us-west-2\n  env: prod\n";
+        let line = find_var_line_in_smelt_yml(smelt_yml, "region");
+        assert!(
+            line.is_some(),
+            "find_var_line_in_smelt_yml must find `region` in the vars block"
+        );
+        let line = line.unwrap();
+        // `region:` is on line 2 (0-indexed) — after `name:` (line 0) and `vars:` (line 1)
+        assert_eq!(
+            line, 2,
+            "region: should be on line 2 (0-indexed), got {line}"
+        );
+    }
+
+    /// At a completion request inside the body of `fn c => |`, the completion
+    /// list includes `c` as the first identifier completion.
+    #[test]
+    fn completion_in_lambda_body_includes_parameter_first() {
+        let lambda = parse_lambda("SELECT map([1, 2, 3], fn c => c)");
+        let params = lambda_params_for_completion(&lambda);
+        assert!(
+            !params.is_empty(),
+            "lambda_params_for_completion must return at least one param"
+        );
+        assert_eq!(
+            params[0], "c",
+            "first completion param must be `c`, got `{}`",
+            params[0]
+        );
+    }
+
+    /// At a completion request at the second-arg position of
+    /// `reduce(xs, |)` where `xs: List<Expr<Integer>>`, the completion list
+    /// includes the reducers whose declared input is compatible with
+    /// `Expr<Integer>` (i.e. `plus_chain`, `comma_sep`); reducers with
+    /// incompatible input (e.g. `union_all` for `TableExpr`) are filtered out.
+    #[test]
+    fn completion_in_reduce_second_arg_offers_registry() {
+        use smelt_types::signatures::{SmeltType, TypeConstraint};
+        use smelt_types::DataType;
+        let int_elem_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+        let list_of_int = SmeltType::List(Box::new(int_elem_ty.clone()));
+        let names = reducer_completions_for_element_type(Some(&list_of_int));
+        assert!(
+            names.contains(&"plus_chain".to_string()),
+            "plus_chain must be offered for List<Expr<Integer>>, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"comma_sep".to_string()),
+            "comma_sep must be offered for any Expr<T> element, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"union_all".to_string()),
+            "union_all (TableExpr input) must NOT be offered for List<Expr<Integer>>, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"and_all".to_string()),
+            "and_all (Boolean input) must NOT be offered for List<Expr<Integer>>, got: {names:?}"
+        );
+    }
+
+    /// Hover inside `map(xs, fn c =` (mid-edit, no body yet) does not crash;
+    /// returns `Lambda<T, ?>` or no hover.
+    #[test]
+    fn hover_does_not_panic_on_partial_lambda() {
+        use smelt_parser::syntax_kind::SyntaxKind;
+        // Parse the partial lambda — the parser should recover gracefully.
+        let sql = "SELECT map([1, 2, 3], fn c =";
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        // Find any LAMBDA node (if the parser recovered one).
+        let maybe_lambda = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::LAMBDA)
+            .and_then(smelt_parser::ast::Lambda::cast);
+        // Whether or not the parser produced a LAMBDA node, calling the hover
+        // helper must not panic.
+        let ctx = smelt_db::TypeContext::new();
+        if let Some(lambda) = maybe_lambda {
+            // Calling with Unknown element type simulates a partial parse.
+            use smelt_types::signatures::SmeltType;
+            let text = hover_text_for_lambda_param("c", &SmeltType::Unknown, &lambda, &ctx);
+            // Must not panic; the text is allowed to be any non-panicking string.
+            let _ = text;
+        }
+        // Also test that find the HOF call helper doesn't crash on partial input.
+        let maybe_call = root
+            .descendants()
+            .find_map(smelt_parser::ast::FunctionCall::cast);
+        if let Some(call) = maybe_call {
+            let text = hover_text_for_hof_call(&call, &ctx);
+            let _ = text;
+        }
+        // Test passes as long as nothing panicked.
+    }
+
+    // ── Dispatch-level tests (Finding 3) ─────────────────────────────────────
+    //
+    // These tests route cursor positions through `hover_text_for_hof_meta_language`
+    // — the same pure function that `Backend::hover` calls — to prove that the
+    // dispatch ordering is correct.  A regression (e.g. swapping the lambda-param
+    // and HOF-result blocks back) MUST cause these tests to fail.
+
+    /// Helper: parse SQL, find the AstFile, and call the dispatch helper.
+    fn dispatch_hover(sql: &str, cursor_offset: usize) -> Option<String> {
+        use smelt_parser::ast::File as AstFile;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = AstFile::cast(root)?;
+        hover_text_for_hof_meta_language(&file, cursor_offset, "")
+    }
+
+    /// Cursor on `c` in the body of `fn c => c` (the second `c`) must return
+    /// the parameter bound type (`Expr<INTEGER>`), NOT the HOF result type
+    /// (`List<Expr<INTEGER>>`).
+    ///
+    /// This is the regression test for Finding 1: if the HOF result-type block
+    /// runs before the lambda-param block, this test fails.
+    #[test]
+    fn dispatch_hover_lambda_parameter_in_body_wins_over_hof_result() {
+        // `map([100000, 200000, 300000], fn c => c)`
+        // The second `c` (body use) starts after `=>`.
+        let sql = "SELECT map([100000, 200000, 300000], fn c => c)";
+        // Find the byte offset of the body `c` — the last `c` in the SQL.
+        let body_c_offset = sql.rfind('c').expect("body `c` must be in SQL");
+        let result = dispatch_hover(sql, body_c_offset);
+        assert!(
+            result.is_some(),
+            "hover on body `c` must produce Some, got None"
+        );
+        let text = result.unwrap();
+        assert!(
+            text.contains("Expr<INTEGER>"),
+            "dispatch hover on body `c` must show param type `Expr<INTEGER>`, got: {text}"
+        );
+        assert!(
+            !text.contains("List<Expr<INTEGER>>"),
+            "dispatch hover on body `c` must NOT show HOF result type, got: {text}"
+        );
+    }
+
+    /// Cursor on `union_all` in the second arg of `reduce(xs, union_all)` must
+    /// return the reducer metadata (contains `TableExpr`), NOT the HOF result type.
+    ///
+    /// This is the regression test for Finding 2: if the reducer-name block
+    /// runs after the HOF result-type block (dead code), this test fails.
+    #[test]
+    fn dispatch_hover_reducer_name_in_second_arg_wins_over_hof_result() {
+        // We need a valid list literal for the first arg.  The reducer name is
+        // the second identifier token.
+        let sql = "SELECT reduce([smelt_table_a, smelt_table_b], union_all)";
+        // Find the offset of `union_all` — the last token before `)`.
+        let union_all_offset = sql.find("union_all").expect("union_all must be in SQL");
+        let result = dispatch_hover(sql, union_all_offset + 2); // cursor inside `union_all`
+        assert!(
+            result.is_some(),
+            "hover on `union_all` in second arg must produce Some, got None"
+        );
+        let text = result.unwrap();
+        assert!(
+            text.contains("TableExpr"),
+            "dispatch hover on reducer name must show reducer metadata with `TableExpr`, got: {text}"
+        );
+        assert!(
+            text.contains("no identity") || text.contains("identity"),
+            "dispatch hover on reducer name must mention identity, got: {text}"
+        );
+    }
+
+    /// Cursor on the binder `c` in `fn c => ...` (the first `c`, after `fn`)
+    /// must return the param type via the lambda-param block.
+    #[test]
+    fn dispatch_hover_lambda_parameter_binder_shows_param_type() {
+        let sql = "SELECT map([100000, 200000, 300000], fn c => c)";
+        // Find the binder `c` — the first `c` after `fn `.
+        let fn_pos = sql.find("fn ").expect("fn must be in SQL");
+        let binder_offset = fn_pos + 3; // skip "fn "
+        let result = dispatch_hover(sql, binder_offset);
+        assert!(
+            result.is_some(),
+            "hover on binder `c` must produce Some, got None"
+        );
+        let text = result.unwrap();
+        assert!(
+            text.contains("Expr<INTEGER>"),
+            "dispatch hover on binder `c` must show `Expr<INTEGER>`, got: {text}"
+        );
+        assert!(
+            !text.contains("List<Expr<INTEGER>>"),
+            "dispatch hover on binder `c` must NOT show HOF result type, got: {text}"
+        );
+    }
+
+    /// Goto-def for a `smelt.config.var('undeclared')` must return `None` (no
+    /// navigation), not `Some` pointing at line 0 of smelt.yml.
+    ///
+    /// This is the regression test for Finding 4: `unwrap_or(0)` silently
+    /// navigates to the top of the file when the var is not declared.
+    #[test]
+    fn goto_def_config_var_undeclared_returns_none() {
+        // `find_var_line_in_smelt_yml` must return None for a variable not in vars.
+        let smelt_yml = "name: test_project\nvars:\n  declared_var: some_value\n";
+        let result = find_var_line_in_smelt_yml(smelt_yml, "undeclared_var");
+        assert!(
+            result.is_none(),
+            "find_var_line_in_smelt_yml for an undeclared var must return None, got {result:?}"
+        );
+        // Confirm the declared var still resolves correctly.
+        let result2 = find_var_line_in_smelt_yml(smelt_yml, "declared_var");
+        assert!(
+            result2.is_some(),
+            "find_var_line_in_smelt_yml for a declared var must return Some"
         );
     }
 }
