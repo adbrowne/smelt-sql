@@ -1722,6 +1722,10 @@ impl Backend {
                 DbCode::ConfigVarNotFound => "config-var-not-found",
                 DbCode::ConfigVarNameNotLiteral => "config-var-name-not-literal",
                 DbCode::ConfigVarNullCoercion => "config-var-null-coercion",
+                // Phase C (meta-language) diagnostic codes.
+                DbCode::ColumnsOfRequiresTableExpr => "columns-of-requires-table-expr",
+                DbCode::ColumnsOfNamedArgument => "columns-of-named-argument",
+                DbCode::ColumnRefFieldUnknown => "column-ref-field-unknown",
             };
             NumberOrString::String(code_str.to_string())
         });

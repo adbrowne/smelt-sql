@@ -545,6 +545,26 @@ pub enum DiagnosticCode {
     /// Anchored at the call site.
     /// Introduced in Phase 3 of the meta-language plan (Phase B).
     ConfigVarNullCoercion,
+
+    // ── Phase C (meta-language) diagnostic codes ─────────────────────────
+    /// Emitted when `smelt.columns_of(x)` is called and `x` synthesises to a
+    /// type that is not assignable to `TableExpr`. Message:
+    /// "smelt.columns_of expects TableExpr; found {actual}".
+    /// Anchored at the argument expression span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase C).
+    ColumnsOfRequiresTableExpr,
+    /// Emitted when `smelt.columns_of` is called with a named argument
+    /// (e.g. `smelt.columns_of(t => orders)`). Message:
+    /// "smelt.columns_of takes one positional argument; named arguments are not supported".
+    /// Anchored at the named-argument span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase C).
+    ColumnsOfNamedArgument,
+    /// Emitted when a field access on a `ColumnRef`-typed value uses a field
+    /// identifier outside the closed field set `{name, type, is_numeric}`. Message:
+    /// "ColumnRef has no field {name}; expected one of: name, type, is_numeric".
+    /// Anchored at the field-name token span (not the base expression).
+    /// Introduced in Phase 1 of the meta-language plan (Phase C).
+    ColumnRefFieldUnknown,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -737,6 +757,37 @@ pub fn meta_hof_diagnostic_message(
             )
         }
         _ => panic!("meta_hof_diagnostic_message called with non-Phase-B code"),
+    }
+}
+
+/// Render the diagnostic message for Phase C (meta-language) reflection diagnostic codes.
+///
+/// Parameters:
+/// - `code`: one of the three Phase C `DiagnosticCode` variants.
+/// - `actual`: the actual synthesised type (for `ColumnsOfRequiresTableExpr`).
+/// - `field_name`: the unknown field name (for `ColumnRefFieldUnknown`).
+///
+/// Returns the exact message string specified in `meta_language.md` §"Diagnostic
+/// codes (new in Phase C)".
+pub fn meta_reflection_diagnostic_message(
+    code: DiagnosticCode,
+    actual: Option<&str>,
+    field_name: Option<&str>,
+) -> String {
+    match code {
+        DiagnosticCode::ColumnsOfRequiresTableExpr => {
+            let act = actual.unwrap_or("?");
+            format!("smelt.columns_of expects TableExpr; found {act}")
+        }
+        DiagnosticCode::ColumnsOfNamedArgument => {
+            "smelt.columns_of takes one positional argument; named arguments are not supported"
+                .to_string()
+        }
+        DiagnosticCode::ColumnRefFieldUnknown => {
+            let name = field_name.unwrap_or("?");
+            format!("ColumnRef has no field {name}; expected one of: name, type, is_numeric")
+        }
+        _ => panic!("meta_reflection_diagnostic_message called with non-Phase-C code"),
     }
 }
 

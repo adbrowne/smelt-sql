@@ -212,6 +212,23 @@ pub enum SmeltType {
         fields: Vec<(String, DataType)>,
         tail: StructRowTail,
     },
+    /// `ColumnRef` — a closed meta-only record type produced by
+    /// `smelt.columns_of` (Phase C, meta-language reflection).
+    ///
+    /// Values of this type describe a single column from a `TableExpr`'s
+    /// schema. The type has exactly three fields (see [`COLUMN_REF_FIELDS`]):
+    ///   - `name: Text` — the column identifier (un-quoted, case-preserved)
+    ///   - `type: DataType` (meta literal) — the column's smelt `DataType`
+    ///   - `is_numeric: Boolean` — `TRUE` iff `type` is in the `Numeric` constraint set
+    ///
+    /// **Meta-only**: not user-writable as a `smelt.define` parameter or
+    /// return type. Values originate only from `smelt.columns_of` (Phase C)
+    /// and future reflection accessors (Phase D). No `ColumnRef` value
+    /// reaches the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{name, type, is_numeric}`.
+    /// Adding a field requires a spec edit and a compiler change.
+    ColumnRef,
 }
 
 /// Subtype check for [`SmeltType`] (Phase A, meta-language).
@@ -2216,7 +2233,102 @@ impl BuiltinRegistry {
     pub fn names() -> impl Iterator<Item = &'static str> {
         REGISTRY.keys().map(|s| s.as_str())
     }
+
+    /// Look up a smelt meta-builtin by its dotted path name (case-insensitive).
+    ///
+    /// These are smelt-specific meta-language builtins that operate on meta types
+    /// (`SmeltType`) rather than SQL types. Examples: `smelt.columns_of`.
+    ///
+    /// Returns `Some(&'static SmeltMetaSignature)` when the name matches, `None`
+    /// otherwise.
+    pub fn lookup(name: &str) -> Option<&'static SmeltMetaSignature> {
+        META_REGISTRY.get(&name.to_ascii_lowercase())
+    }
 }
+
+/// The meta-type of a single field in a closed meta-record.
+///
+/// Used by [`COLUMN_REF_FIELDS`] to express the types of `ColumnRef`'s three
+/// fields. Each field maps to a [`SmeltType`].
+pub type ColumnRefFieldType = SmeltType;
+
+/// The closed field set of [`SmeltType::ColumnRef`] (Phase C, meta-language).
+///
+/// Invariant: exactly three entries — `name`, `type`, `is_numeric` — in this order.
+/// This is the single source of truth for the v1 field set. Any future addition
+/// requires a spec edit AND a change to this constant AND a bump of the field count
+/// in all exhaustiveness checks.
+///
+/// Field types:
+/// - `name`       → `Expr<Text>`   (the column identifier as plain Text)
+/// - `type`       → `Unknown`      (represents the DataType meta-literal; the
+///   concrete meta type is not yet in SmeltType v1)
+/// - `is_numeric` → `Expr<Boolean>` (TRUE iff `type` ∈ Numeric constraint set)
+pub const COLUMN_REF_FIELDS: &[(&str, ColumnRefFieldType)] = &[
+    (
+        "name",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+    ),
+    // `type` is a DataType meta-literal; Phase C maps it to Unknown as a
+    // forward-compatibility placeholder. Phase D will introduce a proper
+    // meta-DataType representation.
+    ("type", SmeltType::Unknown),
+    (
+        "is_numeric",
+        SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean)),
+    ),
+];
+
+/// Look up a [`ColumnRef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"name"`, `"type"`, or `"is_numeric"`;
+/// `None` for any other identifier (the closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn column_ref_field(name: &str) -> Option<&'static ColumnRefFieldType> {
+    COLUMN_REF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// Signature for a smelt meta-language builtin (Phase C).
+///
+/// Unlike [`Signature`] (which uses SQL-world [`SigParam`] / [`TypeExpr`]),
+/// `SmeltMetaSignature` uses [`SmeltType`] for both parameters and return type.
+/// This is necessary because meta-builtins like `smelt.columns_of` operate on
+/// meta sorts (`TableExpr`, `ColumnRef`, `List<ColumnRef>`) rather than scalar
+/// SQL types.
+///
+/// Constraints:
+/// - `params` are positional only (no variadics, no named args in Phase C).
+/// - The registry stores `'static` instances via [`META_REGISTRY`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmeltMetaSignature {
+    /// Dotted canonical name (lowercase), e.g. `"smelt.columns_of"`.
+    pub name: &'static str,
+    /// Positional parameter types in declaration order. Phase C has no variadics
+    /// and no named-arg support for meta-builtins.
+    pub params: Vec<SmeltType>,
+    /// Return type.
+    pub return_type: SmeltType,
+}
+
+static META_REGISTRY: LazyLock<HashMap<String, SmeltMetaSignature>> = LazyLock::new(|| {
+    let mut m: HashMap<String, SmeltMetaSignature> = HashMap::new();
+
+    // `smelt.columns_of(t: TableExpr) -> List<ColumnRef>`
+    // One positional `TableExpr` parameter; no variadics; no named args.
+    m.insert(
+        "smelt.columns_of".to_string(),
+        SmeltMetaSignature {
+            name: "smelt.columns_of",
+            params: vec![SmeltType::TableExpr(None)],
+            return_type: SmeltType::List(Box::new(SmeltType::ColumnRef)),
+        },
+    );
+
+    m
+});
 
 fn tp(name: &str, c: TypeConstraint) -> TypeParam {
     TypeParam {
@@ -3152,6 +3264,7 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
             s
         }
         SmeltType::Unknown => "Unknown".to_string(),
+        SmeltType::ColumnRef => "ColumnRef".to_string(),
     }
 }
 
@@ -4439,6 +4552,86 @@ mod tests {
         assert!(
             !is_subtype_of(&lambda, &lambda2),
             "Lambda with different body type must NOT be a subtype"
+        );
+    }
+
+    // === Phase C (meta-language) TDD tests — ColumnRef witness + smelt.columns_of ===
+
+    #[test]
+    fn columns_of_signature_returns_list_of_column_ref() {
+        // BuiltinRegistry::lookup("smelt.columns_of") must return a SmeltMetaSignature
+        // with one positional TableExpr parameter and List<ColumnRef> return.
+        let sig = BuiltinRegistry::lookup("smelt.columns_of")
+            .expect("smelt.columns_of must be in the smelt meta registry");
+        assert_eq!(
+            sig.params.len(),
+            1,
+            "smelt.columns_of takes exactly one param"
+        );
+        assert!(
+            matches!(&sig.params[0], SmeltType::TableExpr(None)),
+            "smelt.columns_of param must be TableExpr, got: {:?}",
+            sig.params[0]
+        );
+        assert!(
+            matches!(&sig.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "smelt.columns_of must return List<ColumnRef>, got: {:?}",
+            sig.return_type
+        );
+    }
+
+    #[test]
+    fn column_ref_field_set_is_closed() {
+        // COLUMN_REF_FIELDS must expose exactly {name: Text, type: DataType, is_numeric: Boolean}
+        // and nothing else.
+        let expected = ["name", "type", "is_numeric"];
+        for field in &expected {
+            assert!(
+                column_ref_field(field).is_some(),
+                "COLUMN_REF_FIELDS must contain field '{field}'"
+            );
+        }
+        // Any other identifier must return None.
+        assert!(
+            column_ref_field("foo").is_none(),
+            "COLUMN_REF_FIELDS must not contain 'foo'"
+        );
+        assert!(
+            column_ref_field("column_name").is_none(),
+            "COLUMN_REF_FIELDS must not contain 'column_name'"
+        );
+        // Exactly three fields in the constant.
+        assert_eq!(
+            COLUMN_REF_FIELDS.len(),
+            3,
+            "COLUMN_REF_FIELDS must have exactly 3 entries"
+        );
+        // Verify field types.
+        let name_ty = column_ref_field("name").unwrap();
+        assert!(
+            matches!(
+                name_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "name field must be Text (Expr<Text>), got: {name_ty:?}"
+        );
+        let type_ty = column_ref_field("type").unwrap();
+        // c.type maps to SmeltType::Unknown as the Phase C sentinel for "DataType (meta literal)".
+        // Phase D will introduce a proper meta-DataType representation; for now Unknown
+        // is the documented placeholder per the Phase C plan.
+        assert!(
+            matches!(type_ty, SmeltType::Unknown),
+            "c.type maps to SmeltType::Unknown as the Phase C sentinel for DataType (meta literal); \
+             Phase D will introduce a proper meta-DataType representation; got: {:?}",
+            type_ty
+        );
+        let is_numeric_ty = column_ref_field("is_numeric").unwrap();
+        assert!(
+            matches!(
+                is_numeric_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Boolean))
+            ),
+            "is_numeric field must be Boolean, got: {is_numeric_ty:?}"
         );
     }
 }

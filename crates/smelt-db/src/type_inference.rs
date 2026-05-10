@@ -1350,6 +1350,8 @@ fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option
         Some(Ok(SmeltType::List(_))) | Some(Ok(SmeltType::Unknown)) => DataType::Unknown,
         // `Lambda<T, U>` (Phase B meta-language) — meta-only; not a valid return type.
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
+        // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };
@@ -5423,6 +5425,296 @@ pub fn check_config_var_call_diagnostics(
     diags
 }
 
+/// Walk all `SMELT_PATH_CALL` descendants of `select_stmt` whose path is
+/// `columns_of`. For each such call emit:
+///
+/// - [`DiagnosticCode::ColumnsOfNamedArgument`] for every named argument in
+///   the arg list (anchored at the named-arg span).
+/// - [`DiagnosticCode::ColumnsOfRequiresTableExpr`] when the single positional
+///   argument's inferred type is clearly not a `TableExpr` — specifically when
+///   the argument is not a smelt-path expression and its synthesised data type
+///   is a concrete non-Unknown type (e.g. an integer literal `42`).
+///
+/// The function always synthesises `List<ColumnRef>` (recoverable) regardless
+/// of errors — that is handled by `infer_smelt_path_call_type`.
+///
+/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
+/// span positions are not under test.
+pub fn check_columns_of_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+
+    let mut diags = Vec::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let call = match SmeltPathCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Only handle `smelt.columns_of(...)`.
+        let segs = call.segments();
+        if segs.len() != 1 || segs[0].to_lowercase() != "columns_of" {
+            continue;
+        }
+
+        let arg_list = match call.arg_list() {
+            Some(al) => al,
+            None => continue,
+        };
+
+        // ── Named argument check ────────────────────────────────────────
+        // Any NAMED_PARAM in the arg list is invalid; emit one diagnostic
+        // per named arg, anchored at the named-arg node span.
+        for named in arg_list.named_params() {
+            let named_range = to_range(named.text_range());
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: crate::meta_reflection_diagnostic_message(
+                    crate::DiagnosticCode::ColumnsOfNamedArgument,
+                    None,
+                    None,
+                ),
+                range: named_range,
+                code: Some(crate::DiagnosticCode::ColumnsOfNamedArgument),
+                data: None,
+            });
+        }
+
+        // ── Positional argument type check ──────────────────────────────
+        // For each positional arg, check if it's assignable to TableExpr.
+        // A smelt-path expression is treated as a potential TableExpr;
+        // a plain literal or expression with a concrete scalar type is not.
+        for pos_arg in arg_list.positional_args() {
+            // If the argument is a smelt path call OR a smelt path ref
+            // (e.g. `smelt.models.orders` without parens), accept it
+            // unconditionally — smelt paths are TableExpr candidates.
+            if pos_arg.as_smelt_path_call().is_some() {
+                continue;
+            }
+            // Check for SMELT_PATH_REF (value-form `smelt.<path>` without parens).
+            let is_smelt_path_ref = smelt_parser::ast::SmeltPathRef::cast(pos_arg.syntax().clone())
+                .is_some()
+                || pos_arg
+                    .syntax()
+                    .children()
+                    .any(|n| smelt_parser::ast::SmeltPathRef::cast(n).is_some());
+            if is_smelt_path_ref {
+                continue;
+            }
+
+            // Check if the arg is a bare identifier registered as TableExpr
+            // in the context (a `smelt.define` TableExpr parameter).
+            let arg_text = pos_arg.text().trim().to_string();
+            let is_bare_ident =
+                !arg_text.is_empty() && arg_text.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if is_bare_ident {
+                if let Some(smelt_ty) = ctx.lookup_function_param_smelt_type(&arg_text) {
+                    if matches!(smelt_ty, smelt_types::signatures::SmeltType::TableExpr(_)) {
+                        continue;
+                    }
+                }
+            }
+
+            // For everything else, infer the scalar type. If the type is
+            // Unknown (unresolvable identifier — could be a table ref), give
+            // the benefit of the doubt. Only concrete non-TableExpr types
+            // (e.g. Integer, Text, Boolean) trigger the diagnostic.
+            if let Some(tc) = infer_expression_type(&pos_arg, ctx) {
+                let is_clearly_non_table =
+                    !matches!(tc.data_type, DataType::Unknown | DataType::Null);
+                if is_clearly_non_table {
+                    let arg_range = to_range(pos_arg.syntax().text_range());
+                    let actual_str = tc.data_type.to_string();
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_reflection_diagnostic_message(
+                            crate::DiagnosticCode::ColumnsOfRequiresTableExpr,
+                            Some(&actual_str),
+                            None,
+                        ),
+                        range: arg_range,
+                        code: Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+/// Walk all expression descendants of `select_stmt`. For every expression of
+/// the form `<qualifier>.<field>` where `<qualifier>` is registered as
+/// `SmeltType::ColumnRef` in the context, check that `<field>` is in the
+/// closed `COLUMN_REF_FIELDS` set. Unknown fields emit
+/// [`DiagnosticCode::ColumnRefFieldUnknown`] anchored at the field-name span.
+///
+/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
+/// span positions are not under test.
+pub fn check_column_ref_field_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_types::signatures::column_ref_field;
+
+    let mut diags = Vec::new();
+    // Track seen (qualifier, field) pairs to avoid duplicate diagnostics from
+    // nested EXPRESSION nodes that wrap the same column reference text.
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        let expr = match smelt_parser::ast::Expr::cast(node.clone()) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        // We're looking for `qualifier.field` expressions where the qualifier
+        // is a ColumnRef-typed binding.
+        let col_ref = match smelt_parser::ast::ColumnRef::from_expr(&expr) {
+            Some(cr) => cr,
+            None => continue,
+        };
+
+        let qualifier = match col_ref.qualifier() {
+            Some(q) => q,
+            None => continue, // bare identifier — not a dot access
+        };
+
+        // Is the qualifier a ColumnRef-typed binding?
+        let is_column_ref = ctx
+            .lookup_function_param_smelt_type(qualifier)
+            .map(|ty| matches!(ty, smelt_types::signatures::SmeltType::ColumnRef))
+            .unwrap_or(false);
+
+        if !is_column_ref {
+            continue;
+        }
+
+        let field_name = col_ref.name();
+
+        // Check if the field is in the closed field set.
+        if column_ref_field(field_name).is_some() {
+            continue; // valid field — no diagnostic
+        }
+
+        // Deduplicate: the same qualifier.field pair may appear in multiple
+        // nested EXPRESSION wrappers during the descendants walk. Only emit
+        // one diagnostic per (qualifier, field) pair.
+        let key = (qualifier.to_string(), field_name.to_string());
+        if !seen.insert(key) {
+            continue;
+        }
+
+        // Unknown field — emit ColumnRefFieldUnknown anchored at the field token span.
+        // Spec invariant: the diagnostic must point at the field name token (the IDENT
+        // after the DOT), not the whole expression. We re-scan the expression's syntax
+        // children to find the IDENT token that follows the DOT token and use its
+        // text_range(). This avoids modifying the parser AST (approach (a)).
+        let field_token_range = {
+            use smelt_parser::SyntaxKind;
+            // Walk all tokens (not just direct children) within the expression node.
+            // The DOT and IDENT tokens may be nested under inner expression sub-nodes.
+            let mut after_dot = false;
+            let mut found: Option<rowan::TextRange> = None;
+            for token in node
+                .descendants_with_tokens()
+                .filter_map(|e| e.into_token())
+            {
+                let kind = token.kind();
+                if kind == SyntaxKind::DOT {
+                    after_dot = true;
+                } else if kind == SyntaxKind::IDENT && after_dot {
+                    found = Some(token.text_range());
+                    break;
+                }
+            }
+            // Fall back to the whole expression range if the token walk fails
+            // (should not happen for well-formed qualifier.field syntax).
+            found.unwrap_or_else(|| node.text_range())
+        };
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: crate::meta_reflection_diagnostic_message(
+                crate::DiagnosticCode::ColumnRefFieldUnknown,
+                None,
+                Some(field_name),
+            ),
+            range: to_range(field_token_range),
+            code: Some(crate::DiagnosticCode::ColumnRefFieldUnknown),
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Infer the [`SmeltType`] of a ColumnRef field projection `<binding>.<field>`.
+///
+/// Returns `Some(field_type)` when:
+///   - `binding_name` is registered in `ctx` as `SmeltType::ColumnRef` via
+///     `add_function_param_smelt_type`, AND
+///   - `field_name` is in the closed `COLUMN_REF_FIELDS` set.
+///
+/// Returns `None` otherwise (unknown binding or unknown field).
+///
+/// Pure — no Salsa dependency.
+pub fn infer_field_on_column_ref(
+    binding_name: &str,
+    field_name: &str,
+    ctx: &TypeContext,
+) -> Option<smelt_types::signatures::SmeltType> {
+    use smelt_types::signatures::{column_ref_field, SmeltType};
+
+    // Check the binding is a ColumnRef.
+    let is_column_ref = ctx
+        .lookup_function_param_smelt_type(binding_name)
+        .map(|ty| matches!(ty, SmeltType::ColumnRef))
+        .unwrap_or(false);
+
+    if !is_column_ref {
+        return None;
+    }
+
+    // Look up the field in the closed field set and clone the type.
+    column_ref_field(field_name).cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7817,6 +8109,194 @@ mod tests {
             matches!(result.inferred, SmeltType::List(_)),
             "map on List<Expr<Integer>> param must infer List<T>, got: {:?}",
             result.inferred
+        );
+    }
+
+    // === Phase C (meta-language) TDD tests — smelt.columns_of + ColumnRef field projection ===
+
+    /// `smelt.columns_of(42)` synthesises `List<ColumnRef>` (recoverable) and
+    /// emits exactly one `ColumnsOfRequiresTableExpr` at the `42` argument span.
+    #[test]
+    fn columns_of_arg_must_be_table_expr() {
+        // Non-TableExpr arg: 42 (integer literal) — should emit ColumnsOfRequiresTableExpr.
+        let sql = "SELECT smelt.columns_of(42) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_columns_of_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr)),
+            "smelt.columns_of(42) must emit ColumnsOfRequiresTableExpr, got: {:?}",
+            diags
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
+                .count(),
+            1,
+            "must emit exactly one ColumnsOfRequiresTableExpr"
+        );
+
+        // A smelt.<path> reference must not emit a Phase C diagnostic.
+        // We use a bare path reference — the type-checker resolves it as TableExpr.
+        let sql_ok = "SELECT smelt.columns_of(smelt.models.orders) FROM t";
+        let select_ok = parse_select_stmt(sql_ok);
+        let diags_ok = check_columns_of_diagnostics(&select_ok, &ctx, "");
+        assert!(
+            !diags_ok
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr)),
+            "smelt.columns_of(smelt.models.orders) must NOT emit ColumnsOfRequiresTableExpr, got: {:?}",
+            diags_ok
+        );
+    }
+
+    /// `smelt.columns_of(t => orders)` emits exactly one `ColumnsOfNamedArgument`.
+    #[test]
+    fn columns_of_rejects_named_argument() {
+        let sql = "SELECT smelt.columns_of(t => orders) FROM t";
+        let select = parse_select_stmt(sql);
+        let ctx = TypeContext::new();
+        let diags = check_columns_of_diagnostics(&select, &ctx, "");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfNamedArgument)),
+            "smelt.columns_of(t => orders) must emit ColumnsOfNamedArgument, got: {:?}",
+            diags
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfNamedArgument))
+                .count(),
+            1,
+            "must emit exactly one ColumnsOfNamedArgument"
+        );
+
+        // Positional arg must not emit ColumnsOfNamedArgument.
+        let sql_ok = "SELECT smelt.columns_of(orders) FROM t";
+        let select_ok = parse_select_stmt(sql_ok);
+        let diags_ok = check_columns_of_diagnostics(&select_ok, &ctx, "");
+        assert!(
+            !diags_ok
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfNamedArgument)),
+            "smelt.columns_of(orders) must NOT emit ColumnsOfNamedArgument, got: {:?}",
+            diags_ok
+        );
+    }
+
+    /// Given a binding `c: ColumnRef`, field access `c.name`, `c.type`, `c.is_numeric`
+    /// synthesise the correct types.
+    #[test]
+    fn column_ref_field_projection_synthesises_field_type() {
+        // Seed a lambda param `c` as ColumnRef.
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        // For the data-type projection the lambda param `c` maps to DataType::Unknown
+        // (ColumnRef is not a SQL DataType).
+        ctx.add_lambda_param(
+            "c",
+            smelt_types::TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // c.name → Text
+        let name_ty = infer_field_on_column_ref("c", "name", &ctx);
+        assert!(
+            matches!(
+                name_ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)
+                ))
+            ),
+            "c.name must synthesise Text, got: {:?}",
+            name_ty
+        );
+
+        // c.is_numeric → Boolean
+        let is_numeric_ty = infer_field_on_column_ref("c", "is_numeric", &ctx);
+        assert!(
+            matches!(
+                is_numeric_ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Boolean)
+                ))
+            ),
+            "c.is_numeric must synthesise Boolean, got: {:?}",
+            is_numeric_ty
+        );
+
+        // c.type → SmeltType::Unknown as the Phase C sentinel for "DataType (meta literal)".
+        // Phase D will introduce a proper meta-DataType representation; for now Unknown
+        // is the documented placeholder per the Phase C plan.
+        let type_ty = infer_field_on_column_ref("c", "type", &ctx);
+        assert!(
+            matches!(type_ty, Some(SmeltType::Unknown)),
+            "c.type maps to SmeltType::Unknown as the Phase C sentinel for DataType (meta literal); \
+             Phase D will introduce a proper meta-DataType representation; got: {:?}",
+            type_ty
+        );
+    }
+
+    /// Given a binding `c: ColumnRef`, `c.foo` emits exactly one
+    /// `ColumnRefFieldUnknown` at the `foo` field token span and synthesises `Unknown`.
+    #[test]
+    fn column_ref_field_projection_rejects_unknown_field() {
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("c", SmeltType::ColumnRef);
+        ctx.add_lambda_param(
+            "c",
+            smelt_types::TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // c.foo must emit ColumnRefFieldUnknown anchored at the `foo` token span.
+        // In "SELECT c.foo FROM t", `foo` is at byte offset 9..12 (line 0, col 9..12).
+        let sql = "SELECT c.foo FROM t";
+        let select = parse_select_stmt(sql);
+        // Pass the actual source text so that to_range() can compute line/column positions.
+        let diags = check_column_ref_field_diagnostics(&select, &ctx, sql);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ColumnRefFieldUnknown)),
+            "c.foo must emit ColumnRefFieldUnknown, got: {:?}",
+            diags
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnRefFieldUnknown))
+                .count(),
+            1,
+            "must emit exactly one ColumnRefFieldUnknown"
+        );
+        // Pin the diagnostic to the `foo` field-token span, not the whole `c.foo` expression.
+        // Spec invariant: ColumnRefFieldUnknown must anchor at the field name token only.
+        let unknown_diag = diags
+            .iter()
+            .find(|d| d.code == Some(crate::DiagnosticCode::ColumnRefFieldUnknown))
+            .expect("already asserted above");
+        assert_eq!(
+            unknown_diag.range.start,
+            smelt_parser::ast::Position { line: 0, column: 9 },
+            "diagnostic must start at the `foo` token (col 9), not the start of `c.foo`"
+        );
+        assert_eq!(
+            unknown_diag.range.end,
+            smelt_parser::ast::Position {
+                line: 0,
+                column: 12
+            },
+            "diagnostic must end after `foo` (col 12)"
         );
     }
 }
