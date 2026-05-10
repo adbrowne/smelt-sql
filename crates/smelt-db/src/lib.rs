@@ -565,6 +565,16 @@ pub enum DiagnosticCode {
     /// Anchored at the field-name token span (not the base expression).
     /// Introduced in Phase 1 of the meta-language plan (Phase C).
     ColumnRefFieldUnknown,
+    /// Emitted at expansion time when `smelt.columns_of(t)` is called and
+    /// `t`'s schema cannot be statically resolved (the upstream returns
+    /// `Unknown` — the model does not exist, has an unresolvable schema, or
+    /// refers to an opaque expression). Message:
+    /// "cannot resolve column list for {t}; upstream schema is unknown".
+    /// Anchored at the `smelt.columns_of(t)` call site span.
+    /// Drop-on-error recovery: the surrounding HOF splice drops without
+    /// further diagnostics (same policy as `MetaSpreadInForbiddenPosition`).
+    /// Introduced in Phase 3 of the meta-language plan (Phase C).
+    ColumnsOfUnresolvableSchema,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -763,9 +773,10 @@ pub fn meta_hof_diagnostic_message(
 /// Render the diagnostic message for Phase C (meta-language) reflection diagnostic codes.
 ///
 /// Parameters:
-/// - `code`: one of the three Phase C `DiagnosticCode` variants.
+/// - `code`: one of the four Phase C `DiagnosticCode` variants.
 /// - `actual`: the actual synthesised type (for `ColumnsOfRequiresTableExpr`).
 /// - `field_name`: the unknown field name (for `ColumnRefFieldUnknown`).
+/// - `table_expr`: the text of the table expression (for `ColumnsOfUnresolvableSchema`).
 ///
 /// Returns the exact message string specified in `meta_language.md` §"Diagnostic
 /// codes (new in Phase C)".
@@ -773,6 +784,17 @@ pub fn meta_reflection_diagnostic_message(
     code: DiagnosticCode,
     actual: Option<&str>,
     field_name: Option<&str>,
+) -> String {
+    meta_reflection_diagnostic_message_with_table_expr(code, actual, field_name, None)
+}
+
+/// Extended form of [`meta_reflection_diagnostic_message`] that also accepts a
+/// `table_expr` string for the `ColumnsOfUnresolvableSchema` variant.
+pub fn meta_reflection_diagnostic_message_with_table_expr(
+    code: DiagnosticCode,
+    actual: Option<&str>,
+    field_name: Option<&str>,
+    table_expr: Option<&str>,
 ) -> String {
     match code {
         DiagnosticCode::ColumnsOfRequiresTableExpr => {
@@ -787,7 +809,14 @@ pub fn meta_reflection_diagnostic_message(
             let name = field_name.unwrap_or("?");
             format!("ColumnRef has no field {name}; expected one of: name, type, is_numeric")
         }
-        _ => panic!("meta_reflection_diagnostic_message called with non-Phase-C code"),
+        DiagnosticCode::ColumnsOfUnresolvableSchema => {
+            let t = table_expr.unwrap_or("t");
+            format!("cannot resolve column list for {t}; upstream schema is unknown")
+        }
+        _ => panic!(
+            "meta_reflection_diagnostic_message called with non-Phase-C code: {:?}",
+            code
+        ),
     }
 }
 
@@ -4849,6 +4878,80 @@ pub fn resolved_model_schema(
         is_fully_resolved,
         unresolved_extensions,
     })
+}
+
+/// Phase C (meta-language) — Salsa-cached query that materialises the concrete
+/// `Vec<ColumnRefValue>` for a given model path at expansion time.
+///
+/// Takes a `model_name` (the leaf segment of a `smelt.<path>` reference, e.g.
+/// `"orders"`) and resolves it via [`resolve_ref`] + [`resolved_model_schema`] to
+/// produce a [`smelt_types::ColumnRefValue`] per column, preserving the source
+/// schema's declared column order.
+///
+/// Returns `Ok(columns)` when the schema resolves to a concrete (non-empty)
+/// column list, or `Err(())` when:
+/// - the model is not found in the workspace (`resolve_ref` returns `None`), or
+/// - the resolved schema has no columns and is not fully resolved (upstream
+///   `Unknown`).
+///
+/// The error token is `()` — callers emit `ColumnsOfUnresolvableSchema` and
+/// drop the surrounding splice on `Err`.
+///
+/// This query obeys the `smelt-db` pure-function rule: the analysis (building
+/// `ColumnRefValue`s from `Column`s) is pure; the Salsa wrapper only wires up
+/// the inputs.
+#[salsa::tracked]
+pub fn columns_of_for_table_expr(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    model_name: String,
+) -> Result<Arc<Vec<smelt_types::ColumnRefValue>>, ()> {
+    // Resolve the model name to a SourceFile via the existing resolution machinery.
+    let file = match resolve_ref(db, workspace, model_name.clone()) {
+        Some(f) => f,
+        None => return Err(()),
+    };
+
+    // Use the typed + row-extended schema so callers see the full column list
+    // (including wildcard-expanded columns from upstream models).
+    let schema = resolved_model_schema(db, workspace, file);
+
+    // If the schema is unresolvable (no columns and not fully resolved), signal
+    // an unknown schema so the caller can emit ColumnsOfUnresolvableSchema.
+    if schema.columns.is_empty() && !schema.is_fully_resolved {
+        return Err(());
+    }
+
+    // Project each Column into a ColumnRefValue.
+    let columns: Vec<smelt_types::ColumnRefValue> = columns_to_column_ref_values(&schema.columns);
+
+    Ok(Arc::new(columns))
+}
+
+/// Pure helper: convert a slice of [`schema::Column`]s into
+/// [`smelt_types::ColumnRefValue`]s in declaration order.
+///
+/// This function is deliberately separated from the Salsa query body so that
+/// the conversion logic is independently testable without a database.
+pub fn columns_to_column_ref_values(
+    columns: &[schema::Column],
+) -> Vec<smelt_types::ColumnRefValue> {
+    columns
+        .iter()
+        .map(|col| {
+            let data_type = col.data_type.as_ref().map(|tc| tc.data_type.clone());
+            let is_numeric = data_type
+                .as_ref()
+                .map(|dt| dt.is_numeric())
+                .unwrap_or(false);
+            smelt_types::ColumnRefValue {
+                name: col.name.clone(),
+                data_type,
+                is_numeric,
+                source_span: Some(col.range),
+            }
+        })
+        .collect()
 }
 
 #[salsa::tracked]

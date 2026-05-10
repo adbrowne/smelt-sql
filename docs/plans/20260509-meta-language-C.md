@@ -81,7 +81,7 @@ The meta-language Phase C spec increment landed in commit `3ec025d`. The spec au
 |-------|----------|--------|------|
 | 1     | done     | 4e891c4 | 2026-05-11 |
 | 2     | done     | 386d455 | 2026-05-11 |
-| 3     | pending  |        |      |
+| 3     | done     |        | 2026-05-11 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
@@ -453,6 +453,27 @@ The meta-language Phase C spec increment landed in commit `3ec025d`. The spec au
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 3 — production HOF expansion dispatcher integration (follow-up).**
+  Two Phase 3 TDD tests are marked `#[ignore]` because the production HOF expansion dispatcher
+  does not yet call `columns_of_for_table_expr`. This is consistent with the Phase B pattern —
+  `walk_hof_lambda_body_with_anonymous_frame` is exercised by tests directly, not driven from a
+  production `file_diagnostics` orchestrator. The Phase B → Phase C wiring is the same problem,
+  and the gap pre-exists Phase 3.
+  1. `columns_of_hof_lambda_carries_column_origin_frame` — needs the dispatcher to call
+     `columns_of_for_table_expr`, iterate the `ColumnRefValue` list, and pass each
+     `ColumnRefValue::source_span` as the `column_origin` argument to
+     `walk_hof_lambda_body_with_anonymous_frame_and_origin`.  The frame-stamping mechanism is
+     verified by the direct-call form; it's the dispatcher invocation that is deferred.
+  2. `columns_of_unresolvable_schema_drops_with_diagnostic` — the drop-on-error invariant requires
+     the dispatcher to translate `columns_of_for_table_expr` returning `Err(())` into exactly one
+     `ColumnsOfUnresolvableSchema` diagnostic with no cascading HOF-body diagnostics.
+
+  Phase 5's real-fixture coverage (`examples/meta_columns/`) will exercise the end-to-end path
+  once a HOF body-check dispatcher exists and naturally surface the wiring gap. Phase 5 may
+  therefore land the dispatcher as part of making the fixture pass, OR a dedicated Phase B/C
+  follow-up plan may be needed. Decision deferred until Phase 5 surfaces the concrete shape
+  needed by the fixture.
 
 ## Verification
 

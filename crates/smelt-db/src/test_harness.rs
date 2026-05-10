@@ -102,7 +102,7 @@ impl TestDb {
         self.sync_workspace();
     }
 
-    fn sync_workspace(&mut self) -> Workspace {
+    pub fn sync_workspace(&mut self) -> Workspace {
         if self.workspace_dirty {
             let files: Vec<SourceFile> = self
                 .file_order

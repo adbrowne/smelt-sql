@@ -1726,6 +1726,7 @@ impl Backend {
                 DbCode::ColumnsOfRequiresTableExpr => "columns-of-requires-table-expr",
                 DbCode::ColumnsOfNamedArgument => "columns-of-named-argument",
                 DbCode::ColumnRefFieldUnknown => "column-ref-field-unknown",
+                DbCode::ColumnsOfUnresolvableSchema => "columns-of-unresolvable-schema",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -5888,6 +5889,7 @@ mod tests {
             call_site_range: Some(make_db_range(decl_line + 10, 0)),
             fn_id: Some(function.to_string()),
             element_index: None,
+            column_origin: None,
         }
     }
 
@@ -6033,6 +6035,7 @@ mod tests {
             call_site_range: Some(make_db_range(10, 0)),
             fn_id: None, // marks frame as anonymous
             element_index: None,
+            column_origin: None,
         };
         let diag = make_db_diag("type mismatch in lambda body", vec![anon_frame]);
 

@@ -183,6 +183,63 @@ pub fn walk_hof_lambda_body_with_anonymous_frame(
         call_site_range: call_range,
         fn_id: None, // anonymous — HOF has no declaring file
         element_index: None,
+        column_origin: None,
+    };
+
+    inner_diags
+        .into_iter()
+        .map(|mut d| {
+            let frames = match d.data.take() {
+                Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+                    // Prepend the anonymous HOF frame (innermost-first ordering).
+                    existing.insert(0, frame.clone());
+                    existing
+                }
+                _ => vec![frame.clone()],
+            };
+            d.data = Some(DiagnosticData::ExpansionFrames(frames));
+            d
+        })
+        .collect()
+}
+
+/// Phase C (meta-language) variant of [`walk_hof_lambda_body_with_anonymous_frame`]
+/// that accepts an explicit `column_origin` to stamp onto the anonymous HOF frame.
+///
+/// When the HOF source list comes from `smelt.columns_of(t)`, callers can pass the
+/// column's source span (from the upstream `ModelSchema`) so the frame's
+/// `column_origin` field carries that span. When the source was not a
+/// `smelt.columns_of` call (or the span is not statically resolvable), pass `None`.
+///
+/// Pure function — no Salsa dependency.
+pub fn walk_hof_lambda_body_with_anonymous_frame_and_origin(
+    lambda_body: &Expr,
+    lambda_ctx: &TypeContext,
+    text: &str,
+    hof_name: &str,
+    call_range: Option<Range>,
+    nested: Option<&NestedPathCallHandler<'_>>,
+    column_origin: Option<TextRange>,
+) -> Vec<Diagnostic> {
+    let mut inner_diags = Vec::new();
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, nested);
+
+    // Stamp every inner diagnostic with an anonymous HOF expansion frame,
+    // including the Phase C `column_origin` extension.
+    if inner_diags.is_empty() {
+        return inner_diags;
+    }
+
+    let frame = FrameInfo {
+        function: format!("<{}>", hof_name.to_lowercase()),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: None,
+        decl_range: None,
+        call_site_range: call_range,
+        fn_id: None, // anonymous — HOF has no declaring file
+        element_index: None,
+        column_origin,
     };
 
     inner_diags
@@ -1383,6 +1440,7 @@ pub fn check_smelt_path_call(
                 call_site_range,
                 fn_id: Some(sig.name.clone()),
                 element_index: None,
+                column_origin: None,
             });
         } else {
             frames.push(FrameInfo {
@@ -1394,6 +1452,7 @@ pub fn check_smelt_path_call(
                 call_site_range,
                 fn_id: Some(sig.name.clone()),
                 element_index: None,
+                column_origin: None,
             });
         }
         d.data = Some(DiagnosticData::ExpansionFrames(frames));
@@ -2987,6 +3046,248 @@ mod tests {
             diags[0].message.contains("name"),
             "diagnostic message must mention the lifted identifier 'name'; got: {:?}",
             diags[0].message
+        );
+    }
+
+    // ─── Phase C Phase 3 TDD tests ────────────────────────────────────────────
+
+    /// `walk_hof_lambda_body_with_anonymous_frame` with a concrete
+    /// `column_origin` stamps that origin onto the resulting frame.
+    ///
+    /// When the HOF source list comes from `smelt.columns_of(t)`, the
+    /// per-element frame's `column_origin` must be set to the column's source
+    /// span from the upstream schema. This test exercises the frame-stamping
+    /// path by calling a variant that accepts an explicit `column_origin`.
+    ///
+    /// DEFERRED (Phase 5): The full integration path — where `smelt.columns_of(orders)`
+    /// feeds a HOF source list and each per-element expansion frame carries
+    /// `column_origin = Some(span_of_column_in_source_schema)` flowing from the
+    /// `ModelSchema`'s column declaration spans — is deferred to Phase 5 (HOF
+    /// expansion wiring). The current test calls
+    /// `walk_hof_lambda_body_with_anonymous_frame_and_origin` directly with a
+    /// hand-constructed span, which verifies the frame-stamping mechanism in
+    /// isolation but does NOT exercise the `columns_of` source-list path. A full
+    /// integration test requires the HOF expansion dispatcher to call
+    /// `columns_of_for_table_expr`, iterate the resulting `ColumnRefValue`s, and
+    /// pass each `ColumnRefValue::source_span` as the `column_origin` argument —
+    /// that dispatcher wiring does not yet exist. Re-enable and rewrite once
+    /// Phase 5 HOF expansion is complete.
+    #[test]
+    #[ignore = "deferred to Phase 5: HOF expansion wiring for smelt.columns_of source lists not yet integrated"]
+    fn columns_of_hof_lambda_carries_column_origin_frame() {
+        use crate::type_inference::TypeContext;
+        use rowan::TextRange;
+        use rowan::TextSize;
+
+        // Set up a body expression that will produce an error (unknown identifier).
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        // Simulate a concrete column origin span (e.g. column "id" declared at offset 7–9).
+        let origin = TextRange::new(TextSize::from(7u32), TextSize::from(9u32));
+
+        let diags = walk_hof_lambda_body_with_anonymous_frame_and_origin(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            Some(origin),
+        );
+
+        // The frame must carry the column_origin we passed in.
+        let frame_diag = diags.iter().find(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.column_origin == Some(origin))
+            )
+        });
+        assert!(
+            frame_diag.is_some(),
+            "HOF frame must carry the column_origin span; got: {diags:?}"
+        );
+    }
+
+    /// `check_columns_of_unresolvable_schema` emits `ColumnsOfUnresolvableSchema`
+    /// anchored at the call site and the surrounding splice drops (empty diagnostics
+    /// from the HOF handler).
+    ///
+    /// The drop-on-error policy matches `MetaSpreadInForbiddenPosition`: the
+    /// diagnostic is emitted and no further cascading errors surface from inside
+    /// the lambda body.
+    ///
+    /// DEFERRED (Phase 5): The spec's drop-on-error invariant requires the HOF
+    /// expansion dispatcher to: (a) call `columns_of_for_table_expr` which returns
+    /// `Err(())` for an unresolvable model, (b) emit exactly one
+    /// `ColumnsOfUnresolvableSchema` diagnostic anchored at the `smelt.columns_of`
+    /// call-site span, and (c) suppress all cascading diagnostics from the lambda
+    /// body for that HOF call.  That HOF expansion dispatcher wiring does not yet
+    /// exist (Phase 5 scope).  The current test only exercises the message-function
+    /// and the diagnostic code round-trip, not the pipeline invariant.  Re-enable
+    /// and rewrite to set up a full workspace with a function containing
+    /// `map(smelt.columns_of(t), fn c => SOME_BODY)` where `t` resolves to an
+    /// `Unknown` schema, run `file_diagnostics`, and assert exactly one
+    /// `ColumnsOfUnresolvableSchema` diagnostic with no cascading diagnostics from
+    /// inside the lambda body.
+    #[test]
+    #[ignore = "deferred to Phase 5: ColumnsOfUnresolvableSchema drop-on-error HOF wiring not yet integrated"]
+    fn columns_of_unresolvable_schema_drops_with_diagnostic() {
+        // Build a diagnostic directly via the Phase C message function.
+        let msg = crate::meta_reflection_diagnostic_message_with_table_expr(
+            crate::DiagnosticCode::ColumnsOfUnresolvableSchema,
+            None,
+            None,
+            Some("smelt.models.nonexistent"),
+        );
+        assert_eq!(
+            msg,
+            "cannot resolve column list for smelt.models.nonexistent; upstream schema is unknown",
+            "ColumnsOfUnresolvableSchema message must match spec"
+        );
+
+        // Simulate constructing a drop diagnostic — the message is produced and
+        // the surrounding splice would emit nothing else.
+        let drop_diag = crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: msg.clone(),
+            range: crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            },
+            code: Some(crate::DiagnosticCode::ColumnsOfUnresolvableSchema),
+            data: None,
+        };
+        // Verify the diagnostic round-trips correctly.
+        assert_eq!(
+            drop_diag.code,
+            Some(crate::DiagnosticCode::ColumnsOfUnresolvableSchema)
+        );
+        assert!(drop_diag.message.contains("nonexistent"));
+    }
+
+    /// `column_origin_passed_through_to_first_frame` verifies that the
+    /// `column_origin` argument supplied to
+    /// `walk_hof_lambda_body_with_anonymous_frame_and_origin` is carried verbatim
+    /// onto the resulting anonymous frame (single-element check).
+    ///
+    /// End-to-end ordering across multiple `ColumnRef` source elements is verified
+    /// by `columns_of_expansion_preserves_source_ordering_pure` in `tests.rs`,
+    /// which exercises `columns_to_column_ref_values` directly. Multi-element
+    /// dispatcher integration is deferred (see plan's "Deferred during
+    /// implementation" §"Phase 3 — production HOF expansion dispatcher
+    /// integration").
+    #[test]
+    fn column_origin_passed_through_to_first_frame() {
+        use crate::type_inference::TypeContext;
+        use rowan::{TextRange, TextSize};
+
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        // First column origin (column "id" at offset 0–2).
+        let first_origin = TextRange::new(TextSize::from(0u32), TextSize::from(2u32));
+
+        // Walk the lambda body with the first column's origin.
+        let diags = walk_hof_lambda_body_with_anonymous_frame_and_origin(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            Some(first_origin),
+        );
+
+        // The frame must have column_origin = Some(first_origin).
+        let has_first_origin = diags.iter().any(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.column_origin == Some(first_origin))
+            )
+        });
+        assert!(
+            has_first_origin,
+            "frame for first column must carry first_origin; got: {diags:?}"
+        );
+    }
+
+    /// `columns_of_for_table_expr` with two different models at call-site produces
+    /// different concrete column lists, proving per-call-site schema-resolution works.
+    ///
+    /// This verifies the call-site materialisation behaviour: when a function
+    /// `f(t: TableExpr)` is called with `orders` vs `products`, the resolved
+    /// `ColumnRefValue` lists differ.  The test exercises the Salsa query
+    /// `columns_of_for_table_expr` directly (the machinery that wires expansion-time
+    /// call-site arguments to concrete schemas), without requiring the full HOF
+    /// expansion pipeline which is deferred to Phase 5.
+    #[test]
+    fn columns_of_in_table_expr_parameter_uses_call_site_schema() {
+        use crate::test_harness::TestDb;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let mut db = TestDb::default();
+
+        // Model `orders` with columns: id, amount.
+        let orders_path = PathBuf::from("models/orders.sql");
+        db.set_file_text(
+            orders_path.clone(),
+            Arc::new("SELECT 1 AS id, 9.99 AS amount FROM source.raw_orders".to_string()),
+        );
+
+        // Model `products` with columns: sku, price.
+        let products_path = PathBuf::from("models/products.sql");
+        db.set_file_text(
+            products_path.clone(),
+            Arc::new("SELECT 'A1' AS sku, 4.99 AS price FROM source.raw_products".to_string()),
+        );
+
+        db.set_all_files(Arc::new(vec![orders_path.clone(), products_path.clone()]));
+        db.set_file_project_root(orders_path.clone(), PathBuf::from("."));
+        db.set_file_project_root(products_path.clone(), PathBuf::from("."));
+        db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+        let ws = db.sync_workspace();
+
+        // Call-site: f(orders) → columns [id, amount].
+        let orders_cols = crate::columns_of_for_table_expr(&db.db, ws, "orders".to_string())
+            .expect("columns_of_for_table_expr must resolve orders");
+        assert_eq!(
+            orders_cols.len(),
+            2,
+            "orders has 2 columns; got: {:?}",
+            orders_cols
+        );
+        assert_eq!(orders_cols[0].name, "id");
+        assert_eq!(orders_cols[1].name, "amount");
+
+        // Call-site: f(products) → columns [sku, price].
+        let products_cols = crate::columns_of_for_table_expr(&db.db, ws, "products".to_string())
+            .expect("columns_of_for_table_expr must resolve products");
+        assert_eq!(
+            products_cols.len(),
+            2,
+            "products has 2 columns; got: {:?}",
+            products_cols
+        );
+        assert_eq!(products_cols[0].name, "sku");
+        assert_eq!(products_cols[1].name, "price");
+
+        // The two call sites with different `t` arguments produce different column lists.
+        let orders_names: Vec<&str> = orders_cols.iter().map(|c| c.name.as_str()).collect();
+        let products_names: Vec<&str> = products_cols.iter().map(|c| c.name.as_str()).collect();
+        assert_ne!(
+            orders_names, products_names,
+            "orders and products must produce different column lists; \
+             per-call-site schema-resolution must not conflate models"
         );
     }
 }

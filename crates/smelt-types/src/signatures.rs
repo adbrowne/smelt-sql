@@ -902,6 +902,42 @@ pub struct FrameInfo {
     /// `None` when the source list was not a literal or the information is
     /// not statically available (the common v1 case).
     pub element_index: Option<usize>,
+    /// Phase C (meta-language) extension: the source span of the column's
+    /// declaration in the upstream `ModelSchema`, when the HOF source list
+    /// came from `smelt.columns_of(t)`. `None` for literal-sourced lists,
+    /// unresolvable schemas, or non-`columns_of` HOF sources.
+    ///
+    /// Producer-side only in v1 — the LSP renderer does not yet surface this
+    /// field (tracked as a Known Divergence in `expansion.md`).
+    pub column_origin: Option<smelt_parser::TextRange>,
+}
+
+/// Phase C (meta-language): concrete value produced by `smelt.columns_of`.
+///
+/// Each element of the `List<ColumnRef>` returned by `smelt.columns_of(t)`
+/// is one `ColumnRefValue`. The list preserves the source schema's declared
+/// column order (Phase C spec §"ColumnRef ordering").
+///
+/// This struct is pure (no Salsa dependency) and lives in `smelt-types` so
+/// that both `smelt-db` (which produces the list via the Salsa query
+/// `columns_of_for_table_expr`) and any future consumer (e.g. the planner)
+/// can use it without gaining a Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnRefValue {
+    /// The column's declared name (identifier text from the source schema).
+    pub name: String,
+    /// The column's declared data type (from `TypedColumn::data_type`).
+    /// `None` when the column's type was not statically known (e.g. no
+    /// type annotation and inference could not determine it).
+    pub data_type: Option<crate::DataType>,
+    /// Whether the column's type satisfies the `Numeric` constraint —
+    /// `DataType::is_numeric()` per `types.md` §"Type constraints".
+    /// `false` when `data_type` is `None`.
+    pub is_numeric: bool,
+    /// Source span of this column's declaration in the upstream `ModelSchema`
+    /// (the `Column::range` field). `None` when the span is not statically
+    /// resolvable (e.g. source came from an external YAML with no SQL range).
+    pub source_span: Option<smelt_parser::TextRange>,
 }
 
 /// Tier of a function, derived from annotation completeness.
@@ -4016,6 +4052,7 @@ mod tests {
             call_site_range: None,
             fn_id: None,
             element_index: None,
+            column_origin: None,
         };
         assert!(frame.decl_path.is_none());
         assert!(frame.decl_range.is_none());

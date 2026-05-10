@@ -380,6 +380,7 @@ fn multi_level_frame_trace_in_message_body() {
             call_site_range: Some(make_db_range(2, 0)),
             fn_id: Some(function.to_string()),
             element_index: None,
+            column_origin: None,
         }
     }
 

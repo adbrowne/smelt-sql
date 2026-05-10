@@ -37,6 +37,8 @@ The following are the only outputs of expansion that a user can observe:
 
 **Anonymous-frame form** (Phase B, HOF inline-expansion): `map`, `filter`, and `reduce` produce anonymous frames when a type error surfaces inside a lambda body. The anonymous form has `fn_id = None`, `decl_path = None`, `decl_range = None`, and `param = ""`. The `function` field carries the angle-bracketed name (`"<map>"`, `"<filter>"`, `"<reduce>"`). Renderers should handle `fn_id = None` by omitting the "defined in" link and displaying only the bracketed HOF name (e.g. `in expansion of <map>`).
 
+**Phase C extension — `column_origin` on anonymous HOF frames.** When the HOF source list comes from `smelt.columns_of(t)`, the anonymous frame is extended with an optional `column_origin: Option<TextRange>` field carrying the source span of the column's declaration in the upstream `ModelSchema`. Producers populate `column_origin` per-element when the column's source span is statically resolvable; `column_origin = None` when the source was not a `smelt.columns_of` call, the schema was unresolvable, or the span is unavailable. The v1 LSP renderer does not yet surface `column_origin` (tracked in Known Divergences); it is a producer-side invariant only.
+
 The renderer is permitted to read fewer fields than are populated; producers must populate every field they have available regardless of what the current renderer reads.
 
 ## Semantics
@@ -128,6 +130,7 @@ This section captures the load-bearing mechanical decisions. Most of expansion i
 - **Frame-trace renderer is single-level in v1** (research §16 #16). The producer populates the full stack; the LSP renderer reads only the outermost frame. Multi-level rendering is tracked as a divergence in `gradual_typing.md` and resolved by a renderer-only follow-up.
 - **Provenance-aware planner passes are not yet exercised.** Until Level-2 planner work lands (`planner_integration.md` Known Divergences), there are few transformations that stress the origin-tag contract. The contract is normative now so that future passes inherit it; the test surface that pins it grows alongside the planner.
 - **No CTE-collision diagnostic code is currently distinct from `CteCycle`.** Whether to mint a dedicated code (e.g. `CteShadowsCallerCte`) when alpha-rename ships is open.
+- **`column_origin` on anonymous HOF frames is producer-side only in v1.** The field is populated by the compiler when the HOF source list comes from `smelt.columns_of(t)`. The v1 LSP renderer does not read it — a dedicated renderer follow-up will surface it as an optional trailer (e.g. `(column declared at <file>:<line>)`). Until that renderer ships, the field is a no-op from the user's perspective.
 
 ## References
 

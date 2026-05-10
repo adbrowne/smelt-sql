@@ -3921,3 +3921,203 @@ fn diagnostic_code_config_var_null_coercion() {
         "null variable nullable_var coerced to empty string; declare a default in smelt.yml"
     );
 }
+
+// ─── Phase C Phase 3 TDD tests ─────────────────────────────────────────────
+
+/// `ColumnsOfUnresolvableSchema` exists and renders the correct message.
+#[test]
+fn diagnostic_code_columns_of_unresolvable_schema_message() {
+    let code = DiagnosticCode::ColumnsOfUnresolvableSchema;
+    let msg = meta_reflection_diagnostic_message_with_table_expr(
+        code,
+        None,
+        None,
+        Some("smelt.models.orders"),
+    );
+    assert_eq!(
+        msg,
+        "cannot resolve column list for smelt.models.orders; upstream schema is unknown"
+    );
+}
+
+/// `columns_of_for_table_expr` resolves a model's schema and returns
+/// `ColumnRefValue`s in declaration order with correct name, data_type,
+/// and is_numeric values.
+///
+/// The fixture intentionally mixes numeric columns (`id: Integer`, `amount: Decimal`)
+/// with a non-numeric column (`name: Text`) to make the `is_numeric` assertions
+/// meaningful — a fixture with only numeric columns cannot detect a bug where
+/// `is_numeric` is always `true`.
+#[test]
+fn columns_of_salsa_query_resolves_smelt_path_schema() {
+    let mut db = TestDb::default();
+
+    // Create a model `orders` with three typed columns:
+    //   - id (Integer) — numeric
+    //   - amount (Decimal / 9.99) — numeric
+    //   - name (Text / string literal) — NOT numeric
+    let orders_path = PathBuf::from("models/orders.sql");
+    db.set_file_text(
+        orders_path.clone(),
+        Arc::new(
+            "SELECT 1 AS id, 9.99 AS amount, 'anon' AS name FROM source.raw_orders".to_string(),
+        ),
+    );
+    db.set_all_files(Arc::new(vec![orders_path.clone()]));
+    db.set_file_project_root(orders_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let ws = db.sync_workspace();
+    let result = columns_of_for_table_expr(&db.db, ws, "orders".to_string());
+
+    // Should resolve successfully.
+    let cols = result.expect("columns_of_for_table_expr must resolve orders");
+    assert_eq!(cols.len(), 3, "orders has 3 columns; got: {:?}", cols);
+
+    // Column order must be preserved (id, amount, name).
+    assert_eq!(cols[0].name, "id");
+    assert_eq!(cols[1].name, "amount");
+    assert_eq!(cols[2].name, "name");
+
+    // The source_span must be populated (non-None) for SQL-parsed columns.
+    assert!(
+        cols[0].source_span.is_some(),
+        "id column must have a source_span"
+    );
+    assert!(
+        cols[1].source_span.is_some(),
+        "amount column must have a source_span"
+    );
+    assert!(
+        cols[2].source_span.is_some(),
+        "name column must have a source_span"
+    );
+
+    // is_numeric must be derived from types.md Numeric constraint membership:
+    //   Integer and Decimal (9.99) → numeric; Text ('anon') → NOT numeric.
+    assert!(
+        cols[0].is_numeric,
+        "id (Integer) must have is_numeric == true; got col: {:?}",
+        cols[0]
+    );
+    assert!(
+        cols[1].is_numeric,
+        "amount (Decimal) must have is_numeric == true; got col: {:?}",
+        cols[1]
+    );
+    assert!(
+        !cols[2].is_numeric,
+        "name (Text) must have is_numeric == false; got col: {:?}",
+        cols[2]
+    );
+}
+
+/// `columns_of_for_table_expr` returns `Err(())` when the model name is not
+/// found in the workspace.
+#[test]
+fn columns_of_returns_err_for_nonexistent_model() {
+    let mut db = TestDb::default();
+    db.set_all_files(Arc::new(vec![]));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let ws = db.sync_workspace();
+    let result = columns_of_for_table_expr(&db.db, ws, "nonexistent".to_string());
+
+    assert!(
+        result.is_err(),
+        "columns_of_for_table_expr must return Err for unknown model"
+    );
+}
+
+/// Salsa invalidation: modifying the upstream model's schema causes
+/// `columns_of_for_table_expr` to re-evaluate and return the new schema.
+///
+/// This verifies the Salsa cache invariant from the Phase C spec §"Salsa-cached
+/// pure function of workspace state".
+#[test]
+fn columns_of_invalidates_when_upstream_schema_changes() {
+    let mut db = TestDb::default();
+
+    let orders_path = PathBuf::from("models/orders.sql");
+    db.set_file_text(
+        orders_path.clone(),
+        Arc::new("SELECT 1 AS id FROM source.raw_orders".to_string()),
+    );
+    db.set_all_files(Arc::new(vec![orders_path.clone()]));
+    db.set_file_project_root(orders_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    // First evaluation: 1 column.
+    let ws = db.sync_workspace();
+    let cols_v1 =
+        columns_of_for_table_expr(&db.db, ws, "orders".to_string()).expect("v1 must resolve");
+    assert_eq!(
+        cols_v1.len(),
+        1,
+        "v1 must have 1 column; got: {:?}",
+        cols_v1
+    );
+
+    // Mutate the upstream schema by adding a column.
+    db.set_file_text(
+        orders_path.clone(),
+        Arc::new("SELECT 1 AS id, 'x' AS status FROM source.raw_orders".to_string()),
+    );
+
+    // Second evaluation after invalidation: 2 columns.
+    let ws2 = db.sync_workspace();
+    let cols_v2 =
+        columns_of_for_table_expr(&db.db, ws2, "orders".to_string()).expect("v2 must resolve");
+    assert_eq!(
+        cols_v2.len(),
+        2,
+        "v2 must have 2 columns after schema change; got: {:?}",
+        cols_v2
+    );
+    assert_eq!(cols_v2[1].name, "status");
+}
+
+/// `columns_to_column_ref_values` preserves declaration order.
+#[test]
+fn columns_of_expansion_preserves_source_ordering_pure() {
+    use crate::schema::{Column, ColumnSource};
+    use rowan::TextRange;
+
+    // Construct three columns in a deliberate order (z, a, m).
+    let make_col = |name: &str| -> Column {
+        Column {
+            name: name.to_string(),
+            alias: None,
+            source: ColumnSource::Unknown,
+            expression: String::new(),
+            range: TextRange::default(),
+            data_type: None,
+        }
+    };
+
+    let cols = vec![make_col("z"), make_col("a"), make_col("m")];
+    let result = columns_to_column_ref_values(&cols);
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].name, "z");
+    assert_eq!(result[1].name, "a");
+    assert_eq!(result[2].name, "m");
+}
+
+/// `ColumnsOfUnresolvableSchema` message renders with the `{t}` placeholder.
+#[test]
+fn columns_of_unresolvable_schema_message_with_placeholder() {
+    let msg = meta_reflection_diagnostic_message_with_table_expr(
+        DiagnosticCode::ColumnsOfUnresolvableSchema,
+        None,
+        None,
+        None, // no table_expr given — falls back to "t"
+    );
+    assert_eq!(
+        msg,
+        "cannot resolve column list for t; upstream schema is unknown"
+    );
+}
