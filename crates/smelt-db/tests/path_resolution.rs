@@ -197,3 +197,77 @@ fn legacy_smelt_ref_is_parse_error() {
         "smelt.ref('users') must produce a ParseError diagnostic in Phase 4; got {diags:#?}"
     );
 }
+
+/// Regression test: `resolve_ref_path` must not do work proportional to
+/// `workspace.files * workspace.files` per call. Earlier, `file_path_tuple`
+/// invoked `smelt_core::Config::load` (which performs disk I/O and YAML
+/// parsing) once per workspace file inside the resolver, making each call
+/// O(N) on disk and the per-file diagnostics phase O(N^2). On the 1000-model
+/// CI bench this turned a sub-second pass into a multi-hour pass.
+///
+/// This test creates a workspace of 100 files, calls `file_diagnostics`
+/// on every file, and asserts the total wall-clock time stays under a
+/// generous threshold. Pre-fix, this takes tens of seconds; post-fix it
+/// should complete in milliseconds.
+#[test]
+fn resolve_ref_path_does_not_scale_quadratically() {
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    const N: usize = 200;
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let root = tmp.path().to_path_buf();
+    std::fs::create_dir_all(root.join("models")).expect("mkdir models");
+
+    // Build a smelt.yml that mirrors the bench (one entry per model) so each
+    // Config::load() parse pays a realistic cost. With the bug, this YAML is
+    // re-parsed once per workspace file inside every resolve_ref_path call.
+    let mut smelt_yml = String::from(
+        "name: bench\nversion: 1\npaths:\n  - models\ntargets:\n  default:\n    type: duckdb\n    database: ./out.db\n    schema: main\nmodels:\n",
+    );
+    for i in 0..N {
+        smelt_yml.push_str(&format!("  m_{i}:\n    materialization: table\n"));
+    }
+    std::fs::write(root.join("smelt.yml"), &smelt_yml).expect("write smelt.yml");
+
+    let mut files: Vec<(PathBuf, String)> = Vec::with_capacity(N);
+    for i in 0..N {
+        let path = root.join("models").join(format!("m_{i}.sql"));
+        let content = if i == 0 {
+            "SELECT 1 AS id\n".to_string()
+        } else {
+            // Multiple path refs per file so the resolver runs more often.
+            format!(
+                "SELECT a.id\nFROM smelt.models.m_{p} a\nJOIN smelt.models.m_{p} b ON a.id = b.id\n",
+                p = i - 1
+            )
+        };
+        std::fs::write(&path, &content).expect("write model");
+        files.push((path, content));
+    }
+
+    let mut db = Database::default();
+    let project = db.set_project_input(root.clone(), smelt_yml.clone());
+    let mut handles = Vec::with_capacity(N);
+    for (path, content) in &files {
+        let sf = db.set_source_file(path.clone(), content.clone(), root.clone());
+        handles.push(sf);
+    }
+    db.set_workspace(handles.clone(), vec![project]);
+    let ws = db.workspace();
+
+    let start = Instant::now();
+    for sf in &handles {
+        let _ = file_diagnostics(&db, ws, *sf);
+    }
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    // Pre-fix: thousands of ms even at N=100 (per-call cost grows with N).
+    // Post-fix: low milliseconds.
+    assert!(
+        elapsed_ms < 2000.0,
+        "file_diagnostics over {N} files took {elapsed_ms:.0} ms; \
+         resolve_ref_path is doing per-file disk I/O again"
+    );
+}

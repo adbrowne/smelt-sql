@@ -683,6 +683,28 @@ pub fn project_active_backends(
     smelt_core::parse_active_backends(project.smelt_yml_text(db))
 }
 
+/// Return the project's `paths:` scan-root list from `smelt.yml`, or an
+/// empty list when the config text is missing or fails to parse.
+///
+/// Reads from `ProjectInput::smelt_yml_text` so the result is Salsa-tracked
+/// and reused across every per-file resolver call. Without this, callers
+/// like `resolve_ref_path` re-read and re-parse `smelt.yml` once per
+/// workspace file, turning per-file diagnostics into an O(N^2) operation
+/// (this was the root cause of the multi-hour CI bench regression).
+///
+/// The empty-on-error fallback matches the previous `Config::load(...)
+/// .map(|c| c.paths).unwrap_or_default()` behaviour in the resolver: when
+/// the workspace has no parseable config, no scan-root prefix is stripped
+/// and the full directory path becomes part of the resolved tuple.
+#[salsa::tracked]
+pub fn project_paths(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<String>> {
+    let text = project.smelt_yml_text(db);
+    let paths = smelt_core::Config::parse_with_warnings(text)
+        .map(|(c, _warnings)| c.paths)
+        .unwrap_or_default();
+    Arc::new(paths)
+}
+
 /// Discover seed CSV files for a project root and infer their column types.
 ///
 /// Reads from disk (not a tracked Salsa input) — seeds that change on disk
@@ -1214,11 +1236,12 @@ pub fn function_body_diagnostics_for_file(
     // file's directory so that a function in `models/fn.sql` is addressable
     // as `smelt.fn_name()` (empty dir_segments) rather than requiring
     // `smelt.models.fn_name()`.
-    let scan_roots_for_body: Vec<String> = {
+    let scan_roots_for_body: Arc<Vec<String>> = {
         let proj_root = file.project_root(db).clone();
-        smelt_core::Config::load(&proj_root)
-            .map(|c| c.paths)
-            .unwrap_or_default()
+        match find_project(db, workspace, &proj_root) {
+            Some(p) => project_paths(db, p),
+            None => Arc::new(Vec::new()),
+        }
     };
     let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
         for f in &files {
@@ -2316,11 +2339,12 @@ pub fn smelt_fn_call_diagnostics_for_file(
     // file's directory so that a function in `models/fn.sql` under
     // `paths: ["models"]` is addressable as `smelt.fn_name()` (empty
     // dir_segments) rather than requiring `smelt.models.fn_name()`.
-    let scan_roots_for_call: Vec<String> = {
+    let scan_roots_for_call: Arc<Vec<String>> = {
         let proj_root = file.project_root(db).clone();
-        smelt_core::Config::load(&proj_root)
-            .map(|c| c.paths)
-            .unwrap_or_default()
+        match find_project(db, workspace, &proj_root) {
+            Some(p) => project_paths(db, p),
+            None => Arc::new(Vec::new()),
+        }
     };
     let path_prefix_validator = |dir_segments: &[String], name: &str| -> bool {
         for f in &files {
@@ -2739,6 +2763,12 @@ pub fn resolve_ref_path(
     // Try every project root in the workspace; the first match wins.
     for project in workspace.projects(db).iter().copied() {
         let project_root = project.root(db).clone();
+        // Fetch the project's scan-root list once (cached via Salsa) and pass
+        // it into `file_path_tuple` for every workspace file. Without this
+        // hoist, each iteration of the file loop below would re-parse
+        // `smelt.yml` from disk inside `file_path_tuple`, which scaled the
+        // resolver to O(workspace_files * config_load_cost) per call.
+        let scan_roots = project_paths(db, project);
 
         // Seeds: match by address_segments (Phase 2 — no "seeds" prefix required).
         // address_segments is the scan-root-stripped path tuple, so
@@ -2796,7 +2826,8 @@ pub fn resolve_ref_path(
                 continue;
             }
             // Match if file_path lives under project_root.
-            let file_tuple = match file_path_tuple(&project_root, file_path, file, db) {
+            let file_tuple = match file_path_tuple(&project_root, file_path, file, db, &scan_roots)
+            {
                 Some(t) => t,
                 None => continue,
             };
@@ -2831,14 +2862,9 @@ fn file_path_tuple(
     file_path: &Path,
     file: SourceFile,
     db: &dyn salsa::Database,
+    scan_roots: &[String],
 ) -> Option<Vec<String>> {
     let rel = file_path.strip_prefix(project_root).ok()?;
-
-    // Load scan roots from config.paths. If config can't be loaded, fall back
-    // to an empty list (triggering the "no scan root matches" path).
-    let scan_roots = smelt_core::Config::load(project_root)
-        .map(|c| c.paths)
-        .unwrap_or_default();
 
     // Try each scan root. Use the first one that `rel` is under.
     let effective_rel = scan_roots
