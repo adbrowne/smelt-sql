@@ -376,9 +376,137 @@ See [Pipe Operator](pipes.md) for full details and diagnostic codes.
 
 ## Diagnostic codes
 
-### Phase A codes
+Alphabetical across all phases. The "Phase" line on each entry records when the code was introduced.
 
-#### `MetaListEmptyTypeUnknown`
+### `ConfigVarNameNotLiteral`
+
+**Phase:** B.
+
+**When:** The argument to `smelt.config.var` is not a string literal.
+
+**Message:** `smelt.config.var name must be a string literal`
+
+**Fix:** use a string literal: `smelt.config.var('my_var')`. Dynamic name resolution is planned for Phase E1.
+
+See [Config Variables — `ConfigVarNameNotLiteral`](config-vars.md#configvarnamenotliteral).
+
+---
+
+### `ConfigVarNotFound`
+
+**Phase:** B.
+
+**When:** `smelt.config.var('name')` is called but `name` is not declared in `smelt.yml` `vars:`.
+
+**Message:** `compile-time variable {name} not declared in smelt.yml vars`
+
+**Fix:** add `name:` under `vars:` in `smelt.yml`, or check for typos in the variable name.
+
+See [Config Variables — `ConfigVarNotFound`](config-vars.md#configvarnotfound).
+
+---
+
+### `ConfigVarNullCoercion` (warning)
+
+**Phase:** B.
+
+**When:** A `vars:` entry has a YAML `null` value, coerced to `''` at the call site.
+
+**Message:** `null variable {name} coerced to empty string; declare a default in smelt.yml`
+
+**Fix:** replace the null YAML value with an explicit default string.
+
+See [Config Variables — `ConfigVarNullCoercion`](config-vars.md#configvarnullcoercion-warning).
+
+---
+
+### `HofExpectsLambda`
+
+**Phase:** B.
+
+**When:** The second argument to `map` or `filter` is not a lambda.
+
+**Message:** `{hof} expects a lambda; found {actual type}`
+
+**Fix:** replace the second argument with a `fn x => body` lambda.
+
+See [Higher-Order Functions — `HofExpectsLambda`](hofs.md#hofexpectslambda).
+
+---
+
+### `HofExpectsReducer`
+
+**Phase:** B.
+
+**When:** The second argument to `reduce` is not a bare reducer identifier from the closed registry.
+
+**Message:** `reduce expects a reducer; found {actual}`
+
+**Fix:** use one of the seven registered reducer names. See [Reducers](reducers.md) for the full list.
+
+See [Higher-Order Functions — `HofExpectsReducer`](hofs.md#hofexpectsreducer).
+
+---
+
+### `HofNameShadowed`
+
+**Phase:** B.
+
+**When:** A `smelt.define` function is declared with the name `map`, `filter`, or `reduce`.
+
+**Message:** `{name} is a reserved higher-order function name`
+
+**Fix:** rename the `smelt.define` function.
+
+See [Higher-Order Functions — `HofNameShadowed`](hofs.md#hofnameshadowed).
+
+---
+
+### `LambdaArityNotSupported`
+
+**Phase:** B.
+
+**When:** A lambda with more than one parameter is written: `fn (a, b) => body`.
+
+**Message:** `multi-argument lambdas are not supported in v1; use a single parameter`
+
+**Fix:** rewrite to use a single parameter. Multi-argument lambdas are planned for Phase F.
+
+See [Lambdas — `LambdaArityNotSupported`](lambdas.md#lambdaaritynotsupported).
+
+---
+
+### `LambdaInForbiddenPosition`
+
+**Phase:** B.
+
+**When:** A `fn x => body` lambda appears outside a HOF positional argument position.
+
+**Message:** `lambda is only valid as an argument to a higher-order function`
+
+**Fix:** move the lambda inside a `map` or `filter` call.
+
+See [Lambdas — `LambdaInForbiddenPosition`](lambdas.md#lambdainforbiddenposition).
+
+---
+
+### `LambdaResultTypeMismatch`
+
+**Phase:** B.
+
+**When:** The lambda body's type is incompatible with what the surrounding HOF requires (e.g. `filter` requires `Boolean`).
+
+**Message:** `{hof} requires lambda result {expected}; found {actual}`
+
+**Fix:** adjust the body expression to produce the required type.
+
+See [Lambdas — `LambdaResultTypeMismatch`](lambdas.md#lambdaresulttypemismatch).
+
+---
+
+### `MetaListEmptyTypeUnknown`
+
+**Phase:** A.
 
 **When:** A bare `[]` literal appears where the type checker cannot infer the element type from context.
 
@@ -398,7 +526,9 @@ FROM smelt.sources.raw.users
 
 ---
 
-#### `MetaListHeterogeneous`
+### `MetaListHeterogeneous`
+
+**Phase:** A.
 
 **When:** The elements of a list literal do not share a common type under LUB.
 
@@ -416,7 +546,9 @@ SELECT id, ...[1, 'hello'] FROM smelt.sources.raw.users
 
 ---
 
-#### `MetaSpreadInForbiddenPosition`
+### `MetaSpreadInForbiddenPosition`
+
+**Phase:** A.
 
 **When:** A `...xs` spread operator appears in a grammar position that does not support spread. Forbidden positions: WHERE clause, FROM clause without an explicit reducer, boolean-composition context (`AND`/`OR`), named-argument position.
 
@@ -438,7 +570,9 @@ WHERE id = 1 AND ...preds  -- MetaSpreadInForbiddenPosition
 
 ---
 
-#### `MetaSpreadOnNonList`
+### `MetaSpreadOnNonList`
+
+**Phase:** A.
 
 **When:** The `...` operator is applied to an expression that does not have type `List<T>`.
 
@@ -456,117 +590,9 @@ SELECT id, ...some_integer FROM smelt.sources.raw.users
 
 ---
 
-### Phase B codes
+### `PipeInDataPosition`
 
-#### `ConfigVarNameNotLiteral`
-
-**When:** The argument to `smelt.config.var` is not a string literal.
-
-**Message:** `smelt.config.var name must be a string literal`
-
-**Fix:** use a string literal: `smelt.config.var('my_var')`. Dynamic name resolution is planned for Phase E1.
-
-See [Config Variables — `ConfigVarNameNotLiteral`](config-vars.md#configvarnamenotliteral).
-
----
-
-#### `ConfigVarNotFound`
-
-**When:** `smelt.config.var('name')` is called but `name` is not declared in `smelt.yml` `vars:`.
-
-**Message:** `compile-time variable {name} not declared in smelt.yml vars`
-
-**Fix:** add `name:` under `vars:` in `smelt.yml`, or check for typos in the variable name.
-
-See [Config Variables — `ConfigVarNotFound`](config-vars.md#configvarnotfound).
-
----
-
-#### `ConfigVarNullCoercion` (warning)
-
-**When:** A `vars:` entry has a YAML `null` value, coerced to `''` at the call site.
-
-**Message:** `null variable {name} coerced to empty string; declare a default in smelt.yml`
-
-**Fix:** replace the null YAML value with an explicit default string.
-
-See [Config Variables — `ConfigVarNullCoercion`](config-vars.md#configvarnullcoercion-warning).
-
----
-
-#### `HofExpectsLambda`
-
-**When:** The second argument to `map` or `filter` is not a lambda.
-
-**Message:** `{hof} expects a lambda; found {actual type}`
-
-**Fix:** replace the second argument with a `fn x => body` lambda.
-
-See [Higher-Order Functions — `HofExpectsLambda`](hofs.md#hofexpectslambda).
-
----
-
-#### `HofExpectsReducer`
-
-**When:** The second argument to `reduce` is not a bare reducer identifier from the closed registry.
-
-**Message:** `reduce expects a reducer; found {actual}`
-
-**Fix:** use one of the seven registered reducer names. See [Reducers](reducers.md) for the full list.
-
-See [Higher-Order Functions — `HofExpectsReducer`](hofs.md#hofexpectsreducer).
-
----
-
-#### `HofNameShadowed`
-
-**When:** A `smelt.define` function is declared with the name `map`, `filter`, or `reduce`.
-
-**Message:** `{name} is a reserved higher-order function name`
-
-**Fix:** rename the `smelt.define` function.
-
-See [Higher-Order Functions — `HofNameShadowed`](hofs.md#hofnameshadowed).
-
----
-
-#### `LambdaArityNotSupported`
-
-**When:** A lambda with more than one parameter is written: `fn (a, b) => body`.
-
-**Message:** `multi-argument lambdas are not supported in v1; use a single parameter`
-
-**Fix:** rewrite to use a single parameter. Multi-argument lambdas are planned for Phase F.
-
-See [Lambdas — `LambdaArityNotSupported`](lambdas.md#lambdaaritynotsupported).
-
----
-
-#### `LambdaInForbiddenPosition`
-
-**When:** A `fn x => body` lambda appears outside a HOF positional argument position.
-
-**Message:** `lambda is only valid as an argument to a higher-order function`
-
-**Fix:** move the lambda inside a `map` or `filter` call.
-
-See [Lambdas — `LambdaInForbiddenPosition`](lambdas.md#lambdainforbiddenposition).
-
----
-
-#### `LambdaResultTypeMismatch`
-
-**When:** The lambda body's type is incompatible with what the surrounding HOF requires (e.g. `filter` requires `Boolean`).
-
-**Message:** `{hof} requires lambda result {expected}; found {actual}`
-
-**Fix:** adjust the body expression to produce the required type.
-
-See [Lambdas — `LambdaResultTypeMismatch`](lambdas.md#lambdaresulttypemismatch).
-
----
-
-#### `PipeInDataPosition`
+**Phase:** B.
 
 **When:** A `|>` pipe expression appears in a Data-World grammar position.
 
@@ -578,7 +604,9 @@ See [Pipe Operator — `PipeInDataPosition`](pipes.md#pipeindataposition).
 
 ---
 
-#### `PipeRhsNotCall`
+### `PipeRhsNotCall`
+
+**Phase:** B.
 
 **When:** The right-hand side of `|>` is not a function call expression.
 
@@ -590,7 +618,9 @@ See [Pipe Operator — `PipeRhsNotCall`](pipes.md#piperhsnotcall).
 
 ---
 
-#### `ReducerEmptyNoIdentity`
+### `ReducerEmptyNoIdentity`
+
+**Phase:** B.
 
 **When:** `reduce` is called with an empty list using `union_all` or `intersect_all`, which have no identity element.
 
@@ -602,7 +632,9 @@ See [Reducers — `ReducerEmptyNoIdentity`](reducers.md#reduceremptynoidentity).
 
 ---
 
-#### `ReducerInputTypeMismatch`
+### `ReducerInputTypeMismatch`
+
+**Phase:** B.
 
 **When:** `reduce` is called with a list whose element type is incompatible with the reducer's declared input.
 
@@ -614,7 +646,9 @@ See [Reducers — `ReducerInputTypeMismatch`](reducers.md#reducerinputtypemismat
 
 ---
 
-#### `ReducerNameShadowed`
+### `ReducerNameShadowed`
+
+**Phase:** B.
 
 **When:** A `smelt.define` function is declared with a name that matches one of the seven reserved reducer names.
 
