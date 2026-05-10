@@ -5078,12 +5078,17 @@ pub fn check_hof_position_diagnostics(
                                 if let (Some(elem), Some(body_expr)) = (elem_ty, lambda.body()) {
                                     let mut lambda_ctx = ctx.clone();
                                     lambda_ctx.add_lambda_param(&param_name, elem);
+                                    // Pass `None` for `nested`: `check_hof_position_diagnostics`
+                                    // is a top-level walker without a smelt.functions.* dispatch
+                                    // handler. The `nested` handler is available only inside
+                                    // `check_smelt_path_call` (function body expansion context).
                                     let body_diags = crate::function_body_check::walk_hof_lambda_body_with_anonymous_frame(
                                         &body_expr,
                                         &lambda_ctx,
                                         text,
                                         &call_name,
                                         Some(call_range),
+                                        None,
                                     );
                                     diags.extend(body_diags);
                                 }

@@ -26,7 +26,7 @@ The following are the only outputs of expansion that a user can observe:
 
 | Field | Meaning |
 |---|---|
-| `function` | Name of the function whose expansion produced the frame. For HOF anonymous frames this is the HOF name (`"map"`, `"filter"`, `"reduce"`). |
+| `function` | Name of the function whose expansion produced the frame. For HOF anonymous frames this is the bracketed HOF name (`"<map>"`, `"<filter>"`, `"<reduce>"`). The angle brackets are part of the value and distinguish synthesised HOF frames from user-named function frames. |
 | `param` | Name of the parameter whose binding produced the inner error. Empty string for anonymous HOF frames. |
 | `bound_type` | Concrete bound type, rendered for display via `DataType::to_string()`. Empty string for anonymous HOF frames. |
 | `decl_path` | Path to the file declaring the function (`Option`; `None` on degraded sig-lookup and always `None` for anonymous HOF frames). |
@@ -35,7 +35,7 @@ The following are the only outputs of expansion that a user can observe:
 | `fn_id` | Function identifier in the registry (`Option<String>`). `None` for anonymous HOF frames — HOFs are built-in and have no declaring file. `Some(name)` for `smelt.define` frames. |
 | `element_index` | Zero-based index into the source list literal, identifying which element the lambda body operated on. `None` when the source was not a literal or the information is not statically available (the common v1 case). |
 
-**Anonymous-frame form** (Phase B, HOF inline-expansion): `map`, `filter`, and `reduce` produce anonymous frames when a type error surfaces inside a lambda body. The anonymous form has `fn_id = None`, `decl_path = None`, `decl_range = None`, and `param = ""`. Renderers should handle `fn_id = None` by omitting the "defined in" link and displaying only the HOF name.
+**Anonymous-frame form** (Phase B, HOF inline-expansion): `map`, `filter`, and `reduce` produce anonymous frames when a type error surfaces inside a lambda body. The anonymous form has `fn_id = None`, `decl_path = None`, `decl_range = None`, and `param = ""`. The `function` field carries the angle-bracketed name (`"<map>"`, `"<filter>"`, `"<reduce>"`). Renderers should handle `fn_id = None` by omitting the "defined in" link and displaying only the bracketed HOF name (e.g. `in expansion of <map>`).
 
 The renderer is permitted to read fewer fields than are populated; producers must populate every field they have available regardless of what the current renderer reads.
 

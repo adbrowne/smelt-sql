@@ -138,7 +138,7 @@ pub fn walk_body_with_ctx(
 
 /// Phase B (meta-language): walk a HOF lambda body for type errors and stamp
 /// each resulting diagnostic with an **anonymous expansion frame** whose
-/// `fn_id = None` and `function = hof_name`.
+/// `fn_id = None` and `function = "<hof>"` (angle-bracketed form per spec).
 ///
 /// This is the HOF equivalent of `check_function_body_with_expansion`: whereas
 /// `smelt.define` expansions produce named frames (`fn_id = Some(sig.name)`),
@@ -146,10 +146,15 @@ pub fn walk_body_with_ctx(
 /// function body — it is a built-in operator.
 ///
 /// The frame stack entry:
-/// - `function` = `hof_name` (e.g. `"map"`)
+/// - `function` = `"<hof>"` (e.g. `"<map>"`) — angle brackets distinguish
+///   synthesised HOF frames from user-named function frames (spec §FrameInfo).
 /// - `fn_id` = `None` (anonymous — no declaring file)
 /// - `call_site_range` = `call_range` (span of the outer HOF call expression)
 /// - `param`, `bound_type`, `decl_path`, `decl_range`, `element_index` = defaults
+///
+/// `nested` propagates the `smelt.functions.*` dispatch handler so that
+/// `smelt.define`-defined function calls inside a HOF lambda body still
+/// receive expansion-frame stamping (multi-frame chain support).
 ///
 /// Pure function — no Salsa dependency.
 pub fn walk_hof_lambda_body_with_anonymous_frame(
@@ -158,9 +163,10 @@ pub fn walk_hof_lambda_body_with_anonymous_frame(
     text: &str,
     hof_name: &str,
     call_range: Option<Range>,
+    nested: Option<&NestedPathCallHandler<'_>>,
 ) -> Vec<Diagnostic> {
     let mut inner_diags = Vec::new();
-    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, None);
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, nested);
 
     // Stamp every inner diagnostic with an anonymous HOF expansion frame.
     if inner_diags.is_empty() {
@@ -168,7 +174,7 @@ pub fn walk_hof_lambda_body_with_anonymous_frame(
     }
 
     let frame = FrameInfo {
-        function: hof_name.to_string(),
+        function: format!("<{}>", hof_name.to_lowercase()),
         param: String::new(),
         bound_type: String::new(),
         decl_path: None,
@@ -267,6 +273,16 @@ fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
         // lookup).
         if let Some(Ok(SmeltType::SelectItems { kind, .. })) = &p.type_ref {
             ctx.add_fragment_param_kind(&p.name, *kind);
+        }
+        // Carry-over (type-expert review): record the full SmeltType for
+        // List<T> (and any non-trivial meta-language type) parameters so that
+        // HOF inference can recover `SmeltType::List(...)` rather than
+        // collapsing to `DataType::Unknown`.  The scalar projection stored in
+        // `function_params` is insufficient for HOF first-argument inference.
+        if let Some(Ok(smelt_ty)) = &p.type_ref {
+            if matches!(smelt_ty, SmeltType::List(_) | SmeltType::Unknown) {
+                ctx.add_function_param_smelt_type(&p.name, smelt_ty.clone());
+            }
         }
     }
     ctx
@@ -2627,11 +2643,12 @@ mod tests {
     // === Phase B (meta-language Phase 3) TDD tests: HOF expansion frames ===
 
     /// A type error inside a HOF lambda body carries an `ExpansionFrames` payload
-    /// whose innermost frame has `function = "map"`, `fn_id = None`, and
+    /// whose innermost frame has `function = "<map>"`, `fn_id = None`, and
     /// `call_site_range` set to the span of the `map(...)` call.
     ///
     /// This exercises the anonymous-frame stamping: HOF calls push a frame with
-    /// `fn_id = None` (anonymous) before walking the lambda body diagnostics.
+    /// `fn_id = None` (anonymous) and angle-bracketed name (`"<map>"`) before
+    /// walking the lambda body diagnostics.
     #[test]
     fn hof_lambda_body_diagnostic_carries_anonymous_frame() {
         use crate::type_inference::{check_hof_position_diagnostics, TypeContext};
@@ -2646,16 +2663,65 @@ mod tests {
         let diags = check_hof_position_diagnostics(&select, &ctx, sql);
 
         // There must be at least one diagnostic stamped with an anonymous HOF frame.
+        // The function field must use the angle-bracketed form `"<map>"` per spec §FrameInfo.
         let frame_diag = diags.iter().find(|d| {
             matches!(
                 &d.data,
                 Some(crate::DiagnosticData::ExpansionFrames(frames))
-                    if frames.iter().any(|f| f.fn_id.is_none() && f.function == "map")
+                    if frames.iter().any(|f| f.fn_id.is_none() && f.function == "<map>")
             )
         });
         assert!(
             frame_diag.is_some(),
-            "HOF lambda body diagnostic must carry an anonymous map frame; got: {diags:?}"
+            "HOF lambda body diagnostic must carry an anonymous <map> frame (angle-bracketed); got: {diags:?}"
+        );
+    }
+
+    /// `walk_hof_lambda_body_with_anonymous_frame` with `nested = Some(handler)`
+    /// propagates the handler into `walk_body` so SMELT_PATH_CALL nodes inside
+    /// the lambda body still receive frame stamping.
+    ///
+    /// Also verifies the `<map>` bracket form: even when `nested` is wired,
+    /// the anonymous HOF frame carries `function = "<map>"`.
+    #[test]
+    fn hof_lambda_body_with_nested_wired_propagates_and_brackets_hof_name() {
+        use crate::type_inference::TypeContext;
+
+        // Parse a smelt.define whose body has an unknown identifier `bad_expr`.
+        // `walk_body` will emit `UnknownIdentifier`; the anonymous HOF frame wraps it.
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        // Lambda context has no bindings — `bad_expr` is unknown.
+        let lambda_ctx = TypeContext::new();
+
+        // A nested handler that simply returns no diagnostics (no SMELT_PATH_CALL
+        // nodes exist in this body anyway — we verify `nested` is wired without
+        // panicking, and that the HOF frame is still stamped correctly).
+        let nested_fn: &NestedPathCallHandler<'_> = &|_call, _ctx, _text| vec![];
+
+        let diags = walk_hof_lambda_body_with_anonymous_frame(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            Some(nested_fn),
+        );
+
+        // The unknown identifier should produce an UnknownIdentifier diagnostic
+        // wrapped with a `<map>` anonymous HOF frame (angle-bracketed form).
+        let frame_diag = diags.iter().find(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.fn_id.is_none() && f.function == "<map>")
+            )
+        });
+        assert!(
+            frame_diag.is_some(),
+            "walk_hof_lambda_body_with_anonymous_frame with nested=Some must stamp \
+             a <map> anonymous frame (angle-bracketed); got: {diags:?}"
         );
     }
 }
