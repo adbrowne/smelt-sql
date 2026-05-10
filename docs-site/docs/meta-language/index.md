@@ -6,7 +6,7 @@ smelt's meta-language is a compile-time evaluation layer that lets you compute S
 
 Every smelt model lives in two overlapping worlds:
 
-**Meta-world** — evaluated at compile time. Values are fragment sorts (`Expr<T>`, `TableExpr`, `OrderSpec`) and the new meta types introduced by the meta-language (`List<T>`, and in later phases `Lambda<…>`, `Record<…>`, `Map<K,V>`). Meta values never reach the database engine; they are consumed during type-checking and codegen.
+**Meta-world** — evaluated at compile time. Values are fragment sorts (`Expr<T>`, `TableExpr`, `OrderSpec`) and the new meta types introduced by the meta-language (`List<T>`, `Lambda<T, U>`, and in later phases `Record<…>`, `Map<K,V>`). Meta values never reach the database engine; they are consumed during type-checking and codegen.
 
 **Data-world** — the SQL the database engine sees. Types are the `DataType` vocabulary (`INTEGER`, `TEXT`, `BOOLEAN`, …). Data values exist at query runtime.
 
@@ -25,7 +25,7 @@ FROM smelt.sources.raw.users
 
 For the full design rationale — alternatives considered, the framing of the meta/data boundary, worked examples — see the research document at `docs/research/20260507-typed-meta-programming.md`.
 
-## What ships today (Phase A)
+## What ships today (Phases A and B)
 
 Phase A delivers the three constructs that exercise the meta/data boundary:
 
@@ -35,14 +35,26 @@ Phase A delivers the three constructs that exercise the meta/data boundary:
 | `...xs` | Spread operator — splices a `List<T>` into a comma-separated position | [Lists & Spread](lists.md) |
 | `List<T>` | Meta-only type: finite, ordered, immutable | [Lists & Spread](lists.md) |
 
-Quick reference for all Phase A constructs and diagnostic codes: [Reference](reference.md).
+Phase B adds iteration, transformation, and compile-time configuration:
+
+| Construct | Description | Documentation |
+|-----------|-------------|---------------|
+| `fn x => body` | Lambda expression — inline single-argument function | [Lambdas](lambdas.md) |
+| `map` | Apply a lambda to every element of a list | [Higher-Order Functions](hofs.md) |
+| `filter` | Keep list elements matching a predicate | [Higher-Order Functions](hofs.md) |
+| `reduce` | Fold a list into a single SQL fragment using a reducer | [Higher-Order Functions](hofs.md) |
+| `\|>` | Pipe operator — left-to-right HOF chaining | [Pipe Operator](pipes.md) |
+| `and_all`, `comma_sep`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat` | Contextual reducers | [Reducers](reducers.md) |
+| `smelt.config.var('name')` | Compile-time variable lookup from `smelt.yml` | [Config Variables](config-vars.md) |
+
+Quick reference for all shipped constructs and diagnostic codes: [Reference](reference.md).
 
 ## Phase coverage
 
 | Phase | Status | Content |
 |-------|--------|---------|
 | **A — List literals, spread, `List<T>`** | Shipped | List literals, spread operator, four diagnostic codes, hover in editor |
-| **B — HOFs, lambdas, pipe, reducers** | Planned | `map`, `filter`, `reduce`, lambda syntax `fn x => body`, pipe `\|>`, contextual reducers (`and_all`, `comma_sep`, …) |
+| **B — HOFs, lambdas, pipe, reducers** | Shipped | `map`, `filter`, `reduce`, lambda syntax `fn x => body`, pipe `\|>`, contextual reducers (`and_all`, `comma_sep`, …), `smelt.config.var` |
 | **C — Column reflection** | Deferred | `smelt.columns_of(t)`, `ColumnRef` meta record type |
 | **D — Workspace reflection** | Deferred | `smelt.models.*`, `smelt.sources.*`, `ModelRef` |
 | **E1 — Records, maps, config loaders** | Deferred | `Record<{…}>`, `Map<K,V>`, YAML/JSON/TOML loaders |
@@ -50,4 +62,4 @@ Quick reference for all Phase A constructs and diagnostic codes: [Reference](ref
 | **F — Polish** | Deferred | Multi-arg lambdas, meta ternary, parameterised reducers |
 | **G — LSP completeness** | Deferred | Rename, completion, diagnostics-with-frame-stacks across all surface |
 
-Phase B and later phases land incrementally. Each phase adds to the [Reference](reference.md) page and may extend [Lists & Spread](lists.md) with new examples.
+Later phases land incrementally. Each phase adds to the [Reference](reference.md) page.

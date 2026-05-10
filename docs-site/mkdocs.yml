@@ -52,6 +52,11 @@ nav:
   - Meta-Language:
     - Overview: meta-language/index.md
     - Lists & Spread: meta-language/lists.md
+    - Lambdas: meta-language/lambdas.md
+    - Higher-Order Functions: meta-language/hofs.md
+    - Pipe Operator: meta-language/pipes.md
+    - Reducers: meta-language/reducers.md
+    - Config Variables: meta-language/config-vars.md
     - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md
