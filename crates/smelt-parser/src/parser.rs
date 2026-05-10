@@ -423,9 +423,8 @@ impl<'a> Parser<'a> {
         if self.tokens.get(self.pos + lookahead).map(|t| t.kind) != Some(DOT) {
             return false;
         }
-        // Find the next non-trivia token: must be IDENT "fn".
-        // `fn` is a contextual keyword that lexes as IDENT, so the check
-        // is purely text-based.
+        // Find the next non-trivia token: must be FN_KW (the reserved
+        // `fn` keyword that introduces a lambda).
         lookahead += 1;
         while let Some(t) = self.tokens.get(self.pos + lookahead) {
             if t.kind.is_trivia() {
