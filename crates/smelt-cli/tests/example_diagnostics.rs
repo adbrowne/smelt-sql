@@ -704,6 +704,190 @@ fn meta_hofs_broken_config_var_null_coercion() {
     );
 }
 
+// ===== Phase C (meta-language) TDD tests =====
+//
+// Layout mirrors Phase B: one clean workspace + one broken workspace per diagnostic code.
+//   - `examples/meta_columns/`                            — happy-path: coalesce_numeric function + schema-driven select
+//   - `examples/meta_columns_broken_columns_of_requires_table_expr/`   — ColumnsOfRequiresTableExpr
+//   - `examples/meta_columns_broken_columns_of_named_argument/`        — ColumnsOfNamedArgument
+//   - `examples/meta_columns_broken_columns_of_unresolvable_schema/`   — ColumnsOfUnresolvableSchema
+//   - `examples/meta_columns_broken_column_ref_field_unknown/`         — ColumnRefFieldUnknown
+
+/// The Phase C diagnostic codes used to filter diagnostics in the broken-workspace helper.
+const PHASE_C_CODES: &[smelt_db::DiagnosticCode] = &[
+    smelt_db::DiagnosticCode::ColumnsOfRequiresTableExpr,
+    smelt_db::DiagnosticCode::ColumnsOfNamedArgument,
+    smelt_db::DiagnosticCode::ColumnsOfUnresolvableSchema,
+    smelt_db::DiagnosticCode::ColumnRefFieldUnknown,
+];
+
+/// Helper: loads `example_dir` as a workspace, checks that exactly one Phase C diagnostic
+/// fires for the file ending in `expected_file`, and that no other file emits Phase C codes.
+fn check_workspace_emits_exactly_one_phase_c_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_phase_c: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_phase_c: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_phase_c = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| PHASE_C_CODES.contains(c))
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_phase_c(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_c.push(d.clone());
+            } else {
+                other_phase_c.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_phase_c(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_c.push(d.0.clone());
+            } else {
+                other_phase_c.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_phase_c.is_empty(),
+        "expected zero Phase C diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_phase_c.len(),
+        other_phase_c
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_c.len(),
+        1,
+        "expected exactly 1 Phase C diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_phase_c.len(),
+        target_phase_c
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_c[0].code,
+        Some(expected_code),
+        "expected Phase C diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_phase_c[0].code,
+        target_phase_c[0].message
+    );
+}
+
+/// Phase C TDD: `examples/meta_columns/` produces zero diagnostics.
+/// The clean fixture exercises the coalesce_numeric function end-to-end.
+#[test]
+fn meta_columns_clean_workspace() {
+    check_workspace_no_diagnostics("examples/meta_columns");
+}
+
+/// Phase C TDD: `examples/meta_columns_broken_columns_of_requires_table_expr/` produces
+/// exactly one `ColumnsOfRequiresTableExpr` diagnostic.
+#[test]
+fn meta_columns_broken_columns_of_requires_table_expr() {
+    check_workspace_emits_exactly_one_phase_c_diagnostic(
+        "examples/meta_columns_broken_columns_of_requires_table_expr",
+        "models/columns_of_requires_table_expr.sql",
+        smelt_db::DiagnosticCode::ColumnsOfRequiresTableExpr,
+    );
+}
+
+/// Phase C TDD: `examples/meta_columns_broken_columns_of_named_argument/` produces
+/// exactly one `ColumnsOfNamedArgument` diagnostic.
+#[test]
+fn meta_columns_broken_columns_of_named_argument() {
+    check_workspace_emits_exactly_one_phase_c_diagnostic(
+        "examples/meta_columns_broken_columns_of_named_argument",
+        "models/columns_of_named_argument.sql",
+        smelt_db::DiagnosticCode::ColumnsOfNamedArgument,
+    );
+}
+
+/// Phase C TDD: `examples/meta_columns_broken_columns_of_unresolvable_schema/` produces
+/// exactly one `ColumnsOfUnresolvableSchema` diagnostic.
+#[test]
+fn meta_columns_broken_columns_of_unresolvable_schema() {
+    check_workspace_emits_exactly_one_phase_c_diagnostic(
+        "examples/meta_columns_broken_columns_of_unresolvable_schema",
+        "models/columns_of_unresolvable_schema.sql",
+        smelt_db::DiagnosticCode::ColumnsOfUnresolvableSchema,
+    );
+}
+
+/// Phase C TDD: `examples/meta_columns_broken_column_ref_field_unknown/` produces
+/// exactly one `ColumnRefFieldUnknown` diagnostic.
+///
+/// The fixture uses a model-level HOF call `map(smelt.columns_of(orders), fn c => c.invalid)`
+/// where `c` is ColumnRef-typed (bound by the HOF source list) and `invalid` is not
+/// in the closed field set {name, type, is_numeric}.
+#[test]
+fn meta_columns_broken_column_ref_field_unknown() {
+    check_workspace_emits_exactly_one_phase_c_diagnostic(
+        "examples/meta_columns_broken_column_ref_field_unknown",
+        "models/bad_field_access.sql",
+        smelt_db::DiagnosticCode::ColumnRefFieldUnknown,
+    );
+}
+
 // ===== Phase 5b TDD tests =====
 
 /// Phase 5b TDD Test 3: After broken/ fixtures are migrated to `smelt.functions.*`,

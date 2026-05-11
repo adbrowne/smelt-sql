@@ -1645,7 +1645,40 @@ pub fn function_body_diagnostics_for_file(
         if cycle_set.contains(&name) {
             continue;
         }
-        let Some(body_expr) = define.body().and_then(|b| b.expression()) else {
+        let Some(body) = define.body() else {
+            continue;
+        };
+        if let Some(select_stmt) = body.select_stmt() {
+            // Phase C: SELECT-body functions without TableExpr params can be
+            // checked at definition time. `has_deferred_phase13_param` already
+            // skipped TableExpr/SelectItems params above, so any SELECT-body
+            // function that reaches here has only scalar/ColumnRef params.
+            // Run `check_function_select_body` with a seeded param context to
+            // surface `ColumnRefFieldUnknown` (and other SELECT-body codes)
+            // anchored at the function file, not deferred to call-site.
+            let body_ctx = function_body_check::seed_param_context(&sig.params);
+            let no_op_handler = |_call: &smelt_parser::ast::SmeltPathCall,
+                                 _ctx: &type_inference::TypeContext,
+                                 _text: &str|
+             -> Vec<Diagnostic> { Vec::new() };
+            out.extend(function_body_check::check_function_select_body(
+                sig,
+                &select_stmt,
+                &clean_text,
+                &body_ctx,
+                &no_op_handler,
+                None,
+            ));
+            // Phase C: also run the HOF ColumnRef field dispatcher so that
+            // `map(fn c => c.invalid, smelt.columns_of(t))` inside a function
+            // SELECT body emits `ColumnRefFieldUnknown` at definition time.
+            out.extend(function_body_check::check_hof_column_ref_field_diagnostics(
+                &select_stmt,
+                &clean_text,
+            ));
+            continue;
+        }
+        let Some(body_expr) = body.expression() else {
             continue;
         };
         // Phase 26: Use `check_function_body_with_expansion` for Tier 2/3
@@ -2337,12 +2370,20 @@ pub fn smelt_fn_call_diagnostics_for_file(
             // Skip `smelt.config.var(...)` — those are handled by
             // `check_config_var_call_diagnostics` in `check_file_diagnostics`,
             // not by the smelt-function call checker.
+            //
+            // Skip `smelt.columns_of(...)` — a Phase C meta-builtin handled
+            // by `check_columns_of_diagnostics` and the
+            // `ColumnsOfUnresolvableSchema` wiring block in
+            // `check_file_diagnostics`.
             if let Some(call) = SmeltPathCall::cast(n.clone()) {
                 let segs = call.segments();
                 if segs.len() == 2
                     && segs[0].to_lowercase() == "config"
                     && segs[1].to_lowercase() == "var"
                 {
+                    return false;
+                }
+                if segs.len() == 1 && segs[0].to_lowercase() == "columns_of" {
                     return false;
                 }
             }
@@ -3760,6 +3801,137 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 type_inference::check_hof_position_diagnostics(&select_stmt, &kind_ctx, text);
             for diag in hof_diags {
                 DiagnosticAcc(diag).accumulate(db);
+            }
+
+            // Phase C (meta-language) — smelt.columns_of diagnostic wiring.
+            //
+            // Walks every SMELT_PATH_CALL for `smelt.columns_of(...)` in the
+            // select statement. Emits:
+            //   - ColumnsOfNamedArgument: named argument passed to columns_of
+            //   - ColumnsOfRequiresTableExpr: non-TableExpr positional arg
+            // Uses the same empty TypeContext as HOF checks (no column schema
+            // available at this stage in the orchestrator).
+            {
+                let cols_of_diags =
+                    type_inference::check_columns_of_diagnostics(&select_stmt, &kind_ctx, text);
+                for diag in cols_of_diags {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
+            // Phase C (meta-language) — ColumnsOfUnresolvableSchema wiring.
+            //
+            // For each `smelt.columns_of(smelt.models.<name>)` (or
+            // `smelt.columns_of(<name>)` where `<name>` is a bare identifier that
+            // resolves via the workspace) call in the select statement, attempt to
+            // resolve the model schema via `columns_of_for_table_expr`. When the
+            // schema cannot be resolved (the model does not exist or has an unknown
+            // schema), emit exactly one `ColumnsOfUnresolvableSchema` diagnostic
+            // anchored at the full `smelt.columns_of(...)` call span.
+            //
+            // This implements the drop-on-error recovery policy (same as
+            // `MetaSpreadInForbiddenPosition`): the call-site gets one diagnostic
+            // and no cascading errors from the surrounding expression.
+            {
+                use smelt_parser::ast::SmeltPathCall;
+                use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+                for node in select_stmt.syntax().descendants() {
+                    if node.kind() != SMELT_PATH_CALL {
+                        continue;
+                    }
+                    let call = match SmeltPathCall::cast(node.clone()) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let segs = call.segments();
+                    if segs.len() != 1 || segs[0].to_lowercase() != "columns_of" {
+                        continue;
+                    }
+                    let arg_list = match call.arg_list() {
+                        Some(al) => al,
+                        None => continue,
+                    };
+                    // Only check positional args (named args are caught by
+                    // ColumnsOfNamedArgument above).
+                    for pos_arg in arg_list.positional_args() {
+                        // Extract the model name from the positional argument:
+                        // - smelt path ref: e.g. `smelt.models.orders` → last segment
+                        // - bare identifier: e.g. `orders`
+                        let model_name: Option<String> = {
+                            // Try smelt path ref child.
+                            let path_ref_name = pos_arg
+                                .syntax()
+                                .children()
+                                .find_map(smelt_parser::ast::SmeltPathRef::cast)
+                                .and_then(|r| r.segments().last().cloned());
+                            if let Some(n) = path_ref_name {
+                                Some(n)
+                            } else {
+                                // Try direct SmeltPathRef cast.
+                                smelt_parser::ast::SmeltPathRef::cast(pos_arg.syntax().clone())
+                                    .and_then(|r| r.segments().last().cloned())
+                                    .or_else(|| {
+                                        // Bare identifier: must start with a letter or
+                                        // underscore (not a numeric literal like `42`).
+                                        let arg_text = pos_arg.text().trim().to_string();
+                                        let is_bare = !arg_text.is_empty()
+                                            && arg_text
+                                                .chars()
+                                                .next()
+                                                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                                            && arg_text
+                                                .chars()
+                                                .all(|c| c.is_alphanumeric() || c == '_');
+                                        if is_bare {
+                                            Some(arg_text)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                            }
+                        };
+                        let model_name = match model_name {
+                            Some(n) => n,
+                            None => continue,
+                        };
+                        if columns_of_for_table_expr(db, workspace, model_name.clone()).is_err() {
+                            let call_range =
+                                smelt_parser::ast::text_range_to_range(text, node.text_range());
+                            DiagnosticAcc(Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message: meta_reflection_diagnostic_message_with_table_expr(
+                                    DiagnosticCode::ColumnsOfUnresolvableSchema,
+                                    None,
+                                    None,
+                                    Some(&model_name),
+                                ),
+                                range: call_range,
+                                code: Some(DiagnosticCode::ColumnsOfUnresolvableSchema),
+                                data: None,
+                            })
+                            .accumulate(db);
+                        }
+                    }
+                }
+            }
+
+            // Phase C (meta-language) — ColumnRefFieldUnknown HOF dispatcher.
+            //
+            // For each `map`/`filter` HOF call whose first argument is
+            // `smelt.columns_of(…)`, walk the lambda body and emit
+            // `ColumnRefFieldUnknown` for any `<param>.<field>` access where
+            // `<field>` is not in the closed ColumnRef field set
+            // `{name, type, is_numeric}`.
+            //
+            // This runs on MODEL select statements (the outer `select_stmt`).
+            // Function-file SELECT bodies are handled separately in
+            // `function_body_diagnostics_for_file`.
+            {
+                for diag in
+                    function_body_check::check_hof_column_ref_field_diagnostics(&select_stmt, text)
+                {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
             }
 
             let from_sources = count_from_sources(&select_stmt);

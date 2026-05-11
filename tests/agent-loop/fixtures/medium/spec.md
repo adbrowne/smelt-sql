@@ -166,3 +166,59 @@ Key Phase B diagnostics to watch for:
 - `PipeRhsNotCall` — `list |> 3 + 4` (RHS of `|>` must be a call expression)
 
 This extension is not validated by `validate.py`; it is workflow practice only.
+
+## Optional: column reflection with smelt.columns_of (Phase C surface)
+
+After the Phase B extension, try using Phase C column reflection to generate
+per-column expressions automatically from a model's schema.
+
+First, add a schema YAML for `raw_orders` under `models/sources/raw/raw_orders.yml`
+that declares `amount` and `customer_id` as numeric columns:
+
+```yaml
+description: Raw orders
+columns:
+  - name: order_id
+    type: INTEGER
+  - name: customer_id
+    type: INTEGER
+  - name: order_date
+    type: DATE
+  - name: status
+    type: VARCHAR
+  - name: amount
+    type: DOUBLE
+```
+
+Then write a function that uses `smelt.columns_of` and a HOF pipeline to wrap
+every numeric column in `COALESCE`:
+
+```sql
+-- functions/coalesce_numeric.sql
+smelt.define coalesce_numeric(t: TableExpr) -> SelectItems<Scalar, t> AS (
+    smelt.columns_of(t)
+      |> filter(fn c => c.is_numeric)
+      |> map(fn c => COALESCE(c.name, 0))
+)
+```
+
+And call it in a model using the spread form:
+
+```sql
+-- models/stg_orders_safe.sql
+SELECT
+    order_id,
+    status,
+    order_date,
+    ...smelt.functions.coalesce_numeric(smelt.stg_orders)
+FROM smelt.stg_orders
+```
+
+Phase C diagnostics to watch for when experimenting:
+
+- `ColumnsOfRequiresTableExpr` — `smelt.columns_of(42)` where the argument is not a model reference
+- `ColumnsOfNamedArgument` — `smelt.columns_of(t => orders)` uses an unsupported named argument
+- `ColumnsOfUnresolvableSchema` — the model passed to `smelt.columns_of` has no resolvable schema
+- `ColumnRefFieldUnknown` — `c.label` where `label` is not in the ColumnRef field set `{name, type, is_numeric}`
+
+This extension is not validated by `validate.py`; it is workflow practice only.

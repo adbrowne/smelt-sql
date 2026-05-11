@@ -15,21 +15,23 @@
 //! the diagnostic accumulator.
 
 use rowan::TextRange;
-use smelt_parser::ast::{BinaryExpr, Cte, Expr, SelectStmt, SmeltPathCall, TableRef};
+use smelt_parser::ast::{
+    BinaryExpr, Cte, Expr, FunctionCall, Lambda, SelectStmt, SmeltPathCall, TableRef,
+};
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
-    check_schema_requirement, unify_call, ContextRef, ExprKind, FrameInfo, FunctionSig, ParamSpec,
-    SchemaMismatch, SchemaRequirement, Signature, SmeltType, StructRowTail, Tier, TypeConstraint,
-    UnificationError,
+    check_schema_requirement, column_ref_field, unify_call, ContextRef, ExprKind, FrameInfo,
+    FunctionSig, ParamSpec, SchemaMismatch, SchemaRequirement, Signature, SmeltType, StructRowTail,
+    Tier, TypeConstraint, UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
-    check_meta_text_lift_diagnostics, check_undeclared_columns, infer_cte_columns,
-    infer_expression_kind, infer_expression_type, walk_expression_columns_with_visitor,
-    walk_select_columns_with_visitor, TypeContext,
+    check_column_ref_field_diagnostics, check_meta_text_lift_diagnostics, check_undeclared_columns,
+    infer_cte_columns, infer_expression_kind, infer_expression_type,
+    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
@@ -317,7 +319,7 @@ fn emit_duplicate_param_diagnostics(params: &[ParamSpec], out: &mut Vec<Diagnost
 }
 
 /// Build a `TypeContext` seeded with the signature's parameter bindings.
-fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
+pub(crate) fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
     let mut ctx = TypeContext::new();
     for p in params {
         if p.name.is_empty() {
@@ -878,6 +880,14 @@ pub fn check_smelt_path_call(
     let Some(name) = segments.last().cloned() else {
         return diagnostics;
     };
+
+    // Phase C: skip smelt.columns_of — it is a meta-builtin handled by
+    // `check_columns_of_diagnostics` and the `ColumnsOfUnresolvableSchema`
+    // wiring block in `check_file_diagnostics`. It does not go through the
+    // smelt-function call dispatcher and has no `FunctionSig` in the registry.
+    if segments.len() == 1 && name.to_lowercase() == "columns_of" {
+        return diagnostics;
+    }
 
     // Build the display path for messages: "smelt.functions.foo"
     let display_path = format!("smelt.{}", segments.join("."));
@@ -1665,7 +1675,7 @@ pub fn register_join_alias_schemas(
 ///   - nested `smelt.functions.*` path-form calls inside the SELECT-list
 ///     expressions dispatch through `nested_handler` so frames stack across
 ///     expansion depth (Phase 12 contract).
-fn check_function_select_body(
+pub(crate) fn check_function_select_body(
     _sig: &FunctionSig,
     select_stmt: &SelectStmt,
     text: &str,
@@ -1692,22 +1702,30 @@ fn check_function_select_body(
     //    identifier does not resolve.
     for info in check_undeclared_columns(select_stmt, body_ctx) {
         // Suppress spurious UnknownIdentifier for `<columnref-binding>.<field>`
-        // references where `<field>` is a recognised ColumnRef field (i.e.
-        // `column_ref_field(field)` returns `Some`).  These references are
-        // handled by the lift check in step 1b instead; suppressing them here
-        // avoids double-diagnostics for the valid meta-Text lift case (`c.name`).
+        // references regardless of whether `<field>` is a recognised ColumnRef
+        // field.  Two sub-cases:
         //
-        // Unrecognised fields (e.g. `c.foo`) are NOT suppressed — they fall
-        // through and emit `UnknownIdentifier` as normal.
+        //   - Recognised field (e.g. `c.name`): handled by the meta-Text lift
+        //     check in step 1b below.
+        //   - Unrecognised field (e.g. `c.foo`): handled by
+        //     `check_column_ref_field_diagnostics` in step 1c below, which
+        //     emits `ColumnRefFieldUnknown` at the field-name token span (the
+        //     correct spec-required anchor).
+        //
+        // Suppressing both avoids double-diagnostics: `check_undeclared_columns`
+        // anchors at the whole `c.foo` expression, while the Phase C checks
+        // anchor at the field token or emit the correct Phase C code.
         if let Some(qualifier) = &info.qualifier {
-            use smelt_types::signatures::{column_ref_field, SmeltType};
+            use smelt_types::signatures::SmeltType;
             let qualifier_is_column_ref = body_ctx
                 .lookup_function_param_smelt_type(qualifier)
                 .map(|ty| matches!(ty, SmeltType::ColumnRef))
                 .unwrap_or(false);
-            if qualifier_is_column_ref && column_ref_field(&info.column_name).is_some() {
-                // This is a `<columnref-param>.<recognised-field>` reference.
-                // Skip — the lift check (step 1b) validates the lifted identifier.
+            if qualifier_is_column_ref {
+                // All `<columnref-param>.<field>` references are handled by
+                // the lift check (step 1b) for recognised fields and by
+                // `check_column_ref_field_diagnostics` (step 1c) for
+                // unrecognised fields. Skip here to avoid double-diagnostics.
                 continue;
             }
         }
@@ -1742,6 +1760,19 @@ fn check_function_select_body(
             code: Some(DiagnosticCode::UnknownIdentifier),
             data: None,
         });
+    }
+
+    // 1c. Phase C ColumnRef field validation (Phase C §"ColumnRef field access").
+    //     For each `<columnref-param>.<field>` expression where `<field>` is NOT
+    //     in the closed field set `{name, type, is_numeric}`, emit
+    //     `ColumnRefFieldUnknown` anchored at the field-name token.
+    //
+    //     This is separate from step 1a (which now suppresses ALL ColumnRef-
+    //     qualified references to avoid double-diagnostics) and step 1b (which
+    //     handles the valid `c.name` lift). Only *unrecognised* fields reach
+    //     this check.
+    for diag in check_column_ref_field_diagnostics(select_stmt, body_ctx, text) {
+        diagnostics.push(diag);
     }
 
     // 2. Dispatch nested `smelt.functions.*` path-form calls so frames stack
@@ -2692,6 +2723,219 @@ pub fn declared_return_hover_text(sig: &FunctionSig) -> Option<String> {
 // tests in `crates/smelt-db/tests/as_struct_tests.rs`) keep working.
 pub use smelt_planner::lowering::{as_struct_to_sql, backend_supports_struct_literal};
 
+/// Phase C (meta-language) HOF dispatcher: check a SELECT statement for
+/// `ColumnRefFieldUnknown` errors that arise when a HOF lambda body accesses
+/// an invalid field on a `ColumnRef`-typed binding.
+///
+/// A HOF call whose **first argument** is a `smelt.columns_of(…)` path call
+/// produces a `List<ColumnRef>` source list.  Each lambda bound from that list
+/// receives a `ColumnRef`-typed parameter.  When the lambda body accesses a
+/// field that is not in the closed field set `{name, type, is_numeric}`, this
+/// function emits `ColumnRefFieldUnknown` anchored at the field-name token.
+///
+/// Algorithm (per spec §ColumnRef field access):
+/// 1. Walk every `FUNCTION_CALL` descendant of `select_stmt`.
+/// 2. Identify `map`/`filter` calls whose first argument is
+///    `smelt.columns_of(…)` (detected by AST shape: a `SMELT_PATH_CALL` node
+///    whose single segment is `"columns_of"`).
+/// 3. Extract the single-parameter lambda from the second argument.
+/// 4. Build a scratch `TypeContext` with the lambda parameter registered as
+///    `SmeltType::ColumnRef` (via `add_function_param_smelt_type`) so that
+///    `check_column_ref_field_diagnostics_for_expr` can identify it.
+/// 5. Walk the lambda body expression, emitting `ColumnRefFieldUnknown` for
+///    every `<param>.<field>` access where `<field>` is not `name`, `type`,
+///    or `is_numeric`.
+///
+/// Pure function — no Salsa dependency.
+pub fn check_hof_column_ref_field_diagnostics(
+    select_stmt: &SelectStmt,
+    text: &str,
+) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::{DOT, FUNCTION_CALL, IDENT, SMELT_PATH_CALL};
+
+    let mut diags = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != FUNCTION_CALL {
+            continue;
+        }
+        let call = match FunctionCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Get the HOF name, handling keyword-lexed names like `filter`.
+        let call_name_lc: String = call
+            .name()
+            .unwrap_or_else(|| {
+                call.syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia())
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default()
+            })
+            .to_lowercase();
+
+        // Only map/filter (reduce doesn't take a lambda).
+        if call_name_lc != "map" && call_name_lc != "filter" {
+            continue;
+        }
+
+        let args = call.arguments();
+        if args.len() < 2 {
+            continue;
+        }
+
+        // First arg: must be a smelt.columns_of(…) path call.
+        let first_arg = &args[0];
+        let is_columns_of = first_arg.syntax().descendants().any(|n| {
+            if n.kind() != SMELT_PATH_CALL {
+                return false;
+            }
+            let path_call = match SmeltPathCall::cast(n) {
+                Some(p) => p,
+                None => return false,
+            };
+            let segs = path_call.segments();
+            segs.len() == 1 && segs[0].to_lowercase() == "columns_of"
+        }) || {
+            // Direct SMELT_PATH_CALL at the arg level.
+            if first_arg.syntax().kind() == SMELT_PATH_CALL {
+                if let Some(pc) = SmeltPathCall::cast(first_arg.syntax().clone()) {
+                    let segs = pc.segments();
+                    segs.len() == 1 && segs[0].to_lowercase() == "columns_of"
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if !is_columns_of {
+            continue;
+        }
+
+        // Second arg: extract lambda parameter name and body.
+        let second_arg = &args[1];
+        let lambda: Option<Lambda> = Lambda::cast(second_arg.syntax().clone())
+            .or_else(|| second_arg.syntax().children().find_map(Lambda::cast));
+        let lambda = match lambda {
+            Some(l) => l,
+            None => continue,
+        };
+
+        let param_name = match lambda.params().into_iter().next() {
+            Some(n) => n,
+            None => continue,
+        };
+        let lambda_body = match lambda.body() {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Build a scratch context with the lambda param registered as ColumnRef.
+        let mut lambda_ctx = TypeContext::new();
+        lambda_ctx.add_function_param_smelt_type(&param_name, SmeltType::ColumnRef);
+        // Also register as an Unknown-typed scalar so bare `param` resolves
+        // via `lookup_identifier` (prevents spurious UnknownIdentifier).
+        lambda_ctx.add_function_param(
+            &param_name,
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // Walk the lambda body expression for ColumnRef field errors.
+        let body_root = lambda_body.syntax();
+        // Dedup tracker: same (qualifier, field) may appear in nested EXPRESSION
+        // wrappers — emit only once per pair.
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        let to_range = |range: rowan::TextRange| -> Range {
+            smelt_parser::ast::text_range_to_range(text, range)
+        };
+
+        for body_node in body_root.descendants() {
+            let expr = match Expr::cast(body_node.clone()) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            // Look for qualified column refs: `qualifier.field`.
+            let col_ref = match smelt_parser::ast::ColumnRef::from_expr(&expr) {
+                Some(cr) => cr,
+                None => continue,
+            };
+
+            let qualifier = match col_ref.qualifier() {
+                Some(q) => q,
+                None => continue,
+            };
+
+            // Is the qualifier registered as ColumnRef?
+            let is_column_ref = lambda_ctx
+                .lookup_function_param_smelt_type(qualifier)
+                .map(|ty| matches!(ty, SmeltType::ColumnRef))
+                .unwrap_or(false);
+
+            if !is_column_ref {
+                continue;
+            }
+
+            let field_name = col_ref.name();
+
+            // Valid field — skip.
+            if column_ref_field(field_name).is_some() {
+                continue;
+            }
+
+            // Deduplicate.
+            let key = (qualifier.to_string(), field_name.to_string());
+            if !seen.insert(key) {
+                continue;
+            }
+
+            // Find the field-name token (the IDENT after the DOT) for precise anchoring.
+            let field_token_range = {
+                let mut after_dot = false;
+                let mut found: Option<rowan::TextRange> = None;
+                for token in body_node
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                {
+                    let kind = token.kind();
+                    if kind == DOT {
+                        after_dot = true;
+                    } else if kind == IDENT && after_dot {
+                        found = Some(token.text_range());
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| body_node.text_range())
+            };
+
+            diags.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: crate::meta_reflection_diagnostic_message(
+                    DiagnosticCode::ColumnRefFieldUnknown,
+                    None,
+                    Some(field_name),
+                ),
+                range: to_range(field_token_range),
+                code: Some(DiagnosticCode::ColumnRefFieldUnknown),
+                data: None,
+            });
+        }
+    }
+
+    diags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2951,15 +3195,14 @@ mod tests {
 
     /// `check_function_select_body` with `c: ColumnRef` and body
     /// `SELECT c.foo FROM t` where `foo` is NOT a recognised ColumnRef field must
-    /// emit EXACTLY ONE `UnknownIdentifier`.
+    /// emit EXACTLY ONE `ColumnRefFieldUnknown` (Phase C spec).
     ///
-    /// The suppression gate checks BOTH that the qualifier is a ColumnRef param
-    /// AND that the field name is a recognised ColumnRef field (via
-    /// `column_ref_field`).  Since `foo` is not a recognised field, the
-    /// suppression does NOT fire and `check_undeclared_columns` emits its normal
-    /// `UnknownIdentifier`.
+    /// The suppression gate fires for ALL ColumnRef-qualified references
+    /// (`qualifier_is_column_ref` is sufficient) to avoid double-diagnostics.
+    /// `check_column_ref_field_diagnostics` (step 1c) then emits `ColumnRefFieldUnknown`
+    /// anchored at the field-name token, which is the Phase C spec-required behaviour.
     #[test]
-    fn pipeline_column_ref_non_text_field_emits_unknown_identifier() {
+    fn pipeline_column_ref_non_text_field_emits_column_ref_field_unknown() {
         let sig = minimal_sig();
         let ctx = make_pipeline_ctx();
         let sql = "SELECT c.foo FROM t";
@@ -2970,20 +3213,19 @@ mod tests {
         let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
 
         // `c.foo` — `foo` is not a recognised ColumnRef field (`column_ref_field("foo")` = None).
-        // The suppression gate requires BOTH qualifier=ColumnRef AND field=recognised ColumnRef field.
-        // Since `foo` fails the field check, the suppression does NOT fire.
-        // `check_undeclared_columns` emits UnknownIdentifier for `c.foo`.
+        // Phase C: the suppression gate fires for ALL ColumnRef-qualified refs, and
+        // `check_column_ref_field_diagnostics` emits `ColumnRefFieldUnknown` for the unknown field.
+        // This is one and only one diagnostic — no double-diagnostic from check_undeclared_columns.
         assert_eq!(
             diags.len(),
             1,
-            "SELECT c.foo FROM t must produce exactly one UnknownIdentifier — \
-             foo is not a recognised ColumnRef field so the suppression does not fire; \
-             got: {diags:?}"
+            "SELECT c.foo FROM t must produce exactly one ColumnRefFieldUnknown — \
+             foo is not a recognised ColumnRef field; got: {diags:?}"
         );
         assert_eq!(
             diags[0].code,
-            Some(DiagnosticCode::UnknownIdentifier),
-            "diagnostic must be UnknownIdentifier; got: {:?}",
+            Some(DiagnosticCode::ColumnRefFieldUnknown),
+            "diagnostic must be ColumnRefFieldUnknown; got: {:?}",
             diags[0].code
         );
     }
