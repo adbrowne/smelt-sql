@@ -117,15 +117,15 @@ A Tier 1 function that wants a stable, declared return type must escalate to Tie
 
 Type comparison treats engine aliases as equal: `Text` and `Varchar` unify; `Integer` and the engine's `INT` unify. Normalisation happens before the diagnostic message is rendered, so users never see a `Text vs Varchar` mismatch in error text. (See `types.md` §"String unification" for the full alias table.)
 
-### `List<Unknown>` widening (Phase A — meta-language)
+### `List<Unknown>` widening (meta-language)
 
-`List<T>` is meta-only and is introduced by `meta_language.md` Phase A. It interacts with this spec's `Unknown` widening discipline at three points:
+`List<T>` is meta-only (defined in `meta_language.md`). It interacts with this spec's `Unknown` widening discipline at three points:
 
 1. **Heterogeneous list literal degrades to `List<Unknown>`.** A list literal whose elements do not unify under the LUB rules of `types.md` §"Numeric promotion chain" emits `MetaListHeterogeneous` (anchored at the literal's source span) and produces a `List<Unknown>` value. The body that consumed the literal continues to type-check; downstream operations against `List<Unknown>` follow the standard `Unknown` rules below.
 2. **Empty literal in unknown-target position degrades to `List<Unknown>`.** `[]` at a position with no inferable target sort emits `MetaListEmptyTypeUnknown` and produces `List<Unknown>`. Same downstream consequences.
-3. **`List<Unknown>` propagation.** Operations over `List<Unknown>` produce `Unknown` (HOF results — Phase B), `Unknown`-elemented results (further `List<Unknown>`), or are a `TypeMismatch` when the operation requires a satisfied constraint (`reduce` with a numeric reducer over `List<Unknown>` is a `TypeMismatch` once Phase B ships, *not* a silent fallback to a different reducer). Spread of a `List<Unknown>` into a comma-separated position emits each element as an `Unknown`-typed splice; existing kind-ceiling checks at the splice position then run normally and may produce further diagnostics. No new diagnostic codes are introduced for `List<Unknown>` propagation; the existing `TypeMismatch` / `Unknown` rules in `types.md` apply.
+3. **`List<Unknown>` propagation.** Operations over `List<Unknown>` produce `Unknown` (HOF results), `Unknown`-elemented results (further `List<Unknown>`), or are a `TypeMismatch` when the operation requires a satisfied constraint (`reduce` with a numeric reducer over `List<Unknown>` is a `TypeMismatch`, *not* a silent fallback to a different reducer). Spread of a `List<Unknown>` into a comma-separated position emits each element as an `Unknown`-typed splice; existing kind-ceiling checks at the splice position then run normally and may produce further diagnostics. No new diagnostic codes are introduced for `List<Unknown>` propagation; the existing `TypeMismatch` / `Unknown` rules in `types.md` apply.
 
-The rule that **`List<Unknown>` does not silently become `List<Any>`** is load-bearing: `Any` accepts every type and would mask the upstream LUB failure forever; `Unknown` is the compiler's "we already told you about this" type and continues to surface upstream errors at every consumer. Phase A's diagnostic codes (`MetaListEmptyTypeUnknown`, `MetaListHeterogeneous`) fire exactly once at the source of the widening, and downstream surface only the consumer-side `TypeMismatch` if any.
+The rule that **`List<Unknown>` does not silently become `List<Any>`** is load-bearing: `Any` accepts every type and would mask the upstream LUB failure forever; `Unknown` is the compiler's "we already told you about this" type and continues to surface upstream errors at every consumer. The widening diagnostic codes (`MetaListEmptyTypeUnknown`, `MetaListHeterogeneous`) fire exactly once at the source of the widening, and downstream surface only the consumer-side `TypeMismatch` if any.
 
 ### What gradual typing does **not** do
 
@@ -221,7 +221,7 @@ This section captures the load-bearing rationale behind the tier model and the b
 - `docs/specs/functions.md` — declaration grammar, frontmatter, function-level diagnostics, cycle rule
 - `docs/specs/scoping.md` — body-scope name resolution and the `TypeContext` seeding contract
 - `docs/specs/expansion.md` — AST-level expansion mechanics, provenance origin tags, hygiene
-- `docs/specs/meta_language.md` — `List<Unknown>` widening interacts with the meta-language Phase A surface; this spec owns the widening discipline, `meta_language.md` owns the diagnostic codes
+- `docs/specs/meta_language.md` — `List<Unknown>` widening interacts with the meta-language list surface; this spec owns the widening discipline, `meta_language.md` owns the diagnostic codes
 
 ### Research
 

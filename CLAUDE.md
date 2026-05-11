@@ -326,6 +326,31 @@ A spec is the **canonical answer** to "how does this feature work?". It is norma
 - The spec diff is the change description for `/smelt:plan`.
 - `/smelt:validate <feature>` produces a drift report against the spec.
 
+### Timeless-oracle rule
+
+Specs (`docs/specs/`) and user docs (`docs-site/docs/`) describe the feature as if it has always existed. They never reference plan phases, milestones, or implementation history. A reader six months after the plan ships should not be able to tell which plan introduced a given paragraph.
+
+**Forbidden in spec body and user docs:**
+- Section headings tagged with a plan phase: `### Phase A — List<T>`, `#### Phase C goto-def`.
+- Inline labels referring to a phase: `Meta list (Phase A)`, "Phase B adds…", "ships in Phase E1".
+- Status callouts written in plan vocabulary: `*[deferred to Phase E1]*`, "Phase 0 scaffold".
+
+**Where it does belong:**
+- **Plans (`docs/plans/`)** — phases live here; this is the only place phase vocabulary is allowed.
+- **Spec → Known Divergences / Open Questions** — describe the gap in terms of *behavior* ("`column_origin` is not yet emitted by producers") and link the tracking plan. Phase numbers are tolerated here only when paired with a plan link.
+- **Spec → References → Plans (history)** — link plan files; do not describe their internal phase structure.
+
+**Examples — bad → good:**
+
+| Bad (in spec/user-doc body) | Good |
+|---|---|
+| `### Phase A — List<T>, list literals, spread` | `### Lists and spread` |
+| "Phase B adds iteration, transformation, and compile-time configuration:" | "The meta-language provides iteration, transformation, and compile-time configuration via:" |
+| "Inline-schema sugar … is a Phase E1 decision." | Move to **Open Questions**: "Whether `load_yaml(path, { name: Text })` is first-class surface or sugar for a named declaration is undecided. Tracked in `docs/plans/20260509-meta-language-overall.md`." |
+| "ships in Phase 51 of `docs/plans/20260422-smelt-functions.md`" inside §Surface | Move the *status* line to **Known Divergences**; the §Surface entry just describes the validation. |
+
+`/smelt:validate` flags `Phase [A-Z0-9]` matches in spec body sections and user docs as drift.
+
 ## Plans
 
 Plans are committed to the repo under `docs/plans/` as markdown files.

@@ -1,33 +1,40 @@
 ---
 feature: meta_config_loading
 status: experimental
-last_reviewed: 2026-05-09
+last_reviewed: 2026-05-11
 owners: [andrew]
 ---
 
 # Meta Config Loading
 
-> **What this is.** A normative spec for the file-loader family that supplies typed meta-world values from disk: `smelt.config.load_yaml(path, schema)`, `smelt.config.load_json(path, schema)`, `smelt.config.load_toml(path, schema)`, and the schema declarations they validate against. In scope: the loader API surface, schema authoring (inline and named), validation diagnostics with source-span retention through to the YAML/JSON/TOML row that violated the schema, determinism guarantees (workspace-relative paths, no network, no clock), and per-target file-overlay strategies. Out of scope: the meta-language constructs that consume loaded values — `List<T>`, HOFs, records, multi-model production (see `meta_language.md`); the `vars:` block in `smelt.yml` accessed via `smelt.config.var(name)` (see `meta_language.md` §Phase B); the planner's use of generated models (see `planner_integration.md`).
+> **What this is.** A normative spec for the file-loader family that supplies typed meta-world values from disk: `smelt.config.load_yaml(path, schema)`, `smelt.config.load_json(path, schema)`, `smelt.config.load_toml(path, schema)`, and the schema declarations they validate against. In scope: the loader API surface, schema authoring (inline and named), validation diagnostics with source-span retention through to the YAML/JSON/TOML row that violated the schema, determinism guarantees (workspace-relative paths, no network, no clock), and per-target file-overlay strategies. Out of scope: the meta-language constructs that consume loaded values — `List<T>`, HOFs, records, multi-model production (see `meta_language.md`); the `vars:` block in `smelt.yml` accessed via `smelt.config.var(name)` (see `meta_language.md`); the planner's use of generated models (see `planner_integration.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
-> **Skeleton notice.** This spec is a Phase 0 scaffold per `docs/plans/20260509-meta-language-overall.md`. The body is filled in Phase E1, where the loaders ship. Sections marked `[deferred to Phase E1]` describe the surface that will land then. The framing in §Design and §Constraints is load-bearing now and is filled in immediately.
+> **Implementation status.** The loader family is not yet implemented. The §Surface and §Semantics sections describe the intended surface; §Design and §Constraints are load-bearing now. See §Known Divergences for what is undecided and §References → Plans (history) for the tracking plan.
 
 ## Surface
 
-*[deferred to Phase E1]*
+The loader family exposes three calls, one per supported file format:
 
-The Phase E1 spec increment will define:
+- `smelt.config.load_yaml(path: Text, schema: Schema) -> Schema`
+- `smelt.config.load_json(path: Text, schema: Schema) -> Schema`
+- `smelt.config.load_toml(path: Text, schema: Schema) -> Schema`
 
-- `smelt.config.load_yaml(path: Text, schema: Schema)` and corresponding `load_json` / `load_toml`. Return type: the `Schema`-typed meta value.
-- `Schema` declarations: inline (`{ name: Text, columns: List<Text> }`) and named (`smelt.record SourceEntry = { … }` from `meta_language.md` Phase E1).
-- Diagnostic anchoring: validation failures point at the YAML/JSON line and column that violated the schema, not at the loader call site.
-- Path resolution rules: workspace-relative; no `..` escape; no absolute paths in v1; no network or scheme prefixes.
-- Per-target overlay strategies: path-interpolation (`'configs/{target}/sources.yaml'`) and post-load filter — pick on Phase E1 evidence.
+`Schema` declarations:
+
+- **Inline:** `load_yaml('configs/sources.yaml', { name: Text, columns: List<Text> })`.
+- **Named:** declared with `smelt.record SourceEntry = { … }` (see `meta_language.md`) and passed by name.
+
+**Diagnostic anchoring.** Validation failures point at the YAML/JSON/TOML line and column that violated the schema, not at the loader call site. The loader call site is the secondary frame.
+
+**Path resolution.** Workspace-relative; no `..` escape; no absolute paths in v1; no network or scheme prefixes.
+
+**Per-target overlay.** Strategy is one of three candidates listed in §Known Divergences (path-interpolation, file overlay, post-load filter). Picked when the loaders ship.
 
 ## Semantics
 
-### Load-bearing rules (in scope from Phase 0)
+### Load-bearing rules
 
 1. **Workspace containment.** Loader paths must resolve to a file inside the workspace root. Paths escaping the root via `..` or absolute paths are a compile-time error.
 2. **Salsa-tracked inputs.** Every loaded file must be registered as a Salsa input so type checking is reproducible and the LSP invalidates correctly when the file changes.
@@ -37,7 +44,7 @@ The Phase E1 spec increment will define:
 
 ### Per-format and per-target rules
 
-*[deferred to Phase E1]*
+Per-format and per-target rules are not yet defined. See §Known Divergences for the open per-target overlay decision.
 
 ## Design
 
@@ -59,9 +66,7 @@ Determinism and reproducibility (§Constraints below). A spec change to allow ne
 
 ### Per-target overlay strategy options
 
-*[deferred to Phase E1]*
-
-Three options on the table from research §4.10.1: path interpolation, file overlay (load `sources.yaml` then merge `sources.{target}.yaml`), post-load `filter`. Phase E1 picks based on evidence from the example fixtures.
+Three options are on the table from research §4.10.1: path interpolation (`'configs/{target}/sources.yaml'`), file overlay (load `sources.yaml` then merge `sources.{target}.yaml`), post-load `filter`. The choice is open until example fixtures provide evidence — see §Known Divergences.
 
 ## Constraints & Invariants
 
@@ -77,25 +82,24 @@ Three options on the table from research §4.10.1: path interpolation, file over
 - **Network loads.** No HTTP / S3 / etc. in v1; future spec.
 - **Schema inference from sample data.** Future tooling can read a YAML and emit a schema declaration; this is a codegen-time helper, not a loader-time fallback.
 - **Sum types in schemas.** Aligned with `meta_language.md` constraint — heterogeneous values require sum types, which are out of scope.
-- **Recursive schemas.** A schema referring to itself (or mutually recursive schemas) is a Phase F revisit — most config files are flat-or-nested-but-finite.
+- **Recursive schemas.** A schema referring to itself (or mutually recursive schemas) is deferred — most config files are flat-or-nested-but-finite.
 
 ## Known Divergences / Open Questions
 
-- **Body deferred to Phase E1.** No code exists yet. The meta-plan (`docs/plans/20260509-meta-language-overall.md`) tracks when E1 lands.
-- **Per-target overlay strategy.** Three candidates; Phase E1 picks one based on example fixture evidence. Until then, the spec lists the candidates without committing.
-- **Inline-schema sugar.** Whether `load_yaml(path, { name: Text, … })` (inline schema) is a first-class surface or just sugar for a named declaration is a Phase E1 decision.
-- **Schema reuse across files.** Whether named schemas (`smelt.record`) live in their own files (`config_schemas/*.smelt.record`) or only inside `meta-language` files is a layout decision deferred until Phase E1 fixtures show the pattern.
-- **TOML support timing.** Ship YAML + JSON in E1; add TOML in F or post-plan based on user demand. Spec calls TOML in scope to keep the API surface stable, but implementation may follow YAML/JSON.
+- **Loaders not implemented.** No code exists yet; the surface above is intended, not landed. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Per-target overlay strategy is undecided.** Three candidates listed in §Design; the choice will be made when example fixtures provide evidence. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Inline-schema sugar.** Whether `load_yaml(path, { name: Text, … })` (inline schema) is a first-class surface or just sugar for a named declaration is open. Tracked in `docs/plans/20260509-meta-language-overall.md`.
+- **Schema reuse across files.** Whether named schemas (`smelt.record`) live in their own files (`config_schemas/*.smelt.record`) or only inside meta-language files is a layout decision deferred until example fixtures show the pattern.
+- **TOML support timing.** YAML and JSON ship first; TOML may follow based on user demand. The spec lists TOML in scope to keep the API surface stable, but implementation may lag.
 
 ## References
 
-- **Code**: *(populated when Phase E1 lands)*
-- **Tests**: *(populated when Phase E1 lands)*
-- **User docs**: *(populated when Phase E1 lands)*
-  - `docs-site/docs/meta-language/generators.md` will reference this spec from the multi-model-production guide.
+- **Code**: *(none yet — loaders unimplemented)*
+- **Tests**: *(none yet — loaders unimplemented)*
+- **User docs**: *(none yet — loaders unimplemented)*
+  - `docs-site/docs/meta-language/generators.md` will reference this spec from the multi-model-production guide once the loaders ship.
 - **Plans (history)**:
-  - `docs/plans/20260509-meta-language-overall.md` — meta-plan / phase status table
-  - `docs/plans/20260509-meta-language-E1.md` — Phase E1 *(when written)*
+  - `docs/plans/20260509-meta-language-overall.md` — tracking plan for the loader family
 - **Related specs**:
   - `docs/specs/meta_language.md` — the consuming meta-language constructs (`List<T>`, records, `Map<K,V>`, HOFs, multi-model production)
   - `docs/specs/sources.md` — `sources.yml` parser is the closest existing precedent for a workspace-input YAML loader

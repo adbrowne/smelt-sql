@@ -1,6 +1,6 @@
 # Lambdas
 
-Phase B of the meta-language introduces **lambda expressions** — anonymous single-argument functions written inline as arguments to `map` or `filter`. (`reduce`'s second argument is a bare reducer identifier, not a lambda — see [Reducers](reducers.md).) A lambda lets you describe a per-element transformation or predicate without declaring a named `smelt.define`.
+The meta-language provides **lambda expressions** — anonymous single-argument functions written inline as arguments to `map` or `filter`. (`reduce`'s second argument is a bare reducer identifier, not a lambda — see [Reducers](reducers.md).) A lambda lets you describe a per-element transformation or predicate without declaring a named `smelt.define`.
 
 Lambdas are a meta-world construct. They are evaluated entirely at compile time and never reach the database engine.
 
@@ -38,7 +38,7 @@ SELECT
 
 ## Single-argument only (v1)
 
-Phase B supports exactly one lambda parameter. Multi-argument syntax (`fn (a, b) => body`) is reserved for Phase F. Writing it in Phase B emits `LambdaArityNotSupported`.
+Lambdas support exactly one parameter. Multi-argument syntax (`fn (a, b) => body`) is planned but not yet supported; writing it emits `LambdaArityNotSupported`.
 
 ## Where lambdas are allowed
 
@@ -122,7 +122,7 @@ Lambdas capture the compile-time meta-world. Runtime SQL columns do not exist at
     SELECT map([1, 2, 3], fn (a, b) => a + b)
     ```
 
-    **What to fix:** Rewrite to use a single lambda parameter. If your transformation needs two values from the list, consider restructuring the source list or using `smelt.define` to accept both as regular parameters. Multi-argument lambdas are planned for Phase F.
+    **What to fix:** Rewrite to use a single lambda parameter. If your transformation needs two values from the list, consider restructuring the source list or using `smelt.define` to accept both as regular parameters. Multi-argument lambdas are planned but not yet implemented.
 
 ---
 

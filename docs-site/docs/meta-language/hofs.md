@@ -1,6 +1,6 @@
 # Higher-Order Functions
 
-Phase B of the meta-language ships three built-in **higher-order functions (HOFs)**: `map`, `filter`, and `reduce`. HOFs operate on `List<T>` values at compile time and produce new `List<U>` values or reduced fragments that splice into SQL.
+The meta-language provides three built-in **higher-order functions (HOFs)**: `map`, `filter`, and `reduce`. HOFs operate on `List<T>` values at compile time and produce new `List<U>` values or reduced fragments that splice into SQL.
 
 All three HOFs are meta-world only. Their inputs and outputs are compile-time values; the database engine sees the already-reduced SQL fragments, never the HOF calls themselves.
 

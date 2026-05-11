@@ -1,6 +1,6 @@
 # Meta-Language Reference
 
-Alphabetical quick reference for all shipped meta-language constructs and diagnostic codes. Phase A entries were populated first; Phase B extends this page with every HOF, reducer, lambda keyword, pipe operator, and `smelt.config.var`.
+Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, and `smelt.config.var`.
 
 For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md).
 
@@ -145,7 +145,7 @@ See [Reducers — `intersect_all`](reducers.md#intersect_all) for full details.
 
 **Covariance:** `List<S> <: List<T>` whenever `S <: T`. Sound because lists are immutable.
 
-**Construction:** list literals `[a, b, c]` (Phase A); HOFs `map`, `filter` (Phase B).
+**Construction:** list literals `[a, b, c]`; HOFs `map`, `filter`.
 
 **Hover:** hovering over a list literal shows `List<T>` with `T` resolved to the inferred element type, e.g. `List<Expr<INTEGER>>`.
 
@@ -256,7 +256,7 @@ See [Higher-Order Functions — `reduce`](hofs.md#reduce) and [Reducers](reducer
 smelt.config.var(name: Text) -> Text
 ```
 
-Reads `name` from the `vars:` block of `smelt.yml`. The argument must be a string literal in Phase B.
+Reads `name` from the `vars:` block of `smelt.yml`. The argument must be a string literal.
 
 **Example:**
 ```sql
@@ -304,9 +304,9 @@ See [Reducers — `union_all`](reducers.md#union_all) for full details.
 
 where `expr` evaluates to a `List<T>`.
 
-**Valid positions (Phase A):** SELECT lists.
+**Valid positions:** SELECT lists.
 
-**Valid positions (Phase B, planned):** GROUP BY, ORDER BY, positional function arguments, IN-lists, VALUES rows, inside other list literals.
+**Planned but not yet supported:** GROUP BY, ORDER BY, positional function arguments, IN-lists, VALUES rows, inside other list literals.
 
 **Forbidden positions:** WHERE clauses, FROM clauses without an explicit reducer, boolean-composition contexts (`AND`/`OR`), named-argument positions (`name => value`). Each forbidden use emits `MetaSpreadInForbiddenPosition`.
 
@@ -376,25 +376,21 @@ See [Pipe Operator](pipes.md) for full details and diagnostic codes.
 
 ## Diagnostic codes
 
-Alphabetical across all phases. The "Phase" line on each entry records when the code was introduced.
+Alphabetical across the whole meta-language surface.
 
 ### `ConfigVarNameNotLiteral`
-
-**Phase:** B.
 
 **When:** The argument to `smelt.config.var` is not a string literal.
 
 **Message:** `smelt.config.var name must be a string literal`
 
-**Fix:** use a string literal: `smelt.config.var('my_var')`. Dynamic name resolution is planned for Phase E1.
+**Fix:** use a string literal: `smelt.config.var('my_var')`. Dynamic name resolution is planned but not yet implemented.
 
 See [Config Variables — `ConfigVarNameNotLiteral`](config-vars.md#configvarnamenotliteral).
 
 ---
 
 ### `ConfigVarNotFound`
-
-**Phase:** B.
 
 **When:** `smelt.config.var('name')` is called but `name` is not declared in `smelt.yml` `vars:`.
 
@@ -408,8 +404,6 @@ See [Config Variables — `ConfigVarNotFound`](config-vars.md#configvarnotfound)
 
 ### `ConfigVarNullCoercion` (warning)
 
-**Phase:** B.
-
 **When:** A `vars:` entry has a YAML `null` value, coerced to `''` at the call site.
 
 **Message:** `null variable {name} coerced to empty string; declare a default in smelt.yml`
@@ -421,8 +415,6 @@ See [Config Variables — `ConfigVarNullCoercion`](config-vars.md#configvarnullc
 ---
 
 ### `HofExpectsLambda`
-
-**Phase:** B.
 
 **When:** The second argument to `map` or `filter` is not a lambda.
 
@@ -436,8 +428,6 @@ See [Higher-Order Functions — `HofExpectsLambda`](hofs.md#hofexpectslambda).
 
 ### `HofExpectsReducer`
 
-**Phase:** B.
-
 **When:** The second argument to `reduce` is not a bare reducer identifier from the closed registry.
 
 **Message:** `reduce expects a reducer; found {actual}`
@@ -449,8 +439,6 @@ See [Higher-Order Functions — `HofExpectsReducer`](hofs.md#hofexpectsreducer).
 ---
 
 ### `HofNameShadowed`
-
-**Phase:** B.
 
 **When:** A `smelt.define` function is declared with the name `map`, `filter`, or `reduce`.
 
@@ -464,21 +452,17 @@ See [Higher-Order Functions — `HofNameShadowed`](hofs.md#hofnameshadowed).
 
 ### `LambdaArityNotSupported`
 
-**Phase:** B.
-
 **When:** A lambda with more than one parameter is written: `fn (a, b) => body`.
 
 **Message:** `multi-argument lambdas are not supported in v1; use a single parameter`
 
-**Fix:** rewrite to use a single parameter. Multi-argument lambdas are planned for Phase F.
+**Fix:** rewrite to use a single parameter. Multi-argument lambdas are planned but not yet implemented.
 
 See [Lambdas — `LambdaArityNotSupported`](lambdas.md#lambdaaritynotsupported).
 
 ---
 
 ### `LambdaInForbiddenPosition`
-
-**Phase:** B.
 
 **When:** A `fn x => body` lambda appears outside a HOF positional argument position.
 
@@ -492,8 +476,6 @@ See [Lambdas — `LambdaInForbiddenPosition`](lambdas.md#lambdainforbiddenpositi
 
 ### `LambdaResultTypeMismatch`
 
-**Phase:** B.
-
 **When:** The lambda body's type is incompatible with what the surrounding HOF requires (e.g. `filter` requires `Boolean`).
 
 **Message:** `{hof} requires lambda result {expected}; found {actual}`
@@ -505,8 +487,6 @@ See [Lambdas — `LambdaResultTypeMismatch`](lambdas.md#lambdaresulttypemismatch
 ---
 
 ### `MetaListEmptyTypeUnknown`
-
-**Phase:** A.
 
 **When:** A bare `[]` literal appears where the type checker cannot infer the element type from context.
 
@@ -528,8 +508,6 @@ FROM smelt.sources.raw.users
 
 ### `MetaListHeterogeneous`
 
-**Phase:** A.
-
 **When:** The elements of a list literal do not share a common type under LUB.
 
 **Message:** `list elements have incompatible types: {T0}, {Tk}`
@@ -548,8 +526,6 @@ SELECT id, ...[1, 'hello'] FROM smelt.sources.raw.users
 
 ### `MetaSpreadInForbiddenPosition`
 
-**Phase:** A.
-
 **When:** A `...xs` spread operator appears in a grammar position that does not support spread. Forbidden positions: WHERE clause, FROM clause without an explicit reducer, boolean-composition context (`AND`/`OR`), named-argument position.
 
 **Message:** `spread is not allowed in {position name}`
@@ -563,16 +539,14 @@ FROM smelt.sources.raw.users
 WHERE id = 1 AND ...preds  -- MetaSpreadInForbiddenPosition
 ```
 
-**Fix:** move the spread to a SELECT list. For WHERE-clause predicate lists, use the `and_all` reducer. For IN-list membership, use `WHERE id IN (...vs)` (Phase B).
+**Fix:** move the spread to a SELECT list. For WHERE-clause predicate lists, use the `and_all` reducer. For IN-list membership, use `WHERE id IN (...vs)` (planned but not yet implemented).
 
 !!! note
-    In Phase A, forbidden positions other than WHERE may emit parse errors rather than this diagnostic. The full set of friendly diagnostics for forbidden positions lands in Phase B.
+    Forbidden positions other than WHERE may currently emit parse errors rather than this diagnostic. The full set of friendly diagnostics for forbidden positions is planned but not yet wired everywhere.
 
 ---
 
 ### `MetaSpreadOnNonList`
-
-**Phase:** A.
 
 **When:** The `...` operator is applied to an expression that does not have type `List<T>`.
 
@@ -592,8 +566,6 @@ SELECT id, ...some_integer FROM smelt.sources.raw.users
 
 ### `PipeInDataPosition`
 
-**Phase:** B.
-
 **When:** A `|>` pipe expression appears in a Data-World grammar position.
 
 **Message:** `|> is meta-only; use SQL composition in this position`
@@ -605,8 +577,6 @@ See [Pipe Operator — `PipeInDataPosition`](pipes.md#pipeindataposition).
 ---
 
 ### `PipeRhsNotCall`
-
-**Phase:** B.
 
 **When:** The right-hand side of `|>` is not a function call expression.
 
@@ -620,8 +590,6 @@ See [Pipe Operator — `PipeRhsNotCall`](pipes.md#piperhsnotcall).
 
 ### `ReducerEmptyNoIdentity`
 
-**Phase:** B.
-
 **When:** `reduce` is called with an empty list using `union_all` or `intersect_all`, which have no identity element.
 
 **Message:** `reducer {r} has no identity for an empty list`
@@ -634,8 +602,6 @@ See [Reducers — `ReducerEmptyNoIdentity`](reducers.md#reduceremptynoidentity).
 
 ### `ReducerInputTypeMismatch`
 
-**Phase:** B.
-
 **When:** `reduce` is called with a list whose element type is incompatible with the reducer's declared input.
 
 **Message:** `reducer {r} expects List<{T_in}>; found List<{T_actual}>`
@@ -647,8 +613,6 @@ See [Reducers — `ReducerInputTypeMismatch`](reducers.md#reducerinputtypemismat
 ---
 
 ### `ReducerNameShadowed`
-
-**Phase:** B.
 
 **When:** A `smelt.define` function is declared with a name that matches one of the seven reserved reducer names.
 

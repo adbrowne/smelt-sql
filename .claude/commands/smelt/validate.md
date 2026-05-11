@@ -55,7 +55,30 @@ For each normative rule in the spec's **Semantics** section:
 For each invariant in **Constraints & Invariants**:
 - Confirm the codebase still upholds it. Use grep / inspection. (Cannot prove all properties — prove the ones you can, flag the ones you can't.)
 
-### Step 5: Freshness check
+### Step 5: Timeless-oracle check
+
+Phase vocabulary must not leak from plans into the spec body or user docs. See the Timeless-oracle rule in `CLAUDE.md`.
+
+```bash
+# Spec body — phase references outside Known Divergences/References are drift
+grep -nE "Phase [A-Z0-9]+" docs/specs/<slug>.md
+
+# User docs referenced by the spec
+grep -rnE "Phase [A-Z0-9]+" {paths from spec References → User docs}
+```
+
+For each match:
+- **In §Known Divergences / Open Questions** with a `docs/plans/...` link nearby — tolerated, not drift.
+- **In §References → Plans (history)** as a link to a plan file — tolerated.
+- **Anywhere else** (Surface, Semantics, Design, Constraints, headings, inline labels in user docs) — drift. Flag every hit.
+
+Common leakage shapes to call out specifically:
+- `### Phase A — ...` headings
+- `(Phase A)`, `(Phase B)` inline labels in tables or prose
+- `[deferred to Phase E1]`, `Phase 0 scaffold`, "ships in Phase X" callouts
+- User-doc opening sentences like "Phase A of the meta-language ships..."
+
+### Step 6: Freshness check
 
 Compare `last_reviewed` to the most recent commit touching the spec's Reference → Code paths:
 
@@ -65,7 +88,7 @@ git log -1 --format=%cI -- crates/.../src/incremental.rs ...
 
 If the code has changed substantively since `last_reviewed`, flag the spec as stale and recommend running `/smelt:spec`.
 
-### Step 6: Generate the drift report
+### Step 7: Generate the drift report
 
 Write to stdout (and optionally to `docs/validations/YYYY-MM-DD-<slug>.md` if the user wants it persisted — ask):
 
@@ -97,6 +120,12 @@ Write to stdout (and optionally to `docs/validations/YYYY-MM-DD-<slug>.md` if th
 - ⚠️  {Invariant not verifiable from inspection — flag for manual review}
 - ❌ {Invariant violated at file:line}
 
+### Timeless-oracle drift
+- ✅ {No phase-vocabulary leakage detected in spec body or user docs}
+- ❌ {file:line — `### Phase A — ...` heading in spec body}
+- ❌ {file:line — `(Phase B)` inline label in user docs}
+- ❌ {file:line — `[deferred to Phase E1]` callout outside Known Divergences}
+
 ### Freshness
 - last_reviewed: {date}
 - most recent code change: {date} at {path}
@@ -107,7 +136,7 @@ Write to stdout (and optionally to `docs/validations/YYYY-MM-DD-<slug>.md` if th
 - Recommended next step: {/smelt:spec to update spec | /smelt:plan {slug} to fix drift | none}
 ```
 
-### Step 7: Suggest next steps
+### Step 8: Suggest next steps
 
 Based on the report:
 - **Spec is stale** → recommend `/smelt:spec <slug>`.
@@ -122,3 +151,4 @@ Based on the report:
 3. **Test coverage matters.** A spec rule with no test is itself a drift item — the spec is unenforced.
 4. **Honest verdict.** If you can't verify an invariant from inspection, say so. Don't paper over.
 5. **Validate against the spec, not the code.** The spec is the oracle. If the code does something the spec doesn't say, that's drift, not "extra functionality".
+6. **Phase vocabulary in spec/user-doc body is drift.** See the Timeless-oracle rule in `CLAUDE.md`. Phase numbers are tolerated in §Known Divergences only when paired with a plan-file link, and in §References → Plans (history) as plan links.

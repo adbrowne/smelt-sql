@@ -1,6 +1,6 @@
 # Config Variables
 
-Phase B of the meta-language introduces **`smelt.config.var`** — a compile-time variable lookup that reads values from the `vars:` block of your workspace's `smelt.yml`. It is the first Phase B reflection surface: the workspace is known at compile time, and `smelt.config.var` makes that knowledge available as a `Text` value inside your models.
+The meta-language provides **`smelt.config.var`** — a compile-time variable lookup that reads values from the `vars:` block of your workspace's `smelt.yml`. The workspace is known at compile time, and `smelt.config.var` makes that knowledge available as a `Text` value inside your models.
 
 ## Syntax
 
@@ -8,7 +8,7 @@ Phase B of the meta-language introduces **`smelt.config.var`** — a compile-tim
 smelt.config.var('variable_name')
 ```
 
-- The argument must be a **string literal** in Phase B. Expression-valued names (`smelt.config.var(other_var)`) are reserved for Phase E1.
+- The argument must be a **string literal**. Expression-valued names (`smelt.config.var(other_var)`) are planned but not yet supported.
 - The return type is always `Text`.
 - The lookup is resolved at type-check time, not at query runtime.
 
@@ -37,7 +37,7 @@ vars:
 | Float: `3.14` | `'3.14'` | Decimal representation |
 | Null: `~` or `null` | `''` | Coerces to empty string; emits `ConfigVarNullCoercion` warning |
 
-Richer-typed reads (Boolean, Integer) land in Phase E1 with explicit schema declarations. In Phase B, cast the `Text` result yourself if you need a specific SQL type:
+Richer-typed reads (Boolean, Integer) with explicit schema declarations are planned but not yet implemented. For now, cast the `Text` result yourself if you need a specific SQL type:
 
 ```sql
 -- Cast the text result to an integer for comparison
@@ -86,7 +86,7 @@ SELECT smelt.config.var('nullable')
 
 ```sql
 -- Use a config variable as a filter threshold.
--- Cast from Text to the target SQL type explicitly in Phase B.
+-- Cast from Text to the target SQL type explicitly.
 SELECT id, revenue
 FROM smelt.sources.raw.orders
 WHERE revenue > CAST(smelt.config.var('min_revenue') AS DECIMAL)
@@ -136,7 +136,7 @@ WHERE revenue > CAST(smelt.config.var('min_revenue') AS DECIMAL)
     SELECT smelt.config.var(var_name_column)
     ```
 
-    **What to fix:** Replace the argument with a string literal: `smelt.config.var('the_variable_name')`. Dynamic variable-name resolution (computing the name at compile time from another meta value) is planned for Phase E1.
+    **What to fix:** Replace the argument with a string literal: `smelt.config.var('the_variable_name')`. Dynamic variable-name resolution (computing the name at compile time from another meta value) is planned but not yet implemented.
 
 ---
 

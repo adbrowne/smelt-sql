@@ -1,6 +1,6 @@
 # Lists & Spread
 
-Phase A of the meta-language ships two constructs: **list literals** for building compile-time lists of SQL fragments, and the **spread operator** for splicing those lists into SELECT lists and other comma-separated grammar positions.
+The meta-language provides two constructs for working with compile-time lists: **list literals** for building compile-time lists of SQL fragments, and the **spread operator** for splicing those lists into SELECT lists and other comma-separated grammar positions.
 
 ## The `List<T>` type
 
@@ -100,17 +100,17 @@ SELECT id, [1, 2, 3] AS scores FROM smelt.sources.raw.users
 ```
 
 !!! note
-    In Phase A, the bidirectional disambiguation is wired at SELECT-list positions. IN-list positions (`WHERE id IN ([1, 2, 3])`) are not yet type-checked — the literal passes through unprocessed. Full disambiguation for IN-lists and other positions lands in Phase B.
+    Bidirectional disambiguation is currently wired at SELECT-list positions. IN-list positions (`WHERE id IN ([1, 2, 3])`) are not yet type-checked — the literal passes through unprocessed. Full disambiguation for IN-lists and other positions is planned but not yet implemented.
 
 ## Spread operator `...xs`
 
 `...xs` splices the elements of a `List<T>` into the surrounding comma-separated grammar position. Each element is emitted at the spread's source span and validated against the surrounding position's type rules.
 
-**Where spread works today (Phase A):**
+**Where spread works:**
 
 - SELECT lists — fully type-checked.
 
-**Where spread will work in Phase B:**
+**Planned but not yet supported** — spread in the following positions is planned but not yet wired:
 
 - GROUP BY clauses.
 - ORDER BY clauses (list element type must be `OrderSpec`).
@@ -143,7 +143,7 @@ FROM smelt.sources.raw.users
 
 ## Diagnostic codes
 
-Phase A introduces four diagnostic codes. All are anchored at the offending CST span in your editor.
+The list and spread surface introduces four diagnostic codes. All are anchored at the offending CST span in your editor.
 
 ---
 
@@ -193,7 +193,7 @@ Phase A introduces four diagnostic codes. All are anchored at the offending CST 
     **Message:** `spread is not allowed in {position name}`
 
     **Forbidden positions:**
-    - WHERE clauses — no comma-separated grammar; use the `and_all` reducer in Phase B.
+    - WHERE clauses — no comma-separated grammar; use the `and_all` reducer.
     - FROM clauses without an explicit reducer — no default join semantics for `List<TableExpr>`.
     - Boolean-composition contexts (`x AND ...preds`, `y OR ...preds`).
     - Named-argument positions — spread cannot stand on the left of `=>`.
@@ -206,14 +206,14 @@ Phase A introduces four diagnostic codes. All are anchored at the offending CST 
     WHERE id = 1 AND ...preds  -- ← MetaSpreadInForbiddenPosition
     ```
 
-    **What to fix:** Move the spread to a SELECT list. To combine a list of predicates in a WHERE clause, use the `and_all` reducer (Phase B). If the intent is to filter by a list of values, use `IN (...vs)` with a spread (Phase B):
+    **What to fix:** Move the spread to a SELECT list. To combine a list of predicates in a WHERE clause, use the `and_all` reducer. If the intent is to filter by a list of values, use `IN (...vs)` with a spread (planned but not yet implemented):
     ```sql
-    -- Planned Phase B syntax:
+    -- Planned syntax (not yet implemented):
     WHERE id IN (...id_list)
     ```
 
     !!! note
-        In Phase A, forbidden positions other than WHERE clauses may produce parse errors rather than the `MetaSpreadInForbiddenPosition` diagnostic. The friendly diagnostic for all forbidden positions lands in Phase B.
+        Forbidden positions other than WHERE clauses may currently produce parse errors rather than the `MetaSpreadInForbiddenPosition` diagnostic. The friendly diagnostic for all forbidden positions is planned but not yet wired everywhere.
 
 ---
 

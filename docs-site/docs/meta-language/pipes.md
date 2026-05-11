@@ -1,6 +1,6 @@
 # Pipe Operator `|>`
 
-Phase B of the meta-language introduces the **pipe operator `|>`**, which lets you write a chain of HOF calls in left-to-right reading order instead of nesting them inside-out.
+The meta-language provides the **pipe operator `|>`**, which lets you write a chain of HOF calls in left-to-right reading order instead of nesting them inside-out.
 
 The pipe operator is meta-world only: both sides evaluate at compile time. No `|>` expression ever reaches the database engine.
 
@@ -44,7 +44,7 @@ Pipe has lower precedence than function calls, spread (`...`), and field access.
 
 `|>` evaluates only in the meta world. Both the left-hand expression and the right-hand call are compile-time meta-language constructs. Attempting to use pipe inside a Data-World position (for example, inside a `WHERE` predicate) emits `PipeInDataPosition`.
 
-This is a deliberate Phase B scope cut. Extending `|>` into Data-World SQL (pipe-SQL) is a separate design that affects the planner and query executor, not just the meta-language.
+This is a deliberate scope cut. Extending `|>` into Data-World SQL (pipe-SQL) is a separate design that affects the planner and query executor, not just the meta-language.
 
 ## The RHS must be a call
 
