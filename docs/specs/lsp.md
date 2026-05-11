@@ -121,6 +121,7 @@ Go-to-Definition resolves the following identifier types:
 | Column reference (unqualified, unambiguous) | The upstream column definition |
 | Column reference (unqualified, ambiguous) | All matching upstream definitions (array response) |
 | Python `@model` function (from SQL ref) | The `.py` file, at the decorator line |
+| `smelt.columns_of` call path | Reference page (URL hint, graceful no-op when client lacks support) |
 
 Go-to-Definition on a `smelt.<path>` reference in a SQL model navigates to the file at that path. For Python-derived models, it navigates to the `.py` file at the line of the `@model` decorator for that function.
 
@@ -146,6 +147,10 @@ Hover is supported on:
 | `smelt.<path>` (model) | Model schema as markdown table (columns, types, nullability) plus upstream lineage |
 | `smelt.<path>` (source) | Source table schema from the source `.yml` |
 | `smelt.<path>` (seed) | Seed schema (sidecar or inferred) plus row count |
+| `smelt.columns_of(t)` call path | `List<ColumnRef>` plus, when `t`'s schema is statically resolvable, the resolved column count and the first five column names |
+| `ColumnRef`-typed lambda parameter | `ColumnRef` plus the closed field list with each field's type (`name: Text`, `type: DataType`, `is_numeric: Boolean`) |
+| Field projection `c.name` / `c.type` / `c.is_numeric` | The field's declared type |
+| Meta-`Text` lifted as identifier | The lift description (`Text → identifier`) and, when statically traceable, the resolved column name |
 
 Hover content includes type annotations and row requirements from the type inference system where available.
 
@@ -159,6 +164,8 @@ Completions are triggered by the characters `'`, `(`, and `.`.
 | After a `smelt.<partial>` segment | Entities whose path begins with the entered segments |
 | Column context (unqualified) | All reachable column names with inferred types |
 | After `<alias>.` | Columns from the table/model/CTE bound to that alias |
+| At `c.<cursor>` where `c: ColumnRef` | The closed field set (`name`, `type`, `is_numeric`) and no other identifiers |
+| At `smelt.columns_of(<cursor>)` argument position | In-scope `TableExpr`-valued names (`smelt.<path>` model references and enclosing function `TableExpr` parameters) |
 
 Schema-aware column completions derive types from the Salsa type inference system.
 
