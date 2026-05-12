@@ -72,6 +72,7 @@ A target overlay file that does not validate against the schema emits the same d
 | `ConfigLoaderTypeMismatch` | A loaded value's type does not match the schema's declared type | `field `{name}` expects {expected}; got {actual}` (anchored at the YAML/JSON value, secondary frame at the loader call) |
 | `ConfigLoaderRootShapeMismatch` | The file's top-level shape (sequence, mapping, scalar) does not match the schema's expected root shape | `schema `{type}` expects {expected_shape}; file's top level is {actual_shape}` (anchored at the file's first line, secondary frame at the loader call) |
 | `ConfigLoaderDuplicateMapKey` | A `Map<Text, S>`-shaped file contains the same key twice | `duplicate map key `{key}` at {row}; earlier appearance at {first_row}` |
+| `ConfigLoaderNullCoercion` (warning) | A YAML `null` scalar coerces to an empty `Text` value at a schema field declared `Text` | `null value at {row} coerced to empty string; declare a default in the source file` |
 
 ### LSP support
 
