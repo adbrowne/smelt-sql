@@ -136,14 +136,27 @@ A constraint is satisfied iff the actual type is a member. Constraints are **not
 
 ### 7. Fragment sort subtyping
 
-The only subtype relations are linear chains:
+The subtype relations include two linear chains for expression and select-item sorts:
 
 ```
 Expr<T>             <:  AggExpr<T>             <:  WindowExpr<T>
 SelectItems<Scalar> <:  SelectItems<Agg>       <:  SelectItems<Window>
 ```
 
-`TableExpr` and `OrderSpec` are unrelated to the expression chain. Splice points enforce a kind ceiling:
+And two one-way closed-record rules for wide-reflection meta types:
+
+```
+ModelRef   <:  TableExpr
+SourceRef  <:  TableExpr
+```
+
+**`ModelRef <: TableExpr`.** A `ModelRef` value lifts to a `TableExpr` wherever a `TableExpr` is required — reducer-`union_all` arguments, `smelt.columns_of` arguments, and FROM-clause splice positions. The lifted `TableExpr` is the same table representation that `smelt.<model-path>` resolves to for that model. The rule is **one-way**: the reverse direction (`TableExpr → ModelRef`) does not exist; only values originating from `smelt.models.*` accessors are `ModelRef`-typed.
+
+**`SourceRef <: TableExpr`.** The same lifting rule applies to `SourceRef` values produced by `smelt.sources.*` accessors. The lifted `TableExpr` is the same table representation that the source's `smelt.<source-path>` resolves to.
+
+**List covariance applies.** Because `List<T>` is covariant in `T` (§"smelt.define type annotations"), `List<ModelRef> <: List<TableExpr>` and `List<SourceRef> <: List<TableExpr>` follow automatically. This means `reduce(smelt.models.with_tag('cohort'), union_all)` requires no explicit projection — the list element type lifts to `TableExpr` through the single rule above.
+
+`TableExpr`, `ModelRef`, `SourceRef`, and `OrderSpec` are otherwise unrelated to the expression chain. Splice points enforce a kind ceiling:
 
 | Position | Accepted kinds |
 |----------|----------------|
@@ -227,7 +240,7 @@ This section captures the load-bearing rationale behind the type system's shape 
 - Function call inference is **local**: row-variable unification, generic binding, and constraint discharge all happen at the call site without cross-module constraint solving.
 - `Numeric ⊂ Ordered` is structural — callers do not need to restate constraints.
 - Adding a type to `Ordered` is non-breaking; removing one is breaking.
-- Fragment sort subtyping is linear-only — no branching subtype relations are permitted.
+- Fragment sort subtyping for expression-family sorts (`Expr<T>`, `AggExpr<T>`, `WindowExpr<T>`, `SelectItems<K>`) is linear-only. The two closed-record rules (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) are the complete set of non-expression-chain rules; no further branching is permitted without a spec edit.
 - One canonical built-in registry (per `signatures.rs::BuiltinRegistry`); per-dialect registries are out of scope. Backend availability is a per-function `backends:` property, not a registry split.
 - **Out of scope for v1**: nullability in parameter types; `Decimal(p,s)` precision arithmetic; multiple row variables per function; user-defined polymorphism in `smelt.define`; collation tracking on `Text`.
 

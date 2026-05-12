@@ -310,6 +310,21 @@ pub fn is_subtype_of(sub: &SmeltType, sup: &SmeltType) -> bool {
                 _ => false,
             }
         }
+        // Fragment-sort subtyping: ModelRef <: TableExpr and SourceRef <: TableExpr.
+        //
+        // A `ModelRef` or `SourceRef` value's `TableExpr` projection is the same
+        // `TableExpr` that `smelt.<path>` resolves to for that model/source. The
+        // subtyping rule is one-way: `ModelRef` and `SourceRef` lift to `TableExpr`
+        // wherever a `TableExpr` is required (reducer-`union_all` arguments,
+        // `smelt.columns_of` arguments, FROM-clause splice positions).
+        //
+        // The reverse direction (`TableExpr → ModelRef`) does not exist: only values
+        // originating from `smelt.models.*` / `smelt.sources.*` are `ModelRef`/`SourceRef`-typed.
+        //
+        // List covariance (above) automatically lifts `List<ModelRef>` → `List<TableExpr>`
+        // once this element rule is in place.
+        (SmeltType::ModelRef, SmeltType::TableExpr(_)) => true,
+        (SmeltType::SourceRef, SmeltType::TableExpr(_)) => true,
         // All other cross-sort combinations are not subtypes.
         _ => false,
     }
@@ -5033,6 +5048,62 @@ mod tests {
         assert!(
             matches!(s_cols_ty, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
             "SourceRef columns field must be List<ColumnRef>, got: {s_cols_ty:?}"
+        );
+    }
+
+    // === Phase D Phase 2 TDD tests — ModelRef/SourceRef subtype TableExpr ===
+
+    /// `ModelRef <: TableExpr` — the subtyping rule fires in the forward direction.
+    #[test]
+    fn model_ref_is_subtype_of_table_expr() {
+        assert!(
+            is_subtype_of(&SmeltType::ModelRef, &SmeltType::TableExpr(None)),
+            "ModelRef must be a subtype of TableExpr (forward direction)"
+        );
+    }
+
+    /// `SourceRef <: TableExpr` — the subtyping rule fires in the forward direction.
+    #[test]
+    fn source_ref_is_subtype_of_table_expr() {
+        assert!(
+            is_subtype_of(&SmeltType::SourceRef, &SmeltType::TableExpr(None)),
+            "SourceRef must be a subtype of TableExpr (forward direction)"
+        );
+    }
+
+    /// `TableExpr <: ModelRef` does NOT hold — the rule is one-way.
+    #[test]
+    fn table_expr_not_subtype_of_model_ref() {
+        assert!(
+            !is_subtype_of(&SmeltType::TableExpr(None), &SmeltType::ModelRef),
+            "TableExpr must NOT be a subtype of ModelRef (reverse direction forbidden)"
+        );
+        assert!(
+            !is_subtype_of(&SmeltType::TableExpr(None), &SmeltType::SourceRef),
+            "TableExpr must NOT be a subtype of SourceRef (reverse direction forbidden)"
+        );
+    }
+
+    /// `List<ModelRef> <: List<TableExpr>` — List covariance lifts the element rule
+    /// automatically.
+    #[test]
+    fn list_of_model_ref_is_subtype_of_list_of_table_expr() {
+        let list_model_ref = SmeltType::List(Box::new(SmeltType::ModelRef));
+        let list_table_expr = SmeltType::List(Box::new(SmeltType::TableExpr(None)));
+        assert!(
+            is_subtype_of(&list_model_ref, &list_table_expr),
+            "List<ModelRef> must be a subtype of List<TableExpr> via List covariance"
+        );
+        // Reverse does not hold.
+        assert!(
+            !is_subtype_of(&list_table_expr, &list_model_ref),
+            "List<TableExpr> must NOT be a subtype of List<ModelRef>"
+        );
+
+        let list_source_ref = SmeltType::List(Box::new(SmeltType::SourceRef));
+        assert!(
+            is_subtype_of(&list_source_ref, &list_table_expr),
+            "List<SourceRef> must be a subtype of List<TableExpr> via List covariance"
         );
     }
 

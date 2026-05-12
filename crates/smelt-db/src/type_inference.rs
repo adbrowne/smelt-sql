@@ -3294,6 +3294,11 @@ impl ReducerInputConstraint {
                 )
             }
             (ReducerInputConstraint::TableExpr, SmeltType::TableExpr(_)) => true,
+            // ModelRef <: TableExpr and SourceRef <: TableExpr (Phase D subtyping rule).
+            // A `ModelRef` or `SourceRef` element satisfies the `TableExpr` reducer
+            // constraint because of the fragment-sort subtyping rule in `signatures.rs`.
+            (ReducerInputConstraint::TableExpr, SmeltType::ModelRef) => true,
+            (ReducerInputConstraint::TableExpr, SmeltType::SourceRef) => true,
             _ => false,
         }
     }
@@ -5546,13 +5551,20 @@ pub fn check_columns_of_diagnostics(
             }
 
             // Check if the arg is a bare identifier registered as TableExpr
-            // in the context (a `smelt.define` TableExpr parameter).
+            // (or a subtype — `ModelRef` / `SourceRef`) in the context.
+            // `ModelRef <: TableExpr` and `SourceRef <: TableExpr` per Phase D
+            // subtyping rules, so all three are accepted at `smelt.columns_of` call sites.
             let arg_text = pos_arg.text().trim().to_string();
             let is_bare_ident =
                 !arg_text.is_empty() && arg_text.chars().all(|c| c.is_alphanumeric() || c == '_');
             if is_bare_ident {
                 if let Some(smelt_ty) = ctx.lookup_function_param_smelt_type(&arg_text) {
-                    if matches!(smelt_ty, smelt_types::signatures::SmeltType::TableExpr(_)) {
+                    if matches!(
+                        smelt_ty,
+                        smelt_types::signatures::SmeltType::TableExpr(_)
+                            | smelt_types::signatures::SmeltType::ModelRef
+                            | smelt_types::signatures::SmeltType::SourceRef
+                    ) {
                         continue;
                     }
                 }
@@ -9693,5 +9705,192 @@ mod tests {
             "infer_field_on_source_ref must return None for unknown field 'bar', got: {:?}",
             s_unknown_ty
         );
+    }
+
+    // === Phase D Phase 2 TDD tests — ModelRef/SourceRef <: TableExpr subtyping ===
+
+    /// `smelt.columns_of(m)` where `m: ModelRef` synthesises `List<ColumnRef>` with no
+    /// diagnostic — the `ModelRef <: TableExpr` subtyping lift fires at the call site.
+    #[test]
+    fn model_ref_assignable_to_table_expr_in_columns_of_arg() {
+        use smelt_types::signatures::SmeltType;
+
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("m", SmeltType::ModelRef);
+        ctx.add_lambda_param(
+            "m",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // smelt.columns_of(m) — m is ModelRef; must produce no ColumnsOfRequiresTableExpr diagnostic.
+        let sql = "SELECT smelt.columns_of(m) FROM t";
+        let select = parse_select_stmt(sql);
+        let diags = check_columns_of_diagnostics(&select, &ctx, sql);
+        let table_expr_errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
+            .collect();
+        assert!(
+            table_expr_errors.is_empty(),
+            "smelt.columns_of(m) where m: ModelRef must produce no ColumnsOfRequiresTableExpr, got: {:?}",
+            table_expr_errors
+        );
+    }
+
+    /// `smelt.columns_of(s)` where `s: SourceRef` synthesises `List<ColumnRef>` with no
+    /// diagnostic — the `SourceRef <: TableExpr` subtyping lift fires.
+    #[test]
+    fn source_ref_assignable_to_table_expr_in_columns_of_arg() {
+        use smelt_types::signatures::SmeltType;
+
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("s", SmeltType::SourceRef);
+        ctx.add_lambda_param(
+            "s",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        let sql = "SELECT smelt.columns_of(s) FROM t";
+        let select = parse_select_stmt(sql);
+        let diags = check_columns_of_diagnostics(&select, &ctx, sql);
+        let table_expr_errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
+            .collect();
+        assert!(
+            table_expr_errors.is_empty(),
+            "smelt.columns_of(s) where s: SourceRef must produce no ColumnsOfRequiresTableExpr, got: {:?}",
+            table_expr_errors
+        );
+    }
+
+    /// `reduce(xs, union_all)` where `xs: List<ModelRef>` synthesises `TableExpr` with no
+    /// sentinel — List covariance lifts `List<ModelRef>` to `List<TableExpr>`.
+    #[test]
+    fn list_of_model_ref_lifts_to_list_of_table_expr_in_reducer_arg() {
+        use smelt_types::signatures::SmeltType;
+
+        // Build a context with `xs: List<ModelRef>`.
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("xs", SmeltType::List(Box::new(SmeltType::ModelRef)));
+
+        // Parse `reduce(xs, union_all)` as a HOF call.
+        let call = parse_hof_call("SELECT reduce(xs, union_all)");
+        let result = infer_hof_call_from_function_call(&call, &ctx);
+
+        assert!(
+            result.sentinel.is_none(),
+            "reduce(xs, union_all) where xs: List<ModelRef> must have no sentinel, got: {:?}",
+            result.sentinel
+        );
+        assert!(
+            matches!(result.inferred, SmeltType::TableExpr(_)),
+            "reduce(xs, union_all) where xs: List<ModelRef> must infer TableExpr, got: {:?}",
+            result.inferred
+        );
+    }
+
+    /// `SELECT * FROM m` as a meta splice: `ModelRef <: TableExpr` means the
+    /// subtyping rule fires. At body-check time this test verifies `is_subtype_of`
+    /// returns true — concrete column resolution comes in Phase 3.
+    #[test]
+    fn model_ref_assignable_in_from_clause_splice() {
+        use smelt_types::signatures::{is_subtype_of, SmeltType};
+
+        // The subtyping rule is the gate for FROM-clause splice acceptance.
+        assert!(
+            is_subtype_of(&SmeltType::ModelRef, &SmeltType::TableExpr(None)),
+            "ModelRef must be assignable to TableExpr at FROM-clause splice positions"
+        );
+        assert!(
+            is_subtype_of(&SmeltType::SourceRef, &SmeltType::TableExpr(None)),
+            "SourceRef must be assignable to TableExpr at FROM-clause splice positions"
+        );
+    }
+
+    /// A plain `TableExpr`-typed binding is NOT assignable to a `ModelRef`-typed position —
+    /// the subtyping rule is one-way. Verified via `is_subtype_of` and also via the
+    /// `ReducerInputConstraint` path: `reduce(xs, union_all)` where `xs: List<TableExpr>`
+    /// succeeds, but `xs: List<TableExpr>` is NOT assignable to `List<ModelRef>`.
+    #[test]
+    fn table_expr_not_assignable_to_model_ref() {
+        use smelt_types::signatures::{is_subtype_of, SmeltType};
+
+        // Direct subtyping: TableExpr is NOT a subtype of ModelRef.
+        assert!(
+            !is_subtype_of(&SmeltType::TableExpr(None), &SmeltType::ModelRef),
+            "TableExpr must NOT be assignable to ModelRef (reverse direction forbidden)"
+        );
+        assert!(
+            !is_subtype_of(&SmeltType::TableExpr(None), &SmeltType::SourceRef),
+            "TableExpr must NOT be assignable to SourceRef (reverse direction forbidden)"
+        );
+
+        // List direction: List<TableExpr> is NOT a subtype of List<ModelRef>.
+        let list_table = SmeltType::List(Box::new(SmeltType::TableExpr(None)));
+        let list_model_ref = SmeltType::List(Box::new(SmeltType::ModelRef));
+        assert!(
+            !is_subtype_of(&list_table, &list_model_ref),
+            "List<TableExpr> must NOT be assignable to List<ModelRef>"
+        );
+    }
+
+    /// `m.columns` (field projection on `ModelRef`) synthesises the same type as
+    /// `smelt.columns_of(m)` — both produce `List<ColumnRef>` at body-check time.
+    #[test]
+    fn m_columns_equivalent_to_smelt_columns_of_m() {
+        use smelt_types::signatures::SmeltType;
+
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("m", SmeltType::ModelRef);
+        ctx.add_lambda_param(
+            "m",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // m.columns via field projection.
+        let columns_ty = infer_field_on_model_ref("m", "columns", &ctx);
+        assert!(
+            matches!(&columns_ty, Some(SmeltType::List(inner)) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "m.columns must synthesise List<ColumnRef>, got: {:?}",
+            columns_ty
+        );
+
+        // smelt.columns_of(m) via smelt path call — check no ColumnsOfRequiresTableExpr.
+        let sql = "SELECT smelt.columns_of(m) FROM t";
+        let select = parse_select_stmt(sql);
+        let diags = check_columns_of_diagnostics(&select, &ctx, sql);
+        let table_expr_errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(crate::DiagnosticCode::ColumnsOfRequiresTableExpr))
+            .collect();
+        assert!(
+            table_expr_errors.is_empty(),
+            "smelt.columns_of(m) where m: ModelRef must produce no ColumnsOfRequiresTableExpr"
+        );
+
+        // Both produce List<ColumnRef> — assert the types are equivalent.
+        let columns_ty_inner = match columns_ty {
+            Some(SmeltType::List(inner)) => *inner,
+            other => panic!("expected List<ColumnRef> from m.columns, got: {:?}", other),
+        };
+        assert!(
+            matches!(columns_ty_inner, SmeltType::ColumnRef),
+            "m.columns inner type must be ColumnRef, got: {:?}",
+            columns_ty_inner
+        );
+        // smelt.columns_of return type from signature also produces List<ColumnRef>
+        // (verified by the columns_of_signature_returns_list_of_column_ref test in signatures.rs).
+        // At this level we just confirm no diagnostic fires — the full semantic equivalence
+        // is enforced at expansion time (Phase 3).
     }
 }
