@@ -1,8 +1,8 @@
 # Meta-Language Reference
 
-Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, and `smelt.config.var`.
+Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, and the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift).
 
-For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md).
+For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md).
 
 ---
 
@@ -25,6 +25,33 @@ WHERE reduce([is_active, age > 18], and_all)
 ```
 
 See [Reducers — `and_all`](reducers.md#and_all) for full details.
+
+---
+
+## `ColumnRef` — closed meta record type for column reflection
+
+**Kind:** closed meta-only record type; produced exclusively by `smelt.columns_of`.
+
+**Fields:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | `Text` | Column identifier (un-quoted; case-preserved) |
+| `type` | `DataType` | Column's `DataType` |
+| `is_numeric` | `Boolean` | `TRUE` iff `type` is in the `Numeric` constraint set |
+
+Access fields with dot-notation inside a HOF lambda. Any other field name emits `ColumnRefFieldUnknown`. `ColumnRef` is not user-constructible — values originate only from `smelt.columns_of`.
+
+**Example:**
+```sql
+smelt.columns_of(smelt.orders)
+  |> filter(fn c => c.is_numeric)   -- c.is_numeric : Boolean
+  |> map(fn c => c.name)            -- c.name : Text, lifts to identifier in splice
+```
+
+**Editor support:** hover on a `ColumnRef`-typed binding shows `ColumnRef` and the closed field list with each field's type; completion at `c.<cursor>` offers `name`, `type`, `is_numeric`.
+
+See [Reflection — `ColumnRef`](reflection.md#columnref) for the closed-field contract, body-check vs expansion-time behaviour, and diagnostic codes.
 
 ---
 
@@ -181,6 +208,25 @@ See [Higher-Order Functions — `map`](hofs.md#map) for full details and diagnos
 
 ---
 
+## Meta-`Text`-as-identifier lift positions {#meta-text-as-identifier-lift-positions}
+
+When a meta-`Text` value is spliced into a position where the SQL grammar expects an unquoted **identifier**, smelt lifts that value to the identifier. The lift applies in exactly four positions:
+
+| Position | Example |
+|---|---|
+| Column-reference position inside an expression | `COALESCE(c.name, 0)` — `c.name` lifts to a column identifier |
+| `AS` alias of a SELECT item | `SUM(amount) AS c.name` — `c.name` lifts to the output alias |
+| `ORDER BY` column reference | `ORDER BY c.name` — `c.name` lifts to a sort key |
+| `GROUP BY` column reference | `GROUP BY c.name` — `c.name` lifts to a grouping key |
+
+In all other positions a meta-`Text` retains its string-value meaning. The lifted identifier is validated against the surrounding splice context using the standard scoping rule; an unrecognised column name emits `UnknownColumn`.
+
+The lift applies **only to compile-time meta-`Text` values**, not to runtime `Expr<Text>` values.
+
+See [Reflection — Meta-`Text`-as-identifier lift](reflection.md#meta-text-as-identifier-lift) for full details and examples.
+
+---
+
 ## `or_any` — Boolean OR reducer
 
 **Kind:** contextual reducer (closed registry); use as the second argument to `reduce`.
@@ -244,6 +290,30 @@ SELECT reduce([true, false, true], and_all)
 **Editor support:** hover on the reducer name shows its input element type, output sort, and empty-list identity.
 
 See [Higher-Order Functions — `reduce`](hofs.md#reduce) and [Reducers](reducers.md) for full details.
+
+---
+
+## `smelt.columns_of` — compile-time column list accessor
+
+**Kind:** built-in meta-only accessor; returns `List<ColumnRef>`.
+
+**Signature:**
+```
+smelt.columns_of(t: TableExpr) -> List<ColumnRef>
+```
+
+Returns the column list of a `TableExpr`-valued argument as a `List<ColumnRef>`, preserving declared column order. Must be called with exactly one positional argument; named arguments emit `ColumnsOfNamedArgument`. The argument must be `TableExpr`-typed; mismatches emit `ColumnsOfRequiresTableExpr`.
+
+**Example:**
+```sql
+smelt.columns_of(smelt.orders)
+  |> filter(fn c => c.is_numeric)
+  |> map(fn c => COALESCE(c.name, 0))
+```
+
+**Editor support:** hover on `smelt.columns_of(t)` shows `List<ColumnRef>` and, when `t`'s schema is statically resolvable, the resolved column count plus the first five column names; completion at the argument position offers in-scope `TableExpr`-valued names.
+
+See [Reflection](reflection.md) for the full surface, body-check vs expansion-time semantics, and worked example.
 
 ---
 
@@ -377,6 +447,54 @@ See [Pipe Operator](pipes.md) for full details and diagnostic codes.
 ## Diagnostic codes
 
 Alphabetical across the whole meta-language surface.
+
+### `ColumnRefFieldUnknown`
+
+**When:** Field access on a `ColumnRef` value uses an identifier that is not one of the three declared fields (`name`, `type`, `is_numeric`).
+
+**Message:** `ColumnRef has no field {name}; expected one of: name, type, is_numeric`
+
+**Fix:** use `c.name` (Text), `c.type` (DataType), or `c.is_numeric` (Boolean). Any other field requires a spec extension.
+
+See [Reflection — `ColumnRefFieldUnknown`](reflection.md#columnrefieldunknown).
+
+---
+
+### `ColumnsOfNamedArgument`
+
+**When:** `smelt.columns_of` is called with a named argument instead of a positional one.
+
+**Message:** `smelt.columns_of takes one positional argument; named arguments are not supported`
+
+**Fix:** pass the `TableExpr` positionally: `smelt.columns_of(smelt.orders)`.
+
+See [Reflection — `ColumnsOfNamedArgument`](reflection.md#columnsofnamedargument).
+
+---
+
+### `ColumnsOfRequiresTableExpr`
+
+**When:** The argument to `smelt.columns_of` synthesises to a type not assignable to `TableExpr`.
+
+**Message:** `smelt.columns_of expects TableExpr; found {actual}`
+
+**Fix:** pass a `smelt.<path>` reference to a model, source, or seed, or a `TableExpr` parameter of the enclosing `smelt.define` function.
+
+See [Reflection — `ColumnsOfRequiresTableExpr`](reflection.md#columnsofRequirestableexpr).
+
+---
+
+### `ColumnsOfUnresolvableSchema`
+
+**When:** At expansion time, `smelt.columns_of(t)` cannot resolve the schema for `t` (for example because an upstream model has an unknown schema).
+
+**Message:** `cannot resolve column list for {t}; upstream schema is unknown`
+
+**Fix:** ensure the upstream model, source, or seed has a fully declared schema and compiles cleanly. This diagnostic suppresses further errors from the surrounding HOF call.
+
+See [Reflection — `ColumnsOfUnresolvableSchema`](reflection.md#columnsofunresolvableschema).
+
+---
 
 ### `ConfigVarNameNotLiteral`
 

@@ -35,7 +35,7 @@ The meta-language provides three constructs that exercise the meta/data boundary
 | `...xs` | Spread operator — splices a `List<T>` into a comma-separated position | [Lists & Spread](lists.md) |
 | `List<T>` | Meta-only type: finite, ordered, immutable | [Lists & Spread](lists.md) |
 
-The meta-language also provides iteration, transformation, and compile-time configuration:
+The meta-language also provides iteration, transformation, compile-time configuration, and schema reflection:
 
 | Construct | Description | Documentation |
 |-----------|-------------|---------------|
@@ -46,6 +46,8 @@ The meta-language also provides iteration, transformation, and compile-time conf
 | `\|>` | Pipe operator — left-to-right HOF chaining | [Pipe Operator](pipes.md) |
 | `and_all`, `comma_sep`, `or_any`, `union_all`, `intersect_all`, `plus_chain`, `concat` | Contextual reducers | [Reducers](reducers.md) |
 | `smelt.config.var('name')` | Compile-time variable lookup from `smelt.yml` | [Config Variables](config-vars.md) |
+| `smelt.columns_of(t)` | Compile-time column list of a `TableExpr` → `List<ColumnRef>` | [Reflection](reflection.md) |
+| `ColumnRef` | Closed meta record type: `name`, `type`, `is_numeric` fields | [Reflection](reflection.md) |
 
 Quick reference for all constructs and diagnostic codes: [Reference](reference.md).
 
@@ -55,7 +57,6 @@ The following meta-language capabilities are planned but not yet available:
 
 | Capability | Content |
 |------------|---------|
-| **Column reflection** | `smelt.columns_of(t)`, `ColumnRef` meta record type |
 | **Workspace reflection** | `smelt.models.*`, `smelt.sources.*`, `ModelRef` |
 | **Records, maps, config loaders** | `Record<{…}>`, `Map<K,V>`, YAML/JSON/TOML loaders |
 | **Multi-model production** | One file generates N models |
