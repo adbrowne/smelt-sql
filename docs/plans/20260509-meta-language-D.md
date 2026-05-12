@@ -84,7 +84,7 @@ The meta-language Phase D spec increment landed in commits `2c16b12` and `384944
 | 2     | done     | f23615c | 2026-05-12 |
 | 3     | done     | 7e7b90a | 2026-05-13 |
 | 4     | done     | 95e430b | 2026-05-13 |
-| 5     | pending  |        |      |
+| 5     | done     | 47a0013 | 2026-05-13 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 
