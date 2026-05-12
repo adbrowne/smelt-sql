@@ -610,6 +610,7 @@ The exception is `meta_config_loading.md` — the file-loading family is large e
   - `docs/plans/20260509-meta-language-overall.md` — meta-plan tracking the meta-language work
   - `docs/plans/20260509-meta-language-A.md`
   - `docs/plans/20260509-meta-language-B.md`
+  - `docs/plans/20260509-meta-language-C.md`
 - **Related specs**:
   - `docs/specs/functions.md` — `smelt.define`, fragment sorts, named arguments (parser disambiguation surface)
   - `docs/specs/types.md` — `DataType` vocabulary, fragment-sort grammar, strict-by-default doctrine
