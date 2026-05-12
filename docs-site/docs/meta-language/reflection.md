@@ -385,7 +385,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 !!! warning "WithTagRequiresText"
     **When it fires:** `smelt.models.with_tag(x)` or `smelt.sources.with_tag(x)` is called and `x` is not a compile-time Text literal (for example an integer, a function call, or a runtime expression).
 
-    **Message:** `with_tag argument must be a compile-time Text literal`
+    **Message:** `with_tag expects a compile-time Text; found {actual}`
 
     **Fires at:** the argument expression span.
 
@@ -419,7 +419,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 !!! warning "WideReflectionUnknownAccessor"
     **When it fires:** `smelt.models.<name>` or `smelt.sources.<name>` uses an accessor name outside the closed set `{with_tag, all}`.
 
-    **Message:** `smelt.{models,sources} has no accessor '{name}'; expected one of: with_tag, all`
+    **Message:** ``smelt.{models,sources} has no accessor `{name}`; expected one of: with_tag, all``
 
     **Fires at:** the accessor name token span.
 
@@ -453,7 +453,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 !!! warning "ModelRefFieldUnknown"
     **When it fires:** Field access on a `ModelRef`-typed value uses an identifier that is not one of the four declared fields.
 
-    **Message:** `ModelRef has no field '{name}'; expected one of: path, name, tags, columns`
+    **Message:** ``ModelRef has no field `{name}`; expected one of: path, name, tags, columns``
 
     **Fires at:** the field name token span.
 
@@ -470,7 +470,7 @@ SELECT map(smelt.models.all(), fn m => m.path)
 !!! warning "SourceRefFieldUnknown"
     **When it fires:** Field access on a `SourceRef`-typed value uses an identifier that is not one of the four declared fields.
 
-    **Message:** `SourceRef has no field '{name}'; expected one of: path, name, tags, columns`
+    **Message:** ``SourceRef has no field `{name}`; expected one of: path, name, tags, columns``
 
     **Fires at:** the field name token span.
 

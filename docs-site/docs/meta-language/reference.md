@@ -839,7 +839,7 @@ SELECT id, ...some_integer FROM smelt.sources.raw.users
 
 **When:** Field access on a `ModelRef` value uses an identifier that is not one of the four declared fields (`path`, `name`, `tags`, `columns`).
 
-**Message:** `ModelRef has no field {name}; expected one of: path, name, tags, columns`
+**Message:** ``ModelRef has no field `{name}`; expected one of: path, name, tags, columns``
 
 **Fix:** use `m.path` (Text), `m.name` (Text), `m.tags` (List\<Text\>), or `m.columns` (List\<ColumnRef\>). Any other field requires a spec extension.
 
@@ -911,7 +911,7 @@ See [Reducers — `ReducerNameShadowed`](reducers.md#reducernameshadowed).
 
 **When:** Field access on a `SourceRef` value uses an identifier that is not one of the four declared fields (`path`, `name`, `tags`, `columns`).
 
-**Message:** `SourceRef has no field {name}; expected one of: path, name, tags, columns`
+**Message:** ``SourceRef has no field `{name}`; expected one of: path, name, tags, columns``
 
 **Fix:** use `s.path` (Text), `s.name` (Text), `s.tags` (List\<Text\>), or `s.columns` (List\<ColumnRef\>). Any other field requires a spec extension.
 
@@ -923,7 +923,7 @@ See [Reflection — `SourceRefFieldUnknown`](reflection.md#sourcereffieldunknown
 
 **When:** `smelt.models.with_tag` or `smelt.sources.with_tag` is called with a named argument instead of a positional one.
 
-**Message:** `with_tag takes one positional Text literal; named arguments are not supported`
+**Message:** `with_tag takes one positional argument; named arguments are not supported`
 
 **Fix:** use positional syntax: `with_tag('my-tag')` not `with_tag(tag => 'my-tag')`.
 
@@ -935,7 +935,7 @@ See [Reflection — `WithTagNamedArgument`](reflection.md#withtagnamedargument).
 
 **When:** The argument to `smelt.models.with_tag` or `smelt.sources.with_tag` is not a compile-time string literal (e.g. it is an integer or a runtime expression like `UPPER('cohort')`).
 
-**Message:** `with_tag requires a compile-time string literal; found {actual}`
+**Message:** `with_tag expects a compile-time Text; found {actual}`
 
 **Fix:** pass a string literal: `with_tag('my-tag')`. Dynamic tag filtering is not supported.
 
@@ -947,7 +947,7 @@ See [Reflection — `WithTagRequiresText`](reflection.md#withtagrequirestext).
 
 **When:** `smelt.models.all` or `smelt.sources.all` is called with one or more arguments.
 
-**Message:** `all() takes no arguments; found {n} argument(s)`
+**Message:** `{accessor} takes no arguments`
 
 **Fix:** call `all()` with no arguments.
 
@@ -959,7 +959,7 @@ See [Reflection — `WideReflectionUnexpectedArgument`](reflection.md#widereflec
 
 **When:** An unknown accessor is used under `smelt.models.*` or `smelt.sources.*` (e.g. `smelt.models.bogus()`).
 
-**Message:** `unknown wide-reflection accessor {name}; expected one of: with_tag, all`
+**Message:** ``smelt.{models,sources} has no accessor `{name}`; expected one of: with_tag, all``
 
 **Fix:** use only `with_tag('tag')` or `all()`.
 
