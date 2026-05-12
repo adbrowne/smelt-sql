@@ -1765,15 +1765,30 @@ pub fn hover_text_for_hof_meta_language(
                                         .inferred
                                 } else {
                                     // Non-literal first argument.
-                                    // Special case: `smelt.columns_of(t)` as the
-                                    // first argument produces `List<ColumnRef>`, so
-                                    // the lambda element type is `ColumnRef`.  This
-                                    // is the primary use case for ColumnRef-typed
-                                    // lambda parameters and must be handled before
-                                    // falling back to the generic HOF inference.
+                                    // Special case: recognise wide-reflection and
+                                    // narrow-reflection call sites so the lambda
+                                    // element type can be determined statically.
+                                    // - `smelt.columns_of(t)` → `List<ColumnRef>`
+                                    // - `smelt.models.with_tag(t)` / `smelt.models.all` → `List<ModelRef>`
+                                    // - `smelt.sources.with_tag(t)` / `smelt.sources.all` → `List<SourceRef>`
                                     if let Some(path_call) = first_arg.as_smelt_path_call() {
-                                        if path_call.segments() == vec!["columns_of".to_string()] {
+                                        let segs = path_call.segments();
+                                        if segs == vec!["columns_of".to_string()] {
                                             SmeltType::List(Box::new(SmeltType::ColumnRef))
+                                        } else if segs.first().map(|s| s.as_str()) == Some("models")
+                                            && segs
+                                                .get(1)
+                                                .map(|s| s.as_str() == "with_tag" || s.as_str() == "all")
+                                                .unwrap_or(false)
+                                        {
+                                            SmeltType::List(Box::new(SmeltType::ModelRef))
+                                        } else if segs.first().map(|s| s.as_str()) == Some("sources")
+                                            && segs
+                                                .get(1)
+                                                .map(|s| s.as_str() == "with_tag" || s.as_str() == "all")
+                                                .unwrap_or(false)
+                                        {
+                                            SmeltType::List(Box::new(SmeltType::SourceRef))
                                         } else {
                                             SmeltType::Unknown
                                         }
@@ -1801,12 +1816,18 @@ pub fn hover_text_for_hof_meta_language(
                                 }
                             })
                             .unwrap_or(SmeltType::Unknown);
-                        // ColumnRef-typed lambda parameter: use the
-                        // specialised binding helper (shows the closed
+                        // ColumnRef/ModelRef/SourceRef-typed lambda parameter:
+                        // use the specialised binding helper (shows the closed
                         // field list) instead of the generic lambda-param
-                        // helper (which would only show `c: ColumnRef`).
+                        // helper.
                         if matches!(elem_ty, SmeltType::ColumnRef) {
                             return Some(hover_text_for_column_ref_binding(param_name));
+                        }
+                        if matches!(elem_ty, SmeltType::ModelRef) {
+                            return Some(hover_text_for_model_ref_binding(param_name));
+                        }
+                        if matches!(elem_ty, SmeltType::SourceRef) {
+                            return Some(hover_text_for_source_ref_binding(param_name));
                         }
                         let ctx = smelt_db::TypeContext::new();
                         return Some(hover_text_for_lambda_param(
@@ -1818,12 +1839,10 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
-    // ── 3. ColumnRef field projection — cursor on `<field>` in `c.<field>` ──
-    // Runs BEFORE the HOF result-type block so that hovering on `c.name` inside
-    // `map(smelt.columns_of(...), fn c => c.name)` shows the field hover rather
-    // than the outer HOF result type.  The receiver check (via
-    // `is_column_ref_param_before_dot`) ensures plain SQL expressions like
-    // `t.type` or `alias.name` do NOT trigger this hover.
+    // ── 3. ColumnRef / ModelRef / SourceRef field projection ─────────────────
+    // Cursor on `<field>` in `c.<field>` / `m.<field>` / `s.<field>`.
+    // Runs BEFORE the HOF result-type block so field hover wins over outer HOF.
+    // Receiver checks ensure plain SQL field access does NOT trigger this hover.
     {
         use smelt_parser::SyntaxKind::{DOT, IDENT};
         let syntax_node = file.syntax();
@@ -1840,13 +1859,26 @@ pub fn hover_text_for_hof_meta_language(
                         let end: usize = next_tok.text_range().end().into();
                         if cursor_offset >= start && cursor_offset <= end {
                             let field_name = next_tok.text();
-                            // Only fire when the token before the DOT is a
-                            // ColumnRef-typed lambda parameter bound by a HOF
-                            // whose first arg is `smelt.columns_of(...)`.
                             let dot_end: usize = tok.text_range().end().into();
+                            // ColumnRef: HOF first arg is smelt.columns_of(...)
                             if is_column_ref_param_before_dot(file, &file_sql, dot_end).is_some() {
                                 if let Some(hover_text) =
                                     hover_text_for_column_ref_field(field_name)
+                                {
+                                    return Some(hover_text);
+                                }
+                            }
+                            // ModelRef: HOF first arg is smelt.models.with_tag/all
+                            if is_model_ref_param_before_dot(file, &file_sql, dot_end).is_some() {
+                                if let Some(hover_text) = hover_text_for_model_ref_field(field_name)
+                                {
+                                    return Some(hover_text);
+                                }
+                            }
+                            // SourceRef: HOF first arg is smelt.sources.with_tag/all
+                            if is_source_ref_param_before_dot(file, &file_sql, dot_end).is_some() {
+                                if let Some(hover_text) =
+                                    hover_text_for_source_ref_field(field_name)
                                 {
                                     return Some(hover_text);
                                 }
@@ -1858,7 +1890,68 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
-    // ── 4. HOF result type (map / filter / reduce) ─────────────────────────
+    // ── 4. smelt.models.* / smelt.sources.* wide-reflection accessor call ─────
+    // Must run BEFORE the HOF result-type check.  When the cursor is inside
+    // `reduce(smelt.models.all(), union_all)`, the cursor position is inside
+    // the `smelt.models.all()` SmeltPathCall node (a more-specific match).
+    // The HOF result-type block would otherwise intercept the position first.
+    {
+        let wide_call = file
+            .syntax()
+            .descendants()
+            .filter_map(smelt_parser::ast::SmeltPathCall::cast)
+            .find(|c| {
+                let segs = c.segments();
+                let first = segs.first().map(|s| s.as_str());
+                let second = segs.get(1).map(|s| s.as_str());
+                let is_wide = (first == Some("models") || first == Some("sources"))
+                    && (second == Some("with_tag") || second == Some("all"));
+                if !is_wide {
+                    return false;
+                }
+                let r = c.text_range();
+                let s: usize = r.start().into();
+                let e: usize = r.end().into();
+                cursor_offset >= s && cursor_offset <= e
+            });
+
+        if let Some(call) = wide_call {
+            let segs = call.segments();
+            let namespace = segs.first().map(|s| s.as_str()).unwrap_or("models");
+            let accessor = segs.get(1).map(|s| s.as_str()).unwrap_or("all");
+            if namespace == "models" {
+                if accessor == "with_tag" {
+                    let tag = call
+                        .arg_list()
+                        .and_then(|al| al.positional_args().into_iter().next())
+                        .map(|a| {
+                            let t = a.text();
+                            t.trim_matches('\'').trim_matches('"').to_string()
+                        })
+                        .unwrap_or_default();
+                    return Some(hover_text_for_models_with_tag_call(&tag, None));
+                } else {
+                    return Some(hover_text_for_models_all(None));
+                }
+            } else {
+                if accessor == "with_tag" {
+                    let tag = call
+                        .arg_list()
+                        .and_then(|al| al.positional_args().into_iter().next())
+                        .map(|a| {
+                            let t = a.text();
+                            t.trim_matches('\'').trim_matches('"').to_string()
+                        })
+                        .unwrap_or_default();
+                    return Some(hover_text_for_sources_with_tag_call(&tag, None));
+                } else {
+                    return Some(hover_text_for_sources_all(None));
+                }
+            }
+        }
+    }
+
+    // ── 5. HOF result type (map / filter / reduce) ─────────────────────────
     {
         let hof_call = file
             .syntax()
@@ -1976,6 +2069,402 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
+    None
+}
+
+// ============================================================================
+// Phase D (meta-language): hover / goto-def / completion for wide reflection
+//
+// Pure helpers — no Salsa calls inside the bodies.  Backend handlers call them
+// after resolving Salsa-backed data (e.g. ModelRefValue lists) and pass the
+// results in as plain data.
+// ============================================================================
+
+/// Render hover text for a `smelt.models.with_tag(t)` call site.
+///
+/// - Always shows `List<ModelRef>` as the return type.
+/// - When `models` is `Some`, also shows the resolved match count and the
+///   first five matching model names (per spec §"LSP support for wide
+///   reflection").
+/// - When `models` is `None` (workspace not resolvable at this cursor),
+///   shows only the type annotation.
+///
+/// Pure — callers supply the resolved model list.
+pub fn hover_text_for_models_with_tag_call(
+    tag: &str,
+    models: Option<&[smelt_types::signatures::ModelRefValue]>,
+) -> String {
+    match models {
+        None => format!(
+            "`smelt.models.with_tag('{tag}')`\n\n`List<ModelRef>`\n\n\
+             *Workspace not statically resolvable*"
+        ),
+        Some(ms) => {
+            let count = ms.len();
+            let preview: Vec<&str> = ms.iter().take(5).map(|m| m.name.as_str()).collect();
+            let preview_str = preview.join(", ");
+            let ellipsis = if count > 5 { ", …" } else { "" };
+            format!(
+                "`smelt.models.with_tag('{tag}')`\n\n`List<ModelRef>`\n\n\
+                 {count} matching models: {preview_str}{ellipsis}"
+            )
+        }
+    }
+}
+
+/// Render hover text for a `smelt.sources.with_tag(t)` call site.
+///
+/// Mirrors `hover_text_for_models_with_tag_call` but for `SourceRef`.
+///
+/// Pure — callers supply the resolved source list.
+pub fn hover_text_for_sources_with_tag_call(
+    tag: &str,
+    sources: Option<&[smelt_types::signatures::SourceRefValue]>,
+) -> String {
+    match sources {
+        None => format!(
+            "`smelt.sources.with_tag('{tag}')`\n\n`List<SourceRef>`\n\n\
+             *Workspace not statically resolvable*"
+        ),
+        Some(ss) => {
+            let count = ss.len();
+            let preview: Vec<&str> = ss.iter().take(5).map(|s| s.name.as_str()).collect();
+            let preview_str = preview.join(", ");
+            let ellipsis = if count > 5 { ", …" } else { "" };
+            format!(
+                "`smelt.sources.with_tag('{tag}')`\n\n`List<SourceRef>`\n\n\
+                 {count} matching sources: {preview_str}{ellipsis}"
+            )
+        }
+    }
+}
+
+/// Render hover text for `smelt.models.all` call / accessor.
+///
+/// - Always shows the signature `() -> List<ModelRef>`.
+/// - When `total` is `Some`, also shows the workspace's total model count.
+///
+/// Pure — callers supply the total count.
+pub fn hover_text_for_models_all(total: Option<usize>) -> String {
+    match total {
+        None => "`smelt.models.all`\n\n`() -> List<ModelRef>`\n\n\
+                 *Workspace not statically resolvable*"
+            .to_string(),
+        Some(n) => format!(
+            "`smelt.models.all`\n\n`() -> List<ModelRef>`\n\n\
+             {n} models in workspace"
+        ),
+    }
+}
+
+/// Render hover text for `smelt.sources.all` call / accessor.
+///
+/// Mirrors `hover_text_for_models_all` but for `SourceRef`.
+///
+/// Pure — callers supply the total count.
+pub fn hover_text_for_sources_all(total: Option<usize>) -> String {
+    match total {
+        None => "`smelt.sources.all`\n\n`() -> List<SourceRef>`\n\n\
+                 *Workspace not statically resolvable*"
+            .to_string(),
+        Some(n) => format!(
+            "`smelt.sources.all`\n\n`() -> List<SourceRef>`\n\n\
+             {n} sources in workspace"
+        ),
+    }
+}
+
+/// Render hover text for a `ModelRef`-typed lambda parameter binding.
+///
+/// Shows `ModelRef` as the type and lists the four closed fields with their
+/// declared types per `MODEL_REF_FIELDS`.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_model_ref_binding(param_name: &str) -> String {
+    use smelt_types::signatures::MODEL_REF_FIELDS;
+    let mut s = format!(
+        "**`{param_name}`** (lambda parameter)\n\n`{param_name}: ModelRef`\n\n\
+         **Fields:**\n"
+    );
+    for (field_name, field_ty) in MODEL_REF_FIELDS.iter() {
+        let ty_str = format_smelt_type_hover(field_ty);
+        s.push_str(&format!("- `{field_name}: {ty_str}`\n"));
+    }
+    s
+}
+
+/// Render hover text for a `SourceRef`-typed lambda parameter binding.
+///
+/// Shows `SourceRef` as the type and lists the four closed fields with their
+/// declared types per `SOURCE_REF_FIELDS`.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_source_ref_binding(param_name: &str) -> String {
+    use smelt_types::signatures::SOURCE_REF_FIELDS;
+    let mut s = format!(
+        "**`{param_name}`** (lambda parameter)\n\n`{param_name}: SourceRef`\n\n\
+         **Fields:**\n"
+    );
+    for (field_name, field_ty) in SOURCE_REF_FIELDS.iter() {
+        let ty_str = format_smelt_type_hover(field_ty);
+        s.push_str(&format!("- `{field_name}: {ty_str}`\n"));
+    }
+    s
+}
+
+/// Render hover text for a `ModelRef` field projection `m.<field>`.
+///
+/// Returns `Some(text)` for the four recognised fields (`path`, `name`, `tags`,
+/// `columns`) and `None` for any other field name.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_model_ref_field(field_name: &str) -> Option<String> {
+    use smelt_types::signatures::model_ref_field;
+    let field_ty = model_ref_field(field_name)?;
+    let ty_str = format_smelt_type_hover(field_ty);
+    Some(format!("`{field_name}: {ty_str}` (ModelRef field)"))
+}
+
+/// Render hover text for a `SourceRef` field projection `s.<field>`.
+///
+/// Returns `Some(text)` for the four recognised fields (`path`, `name`, `tags`,
+/// `columns`) and `None` for any other field name.
+///
+/// Pure — no Salsa dependency.
+pub fn hover_text_for_source_ref_field(field_name: &str) -> Option<String> {
+    use smelt_types::signatures::source_ref_field;
+    let field_ty = source_ref_field(field_name)?;
+    let ty_str = format_smelt_type_hover(field_ty);
+    Some(format!("`{field_name}: {ty_str}` (SourceRef field)"))
+}
+
+/// Goto-definition for `smelt.models.*` / `smelt.sources.*` accessor call paths —
+/// returns `None` (graceful no-op / URL hint per spec §"LSP support for wide
+/// reflection").
+///
+/// Pure — no Salsa or Backend dependency.
+pub fn goto_def_for_wide_reflection_accessor() -> Option<std::path::PathBuf> {
+    // Graceful no-op per spec. A future phase may return a URL hint.
+    None
+}
+
+/// Goto-definition from a `ModelRef`-typed value at a splice site or from a
+/// `ModelRef` field projection (`m.path`, `m.name`) — resolves to the model's
+/// source `.sql` file.
+///
+/// When `source_path` is `Some`, returns the path. Otherwise returns `None`
+/// (graceful no-op).
+///
+/// Pure — callers supply the resolved path.
+pub fn goto_def_for_model_ref_value(
+    source_path: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    source_path
+}
+
+/// Goto-definition from a `SourceRef`-typed value — resolves to the source
+/// YAML file.
+///
+/// When `yaml_path` is `Some`, returns the path. Otherwise returns `None`
+/// (graceful no-op).
+///
+/// Pure — callers supply the resolved path.
+pub fn goto_def_for_source_ref_value(
+    yaml_path: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    yaml_path
+}
+
+/// Return the closed set of accessor names for `smelt.models.<cursor>` or
+/// `smelt.sources.<cursor>` completion.
+///
+/// Returns exactly `["with_tag", "all"]` — the two accessors per spec.
+///
+/// Pure — no Salsa dependency.
+pub fn wide_reflection_accessor_completions() -> Vec<String> {
+    vec!["with_tag".to_string(), "all".to_string()]
+}
+
+/// Return the closed set of `ModelRef` field names for completion at a
+/// field-projection site (`m.<cursor>`).
+///
+/// Returns exactly `["path", "name", "tags", "columns"]` — the four fields in
+/// declaration order per `MODEL_REF_FIELDS`.
+///
+/// Pure — no Salsa dependency.
+pub fn model_ref_field_completions() -> Vec<String> {
+    use smelt_types::signatures::MODEL_REF_FIELDS;
+    MODEL_REF_FIELDS
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Return the closed set of `SourceRef` field names for completion at a
+/// field-projection site (`s.<cursor>`).
+///
+/// Returns exactly `["path", "name", "tags", "columns"]` — the four fields in
+/// declaration order per `SOURCE_REF_FIELDS`.
+///
+/// Pure — no Salsa dependency.
+pub fn source_ref_field_completions() -> Vec<String> {
+    use smelt_types::signatures::SOURCE_REF_FIELDS;
+    SOURCE_REF_FIELDS
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Determine whether the text immediately before `cursor_offset` in `sql`
+/// ends with `<param_name>.` where `<param_name>` is a lambda parameter
+/// that is `ModelRef`-typed — i.e. it is bound by a HOF (`map`, `filter`,
+/// or `reduce`) whose **first argument** is a `smelt.models.with_tag(...)` or
+/// `smelt.models.all` call.
+///
+/// Returns `Some(param_name)` when the condition holds, `None` otherwise.
+///
+/// Pure — no Salsa dependency.
+pub fn is_model_ref_param_before_dot(
+    file: &smelt_parser::ast::File,
+    sql: &str,
+    cursor_offset: usize,
+) -> Option<String> {
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let before = &sql[..cursor_offset.min(sql.len())];
+    let dot_trimmed = before.strip_suffix('.')?;
+    let param_name: String = dot_trimmed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if param_name.is_empty() {
+        return None;
+    }
+
+    // Find the innermost LAMBDA that contains cursor_offset and declares param_name.
+    let lambda_node = file
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+        .filter(|n| {
+            let s: usize = n.text_range().start().into();
+            let e: usize = n.text_range().end().into();
+            cursor_offset >= s && cursor_offset <= e
+        })
+        .filter_map(smelt_parser::ast::Lambda::cast)
+        .find(|lam| lam.params().iter().any(|p| p == &param_name))?;
+
+    // Walk up to the nearest enclosing HOF FUNCTION_CALL.
+    let mut cur = lambda_node.syntax().parent();
+    let mut hof_call: Option<smelt_parser::ast::FunctionCall> = None;
+    while let Some(node) = cur {
+        if node.kind() == SyntaxKind::FUNCTION_CALL {
+            if let Some(fc) = smelt_parser::ast::FunctionCall::cast(node.clone()) {
+                if matches!(
+                    hof_call_name(&fc).as_deref().unwrap_or(""),
+                    "map" | "filter" | "reduce"
+                ) {
+                    hof_call = Some(fc);
+                    break;
+                }
+            }
+        }
+        cur = node.parent();
+    }
+
+    // Check that the HOF's first argument is `smelt.models.with_tag(...)` or
+    // `smelt.models.all` (or `smelt.models.all()`).
+    let hof = hof_call?;
+    let first_arg = hof.arguments().into_iter().next()?;
+    let path_call = first_arg.as_smelt_path_call()?;
+    let segs = path_call.segments();
+    // segs for `smelt.models.with_tag(...)` → ["models", "with_tag"]
+    // segs for `smelt.models.all` / `smelt.models.all()` → ["models", "all"]
+    if segs.first().map(|s| s.as_str()) == Some("models")
+        && segs
+            .get(1)
+            .map(|s| s.as_str() == "with_tag" || s.as_str() == "all")
+            .unwrap_or(false)
+    {
+        return Some(param_name);
+    }
+    None
+}
+
+/// Determine whether the text immediately before `cursor_offset` in `sql`
+/// ends with `<param_name>.` where `<param_name>` is a lambda parameter
+/// that is `SourceRef`-typed — i.e. it is bound by a HOF whose **first
+/// argument** is a `smelt.sources.with_tag(...)` or `smelt.sources.all` call.
+///
+/// Returns `Some(param_name)` when the condition holds, `None` otherwise.
+///
+/// Pure — no Salsa dependency.
+pub fn is_source_ref_param_before_dot(
+    file: &smelt_parser::ast::File,
+    sql: &str,
+    cursor_offset: usize,
+) -> Option<String> {
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let before = &sql[..cursor_offset.min(sql.len())];
+    let dot_trimmed = before.strip_suffix('.')?;
+    let param_name: String = dot_trimmed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if param_name.is_empty() {
+        return None;
+    }
+
+    let lambda_node = file
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+        .filter(|n| {
+            let s: usize = n.text_range().start().into();
+            let e: usize = n.text_range().end().into();
+            cursor_offset >= s && cursor_offset <= e
+        })
+        .filter_map(smelt_parser::ast::Lambda::cast)
+        .find(|lam| lam.params().iter().any(|p| p == &param_name))?;
+
+    let mut cur = lambda_node.syntax().parent();
+    let mut hof_call: Option<smelt_parser::ast::FunctionCall> = None;
+    while let Some(node) = cur {
+        if node.kind() == SyntaxKind::FUNCTION_CALL {
+            if let Some(fc) = smelt_parser::ast::FunctionCall::cast(node.clone()) {
+                if matches!(
+                    hof_call_name(&fc).as_deref().unwrap_or(""),
+                    "map" | "filter" | "reduce"
+                ) {
+                    hof_call = Some(fc);
+                    break;
+                }
+            }
+        }
+        cur = node.parent();
+    }
+
+    let hof = hof_call?;
+    let first_arg = hof.arguments().into_iter().next()?;
+    let path_call = first_arg.as_smelt_path_call()?;
+    let segs = path_call.segments();
+    if segs.first().map(|s| s.as_str()) == Some("sources")
+        && segs
+            .get(1)
+            .map(|s| s.as_str() == "with_tag" || s.as_str() == "all")
+            .unwrap_or(false)
+    {
+        return Some(param_name);
+    }
     None
 }
 
@@ -5154,6 +5643,91 @@ impl LanguageServer for Backend {
                     }
                 }
 
+                // Phase D: wide-reflection accessor hover with Salsa-backed resolution.
+                //
+                // Must run BEFORE `hover_text_for_hof_meta_language` so the richer
+                // Salsa-resolved version (with counts + names) wins over the pure
+                // fallback (which shows None for workspace state).
+                {
+                    let wide_call = file
+                        .syntax()
+                        .descendants()
+                        .filter_map(smelt_parser::ast::SmeltPathCall::cast)
+                        .find(|c| {
+                            let segs = c.segments();
+                            let first = segs.first().map(|s| s.as_str());
+                            let second = segs.get(1).map(|s| s.as_str());
+                            let is_wide = (first == Some("models") || first == Some("sources"))
+                                && (second == Some("with_tag") || second == Some("all"));
+                            if !is_wide {
+                                return false;
+                            }
+                            let r = c.text_range();
+                            let s: usize = r.start().into();
+                            let e: usize = r.end().into();
+                            cursor_offset >= s && cursor_offset <= e
+                        });
+
+                    if let Some(call) = wide_call {
+                        let segs = call.segments();
+                        let namespace = segs.first().map(|s| s.as_str()).unwrap_or("models");
+                        let accessor = segs.get(1).map(|s| s.as_str()).unwrap_or("all");
+                        let ws = Workspace::try_get(&db);
+
+                        let value = if namespace == "models" {
+                            if accessor == "with_tag" {
+                                let tag = call
+                                    .arg_list()
+                                    .and_then(|al| al.positional_args().into_iter().next())
+                                    .map(|a| {
+                                        let t = a.text();
+                                        t.trim_matches('\'').trim_matches('"').to_string()
+                                    })
+                                    .unwrap_or_default();
+                                let resolved =
+                                    ws.map(|w| smelt_db::models_with_tag(&db, w, tag.clone()));
+                                hover_text_for_models_with_tag_call(
+                                    &tag,
+                                    resolved.as_ref().map(|v| v.as_slice()),
+                                )
+                            } else {
+                                let resolved = ws.map(|w| smelt_db::models_all(&db, w));
+                                hover_text_for_models_all(resolved.as_ref().map(|v| v.len()))
+                            }
+                        } else {
+                            // sources
+                            let project_root = file_project_root(&db, &effective_path);
+                            let project = lookup_project(&db, &project_root);
+                            if accessor == "with_tag" {
+                                let tag = call
+                                    .arg_list()
+                                    .and_then(|al| al.positional_args().into_iter().next())
+                                    .map(|a| {
+                                        let t = a.text();
+                                        t.trim_matches('\'').trim_matches('"').to_string()
+                                    })
+                                    .unwrap_or_default();
+                                let resolved = project
+                                    .map(|p| smelt_db::sources_with_tag(&db, p, tag.clone()));
+                                hover_text_for_sources_with_tag_call(
+                                    &tag,
+                                    resolved.as_ref().map(|v| v.as_slice()),
+                                )
+                            } else {
+                                let resolved = project.map(|p| smelt_db::sources_all(&db, p));
+                                hover_text_for_sources_all(resolved.as_ref().map(|v| v.len()))
+                            }
+                        };
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value,
+                            }),
+                            range: None,
+                        }));
+                    }
+                }
+
                 // Phase C: smelt.columns_of hover with Salsa-backed column resolution.
                 //
                 // Must run BEFORE `hover_text_for_hof_meta_language` so the richer
@@ -5378,6 +5952,96 @@ impl LanguageServer for Backend {
                                 if !items.is_empty() {
                                     return Ok(Some(CompletionResponse::Array(items)));
                                 }
+                            }
+                        }
+                    }
+
+                    // Phase D: smelt.models.<cursor> / smelt.sources.<cursor> accessor
+                    // namespace completion — offer the closed accessor set {with_tag, all}.
+                    //
+                    // Detection: text before cursor ends with `smelt.models.` or
+                    // `smelt.sources.` (possibly with a partial accessor name typed).
+                    {
+                        let before = &text[..cursor_offset.min(text.len())];
+                        let is_models_ns = before.ends_with("smelt.models.")
+                            || before
+                                .rfind("smelt.models.")
+                                .map(|p| {
+                                    let after = &before[p + "smelt.models.".len()..];
+                                    after.chars().all(|c| c.is_alphanumeric() || c == '_')
+                                })
+                                .unwrap_or(false);
+                        let is_sources_ns = !is_models_ns
+                            && (before.ends_with("smelt.sources.")
+                                || before
+                                    .rfind("smelt.sources.")
+                                    .map(|p| {
+                                        let after = &before[p + "smelt.sources.".len()..];
+                                        after.chars().all(|c| c.is_alphanumeric() || c == '_')
+                                    })
+                                    .unwrap_or(false));
+                        if is_models_ns || is_sources_ns {
+                            let accessor_names = wide_reflection_accessor_completions();
+                            let items: Vec<CompletionItem> = accessor_names
+                                .into_iter()
+                                .map(|name| CompletionItem {
+                                    label: name.clone(),
+                                    kind: Some(CompletionItemKind::FUNCTION),
+                                    detail: Some(format!(
+                                        "smelt.{}.{}",
+                                        if is_models_ns { "models" } else { "sources" },
+                                        name
+                                    )),
+                                    sort_text: Some(format!("0_{name}")),
+                                    ..Default::default()
+                                })
+                                .collect();
+                            if !items.is_empty() {
+                                return Ok(Some(CompletionResponse::Array(items)));
+                            }
+                        }
+                    }
+
+                    // Phase D: ModelRef field completion — at `m.<cursor>` inside a
+                    // lambda body where `m` is a ModelRef-typed parameter,
+                    // offer the closed field set {path, name, tags, columns}.
+                    {
+                        if is_model_ref_param_before_dot(&file, &text, cursor_offset).is_some() {
+                            let field_names = model_ref_field_completions();
+                            let items: Vec<CompletionItem> = field_names
+                                .into_iter()
+                                .map(|name| CompletionItem {
+                                    label: name.clone(),
+                                    kind: Some(CompletionItemKind::FIELD),
+                                    detail: hover_text_for_model_ref_field(&name),
+                                    sort_text: Some(format!("0_{name}")),
+                                    ..Default::default()
+                                })
+                                .collect();
+                            if !items.is_empty() {
+                                return Ok(Some(CompletionResponse::Array(items)));
+                            }
+                        }
+                    }
+
+                    // Phase D: SourceRef field completion — at `s.<cursor>` inside a
+                    // lambda body where `s` is a SourceRef-typed parameter,
+                    // offer the closed field set {path, name, tags, columns}.
+                    {
+                        if is_source_ref_param_before_dot(&file, &text, cursor_offset).is_some() {
+                            let field_names = source_ref_field_completions();
+                            let items: Vec<CompletionItem> = field_names
+                                .into_iter()
+                                .map(|name| CompletionItem {
+                                    label: name.clone(),
+                                    kind: Some(CompletionItemKind::FIELD),
+                                    detail: hover_text_for_source_ref_field(&name),
+                                    sort_text: Some(format!("0_{name}")),
+                                    ..Default::default()
+                                })
+                                .collect();
+                            if !items.is_empty() {
+                                return Ok(Some(CompletionResponse::Array(items)));
                             }
                         }
                     }
@@ -7669,6 +8333,503 @@ mod tests {
             text.contains("ColumnRef field") || text.contains("name") && text.contains("Text"),
             "hover on `c.name` in ColumnRef lambda must describe the `name` field (Text), \
              got: {text}"
+        );
+    }
+
+    // ── Phase D (meta-language): hover, goto-def, completion for wide reflection
+
+    /// Hovering on `smelt.models.with_tag('cohort')` returns `List<ModelRef>` in
+    /// the hover text.  When tag resolves, also shows match count + first five
+    /// names.  Analogous for `smelt.sources.with_tag`.
+    ///
+    /// Tests `hover_text_for_models_with_tag_call` and
+    /// `hover_text_for_sources_with_tag_call` pure helpers.
+    #[test]
+    fn hover_on_smelt_models_with_tag_call_shows_list_model_ref() {
+        // Case 1: no resolved models (workspace unresolvable) — must show List<ModelRef>
+        let text_no_models = hover_text_for_models_with_tag_call("cohort", None);
+        assert!(
+            text_no_models.contains("List<ModelRef>"),
+            "hover on smelt.models.with_tag with unresolvable workspace must contain \
+             `List<ModelRef>`, got: {text_no_models}"
+        );
+        assert!(
+            text_no_models.contains("cohort"),
+            "hover on smelt.models.with_tag must mention the tag, got: {text_no_models}"
+        );
+
+        // Case 2: resolved models — must show List<ModelRef> PLUS count + names
+        use smelt_types::signatures::ModelRefValue;
+        let models = vec![
+            ModelRefValue {
+                path: "models/orders.sql".to_string(),
+                name: "orders".to_string(),
+                tags: vec!["cohort".to_string()],
+                model_name_for_columns: "orders".to_string(),
+            },
+            ModelRefValue {
+                path: "models/customers.sql".to_string(),
+                name: "customers".to_string(),
+                tags: vec!["cohort".to_string()],
+                model_name_for_columns: "customers".to_string(),
+            },
+        ];
+        let text_with_models = hover_text_for_models_with_tag_call("cohort", Some(&models));
+        assert!(
+            text_with_models.contains("List<ModelRef>"),
+            "hover on smelt.models.with_tag with resolved models must contain \
+             `List<ModelRef>`, got: {text_with_models}"
+        );
+        assert!(
+            text_with_models.contains('2') || text_with_models.contains("2 matching"),
+            "hover on smelt.models.with_tag with 2 models must mention count, \
+             got: {text_with_models}"
+        );
+        assert!(
+            text_with_models.contains("orders"),
+            "hover on smelt.models.with_tag must list model name `orders`, \
+             got: {text_with_models}"
+        );
+
+        // SourceRef variant
+        let text_no_sources = hover_text_for_sources_with_tag_call("audit", None);
+        assert!(
+            text_no_sources.contains("List<SourceRef>"),
+            "hover on smelt.sources.with_tag must contain `List<SourceRef>`, \
+             got: {text_no_sources}"
+        );
+
+        use smelt_types::signatures::SourceRefValue;
+        let sources = vec![SourceRefValue {
+            path: "sources/raw.yml".to_string(),
+            name: "raw_events".to_string(),
+            tags: vec!["audit".to_string()],
+            address_segments: vec!["raw".to_string(), "raw_events".to_string()],
+        }];
+        let text_with_sources = hover_text_for_sources_with_tag_call("audit", Some(&sources));
+        assert!(
+            text_with_sources.contains("List<SourceRef>"),
+            "hover on smelt.sources.with_tag with resolved sources must contain \
+             `List<SourceRef>`, got: {text_with_sources}"
+        );
+        assert!(
+            text_with_sources.contains("raw_events"),
+            "hover on smelt.sources.with_tag must list source name `raw_events`, \
+             got: {text_with_sources}"
+        );
+
+        // Verify dispatch routing: hovering on the call site in SQL
+        let sql = "SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)";
+        let with_tag_offset = sql.find("with_tag").expect("with_tag must be in SQL");
+        let result = dispatch_hover(sql, with_tag_offset + 2);
+        assert!(
+            result.is_some(),
+            "dispatch hover on smelt.models.with_tag call must produce Some, got None"
+        );
+        let hover_text = result.unwrap();
+        assert!(
+            hover_text.contains("List<ModelRef>"),
+            "dispatch hover on smelt.models.with_tag must contain `List<ModelRef>`, \
+             got: {hover_text}"
+        );
+        assert!(
+            hover_text.contains("cohort"),
+            "dispatch hover on smelt.models.with_tag must mention the tag, \
+             got: {hover_text}"
+        );
+    }
+
+    /// Hovering on `smelt.models.all` shows the signature plus workspace model
+    /// count.  Analogous for `smelt.sources.all`.
+    ///
+    /// Tests `hover_text_for_models_all` and `hover_text_for_sources_all`
+    /// pure helpers.
+    #[test]
+    fn hover_on_smelt_models_all_shows_workspace_count() {
+        // No workspace count available
+        let text_no_count = hover_text_for_models_all(None);
+        assert!(
+            text_no_count.contains("List<ModelRef>"),
+            "hover on smelt.models.all with no count must contain `List<ModelRef>`, \
+             got: {text_no_count}"
+        );
+
+        // With workspace count
+        let text_with_count = hover_text_for_models_all(Some(42));
+        assert!(
+            text_with_count.contains("List<ModelRef>"),
+            "hover on smelt.models.all with count must contain `List<ModelRef>`, \
+             got: {text_with_count}"
+        );
+        assert!(
+            text_with_count.contains("42"),
+            "hover on smelt.models.all must mention total model count 42, \
+             got: {text_with_count}"
+        );
+
+        // SourceRef variant
+        let text_no_sources = hover_text_for_sources_all(None);
+        assert!(
+            text_no_sources.contains("List<SourceRef>"),
+            "hover on smelt.sources.all must contain `List<SourceRef>`, \
+             got: {text_no_sources}"
+        );
+        let text_sources = hover_text_for_sources_all(Some(5));
+        assert!(
+            text_sources.contains("5"),
+            "hover on smelt.sources.all must mention total source count, \
+             got: {text_sources}"
+        );
+
+        // Verify dispatch routing
+        let sql = "SELECT reduce(smelt.models.all(), union_all)";
+        let all_offset = sql.find(".all").expect(".all must be in SQL") + 1;
+        let result = dispatch_hover(sql, all_offset);
+        assert!(
+            result.is_some(),
+            "dispatch hover on smelt.models.all call must produce Some, got None"
+        );
+        let hover_text = result.unwrap();
+        assert!(
+            hover_text.contains("List<ModelRef>"),
+            "dispatch hover on smelt.models.all must contain `List<ModelRef>`, \
+             got: {hover_text}"
+        );
+    }
+
+    /// Hovering on `m` inside `map(smelt.models.with_tag('cohort'), fn m => …)`
+    /// shows `ModelRef` plus the closed four-field list with each field's type.
+    /// Analogous for `SourceRef`.
+    ///
+    /// Routes through `dispatch_hover` to verify the wiring.
+    #[test]
+    fn hover_on_model_ref_lambda_parameter_shows_field_set() {
+        // Case 1: cursor on the binder `m` in `fn m => m.name`
+        let sql = "SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)";
+        let fn_pos = sql.find("fn ").expect("fn must be in SQL");
+        let binder_offset = fn_pos + 3; // skip "fn "
+        let result = dispatch_hover(sql, binder_offset);
+        assert!(
+            result.is_some(),
+            "dispatch hover on ModelRef lambda binder `m` must produce Some, got None"
+        );
+        let text = result.unwrap();
+        assert!(
+            text.contains("ModelRef"),
+            "hover on ModelRef binding `m` must contain `ModelRef`, got: {text}"
+        );
+        // Must show the four closed fields
+        assert!(
+            text.contains("path"),
+            "hover on ModelRef binding must mention field `path`, got: {text}"
+        );
+        assert!(
+            text.contains("name"),
+            "hover on ModelRef binding must mention field `name`, got: {text}"
+        );
+        assert!(
+            text.contains("tags"),
+            "hover on ModelRef binding must mention field `tags`, got: {text}"
+        );
+        assert!(
+            text.contains("columns"),
+            "hover on ModelRef binding must mention field `columns`, got: {text}"
+        );
+
+        // Case 2: the binding helper directly
+        let binding_text = hover_text_for_model_ref_binding("m");
+        assert!(
+            binding_text.contains("ModelRef"),
+            "hover_text_for_model_ref_binding must contain ModelRef, got: {binding_text}"
+        );
+
+        // SourceRef variant
+        let sql_src = "SELECT map(smelt.sources.with_tag('audit'), fn s => s.name)";
+        let fn_pos_src = sql_src.find("fn ").expect("fn must be in SQL");
+        let binder_offset_src = fn_pos_src + 3;
+        let result_src = dispatch_hover(sql_src, binder_offset_src);
+        assert!(
+            result_src.is_some(),
+            "dispatch hover on SourceRef lambda binder `s` must produce Some, got None"
+        );
+        let text_src = result_src.unwrap();
+        assert!(
+            text_src.contains("SourceRef"),
+            "hover on SourceRef binding `s` must contain `SourceRef`, got: {text_src}"
+        );
+        assert!(
+            text_src.contains("path"),
+            "hover on SourceRef binding must mention field `path`, got: {text_src}"
+        );
+    }
+
+    /// Hovering on the `path` token of `m.path` shows `path: Text`;
+    /// on `name` shows `name: Text`; on `tags` shows `tags: List<Text>`;
+    /// on `columns` shows `columns: List<ColumnRef>`.
+    /// Analogous for `SourceRef`.
+    ///
+    /// Tests `hover_text_for_model_ref_field` and `hover_text_for_source_ref_field`
+    /// pure helpers.
+    #[test]
+    fn hover_on_model_ref_field_projection_shows_field_type() {
+        // `m.path` → Text
+        let text_path = hover_text_for_model_ref_field("path");
+        assert!(
+            text_path.is_some(),
+            "hover_text_for_model_ref_field('path') must return Some, got None"
+        );
+        let path_text = text_path.unwrap();
+        assert!(
+            path_text.contains("path"),
+            "hover for `m.path` must mention field name `path`, got: {path_text}"
+        );
+        assert!(
+            path_text.contains("Text") || path_text.contains("TEXT"),
+            "hover for `m.path` must mention `Text` type, got: {path_text}"
+        );
+
+        // `m.name` → Text
+        let text_name = hover_text_for_model_ref_field("name");
+        assert!(
+            text_name.is_some(),
+            "hover_text_for_model_ref_field('name') must return Some, got None"
+        );
+        let name_text = text_name.unwrap();
+        assert!(
+            name_text.contains("Text") || name_text.contains("TEXT"),
+            "hover for `m.name` must mention `Text` type, got: {name_text}"
+        );
+
+        // `m.tags` → List<Text> (internally List<Expr<TEXT>>)
+        let text_tags = hover_text_for_model_ref_field("tags");
+        assert!(
+            text_tags.is_some(),
+            "hover_text_for_model_ref_field('tags') must return Some, got None"
+        );
+        let tags_text = text_tags.unwrap();
+        assert!(
+            tags_text.contains("List")
+                && (tags_text.contains("Text") || tags_text.contains("TEXT")),
+            "hover for `m.tags` must mention List and Text type, got: {tags_text}"
+        );
+
+        // `m.columns` → List<ColumnRef>
+        let text_cols = hover_text_for_model_ref_field("columns");
+        assert!(
+            text_cols.is_some(),
+            "hover_text_for_model_ref_field('columns') must return Some, got None"
+        );
+        let cols_text = text_cols.unwrap();
+        assert!(
+            cols_text.contains("ColumnRef"),
+            "hover for `m.columns` must mention `ColumnRef`, got: {cols_text}"
+        );
+
+        // Unknown field → None
+        let text_unknown = hover_text_for_model_ref_field("nonexistent_field");
+        assert!(
+            text_unknown.is_none(),
+            "hover_text_for_model_ref_field for unknown field must return None, got Some"
+        );
+
+        // SourceRef variant
+        let src_path = hover_text_for_source_ref_field("path");
+        assert!(
+            src_path.is_some(),
+            "hover_text_for_source_ref_field('path') must return Some, got None"
+        );
+        let src_tags = hover_text_for_source_ref_field("tags");
+        let src_tags_text =
+            src_tags.expect("hover_text_for_source_ref_field('tags') must return Some");
+        assert!(
+            src_tags_text.contains("List"),
+            "hover_text_for_source_ref_field('tags') must mention List, got: {src_tags_text}"
+        );
+
+        // Dispatch routing: cursor on the field token in `m.path`
+        let sql = "SELECT map(smelt.models.with_tag('cohort'), fn m => m.path)";
+        let path_offset = sql.rfind("path").expect("`path` must appear in SQL");
+        let result = dispatch_hover(sql, path_offset);
+        assert!(
+            result.is_some(),
+            "dispatch hover on `m.path` field in ModelRef lambda must produce Some, got None"
+        );
+        let hover_text = result.unwrap();
+        assert!(
+            hover_text.contains("ModelRef field")
+                || hover_text.contains("path") && hover_text.contains("Text"),
+            "dispatch hover on `m.path` must describe the `path` field (Text), \
+             got: {hover_text}"
+        );
+    }
+
+    /// Goto-def on `smelt.models.*` / `smelt.sources.*` accessor call paths is
+    /// a graceful no-op (returns `None`).
+    ///
+    /// Tests `goto_def_for_wide_reflection_accessor` pure helper.
+    #[test]
+    fn goto_def_from_model_ref_at_splice_site_resolves_to_source_file() {
+        // The pure helper returns None (graceful no-op per spec; full resolution
+        // requires expansion-time context — known divergence tracked in
+        // docs/plans/20260509-meta-language-overall.md).
+        let result = goto_def_for_wide_reflection_accessor();
+        assert!(
+            result.is_none(),
+            "goto_def_for_wide_reflection_accessor must return None (graceful no-op), \
+             got Some"
+        );
+
+        // goto_def_for_model_ref_value: when a path is supplied, returns it.
+        let path = std::path::PathBuf::from("/project/models/orders.sql");
+        let result_with_path = goto_def_for_model_ref_value(Some(path.clone()));
+        assert_eq!(
+            result_with_path,
+            Some(path.clone()),
+            "goto_def_for_model_ref_value(Some(path)) must return Some(path)"
+        );
+        let result_no_path = goto_def_for_model_ref_value(None);
+        assert!(
+            result_no_path.is_none(),
+            "goto_def_for_model_ref_value(None) must return None (graceful no-op)"
+        );
+
+        // SourceRef variant
+        let yaml_path = std::path::PathBuf::from("/project/sources.yml");
+        let result_src = goto_def_for_source_ref_value(Some(yaml_path.clone()));
+        assert_eq!(
+            result_src,
+            Some(yaml_path),
+            "goto_def_for_source_ref_value(Some(path)) must return Some(path)"
+        );
+        let result_src_none = goto_def_for_source_ref_value(None);
+        assert!(
+            result_src_none.is_none(),
+            "goto_def_for_source_ref_value(None) must return None (graceful no-op)"
+        );
+    }
+
+    /// Goto-def on `m.path` or `m.name` returns the same model file.
+    ///
+    /// Tests that `goto_def_for_model_ref_value` passes through a supplied path,
+    /// mirroring the Phase C `goto_def_for_lifted_identifier` contract.
+    #[test]
+    fn goto_def_from_model_ref_path_or_name_resolves_to_source_file() {
+        // `m.path` and `m.name` both route through `goto_def_for_model_ref_value`
+        // with the model's source path.  The pure helper passes the path through.
+        let model_path = std::path::PathBuf::from("/project/models/cohort_a.sql");
+        let result_path = goto_def_for_model_ref_value(Some(model_path.clone()));
+        let result_name = goto_def_for_model_ref_value(Some(model_path.clone()));
+        assert_eq!(
+            result_path, result_name,
+            "`m.path` and `m.name` goto-def must resolve to the same file"
+        );
+        assert_eq!(
+            result_path,
+            Some(model_path),
+            "goto_def_for_model_ref_value must return the supplied path"
+        );
+
+        // SourceRef: `s.path` and `s.name` both route through `goto_def_for_source_ref_value`.
+        let source_yaml = std::path::PathBuf::from("/project/sources.yml");
+        let result_s_path = goto_def_for_source_ref_value(Some(source_yaml.clone()));
+        assert_eq!(
+            result_s_path,
+            Some(source_yaml),
+            "goto_def_for_source_ref_value must return the supplied yaml path"
+        );
+    }
+
+    /// Completion at `smelt.models.<cursor>` offers exactly `{with_tag, all}` and
+    /// no other identifier. Same for `smelt.sources.<cursor>`.
+    ///
+    /// Tests `wide_reflection_accessor_completions` pure helper.
+    #[test]
+    fn completion_at_smelt_models_namespace_offers_closed_set() {
+        let names = wide_reflection_accessor_completions();
+        assert_eq!(
+            names.len(),
+            2,
+            "wide_reflection_accessor_completions must return exactly 2 items, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"with_tag".to_string()),
+            "wide_reflection_accessor_completions must include `with_tag`, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"all".to_string()),
+            "wide_reflection_accessor_completions must include `all`, got: {names:?}"
+        );
+        // Must NOT contain anything else
+        for name in &names {
+            assert!(
+                name == "with_tag" || name == "all",
+                "wide_reflection_accessor_completions must only contain `with_tag` and `all`, \
+                 got unexpected: {name}"
+            );
+        }
+    }
+
+    /// Completion at `m.<cursor>` where `m: ModelRef` offers exactly
+    /// `{path, name, tags, columns}`. Analogous for `SourceRef`.
+    ///
+    /// Tests `model_ref_field_completions` and `source_ref_field_completions`
+    /// pure helpers.
+    #[test]
+    fn completion_at_model_ref_field_offers_closed_set() {
+        // ModelRef fields
+        let names = model_ref_field_completions();
+        assert_eq!(
+            names.len(),
+            4,
+            "model_ref_field_completions must return exactly 4 items, got: {names:?}"
+        );
+        for field in &["path", "name", "tags", "columns"] {
+            assert!(
+                names.contains(&field.to_string()),
+                "model_ref_field_completions must include `{field}`, got: {names:?}"
+            );
+        }
+        // Must NOT include ColumnRef fields
+        assert!(
+            !names.contains(&"is_numeric".to_string()),
+            "model_ref_field_completions must NOT include ColumnRef field `is_numeric`, \
+             got: {names:?}"
+        );
+
+        // SourceRef fields
+        let src_names = source_ref_field_completions();
+        assert_eq!(
+            src_names.len(),
+            4,
+            "source_ref_field_completions must return exactly 4 items, got: {src_names:?}"
+        );
+        for field in &["path", "name", "tags", "columns"] {
+            assert!(
+                src_names.contains(&field.to_string()),
+                "source_ref_field_completions must include `{field}`, got: {src_names:?}"
+            );
+        }
+
+        // Dispatch routing: `m.<cursor>` inside ModelRef lambda offers field completions.
+        // The detection helper `is_model_ref_param_before_dot` is the gating function.
+        let sql = "SELECT map(smelt.models.with_tag('cohort'), fn m => m.path)";
+        // Cursor positioned just after the final `m.` (after the dot, before `path`).
+        let dot_pos = sql.rfind("m.").expect("`m.` must appear in SQL") + 2;
+        // Verify the detection helper fires
+        use smelt_parser::ast::File as AstFile;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = AstFile::cast(root).expect("must parse to File");
+        let param = is_model_ref_param_before_dot(&file, sql, dot_pos);
+        assert!(
+            param.is_some(),
+            "is_model_ref_param_before_dot must return Some for `m.` inside \
+             smelt.models.with_tag lambda, got None"
+        );
+        assert_eq!(
+            param.unwrap(),
+            "m",
+            "is_model_ref_param_before_dot must return `m` as param name"
         );
     }
 }

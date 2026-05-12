@@ -97,6 +97,14 @@ Diagnostics are published on every file change. All diagnostics for a file are d
 - `UnknownPassingParameter` — PASSING clause references undefined parameter
 - `FunctionCallCycle` — transparent function call graph contains a cycle
 
+**Wide reflection (`smelt.models.*`, `smelt.sources.*`, `ModelRef`, `SourceRef`):**
+- `WithTagRequiresText` — `with_tag` argument is not a compile-time `Text` literal
+- `WithTagNamedArgument` — `with_tag` argument supplied as a named argument instead of positional
+- `WideReflectionUnknownAccessor` — accessor name after `smelt.models.` or `smelt.sources.` is not in the closed set `{with_tag, all}`
+- `WideReflectionUnexpectedArgument` — `all` accessor received an argument
+- `ModelRefFieldUnknown` — field name in a `ModelRef` field projection is not in the closed set `{path, name, tags, columns}`
+- `SourceRefFieldUnknown` — field name in a `SourceRef` field projection is not in the closed set `{path, name, tags, columns}`
+
 **Other:**
 - `UnstableSchemaRequired` — `provenance:` used without `unstable_schema: true`
 - `AsStructUnsupportedBackend` — `smelt.as_struct()` called on unsupported backend
@@ -123,6 +131,9 @@ Go-to-Definition resolves the following identifier types:
 | Python `@model` function (from SQL ref) | The `.py` file, at the decorator line |
 | `smelt.columns_of` call path | Reference page (URL hint, graceful no-op when client lacks support) |
 | Meta-`Text` lifted as identifier (statically traceable) | The source column's declaration in the upstream model, source, or seed; graceful no-op when the column origin cannot be traced |
+| `smelt.models.*` / `smelt.sources.*` accessor call path | Reference page (URL hint, graceful no-op when client lacks support) |
+| `ModelRef` value at a `FROM`-clause or reducer splice site; field projection `m.path` / `m.name` | The model's source `.sql` file; graceful no-op when the concrete model cannot be determined without expansion context |
+| `SourceRef` value at a `FROM`-clause or reducer splice site; field projection `s.path` / `s.name` | The source `.yml` file; graceful no-op when the concrete source cannot be determined without expansion context |
 
 Go-to-Definition on a `smelt.<path>` reference in a SQL model navigates to the file at that path. For Python-derived models, it navigates to the `.py` file at the line of the `@model` decorator for that function.
 
@@ -152,6 +163,14 @@ Hover is supported on:
 | `ColumnRef`-typed lambda parameter | `ColumnRef` plus the closed field list with each field's type (`name: Text`, `type: DataType`, `is_numeric: Boolean`) |
 | Field projection `c.name` / `c.type` / `c.is_numeric` | The field's declared type |
 | Meta-`Text` lifted as identifier | The lift description (`Text → identifier`) and, when statically traceable, the resolved column name |
+| `smelt.models.with_tag(t)` call path | `List<ModelRef>` plus, when `t` resolves to a string literal, the match count and the first five matching model names |
+| `smelt.models.all` call path | `() -> List<ModelRef>` plus the workspace's total model count |
+| `smelt.sources.with_tag(t)` call path | `List<SourceRef>` plus, when `t` resolves to a string literal, the match count and the first five matching source names |
+| `smelt.sources.all` call path | `() -> List<SourceRef>` plus the workspace's total source count |
+| `ModelRef`-typed lambda parameter (bound by a HOF over a `smelt.models.*` list) | `ModelRef` plus the closed field list with each field's type (`path: Text`, `name: Text`, `tags: List<Text>`, `columns: List<ColumnRef>`) |
+| `SourceRef`-typed lambda parameter (bound by a HOF over a `smelt.sources.*` list) | `SourceRef` plus the closed field list with each field's type (`path: Text`, `name: Text`, `tags: List<Text>`, `columns: List<ColumnRef>`) |
+| Field projection `m.path` / `m.name` / `m.tags` / `m.columns` (on `ModelRef`) | The field's declared type |
+| Field projection `s.path` / `s.name` / `s.tags` / `s.columns` (on `SourceRef`) | The field's declared type |
 
 Hover content includes type annotations and row requirements from the type inference system where available.
 
@@ -167,6 +186,10 @@ Completions are triggered by the characters `'`, `(`, and `.`.
 | After `<alias>.` | Columns from the table/model/CTE bound to that alias |
 | At `c.<cursor>` where `c: ColumnRef` | The closed field set (`name`, `type`, `is_numeric`) and no other identifiers |
 | At `smelt.columns_of(<cursor>)` argument position | In-scope `TableExpr`-valued names (`smelt.<path>` model references and enclosing function `TableExpr` parameters) |
+| At `smelt.models.<cursor>` | The closed accessor set (`with_tag`, `all`) and no other identifiers |
+| At `smelt.sources.<cursor>` | The closed accessor set (`with_tag`, `all`) and no other identifiers |
+| At `m.<cursor>` where `m: ModelRef` (lambda parameter over `smelt.models.*` list) | The closed field set (`path`, `name`, `tags`, `columns`) and no other identifiers |
+| At `s.<cursor>` where `s: SourceRef` (lambda parameter over `smelt.sources.*` list) | The closed field set (`path`, `name`, `tags`, `columns`) and no other identifiers |
 
 Schema-aware column completions derive types from the Salsa type inference system.
 
