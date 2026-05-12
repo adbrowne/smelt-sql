@@ -1741,14 +1741,16 @@ pub(crate) fn check_function_select_body(
         });
     }
 
-    // 1b. Meta-Text-as-identifier lift diagnostics (Phase C §"Meta-Text-as-
-    //     identifier lift").  For each expression in SELECT / ORDER BY / GROUP BY
-    //     that is a meta-Text value (`<columnref-param>.name`), validate the
-    //     lifted identifier against the body context and emit `UnknownIdentifier`
-    //     if it does not resolve.
-    //
-    //     This runs AFTER the suppression above so that one and only one
-    //     diagnostic is emitted per unresolvable `c.name` reference.
+    // 1b. Meta-Text-as-identifier lift recognition (§"Meta-Text-as-identifier
+    //     lift").  `check_meta_text_lift_diagnostics` detects expressions in
+    //     SELECT / ORDER BY / GROUP BY that are meta-Text values
+    //     (`<columnref-param>.name`) but does NOT emit scope diagnostics at
+    //     body-check time.  The field-name token ("name") is not the
+    //     per-element column name that the lift resolves to at expansion time;
+    //     validating it against in-scope columns would produce false positives.
+    //     Expansion-time validation is the correct location (spec §Semantics
+    //     rule 6).  This loop is retained as a forward-compatibility hook for
+    //     any future diagnostics the function may emit.
     for info in check_meta_text_lift_diagnostics(select_stmt, body_ctx) {
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
@@ -3231,11 +3233,18 @@ mod tests {
     }
 
     /// `check_function_select_body` with `c: ColumnRef` and body
-    /// `SELECT c.name FROM t` where the lifted identifier `name` is NOT present
-    /// in the model columns must emit EXACTLY ONE `UnknownIdentifier` from the
-    /// lift check — not a double-diagnostic.
+    /// `SELECT c.name FROM t` where no column literally named `"name"` exists in
+    /// the body context must emit ZERO diagnostics.
+    ///
+    /// Body-check-time scope validation for lifted identifiers is suppressed:
+    /// `check_meta_text_lift_diagnostics` returns the field-name token `"name"`,
+    /// not the per-element column name that `c.name` resolves to at expansion time.
+    /// Validating that token against in-scope columns produces false positives in
+    /// the common case where no column happens to be literally named `"name"`.
+    /// Expansion-time validation (after the per-element column name is known)
+    /// is the correct location per spec §Semantics rule 6.
     #[test]
-    fn pipeline_column_ref_name_not_in_scope_emits_single_lift_diagnostic() {
+    fn pipeline_column_ref_name_not_in_scope_emits_no_diagnostics() {
         use smelt_types::signatures::SmeltType;
 
         let sig = minimal_sig();
@@ -3268,26 +3277,14 @@ mod tests {
 
         let diags = check_function_select_body(&sig, &select, sql, &ctx, no_op_nested, None);
 
-        // Exactly one diagnostic: the lift check says "name" is not in scope.
-        // `check_undeclared_columns` is suppressed for the ColumnRef qualifier `c`.
-        // No double-diagnostic.
-        assert_eq!(
-            diags.len(),
-            1,
-            "SELECT c.name FROM t with 'name' NOT in scope must produce exactly ONE \
-             UnknownIdentifier from the lift check (not a double-diagnostic); got: {diags:?}"
-        );
-        assert_eq!(
-            diags[0].code,
-            Some(DiagnosticCode::UnknownIdentifier),
-            "the single diagnostic must be UnknownIdentifier; got: {:?}",
-            diags[0].code
-        );
-        // The message should reference "name" (the lifted identifier).
+        // Zero diagnostics: body-check-time lift-scope validation is suppressed.
+        // `check_undeclared_columns` is suppressed for the ColumnRef qualifier `c`
+        // (step 1a), and `check_meta_text_lift_diagnostics` (step 1b) returns
+        // no diagnostics because expansion-time column names are not yet known.
         assert!(
-            diags[0].message.contains("name"),
-            "diagnostic message must mention the lifted identifier 'name'; got: {:?}",
-            diags[0].message
+            diags.is_empty(),
+            "SELECT c.name FROM t with 'name' NOT literally in scope must produce ZERO \
+             diagnostics — body-check-time lift-scope validation is suppressed; got: {diags:?}"
         );
     }
 

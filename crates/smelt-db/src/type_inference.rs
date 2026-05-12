@@ -5817,7 +5817,7 @@ pub fn is_meta_text_value(expr: &Expr, ctx: &TypeContext) -> Option<String> {
 /// statement and return `UndeclaredColumnInfo` diagnostics for any lifted
 /// identifier that names no in-scope column.
 ///
-/// Lift positions checked (Phase C §"Meta-`Text`-as-identifier lift"):
+/// Lift positions checked (§"Meta-`Text`-as-identifier lift"):
 /// 1. **Column-reference position** — every expression in the SELECT list
 ///    that IS itself a meta-`Text` value (i.e. no sub-expressions; the bare
 ///    `c.name` is the entire select-item expression).
@@ -5829,14 +5829,16 @@ pub fn is_meta_text_value(expr: &Expr, ctx: &TypeContext) -> Option<String> {
 ///    a meta-`Text` value; no scope validation is performed for aliases
 ///    (aliases introduce names, not reference them).
 ///
-/// For positions 1 / 2 / 3: when the lifted field-name text does not resolve
-/// against `ctx` the function emits an `UndeclaredColumnInfo` entry anchored
-/// at the meta-`Text` expression's source span.  No new diagnostic code is
-/// introduced — the caller maps the returned entries to the existing
-/// `UnknownColumn` / `UndeclaredColumn` path.
-///
-/// For position 4 (AS alias): the function simply recognises the lift and
-/// returns no diagnostic (aliases are not validated against scope).
+/// **Body-check-time scope validation is suppressed for all four positions.**
+/// `is_meta_text_value` returns the *field-name token* (e.g. `"name"`), not
+/// the per-element column name that `c.name` will evaluate to at expansion
+/// time.  Validating the field-name token against in-scope columns would
+/// produce false positives whenever no column literally named `"name"` exists
+/// in the body context (almost always), and would mask real errors when one
+/// happens to exist by accident.  Per §Semantics rule 6, lift-scope validation
+/// is correctly located at expansion time, after the per-element column name is
+/// known.  This function therefore recognises the structural lift pattern and
+/// returns an empty `Vec`; expansion-time validation is handled elsewhere.
 ///
 /// Expressions that are NOT meta-`Text` values are silently skipped; they
 /// continue to be validated by `check_undeclared_columns` through the normal
@@ -5844,96 +5846,15 @@ pub fn is_meta_text_value(expr: &Expr, ctx: &TypeContext) -> Option<String> {
 ///
 /// Pure — no Salsa dependency.
 pub fn check_meta_text_lift_diagnostics(
-    select_stmt: &smelt_parser::ast::SelectStmt,
-    ctx: &TypeContext,
+    _select_stmt: &smelt_parser::ast::SelectStmt,
+    _ctx: &TypeContext,
 ) -> Vec<UndeclaredColumnInfo> {
-    let mut out = Vec::new();
-
-    // ── 1. SELECT list (column-reference position & AS-alias position) ──────
-    if let Some(select_list) = select_stmt.select_list() {
-        for item in select_list.items() {
-            let Some(expr) = item.expression() else {
-                continue;
-            };
-            let Some(lifted_text) = is_meta_text_value(&expr, ctx) else {
-                // Not a meta-Text expression — skip (normal undeclared-column
-                // check handles it).
-                continue;
-            };
-
-            // For the AS-alias position: the meta-Text value is the alias.
-            // Aliases introduce names rather than referencing them, so no scope
-            // validation is needed.  The lift is simply recognised (no error).
-            if item.alias().is_some() {
-                // Explicit AS alias — the alias text is already determined by
-                // the parser (the IDENT after AS).  This arm is currently
-                // unreachable for the spec'd dotted form `SUM(amount) AS c.name`
-                // because the parser's `alias()` returns only the first IDENT
-                // after AS (parser-shape limitation; see test
-                // `as_alias_lift_is_parser_limited`).  Phase 3 will handle the
-                // SQL-rendering side of the lift; until then this code is a
-                // forward-compatibility placeholder.  No scope validation
-                // applies to AS-alias positions (aliases introduce names, not
-                // reference them), so the skip is also semantically correct.
-                continue;
-            }
-
-            // Column-reference position (the entire select-item expression is a
-            // meta-Text value, no explicit alias).  Validate the lifted identifier.
-            check_lifted_identifier(&lifted_text, &expr, ctx, &mut out);
-        }
-    }
-
-    // ── 2. ORDER BY position ─────────────────────────────────────────────────
-    if let Some(order_by) = select_stmt.order_by_clause() {
-        for item in order_by.items() {
-            let Some(expr) = item.expression() else {
-                continue;
-            };
-            let Some(lifted_text) = is_meta_text_value(&expr, ctx) else {
-                continue;
-            };
-            check_lifted_identifier(&lifted_text, &expr, ctx, &mut out);
-        }
-    }
-
-    // ── 3. GROUP BY position ─────────────────────────────────────────────────
-    if let Some(group_by) = select_stmt.group_by_clause() {
-        for expr in group_by.expressions() {
-            let Some(lifted_text) = is_meta_text_value(&expr, ctx) else {
-                continue;
-            };
-            check_lifted_identifier(&lifted_text, &expr, ctx, &mut out);
-        }
-    }
-
-    out
-}
-
-/// Validate that a lifted identifier (`lifted_text`) names a column in scope
-/// (`ctx`).  If not, push an `UndeclaredColumnInfo` anchored at `expr`'s span.
-///
-/// Used by `check_meta_text_lift_diagnostics` for lift positions that require
-/// scope validation (column-reference, ORDER BY, GROUP BY).
-fn check_lifted_identifier(
-    lifted_text: &str,
-    expr: &Expr,
-    ctx: &TypeContext,
-    out: &mut Vec<UndeclaredColumnInfo>,
-) {
-    if ctx.lookup_identifier(None, lifted_text).is_some() {
-        return; // Lifted identifier resolves — no error.
-    }
-    let message = format!(
-        "Column '{}' not found in any source, model, or CTE",
-        lifted_text
-    );
-    out.push(UndeclaredColumnInfo {
-        message,
-        range: expr.text_range(),
-        qualifier: None,
-        column_name: lifted_text.to_string(),
-    });
+    // Body-check-time scope validation is suppressed: the field-name token
+    // returned by is_meta_text_value (always "name" for the Text-typed
+    // ColumnRef field) is not the per-element column name that the lift
+    // produces at expansion time.  Expansion-time validation is correct;
+    // body-check-time validation against this token is not.
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -8668,9 +8589,13 @@ mod tests {
     }
 
     /// `lift_in_column_reference_position_resolves_to_column`:
-    /// `c.name` (meta-Text, field "name") in column-reference position with "name"
-    /// in scope → no UnknownColumn.
-    /// `c.name` with "name" NOT in scope → UnknownColumn at the c.name span.
+    /// `c.name` (meta-Text, field "name") in column-reference position produces
+    /// no diagnostics regardless of whether a column named "name" is in scope.
+    ///
+    /// Body-check-time scope validation is suppressed because
+    /// `check_meta_text_lift_diagnostics` returns the field-name token ("name"),
+    /// not the per-element column name that the lift produces at expansion time.
+    /// Expansion-time validation is the correct location.
     #[test]
     fn lift_in_column_reference_position_resolves_to_column() {
         // ── Part 1: "name" IS in scope — no UnknownColumn ─────────────────────
@@ -8684,8 +8609,10 @@ mod tests {
             diags
         );
 
-        // ── Part 2: "name" NOT in scope — UnknownColumn ───────────────────────
-        // Build a context with only `amount` — no `name` column.
+        // ── Part 2: "name" NOT in scope — still no diagnostic ─────────────────
+        // Body-check-time scope validation is suppressed: the field-name token
+        // "name" is not the per-element column name.  Expansion-time validation
+        // is the correct gate.
         let mut ctx_without_name = TypeContext::new();
         ctx_without_name.add_function_param_smelt_type("c", SmeltType::ColumnRef);
         ctx_without_name.add_lambda_param(
@@ -8706,15 +8633,10 @@ mod tests {
 
         let diags_no_name = check_meta_text_lift_diagnostics(&select, &ctx_without_name);
         assert!(
-            !diags_no_name.is_empty(),
-            "c.name lifted to 'name' which is NOT in scope must produce UnknownColumn; got: {:?}",
+            diags_no_name.is_empty(),
+            "c.name with 'name' NOT literally in scope must still produce no diagnostics — \
+             body-check-time lift-scope validation is suppressed; got: {:?}",
             diags_no_name
-        );
-        // The lifted identifier should be reported as "name" (not "c" or "c.name").
-        assert_eq!(
-            diags_no_name[0].column_name, "name",
-            "UnknownColumn column_name must be the lifted identifier 'name', got: {:?}",
-            diags_no_name[0].column_name
         );
     }
 
@@ -8811,8 +8733,12 @@ mod tests {
     }
 
     /// `lift_in_order_by_position_resolves_to_column`:
-    /// `ORDER BY c.name` with `name` in scope → no UnknownColumn.
-    /// `ORDER BY c.name` with `name` NOT in scope → UnknownColumn.
+    /// `ORDER BY c.name` produces no diagnostics regardless of whether a column
+    /// named "name" is in scope.
+    ///
+    /// Body-check-time scope validation is suppressed for the same reason as the
+    /// column-reference position: the field-name token is not the per-element
+    /// column name.
     #[test]
     fn lift_in_order_by_position_resolves_to_column() {
         let ctx_with_name = make_column_ref_ctx();
@@ -8827,7 +8753,7 @@ mod tests {
             diags
         );
 
-        // ── Part 2: "name" NOT in scope ────────────────────────────────────────
+        // ── Part 2: "name" NOT in scope — still no diagnostic ─────────────────
         let mut ctx_no_name = TypeContext::new();
         ctx_no_name.add_function_param_smelt_type("c", SmeltType::ColumnRef);
         ctx_no_name.add_lambda_param(
@@ -8848,20 +8774,19 @@ mod tests {
 
         let diags_err = check_meta_text_lift_diagnostics(&select, &ctx_no_name);
         assert!(
-            !diags_err.is_empty(),
-            "ORDER BY c.name with 'name' NOT in scope must produce UnknownColumn; got: {:?}",
+            diags_err.is_empty(),
+            "ORDER BY c.name with 'name' NOT literally in scope must produce no diagnostics — \
+             body-check-time lift-scope validation is suppressed; got: {:?}",
             diags_err
-        );
-        assert_eq!(
-            diags_err[0].column_name, "name",
-            "lifted column_name must be 'name', got: {:?}",
-            diags_err[0].column_name
         );
     }
 
     /// `lift_in_group_by_position_resolves_to_column`:
-    /// `GROUP BY c.name` with `name` in scope → no UnknownColumn.
-    /// `GROUP BY c.name` with `name` NOT in scope → UnknownColumn.
+    /// `GROUP BY c.name` produces no diagnostics regardless of whether a column
+    /// named "name" is in scope.
+    ///
+    /// Body-check-time scope validation is suppressed for the same reason as the
+    /// other lift positions.
     #[test]
     fn lift_in_group_by_position_resolves_to_column() {
         let ctx_with_name = make_column_ref_ctx();
@@ -8876,7 +8801,7 @@ mod tests {
             diags
         );
 
-        // ── Part 2: "name" NOT in scope ────────────────────────────────────────
+        // ── Part 2: "name" NOT in scope — still no diagnostic ─────────────────
         let mut ctx_no_name = TypeContext::new();
         ctx_no_name.add_function_param_smelt_type("c", SmeltType::ColumnRef);
         ctx_no_name.add_lambda_param(
@@ -8898,16 +8823,10 @@ mod tests {
         let sql_no_name = "SELECT c.name FROM t GROUP BY c.name";
         let select_no_name = parse_select_stmt(sql_no_name);
         let diags_err = check_meta_text_lift_diagnostics(&select_no_name, &ctx_no_name);
-        // GROUP BY c.name appears once, SELECT c.name appears once (col-ref position)
-        // Both positions fire lift diagnostics for "name" not in scope.
         assert!(
-            !diags_err.is_empty(),
-            "GROUP BY c.name with 'name' NOT in scope must produce UnknownColumn; got: {:?}",
-            diags_err
-        );
-        assert!(
-            diags_err.iter().any(|d| d.column_name == "name"),
-            "at least one UnknownColumn for lifted 'name', got: {:?}",
+            diags_err.is_empty(),
+            "GROUP BY c.name with 'name' NOT literally in scope must produce no diagnostics — \
+             body-check-time lift-scope validation is suppressed; got: {:?}",
             diags_err
         );
     }
