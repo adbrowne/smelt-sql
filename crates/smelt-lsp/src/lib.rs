@@ -8663,12 +8663,16 @@ mod tests {
         );
     }
 
-    /// Goto-def on `smelt.models.*` / `smelt.sources.*` accessor call paths is
-    /// a graceful no-op (returns `None`).
-    ///
-    /// Tests `goto_def_for_wide_reflection_accessor` pure helper.
+    /// Goto-def from a `ModelRef` / `SourceRef` value at a splice site is a
+    /// graceful no-op in v1: the pure helpers `goto_def_for_model_ref_value`
+    /// and `goto_def_for_source_ref_value` pass through a supplied path when
+    /// the caller has resolved one and return `None` otherwise. Wiring the
+    /// Backend `goto_definition` handler to detect splice-site cursor
+    /// position and resolve the path through Salsa is a known divergence
+    /// tracked in `docs/specs/meta_language.md` Known Divergences and the
+    /// overall plan `docs/plans/20260509-meta-language-overall.md`.
     #[test]
-    fn goto_def_from_model_ref_at_splice_site_resolves_to_source_file() {
+    fn goto_def_for_model_ref_and_source_ref_values_pass_through_or_noop() {
         // The pure helper returns None (graceful no-op per spec; full resolution
         // requires expansion-time context — known divergence tracked in
         // docs/plans/20260509-meta-language-overall.md).
