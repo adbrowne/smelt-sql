@@ -268,6 +268,81 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 - **Completion** at a `smelt.columns_of(<cursor>)` argument position offers in-scope `TableExpr`-valued names (`smelt.<path>` references and the enclosing function's `TableExpr` parameters).
 - **Diagnostics with frame stacks**: a type error inside a HOF lambda body whose source list comes from `smelt.columns_of(t)` carries the anonymous frame plus an optional `column_origin` field on the per-element entry, recording the source column's declaration span when statically traceable. The `expansion.md` anonymous-frame contract registers this extension.
 
+### Reflection: `smelt.models`, `smelt.sources`, `ModelRef`, `SourceRef`
+
+#### `smelt.models` accessors
+
+| Accessor | Signature | Returns |
+|---|---|---|
+| `smelt.models.with_tag` | `smelt.models.with_tag(tag: Text) -> List<ModelRef>` | Every model whose merged tag set (frontmatter `tags:` ∪ `smelt.yml` `models.<name>.tags`, deduplicated per `crates/smelt-core/src/config.rs::Config::get_tags`) contains `tag`, sorted ascending by `path`. |
+| `smelt.models.all` | `smelt.models.all() -> List<ModelRef>` | Every model in the workspace, sorted ascending by `path`. |
+
+`smelt.models` is a closed accessor namespace; the set is exactly the two accessors above. A reference to an unknown accessor (`smelt.models.bogus()`) emits `WideReflectionUnknownAccessor` at the accessor name span. Named arguments to `with_tag` emit `WithTagNamedArgument` at the named-argument span. An argument to `with_tag` whose evaluated type is not assignable to compile-time `Text` emits `WithTagRequiresText` at the argument expression. The argument's value must be a compile-time-resolvable `Text` (string literal, `smelt.config.var(...)` result, or any meta-`Text` expression); a runtime `Expr<Text>` argument emits `WithTagRequiresText`. `smelt.models.all` accepts no arguments; any positional or named argument emits `WideReflectionUnexpectedArgument` at the offending argument's span.
+
+#### `smelt.sources` accessors
+
+| Accessor | Signature | Returns |
+|---|---|---|
+| `smelt.sources.with_tag` | `smelt.sources.with_tag(tag: Text) -> List<SourceRef>` | Every source whose declared `tags:` set (from the source's YAML declaration per `crates/smelt-core/src/config.rs`) contains `tag`, sorted ascending by `path`. |
+| `smelt.sources.all` | `smelt.sources.all() -> List<SourceRef>` | Every source in the workspace, sorted ascending by `path`. |
+
+`smelt.sources` is a closed accessor namespace with the same disposition as `smelt.models`. Diagnostic codes are shared (`WithTagRequiresText`, `WithTagNamedArgument`, `WideReflectionUnknownAccessor`, `WideReflectionUnexpectedArgument`); the message text substitutes "sources" for "models" where appropriate.
+
+#### `ModelRef` meta record type
+
+`ModelRef` is a closed meta-only record type with four fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `Text` | Workspace-relative file path of the model's source file, normalised with `/` separators (independent of host OS). |
+| `name` | `Text` | The model's `smelt.<path>` identifier — the final path segment without the `.sql` suffix. |
+| `tags` | `List<Text>` | The model's merged tag set, in the deduplication order produced by `Config::get_tags` (frontmatter tags first, then `smelt.yml` tags not already present). |
+| `columns` | `List<ColumnRef>` | The model's column list. Equivalent to `smelt.columns_of(m)` against the underlying `TableExpr`. |
+
+Field access uses dot-notation (`m.path`, `m.name`, `m.tags`, `m.columns`). Field access on any other identifier emits `ModelRefFieldUnknown` at the field span. `ModelRef` is **closed**: the field set is exactly these four fields. Adding a field requires a spec edit and a compiler change.
+
+`ModelRef` is **assignable to `TableExpr`** per `types.md` §"Fragment sort subtyping". The assignability applies wherever a `TableExpr` is required (reducer-`union_all` arguments, `smelt.columns_of` arguments, `FROM`-clause splice positions). The reverse direction (`TableExpr → ModelRef`) does not exist; only values originating from `smelt.models.*` are `ModelRef`-typed.
+
+`ModelRef` is meta-only. It is not a user-writable `smelt.define` parameter or return type, not a list element type users construct in literals, and not a value that reaches the database engine. The internal `SmeltType` witness behind `ModelRef` is unspeced at the user surface; users never construct, deconstruct, or annotate against the witness.
+
+#### `SourceRef` meta record type
+
+`SourceRef` is a closed meta-only record type with the same four-field shape as `ModelRef`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `Text` | Workspace-relative file path of the source's YAML declaration. |
+| `name` | `Text` | The source's identifier — the final path segment without the `.yml` suffix. |
+| `tags` | `List<Text>` | The source's tag set as declared in the source YAML file. |
+| `columns` | `List<ColumnRef>` | The source's column list. Equivalent to `smelt.columns_of(s)` against the underlying `TableExpr`. |
+
+Field access uses dot-notation. Unknown field access emits `SourceRefFieldUnknown` at the field span. `SourceRef` is **closed** and **assignable to `TableExpr`** under the same rules as `ModelRef`. `SourceRef` is meta-only and not user-constructible.
+
+#### Wide-reflection diagnostic codes
+
+Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offending CST span):
+
+| Code | When | Message shape |
+|---|---|---|
+| `WithTagRequiresText` | `smelt.models.with_tag(x)` or `smelt.sources.with_tag(x)` whose `x` synthesises to a type not assignable to compile-time `Text` | `with_tag expects a compile-time Text; found {actual}` |
+| `WithTagNamedArgument` | `with_tag` called with a named argument | `with_tag takes one positional argument; named arguments are not supported` |
+| `WideReflectionUnknownAccessor` | `smelt.models.<name>` or `smelt.sources.<name>` where `<name>` is not in the closed accessor set | `smelt.{models,sources} has no accessor `{name}`; expected one of: with_tag, all` |
+| `WideReflectionUnexpectedArgument` | `smelt.models.all(x)` or `smelt.sources.all(x)` — any argument to `all` | `{accessor} takes no arguments` |
+| `ModelRefFieldUnknown` | Field access on a `ModelRef` value with an identifier outside the closed field set | `ModelRef has no field `{name}`; expected one of: path, name, tags, columns` |
+| `SourceRefFieldUnknown` | Field access on a `SourceRef` value with an identifier outside the closed field set | `SourceRef has no field `{name}`; expected one of: path, name, tags, columns` |
+
+#### LSP support for wide reflection
+
+- **Hover** on `smelt.models.with_tag(t)` or `smelt.sources.with_tag(t)` shows `List<ModelRef>` / `List<SourceRef>` and (when `t` resolves to a literal at the cursor) the resolved match count plus the first five matching names.
+- **Hover** on `smelt.models.all` / `smelt.sources.all` shows the signature plus the workspace's total count.
+- **Hover** on a `ModelRef`-typed binding (a lambda parameter inside a wide-reflection HOF chain) shows `ModelRef` plus the closed field list with each field's type. The corresponding rule holds for `SourceRef`.
+- **Hover** on a field projection `m.path` / `m.name` / `m.tags` / `m.columns` shows the field's declared type and, at expansion time over a resolvable list, the field's concrete value at the current element.
+- **Goto-definition** on `smelt.models.with_tag` / `smelt.models.all` / `smelt.sources.with_tag` / `smelt.sources.all` resolves to the reference page (URL hint, graceful no-op when the client lacks support).
+- **Goto-definition** on a `ModelRef` value at a splice site (where the value has been lifted to `TableExpr` and consumed in a `FROM`-clause or reducer position) resolves to the model's source file. Goto-definition on `m.path` / `m.name` returns the same file. The same rule applies to `SourceRef` resolving to the source YAML file.
+- **Completion** at `smelt.models.<cursor>` and `smelt.sources.<cursor>` offers the closed accessor set (`with_tag`, `all`).
+- **Completion** at a `ModelRef` / `SourceRef` field projection (`m.<cursor>`) offers the closed field list (`path`, `name`, `tags`, `columns`).
+- **Diagnostics with frame stacks**: a type error inside a HOF lambda body whose source list comes from `smelt.models.with_tag(t)` carries the anonymous frame plus an optional `model_origin` field on the per-element entry, recording the source model's `path` and frontmatter declaration span when statically traceable. The corresponding rule applies for `smelt.sources.*`-sourced lists. `model_origin` is the wide-reflection sibling of `column_origin`; the `expansion.md` anonymous-frame contract registers this extension.
+
 ### Meta-`Text`-as-identifier lift
 
 A meta-`Text` value spliced into a position where the Data-World SQL grammar expects an unquoted identifier lifts to that identifier. The lift positions are exactly:
@@ -425,6 +500,34 @@ The two worlds intersect at **splice points** — places where a meta value mate
 
 11. **HOF inline-expansion frame, `column_origin` extension.** The anonymous expansion frame (`function = "<hof>"`, `fn_id = None`, optional `element_index`) is extended for `columns_of`-sourced lists with an additional optional field `column_origin`: the source span of the column's declaration in the upstream `ModelSchema`. When a diagnostic surfaces from inside a HOF lambda body whose source list came from `smelt.columns_of(t)`, the frame's `column_origin` carries the source column's span when statically resolvable. The `expansion.md` anonymous-frame contract registers this extension; producers populate the field, the LSP renderer surfaces it as a "from column declared at <span>" trailer when present.
 
+#### Reflection: `smelt.models`, `smelt.sources`, `ModelRef`, `SourceRef`
+
+1. **Wide-reflection accessors are Salsa-cached pure functions of workspace state.** `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` are Salsa queries reading the `Workspace` singleton input (per `crates/smelt-db/src/lib.rs`'s existing `all_models` and `project_sources` queries). Re-evaluation across two runs over the same workspace input produces byte-equal results — list contents, ordering, and per-element field values are deterministic.
+
+2. **Ordering.** `with_tag` and `all` return lists sorted ascending by `path`. Path comparison is byte-lexicographic on the workspace-relative path string with `/` separators. The order is observable by users; row order in a `reduce(union_all)` over a wide-reflection result follows this order.
+
+3. **`with_tag` tag matching.** A model matches `smelt.models.with_tag(tag)` iff its merged tag set (frontmatter `tags:` ∪ `smelt.yml` `models.<name>.tags`, deduplicated by `Config::get_tags`) contains `tag` by exact string equality. A source matches `smelt.sources.with_tag(tag)` iff the source YAML's `tags:` list contains `tag` by exact string equality. No case-folding, no glob matching, no prefix matching.
+
+4. **Body-check vs expansion-time evaluation.** Wide-reflection accessors are evaluated under the same two-tier regime as `smelt.columns_of`:
+   - **At body-check time** (inside a `smelt.define` body): the result type synthesises to `List<ModelRef>` / `List<SourceRef>` parametrically. HOF lambda bodies over the result check against `ModelRef` / `SourceRef` per element. No concrete model or source list is materialised at body-check time.
+   - **At expansion time** (when the function is inlined at a call site): the workspace state is read, the matching list is materialised, HOF lambdas are walked per element, field projections resolve to concrete values, and any `ModelRef` / `SourceRef` consumed at a splice point lifts to its underlying `TableExpr`.
+
+5. **`ModelRef` / `SourceRef` as `TableExpr`.** A `ModelRef` value's `TableExpr` projection is the same `TableExpr` that `smelt.<path>` resolves to for that model (`architecture.md` §"Resolution"). A `SourceRef` value's projection is the same `TableExpr` that the source's `smelt.<source_path>` resolves to. The subtyping rule (`ModelRef <: TableExpr`, `SourceRef <: TableExpr`) lifts the value wherever `TableExpr` is required; `smelt.columns_of(m)` and `m.columns` are equivalent, and `reduce([m1, m2], union_all)` and `reduce([m1.<TableExpr-projection>, m2.<TableExpr-projection>], union_all)` produce identical SQL.
+
+6. **`ModelRef.columns` / `SourceRef.columns` materialisation.** `m.columns` is equivalent to `smelt.columns_of(m)` over the underlying `TableExpr`. Body-check time produces parametric `List<ColumnRef>`; expansion time materialises the concrete list per the rules in §"Reflection: `smelt.columns_of`, `ColumnRef`, identifier lift".
+
+7. **Field projection.** Inside any context where a `ModelRef`-typed value is in scope (a lambda parameter bound by a HOF over `List<ModelRef>`), the dot-notation `m.<field>` synthesises the declared field's type. Inside any context where a `SourceRef`-typed value is in scope, the same applies. Any field name outside the closed four-field set emits `ModelRefFieldUnknown` / `SourceRefFieldUnknown` at the field span.
+
+8. **Identifier lift carries through `ModelRef.name` and `ModelRef.path` only at the four enumerated lift positions.** `m.name` and `m.path` are meta-`Text` values; in one of the four lift positions (column-reference, AS-alias, ORDER BY column-reference, GROUP BY column-reference) they lift to identifiers per §"Reflection: `smelt.columns_of`, `ColumnRef`, identifier lift" rule 6. The `FROM`-clause splice that consumes a `ModelRef` as a `TableExpr` goes through the `ModelRef <: TableExpr` subtyping rule, **not** through the identifier-lift path; the lift positions table is not extended by wide reflection.
+
+9. **Wide-reflection-sourced HOF frames, `model_origin` extension.** The anonymous expansion frame (`function = "<hof>"`, `fn_id = None`, optional `element_index`) is extended for wide-reflection-sourced lists with an additional optional field `model_origin` (or `source_origin` for `smelt.sources.*`-sourced lists): the source `path` and the frontmatter declaration span when statically traceable. When a diagnostic surfaces from inside a HOF lambda body whose source list came from `smelt.models.*` / `smelt.sources.*`, the frame carries this provenance. The `expansion.md` anonymous-frame contract registers this extension as the wide-reflection sibling of `column_origin`.
+
+10. **Determinism.** Wide-reflection results are deterministic functions of workspace state (per the load-bearing meta-evaluation rule in §"Two worlds, one program"). The accessors perform no I/O, observe no clock or random source, and make no network calls. The Salsa query layer guarantees re-evaluation produces identical results until a workspace input changes; an edit that adds or removes a frontmatter tag invalidates only the queries whose result depends on that tag's membership.
+
+11. **Closed accessor set.** `smelt.models` exposes exactly `{with_tag, all}`. `smelt.sources` exposes exactly `{with_tag, all}`. Future accessors require a spec edit and a compiler change. The diagnostic `WideReflectionUnknownAccessor` is the user-facing surface of the closed set; misuse anchors at the unknown accessor name token.
+
+12. **Termination.** Each wide-reflection accessor performs one bounded scan of workspace state. In the worst case the scan is O(workspace-size); Salsa memoisation makes repeated evaluations O(1) until invalidation. HOF walks over the result list are governed by the existing HOF termination rule.
+
 #### Pipe ↔ HOF interaction
 
 `smelt.config.var` and HOFs compose with pipe: `smelt.columns_of(orders) |> filter(fn c => c.is_numeric) |> map(fn c => COALESCE(c.name, 0))` is the standard worked-example shape. Because pipe is parser-level desugaring (§"Pipe operator"), the result has the same evaluated type, value, frame-stack contribution, and diagnostic anchoring as the equivalent un-piped call.
@@ -496,6 +599,27 @@ The exception is `meta_config_loading.md` — the file-loading family is large e
 **Why `smelt.columns_of` accepts only `TableExpr` (not strings, paths, or model names).** Allowing string-typed arguments (`smelt.columns_of('orders')`) would require the type checker to resolve a `Text` value to a model at type-check time, which couples the meta-language to the path-resolution machinery in a non-`TableExpr` axis. Accepting `smelt.<path>` resolves through the existing pipe (every `smelt.<path>` evaluates to a `TableExpr`); accepting `smelt.define` parameters captures the function-body case. The single-axis surface (one parameter type) pins the resolution path through the existing Data-World schema-resolution machinery without minting a parallel one.
 
 **Why expansion-time evaluation rather than body-check-time.** A `smelt.define` body is type-checked once parametrically; resolving `smelt.columns_of(t)` at body-check time would require type-checking the body once *per call site*, which is the opposite of how `expansion.md` partitions checking from inlining. Expansion-time evaluation matches the existing two-tier model: the body checks against `List<ColumnRef>` parametrically, and the inliner walks the per-call-site list to produce concrete SQL. This also matches research §6.4's promise: "the output schema of a model using `coalesce_numeric` is therefore *known at compile time*" — the inliner statically computes the per-call schema, and that schema is what flows downstream to model schemas.
+
+### Wide reflection — design rationale
+
+**Why `smelt.models` and `smelt.sources` rather than `smelt.workspace.models`.** The namespace alternatives considered were (i) `smelt.workspace.models` / `smelt.workspace.sources` (an explicit `workspace.` prefix); (ii) `smelt.models` / `smelt.sources` (a top-level namespace per entity kind); (iii) a unified `smelt.workspace.entities` returning a heterogeneous list. Option (iii) requires sum types over `ModelRef` / `SourceRef`, which are out of scope per §"Out-of-scope by deliberate choice". Option (i) reads cleanly but adds a namespace level that pays no design dividend — there is no `smelt.workspace.<other>` namespace the prefix disambiguates against, and the per-entity namespace shape matches the existing `smelt.columns_of` (narrow reflection per a specific `TableExpr`) more cleanly than a workspace-grouped namespace would. Option (ii) wins: `smelt.models.with_tag` reads as the rest of the language reads.
+
+**Why the closed accessor set (`with_tag`, `all`) rather than a query DSL.** Alternatives considered were (i) a query-builder surface (`smelt.models.where(tag: "core").and(materialized: "table")`); (ii) lambda-based filtering as the only surface (`smelt.models.all() |> filter(fn m => m.tags |> any(fn t => t == "core"))`); (iii) a closed accessor set with named queries. Option (i) replicates `filter`-over-`all` with a parallel surface and requires a query-AST construct that pays no design dividend. Option (ii) is the *implementation* of `with_tag` — a user can always write the equivalent — but `with_tag` is the common case, and shipping the named accessor keeps the surface terse. Option (iii) wins on the same closed-registry argument as reducers and `ColumnRef` fields: predictable surface, anchored diagnostics on misuse, room to add accessors when concrete demand surfaces.
+
+**Why `ModelRef` and `SourceRef` are closed records with four fields.** The field set `{path, name, tags, columns}` is the minimum closure that makes the killer per-cohort union demo expressible end-to-end:
+
+- `m.tags` — chain further filtering by additional criteria
+- `m.columns` — drive `coalesce_numeric`-style HOF chains across all matching models
+- `m.path` — diagnostics anchoring and LSP `model_origin` framing
+- `m.name` — user-facing logging and goto-def UI
+
+Adding more fields (a `materialization`, a `backends:` list, a `description`) requires a spec edit and is paced by examples that demand them. The closed-record discipline mirrors `ColumnRef`'s rationale.
+
+**Why `SourceRef` shares `ModelRef`'s field set.** A source is a workspace entity with a path, name, tag set, and column list — the same four observables a model exposes for wide reflection purposes. Splitting the shapes (a smaller `SourceRef` lacking `columns`, or a `SourceRef` with source-specific fields like `connection`) was considered and rejected because every use case discovered so far (filter by tag, project to `TableExpr`, iterate column list) is identical between models and sources. Uniformity keeps the surface terse; divergence remains available as a future spec edit if a source-specific field surfaces concrete pressure.
+
+**Why `ModelRef <: TableExpr` (subtyping) rather than an explicit `.table_expr` projection.** The chosen rule lifts `List<ModelRef>` to `List<TableExpr>` via the existing `List<T>` covariant-subtyping rule, so `smelt.models.with_tag('cohort') |> reduce(union_all)` typechecks without a `map(fn m => m.table_expr)` step. An explicit projection field was the alternative; rejected because the killer demo would read `smelt.models.with_tag('cohort') |> map(fn m => m.table_expr) |> reduce(union_all)`, which is ceremony with no payback (`m.table_expr` carries no information `m` doesn't already carry; the user never wants the projection without immediately consuming it as a `TableExpr`). The one-way subtyping ensures `ModelRef` values retain their workspace-identity fields (`path`, `name`, `tags`) until consumed at a splice point; the lift is invisible to the user and is governed by the same fragment-sort assignability rule that already handles `smelt.<path>` to `TableExpr` resolution. The same argument applies to `SourceRef`.
+
+**Why path-sorted determinism rather than declaration order or topological order.** Source-file declaration order is unstable under workspace edits — renaming a file changes the order; an LSP refactor that reorders files changes it. Path-sorted order is stable under arbitrary edits except renames, and a rename is a user-visible operation that the user expects to change downstream model identities. Topological order (over the dep graph) was considered and rejected because `with_tag` queries return arbitrary subgraphs (or no graph at all if the tagged models have no inter-dependencies); imposing a topological order would couple wide reflection to the dep graph in ways that introduce surprising orderings when tags don't track dependencies. Path order is the dial that produces predictable, edit-stable lists.
 
 ## Constraints & Invariants
 
