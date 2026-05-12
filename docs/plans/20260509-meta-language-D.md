@@ -86,7 +86,7 @@ The meta-language Phase D spec increment landed in commits `2c16b12` and `384944
 | 4     | done     | 95e430b | 2026-05-13 |
 | 5     | done     | 47a0013 | 2026-05-13 |
 | 6     | done     | f274453 | 2026-05-13 |
-| 7     | pending  |        |      |
+| 7     | done     | 8eea6f0 | 2026-05-13 |
 
 ---
 
@@ -469,6 +469,8 @@ The meta-language Phase D spec increment landed in commits `2c16b12` and `384944
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+Phase 7 expert review: type-expert clean (R1), lsp-expert clean (R1), examples-curator clean (R1, one material finding addressed — misleading comment in all_cohorts.sql), docs-reviewer clean (R1), cross-feature-impact-reviewer clean (R1). No stop-the-line fired.
 
 ## Verification
 
