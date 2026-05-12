@@ -122,6 +122,7 @@ Go-to-Definition resolves the following identifier types:
 | Column reference (unqualified, ambiguous) | All matching upstream definitions (array response) |
 | Python `@model` function (from SQL ref) | The `.py` file, at the decorator line |
 | `smelt.columns_of` call path | Reference page (URL hint, graceful no-op when client lacks support) |
+| Meta-`Text` lifted as identifier (statically traceable) | The source column's declaration in the upstream model, source, or seed; graceful no-op when the column origin cannot be traced |
 
 Go-to-Definition on a `smelt.<path>` reference in a SQL model navigates to the file at that path. For Python-derived models, it navigates to the `.py` file at the line of the `@model` decorator for that function.
 

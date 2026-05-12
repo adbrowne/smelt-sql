@@ -223,6 +223,7 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 - **Struct field reordering detection.** Whether changing struct field order is detected as `IncompatibleTypeChange` or silently ignored depends on the comparison implementation. Current behavior undocumented in user guide.
 - **Exit code for blocked migrations.** When a run is blocked by `RequiresColumnRemovalFlag` or `FullRefreshBlocked`, the exit code is non-zero but the specific code (1 vs. other) is not specified.
 - **`.smelt/schemas/` format pre-`run_state.md`.** The on-disk JSON format of stored schemas, update timing on partial runs, and the manifest (run IDs, parallelism) are still implementation-defined. A future `run_state.md` will cover the full `.smelt/` layout. Stale-schema cleanup semantics are now specified above. (See `architecture.md` §"Specs not yet authored".)
+- **Reflection-sourced HOF outputs follow source-schema evolution.** A column added to (or removed from) a source schema propagates to the `List<ColumnRef>` produced by `smelt.columns_of(t)` on the next compilation; HOF chains derived from that list (`coalesce_numeric`, schema-driven SELECT lists, and similar derivations defined in `meta_language.md`) reflect the updated column set automatically. The propagation is a compile-time refresh, not a runtime migration: existing deployed schemas of models that consume the reflected output go through the normal `smelt diff` / migration-action path. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References
 
