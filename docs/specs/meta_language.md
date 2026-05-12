@@ -296,7 +296,7 @@ Owned by `crates/smelt-db/src/lib.rs::DiagnosticCode` (all anchored at the offen
 |---|---|---|
 | `path` | `Text` | Workspace-relative file path of the model's source file, normalised with `/` separators (independent of host OS). |
 | `name` | `Text` | The model's `smelt.<path>` identifier — the final path segment without the `.sql` suffix. |
-| `tags` | `List<Text>` | The model's merged tag set, in the deduplication order produced by `Config::get_tags` (frontmatter tags first, then `smelt.yml` tags not already present). |
+| `tags` | `List<Text>` | The model's merged tag set, in the deduplication order produced by `Config::get_tags` (`smelt.yml` tags first, then SQL frontmatter `tags:` entries not already present). |
 | `columns` | `List<ColumnRef>` | The model's column list. Equivalent to `smelt.columns_of(m)` against the underlying `TableExpr`. |
 
 Field access uses dot-notation (`m.path`, `m.name`, `m.tags`, `m.columns`). Field access on any other identifier emits `ModelRefFieldUnknown` at the field span. `ModelRef` is **closed**: the field set is exactly these four fields. Adding a field requires a spec edit and a compiler change.
