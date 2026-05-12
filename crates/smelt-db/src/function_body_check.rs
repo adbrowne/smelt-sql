@@ -967,6 +967,18 @@ pub fn check_smelt_path_call(
         return diagnostics;
     }
 
+    // Phase D: skip smelt.models.* and smelt.sources.* wide-reflection accessors
+    // (`smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`,
+    // `smelt.sources.all`). These are meta-builtins handled by
+    // `check_wide_reflection_diagnostics` and the Phase D wiring block in
+    // `check_file_diagnostics`. They have no `FunctionSig` in the registry.
+    if let Some(first) = segments.first() {
+        let first_lower = first.to_lowercase();
+        if first_lower == "models" || first_lower == "sources" {
+            return diagnostics;
+        }
+    }
+
     // Build the display path for messages: "smelt.functions.foo"
     let display_path = format!("smelt.{}", segments.join("."));
 

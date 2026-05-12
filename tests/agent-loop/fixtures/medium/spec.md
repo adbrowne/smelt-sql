@@ -222,3 +222,58 @@ Phase C diagnostics to watch for when experimenting:
 - `ColumnRefFieldUnknown` — `c.label` where `label` is not in the ColumnRef field set `{name, type, is_numeric}`
 
 This extension is not validated by `validate.py`; it is workflow practice only.
+
+## Optional: wide reflection with smelt.models.with_tag (Phase D surface)
+
+After the Phase C extension, try using Phase D wide reflection to introspect
+the workspace and iterate over models by tag.
+
+First, tag two of your models with a `cohort` tag in their YAML frontmatter:
+
+```sql
+---
+tags: [cohort]
+---
+SELECT ...
+```
+
+Then write a model that maps over all cohort models to collect their names:
+
+```sql
+-- models/cohort_inventory.sql
+-- smelt.models.with_tag('cohort') returns List<ModelRef> — all models tagged
+-- 'cohort' in workspace-relative path order.
+-- map projects each ModelRef to its name field (Text).
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)
+```
+
+You can also explore `smelt.models.all()` (all workspace models) and field
+projection:
+
+```sql
+-- All model paths in the workspace
+SELECT map(smelt.models.all(), fn m => m.path)
+
+-- Column list for every cohort model (m.columns is equivalent to smelt.columns_of(m))
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.columns)
+```
+
+Phase D rules to remember:
+- `with_tag` takes exactly one positional Text literal: `with_tag('my-tag')`. Named
+  arguments (`tag => 'cohort'`) emit `WithTagNamedArgument`; a runtime expression
+  like `UPPER('cohort')` emits `WithTagRequiresText`.
+- `all()` takes no arguments. Any argument emits `WideReflectionUnexpectedArgument`.
+- ModelRef fields are exactly `{path, name, tags, columns}`. Any other field name
+  emits `ModelRefFieldUnknown`.
+- You do NOT need `m.table_expr` to use a ModelRef as a TableExpr — the subtyping
+  lift `ModelRef <: TableExpr` is automatic.
+
+Phase D diagnostics to watch for:
+
+- `WithTagRequiresText` — `with_tag(42)` or `with_tag(UPPER('x'))` — argument must be a compile-time literal
+- `WithTagNamedArgument` — `with_tag(tag => 'cohort')` — use positional syntax
+- `WideReflectionUnknownAccessor` — `smelt.models.bogus()` — only `with_tag` and `all` are valid
+- `WideReflectionUnexpectedArgument` — `smelt.models.all(42)` — `all` takes no arguments
+- `ModelRefFieldUnknown` — `m.materialization` — field is not in the closed set
+
+This extension is not validated by `validate.py`; it is workflow practice only.

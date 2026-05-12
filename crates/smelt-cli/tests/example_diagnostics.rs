@@ -996,3 +996,210 @@ fn broken_workspace_diagnostics_still_fire() {
         );
     }
 }
+
+// ===== Phase D (meta-language) TDD tests =====
+//
+// Layout mirrors Phase C: one clean workspace + one broken workspace per diagnostic code.
+//   - `examples/meta_workspace/`                                        — happy-path models
+//   - `examples/meta_workspace_broken_with_tag_requires_text/`         — WithTagRequiresText
+//   - `examples/meta_workspace_broken_with_tag_named_argument/`        — WithTagNamedArgument
+//   - `examples/meta_workspace_broken_wide_reflection_unknown_accessor/` — WideReflectionUnknownAccessor
+//   - `examples/meta_workspace_broken_wide_reflection_unexpected_argument/` — WideReflectionUnexpectedArgument
+//   - `examples/meta_workspace_broken_model_ref_field_unknown/`        — ModelRefFieldUnknown
+//   - `examples/meta_workspace_broken_source_ref_field_unknown/`       — SourceRefFieldUnknown
+
+/// The Phase D diagnostic codes used to filter diagnostics in the broken-workspace helper.
+const PHASE_D_CODES: &[smelt_db::DiagnosticCode] = &[
+    smelt_db::DiagnosticCode::WithTagRequiresText,
+    smelt_db::DiagnosticCode::WithTagNamedArgument,
+    smelt_db::DiagnosticCode::WideReflectionUnknownAccessor,
+    smelt_db::DiagnosticCode::WideReflectionUnexpectedArgument,
+    smelt_db::DiagnosticCode::ModelRefFieldUnknown,
+    smelt_db::DiagnosticCode::SourceRefFieldUnknown,
+];
+
+/// Helper: loads `example_dir` as a workspace, checks that exactly one Phase D diagnostic
+/// fires for the file ending in `expected_file`, and that no other file emits Phase D codes.
+fn check_workspace_emits_exactly_one_phase_d_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, Workspace};
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_phase_d: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_phase_d: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_phase_d = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| PHASE_D_CODES.contains(c))
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_phase_d(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_d.push(d.clone());
+            } else {
+                other_phase_d.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_phase_d(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_d.push(d.0.clone());
+            } else {
+                other_phase_d.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_phase_d.is_empty(),
+        "expected zero Phase D diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_phase_d.len(),
+        other_phase_d
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_d.len(),
+        1,
+        "expected exactly 1 Phase D diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_phase_d.len(),
+        target_phase_d
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_d[0].code,
+        Some(expected_code),
+        "expected Phase D diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_phase_d[0].code,
+        target_phase_d[0].message
+    );
+}
+
+/// Phase D TDD: `examples/meta_workspace/` produces zero diagnostics.
+/// Exercises smelt.models.with_tag, smelt.models.all, smelt.sources.with_tag,
+/// smelt.sources.all, ModelRef field projection, and SourceRef field projection.
+#[test]
+fn meta_workspace_clean_workspace() {
+    check_workspace_no_diagnostics("examples/meta_workspace");
+}
+
+/// Phase D TDD: `examples/meta_workspace_broken_with_tag_requires_text/` produces
+/// exactly one `WithTagRequiresText` diagnostic.
+#[test]
+fn meta_workspace_broken_with_tag_requires_text() {
+    check_workspace_emits_exactly_one_phase_d_diagnostic(
+        "examples/meta_workspace_broken_with_tag_requires_text",
+        "models/with_tag_requires_text.sql",
+        smelt_db::DiagnosticCode::WithTagRequiresText,
+    );
+}
+
+/// Phase D TDD: `examples/meta_workspace_broken_with_tag_named_argument/` produces
+/// exactly one `WithTagNamedArgument` diagnostic.
+#[test]
+fn meta_workspace_broken_with_tag_named_argument() {
+    check_workspace_emits_exactly_one_phase_d_diagnostic(
+        "examples/meta_workspace_broken_with_tag_named_argument",
+        "models/with_tag_named_argument.sql",
+        smelt_db::DiagnosticCode::WithTagNamedArgument,
+    );
+}
+
+/// Phase D TDD: `examples/meta_workspace_broken_wide_reflection_unknown_accessor/`
+/// produces exactly one `WideReflectionUnknownAccessor` diagnostic.
+#[test]
+fn meta_workspace_broken_wide_reflection_unknown_accessor() {
+    check_workspace_emits_exactly_one_phase_d_diagnostic(
+        "examples/meta_workspace_broken_wide_reflection_unknown_accessor",
+        "models/wide_reflection_unknown_accessor.sql",
+        smelt_db::DiagnosticCode::WideReflectionUnknownAccessor,
+    );
+}
+
+/// Phase D TDD: `examples/meta_workspace_broken_wide_reflection_unexpected_argument/`
+/// produces exactly one `WideReflectionUnexpectedArgument` diagnostic.
+#[test]
+fn meta_workspace_broken_wide_reflection_unexpected_argument() {
+    check_workspace_emits_exactly_one_phase_d_diagnostic(
+        "examples/meta_workspace_broken_wide_reflection_unexpected_argument",
+        "models/wide_reflection_unexpected_argument.sql",
+        smelt_db::DiagnosticCode::WideReflectionUnexpectedArgument,
+    );
+}
+
+/// Phase D TDD: `examples/meta_workspace_broken_model_ref_field_unknown/` produces
+/// exactly one `ModelRefFieldUnknown` diagnostic.
+#[test]
+fn meta_workspace_broken_model_ref_field_unknown() {
+    check_workspace_emits_exactly_one_phase_d_diagnostic(
+        "examples/meta_workspace_broken_model_ref_field_unknown",
+        "models/model_ref_field_unknown.sql",
+        smelt_db::DiagnosticCode::ModelRefFieldUnknown,
+    );
+}
+
+/// Phase D TDD: `examples/meta_workspace_broken_source_ref_field_unknown/` produces
+/// exactly one `SourceRefFieldUnknown` diagnostic.
+#[test]
+fn meta_workspace_broken_source_ref_field_unknown() {
+    check_workspace_emits_exactly_one_phase_d_diagnostic(
+        "examples/meta_workspace_broken_source_ref_field_unknown",
+        "models/source_ref_field_unknown.sql",
+        smelt_db::DiagnosticCode::SourceRefFieldUnknown,
+    );
+}
