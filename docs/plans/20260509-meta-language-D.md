@@ -470,7 +470,7 @@ The meta-language Phase D spec increment landed in commits `2c16b12` and `384944
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
-Phase 7 expert review: type-expert clean (R1), lsp-expert clean (R1), examples-curator clean (R1, one material finding addressed — misleading comment in all_cohorts.sql), docs-reviewer clean (R1), cross-feature-impact-reviewer clean (R1). No stop-the-line fired.
+Phase 7 expert review (orchestrator-led, two rounds): type-expert clean (R3) after a round-2 finding addressed (stale "wide reflection not yet implemented" Known Divergence removed, commit `742eca1`); lsp-expert clean (R3) after a round-2 finding addressed (recorded `ModelRef`/`SourceRef` splice-site goto-def graceful no-op as a Known Divergence, renamed misleading test, commit `65e44bc`); examples-curator clean (R2, no findings; an earlier round-1 cosmetic finding by an in-`/smelt:implement` mid-flight reviewer was addressed in commit `8eea6f0`); docs-reviewer clean (R3) after a round-2 finding addressed (six diagnostic message texts in `reflection.md` and `reference.md` synced to spec verbatim, commit `e6d9437`); cross-feature-impact-reviewer clean (R2, no findings — all four cross-spec touches present, timeless-oracle compliant). No stop-the-line fired.
 
 ## Verification
 
