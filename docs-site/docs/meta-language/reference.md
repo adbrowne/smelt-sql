@@ -1,6 +1,6 @@
 # Meta-Language Reference
 
-Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, and the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift).
+Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, and the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift, wide reflection accessors `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`).
 
 For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md).
 
@@ -227,6 +227,38 @@ See [Reflection — Meta-`Text`-as-identifier lift](reflection.md#meta-text-as-i
 
 ---
 
+## `ModelRef` — closed meta record type for model reflection
+
+**Kind:** closed meta-only record type; produced by `smelt.models.with_tag` and `smelt.models.all`.
+
+**Fields:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `Text` | Workspace-relative path (e.g. `models/orders.sql`) |
+| `name` | `Text` | Short model name (stem, e.g. `orders`) |
+| `tags` | `List<Text>` | Merged tag set (smelt.yml first, then frontmatter) |
+| `columns` | `List<ColumnRef>` | Column list — equivalent to `smelt.columns_of(m)` |
+
+Access fields with dot-notation inside a HOF lambda. Any other field name emits `ModelRefFieldUnknown`. `ModelRef` is not user-constructible — values originate only from `smelt.models.*` accessors.
+
+**Subtyping:** `ModelRef <: TableExpr`. Pass a `ModelRef` anywhere a `TableExpr` is required (e.g. `smelt.columns_of`, `reduce(..., union_all)`) without explicit projection.
+
+**Example:**
+```sql
+-- Collect the name of every model tagged 'cohort'
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)
+
+-- m.columns is equivalent to smelt.columns_of(m)
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.columns)
+```
+
+**Editor support:** hover on a `ModelRef`-typed binding shows `ModelRef` and the closed field list with each field's type; completion at `m.<cursor>` offers `path`, `name`, `tags`, `columns`.
+
+See [Reflection — `ModelRef`](reflection.md#modelref) for the closed-field contract, subtyping rules, and diagnostic codes.
+
+---
+
 ## `or_any` — Boolean OR reducer
 
 **Kind:** contextual reducer (closed registry); use as the second argument to `reduce`.
@@ -337,6 +369,127 @@ SELECT smelt.config.var('region')
 **Editor support:** hover shows `Text` and the variable's resolved value; goto-definition resolves to the `vars.name:` line in `smelt.yml`.
 
 See [Config Variables](config-vars.md) for YAML scalar coercion rules, diagnostic codes, and worked examples.
+
+---
+
+## `smelt.models.all` — all workspace models
+
+**Kind:** compile-time workspace accessor; returns `List<ModelRef>`.
+
+**Signature:**
+```
+smelt.models.all() -> List<ModelRef>
+```
+
+Returns every model in the workspace, sorted by workspace-relative path (byte-lexicographic, `/` separator). Takes no arguments; any argument emits `WideReflectionUnexpectedArgument`.
+
+**Example:**
+```sql
+-- All model paths in the workspace
+SELECT map(smelt.models.all(), fn m => m.path)
+```
+
+**Editor support:** hover on `smelt.models.all()` shows `List<ModelRef>` and the resolved model count; completion offers `smelt.models.all` in `smelt.models.<cursor>` context.
+
+See [Reflection — Wide reflection](reflection.md#wide-reflection-workspace-introspection) for full details, argument rules, and diagnostic codes.
+
+---
+
+## `smelt.models.with_tag` — workspace models filtered by tag
+
+**Kind:** compile-time workspace accessor; returns `List<ModelRef>`.
+
+**Signature:**
+```
+smelt.models.with_tag(tag: Text) -> List<ModelRef>
+```
+
+Returns all workspace models whose tag set contains `tag`, sorted by workspace-relative path. Argument must be a single positional compile-time string literal. Named arguments emit `WithTagNamedArgument`; non-literal arguments emit `WithTagRequiresText`.
+
+**Example:**
+```sql
+-- All models tagged 'cohort', sorted by path
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)
+```
+
+**Editor support:** hover on `smelt.models.with_tag(...)` shows `List<ModelRef>` and the resolved model count for the given tag; completion offers `smelt.models.with_tag` in `smelt.models.<cursor>` context.
+
+See [Reflection — Wide reflection](reflection.md#wide-reflection-workspace-introspection) for full details, argument rules, and diagnostic codes.
+
+---
+
+## `smelt.sources.all` — all workspace sources
+
+**Kind:** compile-time workspace accessor; returns `List<SourceRef>`.
+
+**Signature:**
+```
+smelt.sources.all() -> List<SourceRef>
+```
+
+Returns every declared source in the workspace, sorted by workspace-relative path (byte-lexicographic, `/` separator). Takes no arguments; any argument emits `WideReflectionUnexpectedArgument`.
+
+**Example:**
+```sql
+-- All source paths in the workspace
+SELECT map(smelt.sources.all(), fn s => s.path)
+```
+
+**Editor support:** hover on `smelt.sources.all()` shows `List<SourceRef>` and the resolved source count; completion offers `smelt.sources.all` in `smelt.sources.<cursor>` context.
+
+See [Reflection — Wide reflection](reflection.md#wide-reflection-workspace-introspection) for full details, argument rules, and diagnostic codes.
+
+---
+
+## `smelt.sources.with_tag` — workspace sources filtered by tag
+
+**Kind:** compile-time workspace accessor; returns `List<SourceRef>`.
+
+**Signature:**
+```
+smelt.sources.with_tag(tag: Text) -> List<SourceRef>
+```
+
+Returns all workspace sources whose tag set contains `tag`, sorted by workspace-relative path. Argument must be a single positional compile-time string literal. Named arguments emit `WithTagNamedArgument`; non-literal arguments emit `WithTagRequiresText`.
+
+**Example:**
+```sql
+-- All sources tagged 'audit'
+SELECT map(smelt.sources.with_tag('audit'), fn s => s.name)
+```
+
+**Editor support:** hover on `smelt.sources.with_tag(...)` shows `List<SourceRef>` and the resolved source count for the given tag; completion offers `smelt.sources.with_tag` in `smelt.sources.<cursor>` context.
+
+See [Reflection — Wide reflection](reflection.md#wide-reflection-workspace-introspection) for full details, argument rules, and diagnostic codes.
+
+---
+
+## `SourceRef` — closed meta record type for source reflection
+
+**Kind:** closed meta-only record type; produced by `smelt.sources.with_tag` and `smelt.sources.all`.
+
+**Fields:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `Text` | Workspace-relative path (e.g. `models/sources/raw/orders.yml`) |
+| `name` | `Text` | Short source name (e.g. `orders`) |
+| `tags` | `List<Text>` | Merged tag set (smelt.yml first, then frontmatter) |
+| `columns` | `List<ColumnRef>` | Column list — equivalent to `smelt.columns_of(s)` |
+
+Access fields with dot-notation inside a HOF lambda. Any other field name emits `SourceRefFieldUnknown`. `SourceRef` is not user-constructible — values originate only from `smelt.sources.*` accessors.
+
+**Subtyping:** `SourceRef <: TableExpr`. Pass a `SourceRef` anywhere a `TableExpr` is required without explicit projection.
+
+**Example:**
+```sql
+-- Collect the name of every source tagged 'audit'
+SELECT map(smelt.sources.with_tag('audit'), fn s => s.name)
+```
+
+**Editor support:** hover on a `SourceRef`-typed binding shows `SourceRef` and the closed field list with each field's type; completion at `s.<cursor>` offers `path`, `name`, `tags`, `columns`.
+
+See [Reflection — `SourceRef`](reflection.md#sourceref) for the closed-field contract, subtyping rules, and diagnostic codes.
 
 ---
 
@@ -682,6 +835,18 @@ SELECT id, ...some_integer FROM smelt.sources.raw.users
 
 ---
 
+### `ModelRefFieldUnknown`
+
+**When:** Field access on a `ModelRef` value uses an identifier that is not one of the four declared fields (`path`, `name`, `tags`, `columns`).
+
+**Message:** `ModelRef has no field {name}; expected one of: path, name, tags, columns`
+
+**Fix:** use `m.path` (Text), `m.name` (Text), `m.tags` (List\<Text\>), or `m.columns` (List\<ColumnRef\>). Any other field requires a spec extension.
+
+See [Reflection — `ModelRefFieldUnknown`](reflection.md#modelreffieldunknown).
+
+---
+
 ### `PipeInDataPosition`
 
 **When:** A `|>` pipe expression appears in a Data-World grammar position.
@@ -739,3 +904,63 @@ See [Reducers — `ReducerInputTypeMismatch`](reducers.md#reducerinputtypemismat
 **Fix:** rename the `smelt.define` function.
 
 See [Reducers — `ReducerNameShadowed`](reducers.md#reducernameshadowed).
+
+---
+
+### `SourceRefFieldUnknown`
+
+**When:** Field access on a `SourceRef` value uses an identifier that is not one of the four declared fields (`path`, `name`, `tags`, `columns`).
+
+**Message:** `SourceRef has no field {name}; expected one of: path, name, tags, columns`
+
+**Fix:** use `s.path` (Text), `s.name` (Text), `s.tags` (List\<Text\>), or `s.columns` (List\<ColumnRef\>). Any other field requires a spec extension.
+
+See [Reflection — `SourceRefFieldUnknown`](reflection.md#sourcereffieldunknown).
+
+---
+
+### `WithTagNamedArgument`
+
+**When:** `smelt.models.with_tag` or `smelt.sources.with_tag` is called with a named argument instead of a positional one.
+
+**Message:** `with_tag takes one positional Text literal; named arguments are not supported`
+
+**Fix:** use positional syntax: `with_tag('my-tag')` not `with_tag(tag => 'my-tag')`.
+
+See [Reflection — `WithTagNamedArgument`](reflection.md#withtagnamedargument).
+
+---
+
+### `WithTagRequiresText`
+
+**When:** The argument to `smelt.models.with_tag` or `smelt.sources.with_tag` is not a compile-time string literal (e.g. it is an integer or a runtime expression like `UPPER('cohort')`).
+
+**Message:** `with_tag requires a compile-time string literal; found {actual}`
+
+**Fix:** pass a string literal: `with_tag('my-tag')`. Dynamic tag filtering is not supported.
+
+See [Reflection — `WithTagRequiresText`](reflection.md#withtagrequirestext).
+
+---
+
+### `WideReflectionUnexpectedArgument`
+
+**When:** `smelt.models.all` or `smelt.sources.all` is called with one or more arguments.
+
+**Message:** `all() takes no arguments; found {n} argument(s)`
+
+**Fix:** call `all()` with no arguments.
+
+See [Reflection — `WideReflectionUnexpectedArgument`](reflection.md#widereflectionunexpectedargument).
+
+---
+
+### `WideReflectionUnknownAccessor`
+
+**When:** An unknown accessor is used under `smelt.models.*` or `smelt.sources.*` (e.g. `smelt.models.bogus()`).
+
+**Message:** `unknown wide-reflection accessor {name}; expected one of: with_tag, all`
+
+**Fix:** use only `with_tag('tag')` or `all()`.
+
+See [Reflection — `WideReflectionUnknownAccessor`](reflection.md#widereflectionunknownaccessor).

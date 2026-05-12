@@ -2,7 +2,10 @@
 
 smelt's **reflection** surface lets you inspect the column schema of a model, source, or seed at compile time and turn that schema into SQL — without manually listing column names. The reflection API operates entirely in the meta-world: no column name ever reaches the database engine as a literal string; it is lifted to a SQL identifier at the splice point.
 
-This page covers the narrow `smelt.columns_of` accessor, which reflects a single `TableExpr`-typed value into a `List<ColumnRef>`. Workspace-wide reflection (`smelt.models.*`, `smelt.sources.*`) is planned but not yet implemented — see [Planned but not yet implemented](#planned-but-not-yet-implemented).
+This page covers two reflection areas:
+
+- **Narrow reflection** — `smelt.columns_of` reflects a single `TableExpr`-typed value into a `List<ColumnRef>`.
+- **Wide reflection** — `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`, and `smelt.sources.all` reflect the entire workspace into `List<ModelRef>` or `List<SourceRef>` values.
 
 ## `smelt.columns_of`
 
@@ -265,17 +268,233 @@ The spread `...smelt.functions.coalesce_numeric(smelt.orders)` materialises the 
 
 ---
 
+---
+
+## Wide reflection: workspace introspection
+
+Wide reflection gives you a compile-time view of the entire workspace: every model and every declared source. The result is a `List<ModelRef>` or `List<SourceRef>` — a sequence of workspace entities you can iterate with HOFs, project fields from, or reduce into a UNION ALL query.
+
+### Accessors
+
+```
+smelt.models.with_tag(tag: Text) -> List<ModelRef>
+smelt.models.all() -> List<ModelRef>
+smelt.sources.with_tag(tag: Text) -> List<SourceRef>
+smelt.sources.all() -> List<SourceRef>
+```
+
+**`smelt.models.with_tag(tag)`** returns every model in the workspace whose merged tag set includes `tag`. The tag string is matched case-sensitively and must be a compile-time Text literal.
+
+**`smelt.models.all()`** returns every model in the workspace with no tag filter.
+
+**`smelt.sources.with_tag(tag)`** and **`smelt.sources.all()`** are the corresponding accessors for declared sources.
+
+All four accessors return results in **path-sorted order** — byte-lexicographic on the workspace-relative path string with `/` separators. This order is deterministic across runs over the same workspace state and stable under edits to model content (only renames change it).
+
+Both tag accessors take **exactly one positional argument**: a compile-time Text literal. Named arguments and non-literal expressions are rejected.
+
+Both `all()` accessors take **no arguments**. Passing any argument is rejected.
+
+### `ModelRef`
+
+`ModelRef` is a **closed meta-only record type** representing a single model in the workspace.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `Text` | Workspace-relative path, e.g. `models/orders.sql` |
+| `name` | `Text` | Short model name, e.g. `orders` |
+| `tags` | `List<Text>` | Merged tag set (smelt.yml global tags first, then frontmatter tags not already present) |
+| `columns` | `List<ColumnRef>` | The model's column list — equivalent to `smelt.columns_of(m)` |
+
+Access fields using dot-notation inside a HOF lambda: `m.path`, `m.name`, `m.tags`, `m.columns`. Any other field name emits `ModelRefFieldUnknown`.
+
+`ModelRef` is **not user-constructible**: values originate only from `smelt.models.*` accessors.
+
+### `SourceRef`
+
+`SourceRef` is the source-side counterpart to `ModelRef`. It has the same four fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `Text` | Workspace-relative path to the source YAML, e.g. `models/sources/raw/orders.yml` |
+| `name` | `Text` | Short source name (last segment of the address), e.g. `orders` |
+| `tags` | `List<Text>` | Tags declared in the source YAML's `tags:` key |
+| `columns` | `List<ColumnRef>` | The source's column list — equivalent to `smelt.columns_of(s)` |
+
+Access fields using dot-notation: `s.path`, `s.name`, `s.tags`, `s.columns`. Any other field name emits `SourceRefFieldUnknown`.
+
+### Subtyping: ModelRef and SourceRef lift to TableExpr
+
+`ModelRef <: TableExpr` and `SourceRef <: TableExpr`. A `ModelRef` value can be passed wherever a `TableExpr` is required — including as an argument to `smelt.columns_of` and as an element in a list reduced with `union_all`.
+
+Because of the `List<T>` covariant subtyping rule, `List<ModelRef>` also lifts to `List<TableExpr>`. This means `reduce(smelt.models.with_tag('cohort'), union_all)` typechecks without any explicit projection step — you do not need `|> map(fn m => m.table_expr)`.
+
+### `m.columns` is equivalent to `smelt.columns_of(m)`
+
+`m.columns` and `smelt.columns_of(m)` produce the same `List<ColumnRef>`. Use whichever reads more naturally. At body-check time both return `List<ColumnRef>` parametrically; at expansion time both resolve the concrete schema from the model's declared columns.
+
+### Determinism and ordering
+
+The wide reflection accessors are **Salsa-cached**: on unchanged workspace state, `smelt.models.with_tag(t)` returns the same results byte-equal across invocations. When a model's file content, frontmatter tags, or `smelt.yml` global tags change, the Salsa query is invalidated and re-evaluated. The LSP updates hover counts and diagnostics automatically.
+
+Results are always path-sorted (byte-lexicographic, `/` separators). A `reduce(smelt.models.with_tag('cohort'), union_all)` query renders UNION ALL branches in the same stable order. If downstream queries depend on row order, document this dependency explicitly.
+
+### Example: map model names
+
+```sql
+-- Collect the names of all models tagged 'cohort'
+-- smelt.models.with_tag('cohort') returns List<ModelRef> in path order
+-- map projects each ModelRef to its name field (a Text value)
+SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)
+```
+
+### Example: map source names
+
+```sql
+-- Collect the names of all sources tagged 'audit'
+SELECT map(smelt.sources.with_tag('audit'), fn s => s.name)
+```
+
+### Example: workspace inventory
+
+```sql
+-- All model paths in the workspace
+SELECT map(smelt.models.all(), fn m => m.path)
+```
+
+---
+
+## LSP support for wide reflection
+
+**Hover** on `smelt.models.with_tag('cohort')` shows `List<ModelRef>` together with the tag string and (when the workspace is resolvable at the cursor) the number of matching models and the first five model names. Hover on `smelt.models.all` / `smelt.sources.all` shows the total model/source count.
+
+**Hover** on a `ModelRef`-typed or `SourceRef`-typed lambda parameter shows the record type plus the closed four-field list with each field's type.
+
+**Hover** on a field projection (`m.path`, `m.name`, `m.tags`, `m.columns`) shows the field's declared type.
+
+**Goto-definition** on a `ModelRef` value at a splice site (including `m.path` and `m.name`) resolves to the model's source `.sql` file. The same rule applies to `SourceRef` resolving to the source YAML file.
+
+**Completion** at `smelt.models.<cursor>` or `smelt.sources.<cursor>` offers exactly `{with_tag, all}`. Completion at `m.<cursor>` where `m: ModelRef` offers exactly `{path, name, tags, columns}` — same for `SourceRef`.
+
+---
+
+## Wide-reflection diagnostic codes
+
+---
+
+!!! warning "WithTagRequiresText"
+    **When it fires:** `smelt.models.with_tag(x)` or `smelt.sources.with_tag(x)` is called and `x` is not a compile-time Text literal (for example an integer, a function call, or a runtime expression).
+
+    **Message:** `with_tag argument must be a compile-time Text literal`
+
+    **Fires at:** the argument expression span.
+
+    **Example:**
+    ```sql
+    -- ← WithTagRequiresText: 42 is not a Text literal
+    SELECT map(smelt.models.with_tag(42), fn m => m.name)
+    ```
+
+    **What to fix:** Use a string literal: `smelt.models.with_tag('cohort')`.
+
+---
+
+!!! warning "WithTagNamedArgument"
+    **When it fires:** `with_tag` is called with a named argument instead of a positional argument.
+
+    **Message:** `with_tag takes one positional argument; named arguments are not supported`
+
+    **Fires at:** the named-argument span.
+
+    **Example:**
+    ```sql
+    -- ← WithTagNamedArgument
+    SELECT map(smelt.models.with_tag(tag => 'cohort'), fn m => m.name)
+    ```
+
+    **What to fix:** Remove the `=>` and pass the tag string positionally: `with_tag('cohort')`.
+
+---
+
+!!! warning "WideReflectionUnknownAccessor"
+    **When it fires:** `smelt.models.<name>` or `smelt.sources.<name>` uses an accessor name outside the closed set `{with_tag, all}`.
+
+    **Message:** `smelt.{models,sources} has no accessor '{name}'; expected one of: with_tag, all`
+
+    **Fires at:** the accessor name token span.
+
+    **Example:**
+    ```sql
+    -- ← WideReflectionUnknownAccessor: 'bogus' is not a valid accessor
+    SELECT smelt.models.bogus()
+    ```
+
+    **What to fix:** Use `with_tag('my-tag')` to filter by tag, or `all()` to get every entity.
+
+---
+
+!!! warning "WideReflectionUnexpectedArgument"
+    **When it fires:** `smelt.models.all` or `smelt.sources.all` is called with one or more arguments.
+
+    **Message:** `{accessor} takes no arguments`
+
+    **Fires at:** the argument span.
+
+    **Example:**
+    ```sql
+    -- ← WideReflectionUnexpectedArgument
+    SELECT map(smelt.models.all(42), fn m => m.name)
+    ```
+
+    **What to fix:** Remove the argument: `smelt.models.all()`.
+
+---
+
+!!! warning "ModelRefFieldUnknown"
+    **When it fires:** Field access on a `ModelRef`-typed value uses an identifier that is not one of the four declared fields.
+
+    **Message:** `ModelRef has no field '{name}'; expected one of: path, name, tags, columns`
+
+    **Fires at:** the field name token span.
+
+    **Example:**
+    ```sql
+    -- ← ModelRefFieldUnknown: 'materialization' is not a ModelRef field
+    SELECT map(smelt.models.with_tag('cohort'), fn m => m.materialization)
+    ```
+
+    **What to fix:** Use one of the four valid fields: `m.path`, `m.name`, `m.tags`, or `m.columns`. Additional fields (such as `materialization`) are not yet in the closed field set.
+
+---
+
+!!! warning "SourceRefFieldUnknown"
+    **When it fires:** Field access on a `SourceRef`-typed value uses an identifier that is not one of the four declared fields.
+
+    **Message:** `SourceRef has no field '{name}'; expected one of: path, name, tags, columns`
+
+    **Fires at:** the field name token span.
+
+    **Example:**
+    ```sql
+    -- ← SourceRefFieldUnknown: 'schema' is not a SourceRef field
+    SELECT map(smelt.sources.all(), fn s => s.schema)
+    ```
+
+    **What to fix:** Use one of the four valid fields: `s.path`, `s.name`, `s.tags`, or `s.columns`.
+
+---
+
 ## Planned but not yet implemented
 
 The following reflection capabilities are planned but not yet available:
 
-- **Workspace-wide reflection** (`smelt.models.*`, `smelt.sources.*`, `ModelRef`): iterate over all models or all sources in the workspace. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 - **Record types and config loaders** (`Record<{…}>`, `Map<K,V>`, YAML/JSON/TOML loaders): user-writable record types and structured config loading.
 - **Multi-model production**: one file generates multiple output models.
+- **Additional `ModelRef`/`SourceRef` fields** (`materialization`, `backends`, `description`, …): the field set will expand as concrete use cases are identified.
 
 ## See also
 
 - [Lists & Spread](lists.md) — `List<T>` type, list literals, and the spread operator used to materialise reflection results into SELECT lists.
-- [Higher-Order Functions](hofs.md) — `filter` and `map`, which are the primary tools for transforming a `List<ColumnRef>`.
-- [Pipe Operator](pipes.md) — `|>` for readable HOF chains over `smelt.columns_of` results.
+- [Higher-Order Functions](hofs.md) — `filter` and `map`, which are the primary tools for transforming a `List<ColumnRef>`, `List<ModelRef>`, or `List<SourceRef>`.
+- [Pipe Operator](pipes.md) — `|>` for readable HOF chains over reflection results.
 - [Reference](reference.md) — alphabetical quick reference including all reflection diagnostic codes.
