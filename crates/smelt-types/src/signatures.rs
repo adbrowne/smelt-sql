@@ -229,6 +229,40 @@ pub enum SmeltType {
     /// **Closed**: the v1 field set is exactly `{name, type, is_numeric}`.
     /// Adding a field requires a spec edit and a compiler change.
     ColumnRef,
+    /// `ModelRef` — a closed meta-only record type produced by wide-reflection
+    /// accessors `smelt.models.with_tag` and `smelt.models.all` (Phase D,
+    /// meta-language reflection).
+    ///
+    /// Values of this type describe a single model in the workspace. The type
+    /// has exactly four fields (see [`MODEL_REF_FIELDS`]):
+    ///   - `path: Text` — workspace-relative file path with `/` separators
+    ///   - `name: Text` — the model's identifier (final path segment without `.sql`)
+    ///   - `tags: List<Text>` — the model's merged tag set
+    ///   - `columns: List<ColumnRef>` — the model's column list
+    ///
+    /// **Meta-only**: not user-writable as a `smelt.define` parameter or
+    /// return type. Values originate only from `smelt.models.*` accessors.
+    /// No `ModelRef` value reaches the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{path, name, tags, columns}`.
+    ModelRef,
+    /// `SourceRef` — a closed meta-only record type produced by wide-reflection
+    /// accessors `smelt.sources.with_tag` and `smelt.sources.all` (Phase D,
+    /// meta-language reflection).
+    ///
+    /// Values of this type describe a single source in the workspace. The type
+    /// has exactly four fields (see [`SOURCE_REF_FIELDS`]):
+    ///   - `path: Text` — workspace-relative file path of the source YAML
+    ///   - `name: Text` — the source's identifier (final path segment without `.yml`)
+    ///   - `tags: List<Text>` — the source's tag set as declared in the YAML
+    ///   - `columns: List<ColumnRef>` — the source's column list
+    ///
+    /// **Meta-only**: not user-writable as a `smelt.define` parameter or
+    /// return type. Values originate only from `smelt.sources.*` accessors.
+    /// No `SourceRef` value reaches the database engine.
+    ///
+    /// **Closed**: the v1 field set is exactly `{path, name, tags, columns}`.
+    SourceRef,
 }
 
 /// Subtype check for [`SmeltType`] (Phase A, meta-language).
@@ -2327,6 +2361,114 @@ pub fn column_ref_field(name: &str) -> Option<&'static ColumnRefFieldType> {
         .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
 }
 
+/// The closed field set of [`SmeltType::ModelRef`] (Phase D, meta-language).
+///
+/// Invariant: exactly four entries — `path`, `name`, `tags`, `columns` — in
+/// this canonical order. This is the single source of truth for the v1 field
+/// set. Any future addition requires a spec edit AND a change to this constant.
+///
+/// Field types:
+/// - `path`    → `Expr<Text>`         — workspace-relative file path
+/// - `name`    → `Expr<Text>`         — model identifier (path segment sans `.sql`)
+/// - `tags`    → `List<Expr<Text>>`   — merged tag set
+/// - `columns` → `List<ColumnRef>`    — model column list
+///
+/// Uses `LazyLock` because `SmeltType::List` contains a `Box`, which cannot
+/// be constructed in `const` context. The logical invariants are still that this
+/// is the single, immutable source of truth for the field set.
+pub static MODEL_REF_FIELDS: LazyLock<Vec<(&'static str, SmeltType)>> = LazyLock::new(|| {
+    vec![
+        (
+            "path",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "name",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "tags",
+            SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text,
+            )))),
+        ),
+        ("columns", SmeltType::List(Box::new(SmeltType::ColumnRef))),
+    ]
+});
+
+/// The closed field set of [`SmeltType::SourceRef`] (Phase D, meta-language).
+///
+/// Invariant: exactly four entries — `path`, `name`, `tags`, `columns` — in
+/// this canonical order, identical in shape to [`MODEL_REF_FIELDS`] (uniformity
+/// invariant from the design rationale). The semantic meanings differ (source
+/// YAML path vs model SQL path; source tags vs merged model tags; etc.) but the
+/// structural types are the same.
+pub static SOURCE_REF_FIELDS: LazyLock<Vec<(&'static str, SmeltType)>> = LazyLock::new(|| {
+    vec![
+        (
+            "path",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "name",
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        ),
+        (
+            "tags",
+            SmeltType::List(Box::new(SmeltType::Expr(TypeConstraint::Concrete(
+                DataType::Text,
+            )))),
+        ),
+        ("columns", SmeltType::List(Box::new(SmeltType::ColumnRef))),
+    ]
+});
+
+/// Look up a [`ModelRef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"path"`, `"name"`, `"tags"`, or `"columns"`;
+/// `None` for any other identifier (the closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn model_ref_field(name: &str) -> Option<&'static SmeltType> {
+    MODEL_REF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// Look up a [`SourceRef`] field by name (case-sensitive, exact match).
+///
+/// Returns `Some(&SmeltType)` for `"path"`, `"name"`, `"tags"`, or `"columns"`;
+/// `None` for any other identifier (the closed-field invariant).
+///
+/// Pure — no Salsa dependency.
+pub fn source_ref_field(name: &str) -> Option<&'static SmeltType> {
+    SOURCE_REF_FIELDS
+        .iter()
+        .find_map(|(field_name, ty)| if *field_name == name { Some(ty) } else { None })
+}
+
+/// The closed accessor set for the `smelt.models` namespace.
+///
+/// Returns `Some(&'static SmeltMetaSignature)` when `name` is a known accessor;
+/// `None` when `name` is not in the closed set (trigger for
+/// `WideReflectionUnknownAccessor`).
+///
+/// Pure — no Salsa dependency.
+pub fn models_accessor(name: &str) -> Option<&'static SmeltMetaSignature> {
+    MODELS_ACCESSORS.get(name)
+}
+
+/// The closed accessor set for the `smelt.sources` namespace.
+///
+/// Returns `Some(&'static SmeltMetaSignature)` when `name` is a known accessor;
+/// `None` when `name` is not in the closed set (trigger for
+/// `WideReflectionUnknownAccessor`).
+///
+/// Pure — no Salsa dependency.
+pub fn sources_accessor(name: &str) -> Option<&'static SmeltMetaSignature> {
+    SOURCES_ACCESSORS.get(name)
+}
+
 /// Signature for a smelt meta-language builtin (Phase C).
 ///
 /// Unlike [`Signature`] (which uses SQL-world [`SigParam`] / [`TypeExpr`]),
@@ -2365,6 +2507,62 @@ static META_REGISTRY: LazyLock<HashMap<String, SmeltMetaSignature>> = LazyLock::
 
     m
 });
+
+/// Closed accessor namespace for `smelt.models`.
+///
+/// Keys are the accessor names (lowercase); values are the signatures. The two
+/// accessors are:
+/// - `with_tag`: `(Text) -> List<ModelRef>` — one positional `Expr<Text>` param.
+/// - `all`: `() -> List<ModelRef>` — zero parameters.
+static MODELS_ACCESSORS: LazyLock<HashMap<&'static str, SmeltMetaSignature>> =
+    LazyLock::new(|| {
+        let mut m: HashMap<&'static str, SmeltMetaSignature> = HashMap::new();
+        m.insert(
+            "with_tag",
+            SmeltMetaSignature {
+                name: "smelt.models.with_tag",
+                params: vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))],
+                return_type: SmeltType::List(Box::new(SmeltType::ModelRef)),
+            },
+        );
+        m.insert(
+            "all",
+            SmeltMetaSignature {
+                name: "smelt.models.all",
+                params: vec![],
+                return_type: SmeltType::List(Box::new(SmeltType::ModelRef)),
+            },
+        );
+        m
+    });
+
+/// Closed accessor namespace for `smelt.sources`.
+///
+/// Keys are the accessor names (lowercase); values are the signatures. The two
+/// accessors are:
+/// - `with_tag`: `(Text) -> List<SourceRef>` — one positional `Expr<Text>` param.
+/// - `all`: `() -> List<SourceRef>` — zero parameters.
+static SOURCES_ACCESSORS: LazyLock<HashMap<&'static str, SmeltMetaSignature>> =
+    LazyLock::new(|| {
+        let mut m: HashMap<&'static str, SmeltMetaSignature> = HashMap::new();
+        m.insert(
+            "with_tag",
+            SmeltMetaSignature {
+                name: "smelt.sources.with_tag",
+                params: vec![SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))],
+                return_type: SmeltType::List(Box::new(SmeltType::SourceRef)),
+            },
+        );
+        m.insert(
+            "all",
+            SmeltMetaSignature {
+                name: "smelt.sources.all",
+                params: vec![],
+                return_type: SmeltType::List(Box::new(SmeltType::SourceRef)),
+            },
+        );
+        m
+    });
 
 fn tp(name: &str, c: TypeConstraint) -> TypeParam {
     TypeParam {
@@ -3301,6 +3499,8 @@ pub fn format_smelt_type_hover(ty: &SmeltType) -> String {
         }
         SmeltType::Unknown => "Unknown".to_string(),
         SmeltType::ColumnRef => "ColumnRef".to_string(),
+        SmeltType::ModelRef => "ModelRef".to_string(),
+        SmeltType::SourceRef => "SourceRef".to_string(),
     }
 }
 
@@ -4670,5 +4870,194 @@ mod tests {
             ),
             "is_numeric field must be Boolean, got: {is_numeric_ty:?}"
         );
+    }
+
+    // === Phase D (meta-language) TDD tests — ModelRef / SourceRef + wide reflection ===
+
+    /// `smelt.models.with_tag` resolves to `(Text) -> List<ModelRef>` with one
+    /// positional parameter; `smelt.models.all` resolves to `() -> List<ModelRef>` with
+    /// zero parameters; analogous for `smelt.sources.*` returning `List<SourceRef>`.
+    #[test]
+    fn wide_reflection_accessor_signatures() {
+        // smelt.models.with_tag: (Text) -> List<ModelRef>
+        let with_tag_m =
+            models_accessor("with_tag").expect("models_accessor(with_tag) must be registered");
+        assert_eq!(
+            with_tag_m.params.len(),
+            1,
+            "smelt.models.with_tag must have exactly one positional parameter"
+        );
+        assert!(
+            matches!(
+                &with_tag_m.params[0],
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "smelt.models.with_tag param must be Expr<Text>, got: {:?}",
+            with_tag_m.params[0]
+        );
+        assert!(
+            matches!(&with_tag_m.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ModelRef)),
+            "smelt.models.with_tag must return List<ModelRef>, got: {:?}",
+            with_tag_m.return_type
+        );
+
+        // smelt.models.all: () -> List<ModelRef>
+        let all_m = models_accessor("all").expect("models_accessor(all) must be registered");
+        assert_eq!(
+            all_m.params.len(),
+            0,
+            "smelt.models.all must have zero parameters"
+        );
+        assert!(
+            matches!(&all_m.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ModelRef)),
+            "smelt.models.all must return List<ModelRef>, got: {:?}",
+            all_m.return_type
+        );
+
+        // smelt.sources.with_tag: (Text) -> List<SourceRef>
+        let with_tag_s =
+            sources_accessor("with_tag").expect("sources_accessor(with_tag) must be registered");
+        assert_eq!(
+            with_tag_s.params.len(),
+            1,
+            "smelt.sources.with_tag must have exactly one positional parameter"
+        );
+        assert!(
+            matches!(
+                &with_tag_s.params[0],
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "smelt.sources.with_tag param must be Expr<Text>, got: {:?}",
+            with_tag_s.params[0]
+        );
+        assert!(
+            matches!(&with_tag_s.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::SourceRef)),
+            "smelt.sources.with_tag must return List<SourceRef>, got: {:?}",
+            with_tag_s.return_type
+        );
+
+        // smelt.sources.all: () -> List<SourceRef>
+        let all_s = sources_accessor("all").expect("sources_accessor(all) must be registered");
+        assert_eq!(
+            all_s.params.len(),
+            0,
+            "smelt.sources.all must have zero parameters"
+        );
+        assert!(
+            matches!(&all_s.return_type, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::SourceRef)),
+            "smelt.sources.all must return List<SourceRef>, got: {:?}",
+            all_s.return_type
+        );
+    }
+
+    /// `MODEL_REF_FIELDS` exposes exactly `{path: Text, name: Text, tags: List<Text>,
+    /// columns: List<ColumnRef>}` and no other field; same for `SOURCE_REF_FIELDS`.
+    #[test]
+    fn model_ref_field_set_is_closed() {
+        let expected = ["path", "name", "tags", "columns"];
+        for field in &expected {
+            assert!(
+                model_ref_field(field).is_some(),
+                "MODEL_REF_FIELDS must contain field '{field}'"
+            );
+            assert!(
+                source_ref_field(field).is_some(),
+                "SOURCE_REF_FIELDS must contain field '{field}'"
+            );
+        }
+        // Unknown fields must return None.
+        assert!(
+            model_ref_field("foo").is_none(),
+            "MODEL_REF_FIELDS must not contain 'foo'"
+        );
+        assert!(
+            model_ref_field("is_numeric").is_none(),
+            "MODEL_REF_FIELDS must not contain 'is_numeric'"
+        );
+        assert!(
+            source_ref_field("foo").is_none(),
+            "SOURCE_REF_FIELDS must not contain 'foo'"
+        );
+        // Exactly four fields in each constant.
+        assert_eq!(
+            MODEL_REF_FIELDS.len(),
+            4,
+            "MODEL_REF_FIELDS must have exactly 4 entries"
+        );
+        assert_eq!(
+            SOURCE_REF_FIELDS.len(),
+            4,
+            "SOURCE_REF_FIELDS must have exactly 4 entries"
+        );
+        // Verify types: path → Text, name → Text
+        let path_ty = model_ref_field("path").unwrap();
+        assert!(
+            matches!(
+                path_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "path field must be Expr<Text>, got: {path_ty:?}"
+        );
+        let name_ty = model_ref_field("name").unwrap();
+        assert!(
+            matches!(
+                name_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "name field must be Expr<Text>, got: {name_ty:?}"
+        );
+        // tags → List<Expr<Text>>
+        let tags_ty = model_ref_field("tags").unwrap();
+        assert!(
+            matches!(tags_ty, SmeltType::List(inner)
+                if matches!(inner.as_ref(), SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)))),
+            "tags field must be List<Expr<Text>>, got: {tags_ty:?}"
+        );
+        // columns → List<ColumnRef>
+        let cols_ty = model_ref_field("columns").unwrap();
+        assert!(
+            matches!(cols_ty, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "columns field must be List<ColumnRef>, got: {cols_ty:?}"
+        );
+
+        // Same checks on source_ref_field
+        let s_path_ty = source_ref_field("path").unwrap();
+        assert!(
+            matches!(
+                s_path_ty,
+                SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))
+            ),
+            "SourceRef path field must be Expr<Text>, got: {s_path_ty:?}"
+        );
+        let s_cols_ty = source_ref_field("columns").unwrap();
+        assert!(
+            matches!(s_cols_ty, SmeltType::List(inner) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "SourceRef columns field must be List<ColumnRef>, got: {s_cols_ty:?}"
+        );
+    }
+
+    /// `MODEL_REF_FIELDS` and `SOURCE_REF_FIELDS` have the same field names and
+    /// types in the same order (uniformity invariant from the design rationale).
+    #[test]
+    fn model_ref_and_source_ref_field_sets_are_identical_shape() {
+        assert_eq!(
+            MODEL_REF_FIELDS.len(),
+            SOURCE_REF_FIELDS.len(),
+            "MODEL_REF_FIELDS and SOURCE_REF_FIELDS must have the same number of fields"
+        );
+        for (i, ((model_name, model_ty), (source_name, source_ty))) in MODEL_REF_FIELDS
+            .iter()
+            .zip(SOURCE_REF_FIELDS.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                model_name, source_name,
+                "field {i}: MODEL_REF_FIELDS name '{model_name}' != SOURCE_REF_FIELDS name '{source_name}'"
+            );
+            assert_eq!(
+                model_ty, source_ty,
+                "field {i} ({model_name}): MODEL_REF_FIELDS type does not match SOURCE_REF_FIELDS type"
+            );
+        }
     }
 }

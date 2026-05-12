@@ -759,7 +759,9 @@ impl SmeltPath {
             .0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == IDENT)
+            // Include IDENT and also ALL_KW: `all` is a reserved SQL keyword
+            // but a valid smelt path segment in `smelt.models.all`.
+            .filter(|t| t.kind() == IDENT || t.kind() == ALL_KW)
             .map(|t| t.text().to_string())
             .collect();
         // Drop the leading `smelt` token. Error-recovery paths may produce a

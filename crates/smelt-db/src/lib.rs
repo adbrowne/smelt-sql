@@ -575,6 +575,44 @@ pub enum DiagnosticCode {
     /// further diagnostics (same policy as `MetaSpreadInForbiddenPosition`).
     /// Introduced in Phase 3 of the meta-language plan (Phase C).
     ColumnsOfUnresolvableSchema,
+
+    // ── Phase D (meta-language) diagnostic codes ─────────────────────────
+    /// Emitted when `smelt.models.with_tag(x)` or `smelt.sources.with_tag(x)`
+    /// is called and `x` synthesises to a type not assignable to compile-time
+    /// `Text` (e.g. a runtime `Expr<Text>` like `UPPER('x')` or an integer
+    /// literal). Message: "with_tag expects a compile-time Text; found {actual}".
+    /// Anchored at the argument expression span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase D).
+    WithTagRequiresText,
+    /// Emitted when `with_tag` is called with a named argument
+    /// (e.g. `smelt.models.with_tag(tag => 'core')`). Message:
+    /// "with_tag takes one positional argument; named arguments are not supported".
+    /// Anchored at the named-argument span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase D).
+    WithTagNamedArgument,
+    /// Emitted when `smelt.models.<name>` or `smelt.sources.<name>` refers to
+    /// an accessor name outside the closed set `{with_tag, all}`. Message:
+    /// "smelt.{models,sources} has no accessor `{name}`; expected one of: with_tag, all".
+    /// Anchored at the accessor-name token span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase D).
+    WideReflectionUnknownAccessor,
+    /// Emitted when `smelt.models.all` or `smelt.sources.all` is called with
+    /// any argument (positional or named). Message: "{accessor} takes no arguments".
+    /// Anchored at the offending argument's span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase D).
+    WideReflectionUnexpectedArgument,
+    /// Emitted when field access on a `ModelRef`-typed value uses a field
+    /// identifier outside the closed field set `{path, name, tags, columns}`.
+    /// Message: "ModelRef has no field `{name}`; expected one of: path, name, tags, columns".
+    /// Anchored at the field-name token span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase D).
+    ModelRefFieldUnknown,
+    /// Emitted when field access on a `SourceRef`-typed value uses a field
+    /// identifier outside the closed field set `{path, name, tags, columns}`.
+    /// Message: "SourceRef has no field `{name}`; expected one of: path, name, tags, columns".
+    /// Anchored at the field-name token span.
+    /// Introduced in Phase 1 of the meta-language plan (Phase D).
+    SourceRefFieldUnknown,
 }
 
 /// Structured metadata attached to diagnostics for code actions
@@ -813,8 +851,36 @@ pub fn meta_reflection_diagnostic_message_with_table_expr(
             let t = table_expr.unwrap_or("t");
             format!("cannot resolve column list for {t}; upstream schema is unknown")
         }
+        // Phase D diagnostic messages
+        DiagnosticCode::WithTagRequiresText => {
+            let act = actual.unwrap_or("?");
+            format!("with_tag expects a compile-time Text; found {act}")
+        }
+        DiagnosticCode::WithTagNamedArgument => {
+            "with_tag takes one positional argument; named arguments are not supported".to_string()
+        }
+        DiagnosticCode::WideReflectionUnknownAccessor => {
+            // `actual` carries the namespace ("models" or "sources"),
+            // `field_name` carries the unknown accessor name.
+            let ns = actual.unwrap_or("models");
+            let name = field_name.unwrap_or("?");
+            format!("smelt.{ns} has no accessor `{name}`; expected one of: with_tag, all")
+        }
+        DiagnosticCode::WideReflectionUnexpectedArgument => {
+            // `actual` carries the full accessor name ("smelt.models.all", etc.).
+            let accessor = actual.unwrap_or("all");
+            format!("{accessor} takes no arguments")
+        }
+        DiagnosticCode::ModelRefFieldUnknown => {
+            let name = field_name.unwrap_or("?");
+            format!("ModelRef has no field `{name}`; expected one of: path, name, tags, columns")
+        }
+        DiagnosticCode::SourceRefFieldUnknown => {
+            let name = field_name.unwrap_or("?");
+            format!("SourceRef has no field `{name}`; expected one of: path, name, tags, columns")
+        }
         _ => panic!(
-            "meta_reflection_diagnostic_message called with non-Phase-C code: {:?}",
+            "meta_reflection_diagnostic_message called with non-Phase-C/D code: {:?}",
             code
         ),
     }
@@ -1676,6 +1742,17 @@ pub fn function_body_diagnostics_for_file(
                 &select_stmt,
                 &clean_text,
             ));
+            // Phase D: run the HOF ModelRef/SourceRef field dispatcher and
+            // the wide-reflection accessor checker so that
+            // `map(smelt.models.with_tag('x'), fn m => m.bogus)` emits
+            // `ModelRefFieldUnknown` and `smelt.models.with_tag(42)` emits
+            // `WithTagRequiresText` inside a function SELECT body.
+            out.extend(
+                function_body_check::check_hof_model_ref_source_ref_field_diagnostics(
+                    &select_stmt,
+                    &clean_text,
+                ),
+            );
             continue;
         }
         let Some(body_expr) = body.expression() else {
@@ -3930,6 +4007,48 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 for diag in
                     function_body_check::check_hof_column_ref_field_diagnostics(&select_stmt, text)
                 {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
+            // Phase D (meta-language) — wide-reflection accessor diagnostics.
+            //
+            // Walks every SMELT_PATH_CALL for `smelt.models.*` / `smelt.sources.*`
+            // in the model SELECT statement.  Emits:
+            //   - WideReflectionUnknownAccessor: unknown accessor name
+            //   - WideReflectionUnexpectedArgument: argument to `all`
+            //   - WithTagRequiresText: non-compile-time-Text argument to `with_tag`
+            //   - WithTagNamedArgument: named argument to `with_tag`
+            //
+            // Uses an empty TypeContext (no ModelRef/SourceRef bindings exist at
+            // the top-level model SELECT scope).
+            {
+                let phase_d_ctx = type_inference::TypeContext::new();
+                for diag in type_inference::check_wide_reflection_diagnostics(
+                    &select_stmt,
+                    &phase_d_ctx,
+                    text,
+                ) {
+                    DiagnosticAcc(diag).accumulate(db);
+                }
+            }
+
+            // Phase D (meta-language) — ModelRef / SourceRef HOF field dispatcher.
+            //
+            // For each `map`/`filter` HOF call whose first argument is a
+            // `smelt.models.*` / `smelt.sources.*` wide-reflection call, walk
+            // the lambda body and emit `ModelRefFieldUnknown` /
+            // `SourceRefFieldUnknown` for any `<param>.<field>` access where
+            // `<field>` is not in the closed field set `{path, name, tags, columns}`.
+            //
+            // This runs on MODEL select statements (the outer `select_stmt`).
+            // Function-file SELECT bodies are handled separately in
+            // `function_body_diagnostics_for_file` via `check_function_select_body`.
+            {
+                for diag in function_body_check::check_hof_model_ref_source_ref_field_diagnostics(
+                    &select_stmt,
+                    text,
+                ) {
                     DiagnosticAcc(diag).accumulate(db);
                 }
             }

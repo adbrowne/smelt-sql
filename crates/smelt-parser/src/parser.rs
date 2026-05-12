@@ -1750,13 +1750,15 @@ impl<'a> Parser<'a> {
                 .get(self.pos + lookahead2)
                 .map(|t| t.kind)
                 .unwrap_or(EOF);
-            if after_dot != IDENT {
+            // Allow IDENT segments and also ALL_KW (`all` is a reserved SQL
+            // keyword but a valid smelt path segment in `smelt.models.all`).
+            if after_dot != IDENT && after_dot != ALL_KW {
                 break;
             }
             self.skip_trivia();
             self.advance(); // DOT
             self.skip_trivia();
-            self.advance(); // IDENT
+            self.advance(); // IDENT or ALL_KW
         }
 
         // Close the SMELT_PATH child node now that all segments are captured.

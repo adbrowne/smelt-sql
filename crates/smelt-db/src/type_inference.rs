@@ -1317,6 +1317,25 @@ fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option
         }));
     }
 
+    // Phase D: `smelt.models.<accessor>(...)` and `smelt.sources.<accessor>(...)`.
+    // Both `with_tag` and `all` return `List<ModelRef|SourceRef>`. We synthesise
+    // `Unknown` (the DataType projection of a meta-list) — the `SmeltType` is
+    // resolved at the HOF inference layer. Unknown / miss accessors also return
+    // Unknown (the error is emitted by `check_wide_reflection_diagnostics`).
+    // Use segments() here (IDENT-only) since "models" and "sources" are plain identifiers.
+    // "all" is a keyword so segments().len() == 1 for `smelt.models.all`, but we detect
+    // `models`/`sources` as the first segment regardless.
+    {
+        // Check first segment (always an IDENT) for "models" or "sources".
+        let first_seg = segments.first();
+        if first_seg
+            .map(|s| s.eq_ignore_ascii_case("models") || s.eq_ignore_ascii_case("sources"))
+            .unwrap_or(false)
+        {
+            return Some(TypedColumn::nullable(DataType::Unknown));
+        }
+    }
+
     let name = segments.last()?;
     let sig = ctx.lookup_function_signature(name)?;
 
@@ -1352,6 +1371,8 @@ fn infer_smelt_path_call_type(call: &SmeltPathCall, ctx: &TypeContext) -> Option
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
+        // `ModelRef` / `SourceRef` (Phase D meta-language) — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     };
@@ -5685,6 +5706,445 @@ pub fn check_column_ref_field_diagnostics(
     diags
 }
 
+// ─── Phase D: wide-reflection diagnostics and field projection ───────────────
+
+/// Returns `true` when `expr` is a compile-time-resolvable meta-`Text` value
+/// for the purpose of the `with_tag` argument check.
+///
+/// Accepted as compile-time Text:
+/// - Bare string literals (detected by `is_string_literal_expr`).
+/// - `smelt.config.var(...)` calls (the result is always a nullable `Varchar`
+///   sourced at compile time).
+/// - A `ModelRef` or `SourceRef` field projection to a `Text`-typed field
+///   (`m.path`, `m.name`, `s.path`, `s.name`) — i.e. expressions whose inferred
+///   `SmeltType` (in the meta-type layer) is `Expr<Text>` from a closed meta-record.
+///
+/// Rejected (returns `false`):
+/// - Integer or other non-Text literals (`42`, `true`, etc.).
+/// - Runtime function calls that synthesise `Expr<Text>` at SQL evaluation time
+///   (e.g. `UPPER('x')`).
+/// - Bare column references.
+///
+/// Pure — no Salsa dependency.
+pub fn is_compile_time_text_arg(expr: &Expr, ctx: &TypeContext) -> bool {
+    use smelt_types::signatures::{column_ref_field, model_ref_field, source_ref_field, SmeltType};
+
+    // 1. Bare string literal — always accepted.
+    if crate::config_vars::is_string_literal_expr(expr) {
+        return true;
+    }
+
+    // 2. smelt.config.var(...) call — always accepted (compile-time Text).
+    if let Some(path_call) = expr.as_smelt_path_call() {
+        let segs = path_call.segments();
+        if segs.len() == 2
+            && segs[0].eq_ignore_ascii_case("config")
+            && segs[1].eq_ignore_ascii_case("var")
+        {
+            return true;
+        }
+        // wide-reflection accessor calls return List<ModelRef|SourceRef>, not Text.
+        return false;
+    }
+
+    // 3. A field projection `<binding>.<field>` where the binding is a
+    //    ColumnRef, ModelRef, or SourceRef and the field type is Expr<Text>.
+    if let Some(col_ref) = smelt_parser::ast::ColumnRef::from_expr(expr) {
+        let qualifier = match col_ref.qualifier() {
+            Some(q) => q,
+            None => return false, // bare identifier — not a qualified field access
+        };
+        let field = col_ref.name();
+
+        // Is the qualifier a meta-record-typed binding?
+        if let Some(ty) = ctx.lookup_function_param_smelt_type(qualifier) {
+            let field_ty_opt: Option<&SmeltType> = match ty {
+                SmeltType::ColumnRef => column_ref_field(field),
+                SmeltType::ModelRef => model_ref_field(field),
+                SmeltType::SourceRef => source_ref_field(field),
+                _ => None,
+            };
+            if let Some(field_ty) = field_ty_opt {
+                return matches!(
+                    field_ty,
+                    SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(
+                        DataType::Text
+                    ))
+                );
+            }
+        }
+    }
+
+    false
+}
+
+/// Walk all `SMELT_PATH_CALL` descendants of `select_stmt` whose path is
+/// `models.<accessor>` or `sources.<accessor>`. For each:
+///
+/// - Emit [`DiagnosticCode::WideReflectionUnknownAccessor`] when the accessor
+///   name is not in the closed set `{with_tag, all}`.
+/// - For `with_tag`: emit [`DiagnosticCode::WithTagNamedArgument`] for any named
+///   argument; emit [`DiagnosticCode::WithTagRequiresText`] when the positional
+///   argument is not compile-time-resolvable Text.
+/// - For `all`: emit [`DiagnosticCode::WideReflectionUnexpectedArgument`] for any
+///   argument (positional or named).
+///
+/// Always synthesises the spec'd return type (recoverable) — diagnostics here do
+/// not prevent downstream HOF type-checking.
+///
+/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
+/// span positions are not under test.
+pub fn check_wide_reflection_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_parser::ast::SmeltPathCall;
+    use smelt_parser::SyntaxKind::SMELT_PATH_CALL;
+
+    let mut diags = Vec::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != SMELT_PATH_CALL {
+            continue;
+        }
+        let call = match SmeltPathCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Only handle `smelt.models.<accessor>` and `smelt.sources.<accessor>`.
+        let segs = call.segments();
+        if segs.len() != 2 {
+            continue;
+        }
+        let ns = segs[0].to_lowercase();
+        if ns != "models" && ns != "sources" {
+            continue;
+        }
+        let accessor_name = segs[1].as_str();
+
+        // Check closed accessor set.
+        let is_with_tag = accessor_name.eq_ignore_ascii_case("with_tag");
+        let is_all = accessor_name.eq_ignore_ascii_case("all");
+
+        if !is_with_tag && !is_all {
+            // Unknown accessor — emit WideReflectionUnknownAccessor at the accessor token span.
+            let accessor_range = find_last_segment_range(&call, text);
+            diags.push(crate::Diagnostic {
+                severity: crate::DiagnosticSeverity::Error,
+                message: crate::meta_reflection_diagnostic_message(
+                    crate::DiagnosticCode::WideReflectionUnknownAccessor,
+                    Some(&ns),
+                    Some(accessor_name),
+                ),
+                range: accessor_range,
+                code: Some(crate::DiagnosticCode::WideReflectionUnknownAccessor),
+                data: None,
+            });
+            continue;
+        }
+
+        let arg_list = call.arg_list();
+
+        if is_all {
+            // `all` accepts no arguments at all.
+            if let Some(al) = &arg_list {
+                let full_accessor = format!("smelt.{ns}.all");
+                for pos_arg in al.positional_args() {
+                    let arg_range = to_range(pos_arg.syntax().text_range());
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_reflection_diagnostic_message(
+                            crate::DiagnosticCode::WideReflectionUnexpectedArgument,
+                            Some(&full_accessor),
+                            None,
+                        ),
+                        range: arg_range,
+                        code: Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument),
+                        data: None,
+                    });
+                }
+                for named_arg in al.named_params() {
+                    let arg_range = to_range(named_arg.text_range());
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_reflection_diagnostic_message(
+                            crate::DiagnosticCode::WideReflectionUnexpectedArgument,
+                            Some(&full_accessor),
+                            None,
+                        ),
+                        range: arg_range,
+                        code: Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument),
+                        data: None,
+                    });
+                }
+            }
+            continue;
+        }
+
+        // is_with_tag: check for named args and compile-time Text argument.
+        if let Some(al) = &arg_list {
+            // Named arguments are not supported.
+            for named_arg in al.named_params() {
+                let arg_range = to_range(named_arg.text_range());
+                diags.push(crate::Diagnostic {
+                    severity: crate::DiagnosticSeverity::Error,
+                    message: crate::meta_reflection_diagnostic_message(
+                        crate::DiagnosticCode::WithTagNamedArgument,
+                        None,
+                        None,
+                    ),
+                    range: arg_range,
+                    code: Some(crate::DiagnosticCode::WithTagNamedArgument),
+                    data: None,
+                });
+            }
+
+            // Positional argument must be compile-time Text.
+            for pos_arg in al.positional_args() {
+                if !is_compile_time_text_arg(&pos_arg, ctx) {
+                    // Get the actual synthesised type string for the message.
+                    let actual_str = infer_expression_type(&pos_arg, ctx)
+                        .map(|tc| tc.data_type.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    let arg_range = to_range(pos_arg.syntax().text_range());
+                    diags.push(crate::Diagnostic {
+                        severity: crate::DiagnosticSeverity::Error,
+                        message: crate::meta_reflection_diagnostic_message(
+                            crate::DiagnosticCode::WithTagRequiresText,
+                            Some(&actual_str),
+                            None,
+                        ),
+                        range: arg_range,
+                        code: Some(crate::DiagnosticCode::WithTagRequiresText),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
+    diags
+}
+
+/// Extract path segments from a `SmeltPathCall`, including keyword tokens.
+///
+/// Unlike `SmeltPathCall::segments()`, which only collects `IDENT` tokens,
+/// this helper also collects keyword tokens (e.g. `ALL_KW` for `all`) so that
+/// accessor names that happen to be SQL keywords are included. The leading
+/// `smelt` IDENT token is dropped (same as `segments()`).
+///
+/// Find the text range of the last path segment in a `SmeltPathCall`.
+///
+/// For `smelt.models.bogus(...)` returns the span of `bogus`.
+/// Falls back to the node's own range when a more precise span cannot be found.
+fn find_last_segment_range(call: &smelt_parser::ast::SmeltPathCall, text: &str) -> crate::Range {
+    use smelt_parser::SyntaxKind::IDENT;
+
+    // Walk the path's IDENT tokens to find the last one (the accessor name).
+    let path_node = call.path();
+    let last_ident_range = path_node.and_then(|p| {
+        p.syntax()
+            .children_with_tokens()
+            .filter_map(|it| {
+                if let rowan::NodeOrToken::Token(t) = it {
+                    if t.kind() == IDENT {
+                        return Some(t.text_range());
+                    }
+                }
+                None
+            })
+            .last()
+    });
+
+    let raw_range = last_ident_range.unwrap_or_else(|| call.syntax().text_range());
+    if text.is_empty() {
+        crate::Range {
+            start: smelt_parser::ast::Position { line: 0, column: 0 },
+            end: smelt_parser::ast::Position { line: 0, column: 0 },
+        }
+    } else {
+        smelt_parser::ast::text_range_to_range(text, raw_range)
+    }
+}
+
+/// Walk all expression descendants of `select_stmt`. For every expression of
+/// the form `<qualifier>.<field>` where `<qualifier>` is registered as
+/// `SmeltType::ModelRef` or `SmeltType::SourceRef` in the context, check that
+/// `<field>` is in the closed `MODEL_REF_FIELDS` / `SOURCE_REF_FIELDS` set.
+/// Unknown fields emit [`DiagnosticCode::ModelRefFieldUnknown`] /
+/// [`DiagnosticCode::SourceRefFieldUnknown`] anchored at the field-name span.
+///
+/// Pure — no Salsa dependency. Pass `""` for `text` in unit tests where exact
+/// span positions are not under test.
+pub fn check_model_ref_source_ref_field_diagnostics(
+    select_stmt: &smelt_parser::ast::SelectStmt,
+    ctx: &TypeContext,
+    text: &str,
+) -> Vec<crate::Diagnostic> {
+    use smelt_types::signatures::{model_ref_field, source_ref_field, SmeltType};
+
+    let mut diags = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    let to_range = |range: rowan::TextRange| -> crate::Range {
+        if text.is_empty() {
+            crate::Range {
+                start: smelt_parser::ast::Position { line: 0, column: 0 },
+                end: smelt_parser::ast::Position { line: 0, column: 0 },
+            }
+        } else {
+            smelt_parser::ast::text_range_to_range(text, range)
+        }
+    };
+
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        let expr = match smelt_parser::ast::Expr::cast(node.clone()) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        let col_ref = match smelt_parser::ast::ColumnRef::from_expr(&expr) {
+            Some(cr) => cr,
+            None => continue,
+        };
+
+        let qualifier = match col_ref.qualifier() {
+            Some(q) => q,
+            None => continue, // bare identifier — not a dot access
+        };
+
+        // Is the qualifier a ModelRef or SourceRef-typed binding?
+        let binding_ty = ctx.lookup_function_param_smelt_type(qualifier).cloned();
+
+        let (is_model_ref, _is_source_ref) = match &binding_ty {
+            Some(SmeltType::ModelRef) => (true, false),
+            Some(SmeltType::SourceRef) => (false, true),
+            _ => continue,
+        };
+
+        let field_name = col_ref.name();
+
+        // Check if the field is in the closed field set.
+        let field_known = if is_model_ref {
+            model_ref_field(field_name).is_some()
+        } else {
+            source_ref_field(field_name).is_some()
+        };
+
+        if field_known {
+            continue; // valid field — no diagnostic
+        }
+
+        // Deduplicate: same (qualifier, field) pair may appear in multiple wrappers.
+        let key = (qualifier.to_string(), field_name.to_string());
+        if !seen.insert(key) {
+            continue;
+        }
+
+        // Unknown field — emit the appropriate diagnostic anchored at the field token span.
+        let field_token_range = {
+            use smelt_parser::SyntaxKind::{DOT, IDENT};
+            let mut found: Option<rowan::TextRange> = None;
+            let mut after_dot = false;
+            for child in node.children_with_tokens() {
+                match child {
+                    rowan::NodeOrToken::Token(t) if t.kind() == DOT => {
+                        after_dot = true;
+                    }
+                    rowan::NodeOrToken::Token(t) if after_dot && t.kind() == IDENT => {
+                        found = Some(t.text_range());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            found.unwrap_or_else(|| node.text_range())
+        };
+
+        let code = if is_model_ref {
+            crate::DiagnosticCode::ModelRefFieldUnknown
+        } else {
+            crate::DiagnosticCode::SourceRefFieldUnknown
+        };
+        diags.push(crate::Diagnostic {
+            severity: crate::DiagnosticSeverity::Error,
+            message: crate::meta_reflection_diagnostic_message(code, None, Some(field_name)),
+            range: to_range(field_token_range),
+            code: Some(code),
+            data: None,
+        });
+    }
+
+    diags
+}
+
+/// Infer the [`SmeltType`] of a `ModelRef` field projection `<binding>.<field>`.
+///
+/// Returns `Some(field_type)` when:
+///   - `binding_name` is registered in `ctx` as `SmeltType::ModelRef`, AND
+///   - `field_name` is in the closed `MODEL_REF_FIELDS` set.
+///
+/// Returns `None` otherwise.
+///
+/// Pure — no Salsa dependency.
+pub fn infer_field_on_model_ref(
+    binding_name: &str,
+    field_name: &str,
+    ctx: &TypeContext,
+) -> Option<smelt_types::signatures::SmeltType> {
+    use smelt_types::signatures::{model_ref_field, SmeltType};
+    let is_model_ref = ctx
+        .lookup_function_param_smelt_type(binding_name)
+        .map(|ty| matches!(ty, SmeltType::ModelRef))
+        .unwrap_or(false);
+    if !is_model_ref {
+        return None;
+    }
+    model_ref_field(field_name).cloned()
+}
+
+/// Infer the [`SmeltType`] of a `SourceRef` field projection `<binding>.<field>`.
+///
+/// Returns `Some(field_type)` when:
+///   - `binding_name` is registered in `ctx` as `SmeltType::SourceRef`, AND
+///   - `field_name` is in the closed `SOURCE_REF_FIELDS` set.
+///
+/// Returns `None` otherwise.
+///
+/// Pure — no Salsa dependency.
+pub fn infer_field_on_source_ref(
+    binding_name: &str,
+    field_name: &str,
+    ctx: &TypeContext,
+) -> Option<smelt_types::signatures::SmeltType> {
+    use smelt_types::signatures::{source_ref_field, SmeltType};
+    let is_source_ref = ctx
+        .lookup_function_param_smelt_type(binding_name)
+        .map(|ty| matches!(ty, SmeltType::SourceRef))
+        .unwrap_or(false);
+    if !is_source_ref {
+        return None;
+    }
+    source_ref_field(field_name).cloned()
+}
+
 /// Infer the [`SmeltType`] of a ColumnRef field projection `<binding>.<field>`.
 ///
 /// Returns `Some(field_type)` when:
@@ -8828,6 +9288,410 @@ mod tests {
             "GROUP BY c.name with 'name' NOT literally in scope must produce no diagnostics — \
              body-check-time lift-scope validation is suppressed; got: {:?}",
             diags_err
+        );
+    }
+
+    // ─── Phase D: wide-reflection diagnostics ────────────────────────────────
+
+    /// `smelt.models.with_tag(42)` emits `WithTagRequiresText` (integer is not Text).
+    /// `smelt.sources.with_tag(UPPER('x'))` emits `WithTagRequiresText` (runtime Text).
+    /// `smelt.models.with_tag('core')` emits no Phase D diagnostic.
+    #[test]
+    fn with_tag_arg_must_be_compile_time_text() {
+        // smelt.models.with_tag(42) — integer literal, not Text → WithTagRequiresText
+        {
+            let sql = "SELECT smelt.models.with_tag(42) FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == Some(crate::DiagnosticCode::WithTagRequiresText)),
+                "smelt.models.with_tag(42) must emit WithTagRequiresText, got: {:?}",
+                diags
+            );
+            assert_eq!(
+                diags
+                    .iter()
+                    .filter(|d| d.code == Some(crate::DiagnosticCode::WithTagRequiresText))
+                    .count(),
+                1,
+                "must emit exactly one WithTagRequiresText"
+            );
+        }
+
+        // smelt.sources.with_tag(UPPER('x')) — runtime Expr<Text> → WithTagRequiresText
+        {
+            let sql = "SELECT smelt.sources.with_tag(UPPER('x')) FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == Some(crate::DiagnosticCode::WithTagRequiresText)),
+                "smelt.sources.with_tag(UPPER('x')) must emit WithTagRequiresText, got: {:?}",
+                diags
+            );
+        }
+
+        // smelt.models.with_tag('core') — string literal → NO Phase D diagnostic
+        {
+            let sql = "SELECT smelt.models.with_tag('core') FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                !diags.iter().any(|d| matches!(
+                    d.code,
+                    Some(crate::DiagnosticCode::WithTagRequiresText)
+                        | Some(crate::DiagnosticCode::WithTagNamedArgument)
+                        | Some(crate::DiagnosticCode::WideReflectionUnknownAccessor)
+                        | Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument)
+                )),
+                "smelt.models.with_tag('core') must emit NO Phase D diagnostic, got: {:?}",
+                diags
+            );
+        }
+    }
+
+    /// `smelt.models.with_tag(tag => 'core')` emits exactly one `WithTagNamedArgument`.
+    /// `smelt.models.with_tag('core')` does not.
+    #[test]
+    fn with_tag_rejects_named_argument() {
+        // Named argument → WithTagNamedArgument
+        {
+            let sql = "SELECT smelt.models.with_tag(tag => 'core') FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == Some(crate::DiagnosticCode::WithTagNamedArgument)),
+                "smelt.models.with_tag(tag => 'core') must emit WithTagNamedArgument, got: {:?}",
+                diags
+            );
+            assert_eq!(
+                diags
+                    .iter()
+                    .filter(|d| d.code == Some(crate::DiagnosticCode::WithTagNamedArgument))
+                    .count(),
+                1,
+                "must emit exactly one WithTagNamedArgument"
+            );
+        }
+
+        // Positional arg → no WithTagNamedArgument
+        {
+            let sql = "SELECT smelt.models.with_tag('core') FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                !diags
+                    .iter()
+                    .any(|d| d.code == Some(crate::DiagnosticCode::WithTagNamedArgument)),
+                "smelt.models.with_tag('core') must NOT emit WithTagNamedArgument, got: {:?}",
+                diags
+            );
+        }
+    }
+
+    /// `smelt.models.bogus()` emits exactly one `WideReflectionUnknownAccessor` at
+    /// the `bogus` token span; same for `smelt.sources.bogus()`.
+    #[test]
+    fn wide_reflection_unknown_accessor() {
+        // smelt.models.bogus() — unknown accessor
+        {
+            let sql = "SELECT smelt.models.bogus() FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == Some(crate::DiagnosticCode::WideReflectionUnknownAccessor)),
+                "smelt.models.bogus() must emit WideReflectionUnknownAccessor, got: {:?}",
+                diags
+            );
+            assert_eq!(
+                diags
+                    .iter()
+                    .filter(|d| d.code
+                        == Some(crate::DiagnosticCode::WideReflectionUnknownAccessor))
+                    .count(),
+                1,
+                "must emit exactly one WideReflectionUnknownAccessor"
+            );
+        }
+
+        // smelt.sources.bogus() — same for "sources"
+        {
+            let sql = "SELECT smelt.sources.bogus() FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == Some(crate::DiagnosticCode::WideReflectionUnknownAccessor)),
+                "smelt.sources.bogus() must emit WideReflectionUnknownAccessor, got: {:?}",
+                diags
+            );
+        }
+    }
+
+    /// `smelt.models.all(42)` emits exactly one `WideReflectionUnexpectedArgument` at the
+    /// `42` arg span; `smelt.models.all()` does not.
+    /// `smelt.sources.all(named => 'x')` emits `WideReflectionUnexpectedArgument` at named-arg span.
+    #[test]
+    fn wide_reflection_all_takes_no_arguments() {
+        // smelt.models.all(42) — positional arg to all()
+        {
+            let sql = "SELECT smelt.models.all(42) FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags.iter().any(
+                    |d| d.code == Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument)
+                ),
+                "smelt.models.all(42) must emit WideReflectionUnexpectedArgument, got: {:?}",
+                diags
+            );
+            assert_eq!(
+                diags
+                    .iter()
+                    .filter(
+                        |d| d.code == Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument)
+                    )
+                    .count(),
+                1,
+                "must emit exactly one WideReflectionUnexpectedArgument"
+            );
+        }
+
+        // smelt.models.all() — no args → no diagnostic
+        {
+            let sql = "SELECT smelt.models.all() FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                !diags.iter().any(
+                    |d| d.code == Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument)
+                ),
+                "smelt.models.all() must NOT emit WideReflectionUnexpectedArgument, got: {:?}",
+                diags
+            );
+        }
+
+        // smelt.sources.all(named => 'x') — named arg to all()
+        {
+            let sql = "SELECT smelt.sources.all(named => 'x') FROM t";
+            let select = parse_select_stmt(sql);
+            let ctx = TypeContext::new();
+            let diags = check_wide_reflection_diagnostics(&select, &ctx, "");
+            assert!(
+                diags.iter().any(|d| d.code
+                    == Some(crate::DiagnosticCode::WideReflectionUnexpectedArgument)),
+                "smelt.sources.all(named => 'x') must emit WideReflectionUnexpectedArgument, got: {:?}",
+                diags
+            );
+        }
+    }
+
+    /// Given `m: ModelRef`, field projections synthesise the correct types.
+    /// Given `s: SourceRef`, field projections synthesise the correct types.
+    #[test]
+    fn model_ref_field_projection_synthesises_field_type() {
+        use smelt_types::signatures::SmeltType;
+
+        // Set up a context with `m: ModelRef` and `s: SourceRef`.
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("m", SmeltType::ModelRef);
+        ctx.add_lambda_param(
+            "m",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx.add_function_param_smelt_type("s", SmeltType::SourceRef);
+        ctx.add_lambda_param(
+            "s",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // m.path → Expr<Text>
+        let path_ty = infer_field_on_model_ref("m", "path", &ctx);
+        assert!(
+            matches!(
+                path_ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)
+                ))
+            ),
+            "m.path must synthesise Expr<Text>, got: {:?}",
+            path_ty
+        );
+
+        // m.name → Expr<Text>
+        let name_ty = infer_field_on_model_ref("m", "name", &ctx);
+        assert!(
+            matches!(
+                name_ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)
+                ))
+            ),
+            "m.name must synthesise Expr<Text>, got: {:?}",
+            name_ty
+        );
+
+        // m.tags → List<Expr<Text>>
+        let tags_ty = infer_field_on_model_ref("m", "tags", &ctx);
+        assert!(
+            matches!(&tags_ty, Some(SmeltType::List(inner))
+                if matches!(inner.as_ref(), SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)))),
+            "m.tags must synthesise List<Expr<Text>>, got: {:?}",
+            tags_ty
+        );
+
+        // m.columns → List<ColumnRef>
+        let cols_ty = infer_field_on_model_ref("m", "columns", &ctx);
+        assert!(
+            matches!(&cols_ty, Some(SmeltType::List(inner)) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "m.columns must synthesise List<ColumnRef>, got: {:?}",
+            cols_ty
+        );
+
+        // SourceRef: s.path → Expr<Text>
+        let s_path_ty = infer_field_on_source_ref("s", "path", &ctx);
+        assert!(
+            matches!(
+                s_path_ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)
+                ))
+            ),
+            "s.path must synthesise Expr<Text>, got: {:?}",
+            s_path_ty
+        );
+
+        // SourceRef: s.name → Expr<Text>
+        let s_name_ty = infer_field_on_source_ref("s", "name", &ctx);
+        assert!(
+            matches!(
+                s_name_ty,
+                Some(SmeltType::Expr(
+                    smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)
+                ))
+            ),
+            "s.name must synthesise Expr<Text>, got: {:?}",
+            s_name_ty
+        );
+
+        // SourceRef: s.tags → List<Expr<Text>>
+        let s_tags_ty = infer_field_on_source_ref("s", "tags", &ctx);
+        assert!(
+            matches!(&s_tags_ty, Some(SmeltType::List(inner))
+                if matches!(inner.as_ref(), SmeltType::Expr(smelt_types::signatures::TypeConstraint::Concrete(DataType::Text)))),
+            "s.tags must synthesise List<Expr<Text>>, got: {:?}",
+            s_tags_ty
+        );
+
+        // SourceRef: s.columns → List<ColumnRef>
+        let s_cols_ty = infer_field_on_source_ref("s", "columns", &ctx);
+        assert!(
+            matches!(&s_cols_ty, Some(SmeltType::List(inner)) if matches!(inner.as_ref(), SmeltType::ColumnRef)),
+            "s.columns must synthesise List<ColumnRef>, got: {:?}",
+            s_cols_ty
+        );
+    }
+
+    /// Given `m: ModelRef`, `m.foo` emits exactly one `ModelRefFieldUnknown` at the `foo`
+    /// field span and synthesises `Unknown` (drop-on-error).
+    /// Given `s: SourceRef`, `s.bar` emits exactly one `SourceRefFieldUnknown`.
+    #[test]
+    fn model_ref_field_projection_rejects_unknown_field() {
+        use smelt_types::signatures::SmeltType;
+
+        let mut ctx = TypeContext::new();
+        ctx.add_function_param_smelt_type("m", SmeltType::ModelRef);
+        ctx.add_lambda_param(
+            "m",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+        ctx.add_function_param_smelt_type("s", SmeltType::SourceRef);
+        ctx.add_lambda_param(
+            "s",
+            TypedColumn {
+                data_type: DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        // m.foo — unknown field on ModelRef → ModelRefFieldUnknown
+        let sql = "SELECT m.foo FROM t";
+        let select = parse_select_stmt(sql);
+        let diags = check_model_ref_source_ref_field_diagnostics(&select, &ctx, sql);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::ModelRefFieldUnknown)),
+            "m.foo must emit ModelRefFieldUnknown, got: {:?}",
+            diags
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == Some(crate::DiagnosticCode::ModelRefFieldUnknown))
+                .count(),
+            1,
+            "must emit exactly one ModelRefFieldUnknown"
+        );
+        // Confirm infer_field_on_model_ref returns None for unknown field.
+        let unknown_ty = infer_field_on_model_ref("m", "foo", &ctx);
+        assert!(
+            unknown_ty.is_none(),
+            "infer_field_on_model_ref must return None for unknown field 'foo', got: {:?}",
+            unknown_ty
+        );
+
+        // s.bar — unknown field on SourceRef → SourceRefFieldUnknown
+        let sql_s = "SELECT s.bar FROM t";
+        let select_s = parse_select_stmt(sql_s);
+        let diags_s = check_model_ref_source_ref_field_diagnostics(&select_s, &ctx, sql_s);
+        assert!(
+            diags_s
+                .iter()
+                .any(|d| d.code == Some(crate::DiagnosticCode::SourceRefFieldUnknown)),
+            "s.bar must emit SourceRefFieldUnknown, got: {:?}",
+            diags_s
+        );
+        assert_eq!(
+            diags_s
+                .iter()
+                .filter(|d| d.code == Some(crate::DiagnosticCode::SourceRefFieldUnknown))
+                .count(),
+            1,
+            "must emit exactly one SourceRefFieldUnknown"
+        );
+        // Confirm infer_field_on_source_ref returns None for unknown field.
+        let s_unknown_ty = infer_field_on_source_ref("s", "bar", &ctx);
+        assert!(
+            s_unknown_ty.is_none(),
+            "infer_field_on_source_ref must return None for unknown field 'bar', got: {:?}",
+            s_unknown_ty
         );
     }
 }

@@ -29,9 +29,11 @@ use std::path::PathBuf;
 
 use crate::schema::{Column, ColumnSource, ModelSchema};
 use crate::type_inference::{
-    check_column_ref_field_diagnostics, check_meta_text_lift_diagnostics, check_undeclared_columns,
-    infer_cte_columns, infer_expression_kind, infer_expression_type,
-    walk_expression_columns_with_visitor, walk_select_columns_with_visitor, TypeContext,
+    check_column_ref_field_diagnostics, check_meta_text_lift_diagnostics,
+    check_model_ref_source_ref_field_diagnostics, check_undeclared_columns,
+    check_wide_reflection_diagnostics, infer_cte_columns, infer_expression_kind,
+    infer_expression_type, walk_expression_columns_with_visitor, walk_select_columns_with_visitor,
+    TypeContext,
 };
 use crate::{Diagnostic, DiagnosticCode, DiagnosticData, DiagnosticSeverity, Range};
 
@@ -350,7 +352,11 @@ pub(crate) fn seed_param_context(params: &[ParamSpec]) -> TypeContext {
         if let Some(Ok(smelt_ty)) = &p.type_ref {
             if matches!(
                 smelt_ty,
-                SmeltType::List(_) | SmeltType::Unknown | SmeltType::ColumnRef
+                SmeltType::List(_)
+                    | SmeltType::Unknown
+                    | SmeltType::ColumnRef
+                    | SmeltType::ModelRef
+                    | SmeltType::SourceRef
             ) {
                 ctx.add_function_param_smelt_type(&p.name, smelt_ty.clone());
             }
@@ -394,6 +400,8 @@ fn param_binding_type(p: &ParamSpec) -> DataType {
         Some(Ok(SmeltType::Lambda(_, _))) => DataType::Unknown,
         // `ColumnRef` (Phase C meta-language) — meta-only; not a SQL DataType.
         Some(Ok(SmeltType::ColumnRef)) => DataType::Unknown,
+        // `ModelRef` / `SourceRef` (Phase D meta-language) — meta-only; not a SQL DataType.
+        Some(Ok(SmeltType::ModelRef)) | Some(Ok(SmeltType::SourceRef)) => DataType::Unknown,
         Some(Err(_)) => DataType::Unknown,
         None => DataType::Unknown,
     }
@@ -1717,14 +1725,20 @@ pub(crate) fn check_function_select_body(
         // anchor at the field token or emit the correct Phase C code.
         if let Some(qualifier) = &info.qualifier {
             use smelt_types::signatures::SmeltType;
-            let qualifier_is_column_ref = body_ctx
-                .lookup_function_param_smelt_type(qualifier)
-                .map(|ty| matches!(ty, SmeltType::ColumnRef))
+            let qualifier_smelt_ty = body_ctx.lookup_function_param_smelt_type(qualifier);
+            let qualifier_is_meta_record = qualifier_smelt_ty
+                .map(|ty| {
+                    matches!(
+                        ty,
+                        SmeltType::ColumnRef | SmeltType::ModelRef | SmeltType::SourceRef
+                    )
+                })
                 .unwrap_or(false);
-            if qualifier_is_column_ref {
-                // All `<columnref-param>.<field>` references are handled by
-                // the lift check (step 1b) for recognised fields and by
-                // `check_column_ref_field_diagnostics` (step 1c) for
+            if qualifier_is_meta_record {
+                // All `<meta-record-param>.<field>` references are handled by
+                // the lift check (step 1b) for recognised ColumnRef fields and by
+                // `check_column_ref_field_diagnostics` (step 1c) /
+                // `check_model_ref_source_ref_field_diagnostics` (step 1d) for
                 // unrecognised fields. Skip here to avoid double-diagnostics.
                 continue;
             }
@@ -1774,6 +1788,23 @@ pub(crate) fn check_function_select_body(
     //     handles the valid `c.name` lift). Only *unrecognised* fields reach
     //     this check.
     for diag in check_column_ref_field_diagnostics(select_stmt, body_ctx, text) {
+        diagnostics.push(diag);
+    }
+
+    // 1d. Phase D ModelRef / SourceRef field validation.
+    //     For each `<modelref-param>.<field>` / `<sourceref-param>.<field>`
+    //     expression where `<field>` is NOT in the closed four-field set
+    //     `{path, name, tags, columns}`, emit `ModelRefFieldUnknown` /
+    //     `SourceRefFieldUnknown` anchored at the field-name token.
+    //
+    //     Also fires `check_wide_reflection_diagnostics` so that
+    //     `smelt.models.with_tag(42)` inside a function body gets
+    //     `WithTagRequiresText`, and `smelt.models.bogus()` gets
+    //     `WideReflectionUnknownAccessor`.
+    for diag in check_model_ref_source_ref_field_diagnostics(select_stmt, body_ctx, text) {
+        diagnostics.push(diag);
+    }
+    for diag in check_wide_reflection_diagnostics(select_stmt, body_ctx, text) {
         diagnostics.push(diag);
     }
 
@@ -2930,6 +2961,234 @@ pub fn check_hof_column_ref_field_diagnostics(
                 ),
                 range: to_range(field_token_range),
                 code: Some(DiagnosticCode::ColumnRefFieldUnknown),
+                data: None,
+            });
+        }
+    }
+
+    diags
+}
+
+/// Phase D (meta-language) — HOF lambda body check for `ModelRef` / `SourceRef`
+/// field projections.
+///
+/// Mirrors `check_hof_column_ref_field_diagnostics` for the `ModelRef` /
+/// `SourceRef` record types.  For each `map` / `filter` HOF call whose first
+/// argument is a wide-reflection accessor call (`smelt.models.*` or
+/// `smelt.sources.*`), this function:
+///
+/// 1. Determines the element type of the list (`ModelRef` for `smelt.models.*`,
+///    `SourceRef` for `smelt.sources.*`).
+/// 2. Extracts the lambda parameter name.
+/// 3. Builds a scratch `TypeContext` with the parameter registered as the
+///    appropriate meta-record type.
+/// 4. Walks the lambda body for `<param>.<field>` accesses where `<field>` is
+///    not in the closed field set `{path, name, tags, columns}` and emits
+///    `ModelRefFieldUnknown` / `SourceRefFieldUnknown` anchored at the
+///    field-name token.
+///
+/// Pure function — no Salsa dependency.
+pub fn check_hof_model_ref_source_ref_field_diagnostics(
+    select_stmt: &SelectStmt,
+    text: &str,
+) -> Vec<Diagnostic> {
+    use smelt_parser::SyntaxKind::{DOT, FUNCTION_CALL, IDENT, SMELT_PATH_CALL};
+    use smelt_types::signatures::{model_ref_field, source_ref_field, SmeltType};
+
+    let mut diags = Vec::new();
+    let root = select_stmt.syntax();
+
+    for node in root.descendants() {
+        if node.kind() != FUNCTION_CALL {
+            continue;
+        }
+        let call = match FunctionCall::cast(node.clone()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Only map/filter HOFs.
+        let call_name_lc: String = call
+            .name()
+            .unwrap_or_else(|| {
+                call.syntax()
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia())
+                    .map(|t| t.text().to_string())
+                    .unwrap_or_default()
+            })
+            .to_lowercase();
+        if call_name_lc != "map" && call_name_lc != "filter" {
+            continue;
+        }
+
+        let args = call.arguments();
+        if args.len() < 2 {
+            continue;
+        }
+
+        // First arg: must be a wide-reflection smelt path call
+        // (`smelt.models.*` or `smelt.sources.*`).
+        let first_arg = &args[0];
+        let wide_reflection_ns: Option<SmeltType> = first_arg
+            .syntax()
+            .descendants()
+            .find_map(|n| {
+                if n.kind() != SMELT_PATH_CALL {
+                    return None;
+                }
+                let path_call = SmeltPathCall::cast(n)?;
+                let segs = path_call.segments();
+                if segs.len() != 2 {
+                    return None;
+                }
+                match segs[0].to_lowercase().as_str() {
+                    "models" => Some(SmeltType::ModelRef),
+                    "sources" => Some(SmeltType::SourceRef),
+                    _ => None,
+                }
+            })
+            .or_else(|| {
+                if first_arg.syntax().kind() != SMELT_PATH_CALL {
+                    return None;
+                }
+                let pc = SmeltPathCall::cast(first_arg.syntax().clone())?;
+                let segs = pc.segments();
+                if segs.len() != 2 {
+                    return None;
+                }
+                match segs[0].to_lowercase().as_str() {
+                    "models" => Some(SmeltType::ModelRef),
+                    "sources" => Some(SmeltType::SourceRef),
+                    _ => None,
+                }
+            });
+
+        let elem_ty = match wide_reflection_ns {
+            Some(ty) => ty,
+            None => continue,
+        };
+
+        // Second arg: extract lambda parameter name and body.
+        let second_arg = &args[1];
+        let lambda: Option<Lambda> = Lambda::cast(second_arg.syntax().clone())
+            .or_else(|| second_arg.syntax().children().find_map(Lambda::cast));
+        let lambda = match lambda {
+            Some(l) => l,
+            None => continue,
+        };
+
+        let param_name = match lambda.params().into_iter().next() {
+            Some(n) => n,
+            None => continue,
+        };
+        let lambda_body = match lambda.body() {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // Build a scratch context with the lambda param registered as ModelRef or SourceRef.
+        let mut lambda_ctx = TypeContext::new();
+        lambda_ctx.add_function_param_smelt_type(&param_name, elem_ty.clone());
+        // Also register as Unknown-typed scalar so bare `param` resolves
+        // via `lookup_identifier` (prevents spurious UnknownIdentifier).
+        use smelt_types::TypedColumn;
+        lambda_ctx.add_function_param(
+            &param_name,
+            TypedColumn {
+                data_type: smelt_types::DataType::Unknown,
+                nullable: true,
+            },
+        );
+
+        let is_model_ref = matches!(elem_ty, SmeltType::ModelRef);
+
+        // Walk the lambda body for field errors.
+        let body_root = lambda_body.syntax();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        let to_range = |range: rowan::TextRange| -> Range {
+            smelt_parser::ast::text_range_to_range(text, range)
+        };
+
+        for body_node in body_root.descendants() {
+            let expr = match smelt_parser::ast::Expr::cast(body_node.clone()) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            let col_ref = match smelt_parser::ast::ColumnRef::from_expr(&expr) {
+                Some(cr) => cr,
+                None => continue,
+            };
+
+            let qualifier = match col_ref.qualifier() {
+                Some(q) => q,
+                None => continue,
+            };
+
+            // Is the qualifier registered as ModelRef/SourceRef?
+            let registered_ty = lambda_ctx
+                .lookup_function_param_smelt_type(qualifier)
+                .cloned();
+            let matches_elem = match &registered_ty {
+                Some(SmeltType::ModelRef) => is_model_ref,
+                Some(SmeltType::SourceRef) => !is_model_ref,
+                _ => false,
+            };
+            if !matches_elem {
+                continue;
+            }
+
+            let field_name = col_ref.name();
+
+            // Valid field — skip.
+            let field_known = if is_model_ref {
+                model_ref_field(field_name).is_some()
+            } else {
+                source_ref_field(field_name).is_some()
+            };
+            if field_known {
+                continue;
+            }
+
+            // Deduplicate.
+            let key = (qualifier.to_string(), field_name.to_string());
+            if !seen.insert(key) {
+                continue;
+            }
+
+            // Find the field-name token (the IDENT after the DOT).
+            let field_token_range = {
+                let mut after_dot = false;
+                let mut found: Option<rowan::TextRange> = None;
+                for token in body_node
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                {
+                    let kind = token.kind();
+                    if kind == DOT {
+                        after_dot = true;
+                    } else if kind == IDENT && after_dot {
+                        found = Some(token.text_range());
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| body_node.text_range())
+            };
+
+            let code = if is_model_ref {
+                DiagnosticCode::ModelRefFieldUnknown
+            } else {
+                DiagnosticCode::SourceRefFieldUnknown
+            };
+            diags.push(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: crate::meta_reflection_diagnostic_message(code, None, Some(field_name)),
+                range: to_range(field_token_range),
+                code: Some(code),
                 data: None,
             });
         }

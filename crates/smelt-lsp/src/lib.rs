@@ -2138,6 +2138,13 @@ impl Backend {
                 DbCode::ColumnsOfNamedArgument => "columns-of-named-argument",
                 DbCode::ColumnRefFieldUnknown => "column-ref-field-unknown",
                 DbCode::ColumnsOfUnresolvableSchema => "columns-of-unresolvable-schema",
+                // Phase D (meta-language) diagnostic codes.
+                DbCode::WithTagRequiresText => "with-tag-requires-text",
+                DbCode::WithTagNamedArgument => "with-tag-named-argument",
+                DbCode::WideReflectionUnknownAccessor => "wide-reflection-unknown-accessor",
+                DbCode::WideReflectionUnexpectedArgument => "wide-reflection-unexpected-argument",
+                DbCode::ModelRefFieldUnknown => "model-ref-field-unknown",
+                DbCode::SourceRefFieldUnknown => "source-ref-field-unknown",
             };
             NumberOrString::String(code_str.to_string())
         });
