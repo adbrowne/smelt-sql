@@ -85,7 +85,7 @@ The meta-language Phase C spec increment landed in commit `3ec025d`. The spec au
 | 4     | done     | 9c7ef7e | 2026-05-11 |
 | 5     | done     | 9341540 | 2026-05-11 |
 | 6     | done     | 4e3dc8a | 2026-05-12 |
-| 7     | pending  |        |      |
+| 7     | done     |        | 2026-05-12 |
 
 ---
 
@@ -474,6 +474,13 @@ The meta-language Phase C spec increment landed in commit `3ec025d`. The spec au
   therefore land the dispatcher as part of making the fixture pass, OR a dedicated Phase B/C
   follow-up plan may be needed. Decision deferred until Phase 5 surfaces the concrete shape
   needed by the fixture.
+
+- **Phase 7 expert review:** type-expert clean (R2), lsp-expert clean (R2), examples-curator clean (R1), docs-reviewer clean (R1), cross-feature-impact-reviewer clean (R2). No stop-the-line fired. Material findings addressed across three review commits (`a36b172`, `da284e2`, `0adac10`).
+
+  Findings that landed as Known Divergences rather than code fixes:
+  1. `ColumnRef.type` field projection currently returns `Unknown` instead of a `DataType` meta literal, so `c.type == Integer` degrades to `Unknown`. Recorded in `docs/specs/meta_language.md` Known Divergences; the richer `DataType` meta-literal surface lands with the wider record / data-literal work tracked in `docs/plans/20260509-meta-language-overall.md`.
+  2. Lift-scope validation at body-check time is now suppressed entirely; expansion-time validation against the call-site schema is not yet wired (production HOF expansion dispatcher integration is the same gap noted above). A lifted identifier that references a non-existent column currently produces incorrect SQL rather than an `UnknownColumn` diagnostic. Recorded in `docs/specs/meta_language.md` Known Divergences and tracked in `docs/plans/20260509-meta-language-overall.md`.
+  3. LSP hover and goto-def helpers for lifted identifiers (`hover_text_for_lifted_identifier`, `goto_def_for_lifted_identifier`) exist and are unit-tested but are not wired into `Backend::hover` / `Backend::goto_definition`. Already documented as a Known Divergence in `docs/specs/meta_language.md`; reported by lsp-expert R1 for completeness and accepted, not a blocker.
 
 ## Verification
 
