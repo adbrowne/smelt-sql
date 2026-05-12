@@ -1445,6 +1445,86 @@ pub fn column_ref_field_completions() -> Vec<String> {
         .collect()
 }
 
+/// Determine whether the text immediately before `cursor_offset` in `sql`
+/// ends with `<param_name>.` where `<param_name>` is a lambda parameter
+/// that is ColumnRef-typed — i.e. it is bound by a HOF (`map`, `filter`,
+/// or `reduce`) whose **first argument** is a `smelt.columns_of(...)` call.
+///
+/// Returns `Some(param_name)` when the condition holds, `None` otherwise.
+///
+/// This helper is the single gating function used by both:
+///   - the hover dispatch (block 6, field-projection hover), and
+///   - the completion dispatch (ColumnRef field completion).
+///
+/// Pure — no Salsa dependency.
+pub fn is_column_ref_param_before_dot(
+    file: &smelt_parser::ast::File,
+    sql: &str,
+    cursor_offset: usize,
+) -> Option<String> {
+    use smelt_parser::syntax_kind::SyntaxKind;
+
+    let before = &sql[..cursor_offset.min(sql.len())];
+
+    // Quick pre-check: the text before the cursor must end with `<ident>.`
+    // (at least one identifier character followed by a dot).  This avoids
+    // the more expensive CST walk for unrelated positions.
+    let dot_trimmed = before.strip_suffix('.')?;
+    let param_name: String = dot_trimmed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if param_name.is_empty() {
+        return None;
+    }
+
+    // Find the innermost LAMBDA node that (a) contains cursor_offset and
+    // (b) declares `param_name` as one of its parameters.
+    let lambda_node = file
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::LAMBDA)
+        .filter(|n| {
+            let s: usize = n.text_range().start().into();
+            let e: usize = n.text_range().end().into();
+            cursor_offset >= s && cursor_offset <= e
+        })
+        .filter_map(smelt_parser::ast::Lambda::cast)
+        .find(|lam| lam.params().iter().any(|p| p == &param_name))?;
+
+    // Walk up from the lambda to find the nearest enclosing HOF FUNCTION_CALL.
+    let mut cur = lambda_node.syntax().parent();
+    let mut hof_call: Option<smelt_parser::ast::FunctionCall> = None;
+    while let Some(node) = cur {
+        if node.kind() == SyntaxKind::FUNCTION_CALL {
+            if let Some(fc) = smelt_parser::ast::FunctionCall::cast(node.clone()) {
+                if matches!(
+                    hof_call_name(&fc).as_deref().unwrap_or(""),
+                    "map" | "filter" | "reduce"
+                ) {
+                    hof_call = Some(fc);
+                    break;
+                }
+            }
+        }
+        cur = node.parent();
+    }
+
+    // Check that the HOF's first argument is a `smelt.columns_of(...)` call.
+    let hof = hof_call?;
+    let first_arg = hof.arguments().into_iter().next()?;
+    let path_call = first_arg.as_smelt_path_call()?;
+    if path_call.segments() == vec!["columns_of".to_string()] {
+        Some(param_name)
+    } else {
+        None
+    }
+}
+
 /// Extract in-scope `TableExpr`-valued names from `sql` for use as completion
 /// candidates at a `smelt.columns_of(<cursor>)` argument position.
 ///
@@ -1523,14 +1603,18 @@ pub fn columns_of_arg_completions_for_sql(sql: &str) -> Vec<String> {
 /// 2. **Lambda parameter** — cursor on a lambda parameter IDENT, either at
 ///    the binding site (`fn c =>` — the `c` after `fn`) or at any use of
 ///    that name in the lambda body.
-/// 3. **HOF result type** — cursor anywhere inside a `map(...)` /
+/// 3. **ColumnRef field projection** — cursor on the field token of a
+///    `c.<field>` dot expression where `<field>` is a known ColumnRef field
+///    AND the receiver is a ColumnRef-typed lambda parameter (HOF first arg
+///    is `smelt.columns_of(...)`).  Must run BEFORE block 4 (HOF result type)
+///    because the cursor is inside the HOF call range and block 4 would
+///    otherwise shadow the field hover.
+/// 4. **HOF result type** — cursor anywhere inside a `map(...)` /
 ///    `filter(...)` / `reduce(...)` call, shows the inferred output type.
-/// 4. **`smelt.config.var`** — cursor on a `smelt.config.var('x')` call,
+/// 5. **`smelt.config.var`** — cursor on a `smelt.config.var('x')` call,
 ///    shows the resolved value from `smelt_yml_text`.
-/// 5. **`smelt.columns_of`** — cursor on the call path of a
+/// 6. **`smelt.columns_of`** — cursor on the call path of a
 ///    `smelt.columns_of(t)` call; shows `List<ColumnRef>`.
-/// 6. **ColumnRef field projection** — cursor on the field token of a
-///    `c.<field>` dot expression where `<field>` is a known ColumnRef field.
 ///
 /// Returns `Some(hover_markdown_text)` when a match is found, `None` otherwise.
 pub fn hover_text_for_hof_meta_language(
@@ -1734,7 +1818,47 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
-    // ── 3. HOF result type (map / filter / reduce) ─────────────────────────
+    // ── 3. ColumnRef field projection — cursor on `<field>` in `c.<field>` ──
+    // Runs BEFORE the HOF result-type block so that hovering on `c.name` inside
+    // `map(smelt.columns_of(...), fn c => c.name)` shows the field hover rather
+    // than the outer HOF result type.  The receiver check (via
+    // `is_column_ref_param_before_dot`) ensures plain SQL expressions like
+    // `t.type` or `alias.name` do NOT trigger this hover.
+    {
+        use smelt_parser::SyntaxKind::{DOT, IDENT};
+        let syntax_node = file.syntax();
+        let tokens: Vec<_> = syntax_node
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .collect();
+        let file_sql = file.syntax().text().to_string();
+        for (i, tok) in tokens.iter().enumerate() {
+            if tok.kind() == DOT {
+                if let Some(next_tok) = tokens.get(i + 1) {
+                    if next_tok.kind() == IDENT {
+                        let start: usize = next_tok.text_range().start().into();
+                        let end: usize = next_tok.text_range().end().into();
+                        if cursor_offset >= start && cursor_offset <= end {
+                            let field_name = next_tok.text();
+                            // Only fire when the token before the DOT is a
+                            // ColumnRef-typed lambda parameter bound by a HOF
+                            // whose first arg is `smelt.columns_of(...)`.
+                            let dot_end: usize = tok.text_range().end().into();
+                            if is_column_ref_param_before_dot(file, &file_sql, dot_end).is_some() {
+                                if let Some(hover_text) =
+                                    hover_text_for_column_ref_field(field_name)
+                                {
+                                    return Some(hover_text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 4. HOF result type (map / filter / reduce) ─────────────────────────
     {
         let hof_call = file
             .syntax()
@@ -1764,7 +1888,7 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
-    // ── 4. smelt.config.var('x') ───────────────────────────────────────────
+    // ── 5. smelt.config.var('x') ───────────────────────────────────────────
     {
         let config_call = file
             .syntax()
@@ -1818,11 +1942,10 @@ pub fn hover_text_for_hof_meta_language(
         }
     }
 
-    // ── 5. smelt.columns_of(t) — cursor on the call path ─────────────────────
-    // Must run BEFORE the generic HOF check above would ever intercept it
-    // (actually the generic HOF check only matches `map`/`filter`/`reduce`,
-    // so this block runs without conflict). We check for a SMELT_PATH_CALL
-    // whose segments are `["columns_of"]` (the leading `smelt` is implicit).
+    // ── 6. smelt.columns_of(t) — cursor on the call path ─────────────────────
+    // The generic HOF check only matches `map`/`filter`/`reduce`, so this
+    // block runs without conflict.  We check for a SMELT_PATH_CALL whose
+    // segments are `["columns_of"]` (the leading `smelt` is implicit).
     {
         let columns_of_call = file
             .syntax()
@@ -1850,36 +1973,6 @@ pub fn hover_text_for_hof_meta_language(
             // pure dispatch). Backend::hover supplies resolved columns via its
             // own block; this pure helper is exercised by the dispatch tests.
             return Some(hover_text_for_columns_of_call(&table_name, None));
-        }
-    }
-
-    // ── 6. ColumnRef field projection — cursor on `<field>` in `c.<field>` ──
-    // Detect when the cursor is on an IDENT token that follows a DOT and the
-    // IDENT is one of the three known ColumnRef fields.  We do a lightweight
-    // token scan: find every DOT token in the file, then check if the IDENT
-    // immediately after the DOT contains the cursor and is a ColumnRef field.
-    {
-        use smelt_parser::SyntaxKind::{DOT, IDENT};
-        let syntax_node = file.syntax();
-        let tokens: Vec<_> = syntax_node
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .collect();
-        for (i, tok) in tokens.iter().enumerate() {
-            if tok.kind() == DOT {
-                if let Some(next_tok) = tokens.get(i + 1) {
-                    if next_tok.kind() == IDENT {
-                        let start: usize = next_tok.text_range().start().into();
-                        let end: usize = next_tok.text_range().end().into();
-                        if cursor_offset >= start && cursor_offset <= end {
-                            let field_name = next_tok.text();
-                            if let Some(hover_text) = hover_text_for_column_ref_field(field_name) {
-                                return Some(hover_text);
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -5288,58 +5381,27 @@ impl LanguageServer for Backend {
                     //
                     // Detection: check if the text immediately before the cursor
                     // (within the lambda body) ends with `<ident>.` where `<ident>`
-                    // is a lambda parameter name.  If so, return the ColumnRef fields.
+                    // is a ColumnRef-typed lambda parameter name.  We use
+                    // `is_column_ref_param_before_dot` which checks that the
+                    // receiver param is bound by a HOF whose first arg is
+                    // `smelt.columns_of(...)`.  This prevents false-positive
+                    // completions when an unrelated `smelt.columns_of` call
+                    // appears elsewhere in the file.
                     {
-                        // Collect lambda parameter names in scope.
-                        let lambda_params_in_scope: Vec<String> = file
-                            .syntax()
-                            .descendants()
-                            .filter(|n| n.kind() == SyntaxKind::LAMBDA)
-                            .filter(|n| {
-                                let s: usize = n.text_range().start().into();
-                                let e: usize = n.text_range().end().into();
-                                cursor_offset >= s && cursor_offset <= e
-                            })
-                            .filter_map(smelt_parser::ast::Lambda::cast)
-                            .flat_map(|lam| lam.params())
-                            .collect();
-
-                        if !lambda_params_in_scope.is_empty() {
-                            // Check if text before cursor ends with `<param_name>.`
-                            let before = &text[..cursor_offset.min(text.len())];
-                            let ends_with_param_dot = lambda_params_in_scope
-                                .iter()
-                                .any(|p| before.ends_with(&format!("{p}.")));
-
-                            if ends_with_param_dot {
-                                // Check whether the enclosing HOF iterates over a
-                                // `smelt.columns_of` call — if so, emit ColumnRef fields.
-                                // As a conservative approximation, we also emit ColumnRef
-                                // fields whenever ANY `smelt.columns_of` call appears in the
-                                // file; the alternative (type inference to know the lambda
-                                // param type) is future work.
-                                let has_columns_of = file
-                                    .syntax()
-                                    .descendants()
-                                    .filter_map(smelt_parser::ast::SmeltPathCall::cast)
-                                    .any(|c| c.segments() == vec!["columns_of".to_string()]);
-
-                                if has_columns_of {
-                                    let field_names = column_ref_field_completions();
-                                    let items: Vec<CompletionItem> = field_names
-                                        .into_iter()
-                                        .map(|name| CompletionItem {
-                                            label: name.clone(),
-                                            kind: Some(CompletionItemKind::FIELD),
-                                            detail: hover_text_for_column_ref_field(&name),
-                                            sort_text: Some(format!("0_{name}")),
-                                            ..Default::default()
-                                        })
-                                        .collect();
-                                    if !items.is_empty() {
-                                        return Ok(Some(CompletionResponse::Array(items)));
-                                    }
-                                }
+                        if is_column_ref_param_before_dot(&file, &text, cursor_offset).is_some() {
+                            let field_names = column_ref_field_completions();
+                            let items: Vec<CompletionItem> = field_names
+                                .into_iter()
+                                .map(|name| CompletionItem {
+                                    label: name.clone(),
+                                    kind: Some(CompletionItemKind::FIELD),
+                                    detail: hover_text_for_column_ref_field(&name),
+                                    sort_text: Some(format!("0_{name}")),
+                                    ..Default::default()
+                                })
+                                .collect();
+                            if !items.is_empty() {
+                                return Ok(Some(CompletionResponse::Array(items)));
                             }
                         }
                     }
@@ -7492,5 +7554,110 @@ mod tests {
         }
         // None is also acceptable if the file is not registered in a real DB
         // (the dispatch operates on parsed AST only, no Salsa).
+    }
+
+    // ── Finding 1 + 2 regression tests ───────────────────────────────────────
+    //
+    // These tests verify that ColumnRef field completions and hover only fire
+    // when the receiver token is actually a ColumnRef-typed lambda parameter
+    // (i.e. bound by a HOF whose first arg is `smelt.columns_of(...)`).
+
+    /// Helper: check whether `is_column_ref_param_before_dot` returns `Some` for
+    /// a file + cursor positioned just after `<param>.`.
+    fn check_is_column_ref_param(sql: &str, cursor_offset: usize) -> Option<String> {
+        use smelt_parser::ast::File as AstFile;
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = AstFile::cast(root)?;
+        is_column_ref_param_before_dot(&file, sql, cursor_offset)
+    }
+
+    /// NEGATIVE completion — `x.<cursor>` inside `map(some_int_list, fn x => x.something)`
+    /// with an UNRELATED `smelt.columns_of(orders)` call elsewhere in the file.
+    ///
+    /// The completion MUST NOT offer `{name, type, is_numeric}` for `x` because `x`
+    /// is not a ColumnRef-typed parameter (the HOF iterates over `some_int_list`, not
+    /// `smelt.columns_of(...)`).
+    #[test]
+    fn completion_column_ref_fields_does_not_fire_for_unrelated_lambda_param() {
+        // `x` is a parameter of `map(some_int_list, ...)` — NOT ColumnRef.
+        // `smelt.columns_of(orders)` appears elsewhere but must not pollute `x`.
+        let sql = "SELECT map(some_int_list, fn x => x.something), smelt.columns_of(orders)";
+        // Cursor after `x.` — position just past the dot.
+        let dot_pos = sql.find("x.").expect("`x.` must appear in SQL") + 2; // after the dot
+        let result = check_is_column_ref_param(sql, dot_pos);
+        assert!(
+            result.is_none(),
+            "is_column_ref_param_before_dot must return None for `x.` where `x` is NOT \
+             a ColumnRef-typed param (HOF iterates over `some_int_list`), got: {result:?}"
+        );
+    }
+
+    /// POSITIVE completion — `c.<cursor>` inside `map(smelt.columns_of(orders), fn c => c.)`
+    ///
+    /// The completion MUST offer `{name, type, is_numeric}` because `c` IS a
+    /// ColumnRef-typed parameter (the HOF iterates over `smelt.columns_of(orders)`).
+    #[test]
+    fn completion_column_ref_fields_fires_for_columns_of_lambda_param() {
+        let sql = "SELECT map(smelt.columns_of(orders), fn c => c.name)";
+        // Cursor after `c.` in the lambda body — just past the dot before `name`.
+        let c_dot_pos = sql.rfind("c.").expect("`c.` must appear in SQL") + 2;
+        let result = check_is_column_ref_param(sql, c_dot_pos);
+        assert!(
+            result.is_some(),
+            "is_column_ref_param_before_dot must return Some for `c.` where `c` IS \
+             a ColumnRef-typed param (HOF iterates over `smelt.columns_of(orders)`), \
+             got: None"
+        );
+        let param_name = result.unwrap();
+        assert_eq!(
+            param_name, "c",
+            "returned param name must be `c`, got: {param_name}"
+        );
+    }
+
+    /// NEGATIVE hover — hovering on the `type` token in plain SQL `t.type`
+    /// (where `t` is a table alias, NOT a ColumnRef lambda parameter) must NOT
+    /// return the ColumnRef field hover.
+    ///
+    /// The dispatch (`hover_text_for_hof_meta_language`) must check the receiver
+    /// before returning ColumnRef field hover text.
+    #[test]
+    fn hover_column_ref_field_does_not_fire_for_plain_sql_field_access() {
+        // Plain SQL table alias access — no HOF, no smelt.columns_of.
+        let sql = "SELECT t.type FROM some_table t";
+        let type_offset = sql.find(".type").expect("`.type` must appear in SQL") + 1; // on `type`
+        let result = dispatch_hover(sql, type_offset);
+        // If the dispatch fires the ColumnRef hover without the receiver check, it
+        // will return Some text containing "(ColumnRef field)". That is the bug.
+        if let Some(text) = result {
+            assert!(
+                !text.contains("ColumnRef field"),
+                "hover on plain SQL `t.type` must NOT show ColumnRef field hover \
+                 (no ColumnRef binding in scope), got: {text}"
+            );
+        }
+        // None is fine — no ColumnRef context means no hover.
+    }
+
+    /// POSITIVE hover — hovering on `name` in `c.name` inside
+    /// `map(smelt.columns_of(orders), fn c => c.name)` MUST show the ColumnRef
+    /// field hover for `name: Text`.
+    #[test]
+    fn hover_column_ref_field_fires_for_columns_of_lambda_body_field_access() {
+        let sql = "SELECT map(smelt.columns_of(orders), fn c => c.name)";
+        // Cursor on `name` in `c.name` — the last occurrence of `name`.
+        let name_offset = sql.rfind("name").expect("`name` must appear in SQL");
+        let result = dispatch_hover(sql, name_offset);
+        assert!(
+            result.is_some(),
+            "hover on `c.name` inside smelt.columns_of lambda must produce Some, got None"
+        );
+        let text = result.unwrap();
+        assert!(
+            text.contains("ColumnRef field") || text.contains("name") && text.contains("Text"),
+            "hover on `c.name` in ColumnRef lambda must describe the `name` field (Text), \
+             got: {text}"
+        );
     }
 }
