@@ -26,8 +26,8 @@ use salsa::{Accumulator, Setter};
 use serde::Deserialize;
 use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
 use smelt_types::signatures::{extract_function_signatures_with_raw, FunctionSig};
-pub use smelt_types::TypedColumn;
 use smelt_types::{parse_type, DataType};
+pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue, TypedColumn};
 
 pub mod backends;
 pub mod code_actions;
@@ -1234,6 +1234,173 @@ pub fn all_models(db: &dyn salsa::Database, workspace: Workspace) -> Arc<HashMap
         }
     }
     Arc::new(models)
+}
+
+// ============================================================================
+// Wide-reflection Salsa queries (Phase D, meta-language)
+// ============================================================================
+//
+// Four queries materialise the `List<ModelRef>` / `List<SourceRef>` values
+// that `smelt.models.with_tag`, `smelt.models.all`, `smelt.sources.with_tag`,
+// and `smelt.sources.all` resolve to at expansion time.
+//
+// Each query is a thin wrapper over pure filtering/projection logic:
+// - Read the existing `all_models` / `project_sources` Salsa input.
+// - Filter by tag membership (when applicable).
+// - Project to `ModelRefValue` / `SourceRefValue`.
+// - Sort ascending by `path` (byte-lexicographic on workspace-relative path
+//   with `/` separators).
+//
+// The query keys on `Workspace` / `ProjectInput` so Salsa invalidates on
+// workspace-state changes that affect tag membership or file lists.
+//
+// Per the pure-function rule (CLAUDE.md): analysis logic is in the pure
+// helpers below; queries are thin wrappers.
+
+/// Pure helper: materialise a `ModelRefValue` from a model file.
+///
+/// Returns `None` when the file is not a valid model.
+fn make_model_ref_value(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Option<ModelRefValue> {
+    let model = parse_model(db, file)?;
+    let raw_text = file.text(db);
+    let project_root = file.project_root(db).clone();
+    let abs_path = file.path(db).clone();
+
+    // Compute workspace-relative path with `/` separators.
+    let rel_path = abs_path
+        .strip_prefix(&project_root)
+        .unwrap_or(&abs_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    // Extract frontmatter metadata to get the model's frontmatter tags.
+    let frontmatter_metadata: Option<smelt_core::ModelMetadata> =
+        smelt_core::extract_file_metadata(raw_text)
+            .ok()
+            .and_then(|fm| match fm {
+                smelt_core::FileMetadata::Single { metadata, .. } => Some(*metadata),
+                _ => None,
+            });
+
+    // Load the smelt.yml config for the project to get the merged tag set.
+    let smelt_yml_text = workspace
+        .projects(db)
+        .iter()
+        .copied()
+        .find(|p| p.root(db).as_path() == project_root.as_path())
+        .map(|p| p.smelt_yml_text(db).clone())
+        .unwrap_or_default();
+
+    let merged_tags =
+        if let Ok((config, _)) = smelt_core::Config::parse_with_warnings(&smelt_yml_text) {
+            config.get_tags(&model.name, frontmatter_metadata.as_ref())
+        } else {
+            // No smelt.yml or parse failure — only frontmatter tags.
+            frontmatter_metadata.map(|m| m.tags).unwrap_or_default()
+        };
+
+    Some(ModelRefValue {
+        path: rel_path,
+        name: model.name.clone(),
+        tags: merged_tags,
+        model_name_for_columns: model.name.clone(),
+    })
+}
+
+/// Return every model in the workspace whose merged tag set contains `tag`,
+/// sorted ascending by workspace-relative `path` (byte-lexicographic, `/`
+/// separators). Salsa-cached; invalidated when the workspace file list or any
+/// file's content/frontmatter changes.
+#[salsa::tracked]
+pub fn models_with_tag(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    tag: String,
+) -> Arc<Vec<ModelRefValue>> {
+    let mut result: Vec<ModelRefValue> = workspace
+        .files(db)
+        .iter()
+        .copied()
+        .filter_map(|file| make_model_ref_value(db, workspace, file))
+        .filter(|m| m.tags.contains(&tag))
+        .collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    Arc::new(result)
+}
+
+/// Return every model in the workspace, sorted ascending by workspace-relative
+/// `path` (byte-lexicographic, `/` separators). Salsa-cached; invalidated when
+/// the workspace file list or any file's content changes.
+#[salsa::tracked]
+pub fn models_all(db: &dyn salsa::Database, workspace: Workspace) -> Arc<Vec<ModelRefValue>> {
+    let mut result: Vec<ModelRefValue> = workspace
+        .files(db)
+        .iter()
+        .copied()
+        .filter_map(|file| make_model_ref_value(db, workspace, file))
+        .collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    Arc::new(result)
+}
+
+/// Pure helper: materialise a `SourceRefValue` from a `SourceInfo`.
+fn make_source_ref_value(project_root: &Path, source: &smelt_core::SourceInfo) -> SourceRefValue {
+    // Workspace-relative path with `/` separators.
+    let rel_path = source
+        .path
+        .strip_prefix(project_root)
+        .unwrap_or(&source.path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    // Name: last address segment (final stem).
+    let name = source.address_segments.last().cloned().unwrap_or_default();
+
+    SourceRefValue {
+        path: rel_path,
+        name,
+        tags: source.tags.clone(),
+        address_segments: source.address_segments.clone(),
+    }
+}
+
+/// Return every source in the project whose `tags:` list contains `tag`,
+/// sorted ascending by workspace-relative `path` (byte-lexicographic, `/`
+/// separators). Salsa-cached; invalidated when the `ProjectInput` changes.
+#[salsa::tracked]
+pub fn sources_with_tag(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+    tag: String,
+) -> Arc<Vec<SourceRefValue>> {
+    let root = project.root(db).clone();
+    let sources = project_sources(db, project);
+    let mut result: Vec<SourceRefValue> = sources
+        .iter()
+        .filter(|s| s.tags.contains(&tag))
+        .map(|s| make_source_ref_value(&root, s))
+        .collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    Arc::new(result)
+}
+
+/// Return every source in the project, sorted ascending by workspace-relative
+/// `path` (byte-lexicographic, `/` separators). Salsa-cached; invalidated
+/// when the `ProjectInput` changes.
+#[salsa::tracked]
+pub fn sources_all(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec<SourceRefValue>> {
+    let root = project.root(db).clone();
+    let sources = project_sources(db, project);
+    let mut result: Vec<SourceRefValue> = sources
+        .iter()
+        .map(|s| make_source_ref_value(&root, s))
+        .collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    Arc::new(result)
 }
 
 // ============================================================================

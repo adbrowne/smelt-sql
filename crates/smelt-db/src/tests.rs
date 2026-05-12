@@ -4121,3 +4121,308 @@ fn columns_of_unresolvable_schema_message_with_placeholder() {
         "cannot resolve column list for t; upstream schema is unknown"
     );
 }
+
+// ============================================================================
+// Phase D — wide-reflection Salsa query tests
+// ============================================================================
+
+/// Helper: set up a multi-model workspace with frontmatter tags.
+///
+/// Returns (TestDb, Workspace). Models are named `a`, `b`, `c`, `d` under
+/// `models/a.sql`, etc. Models a/b/c are tagged `cohort`; model d is not.
+fn setup_cohort_workspace() -> (TestDb, Workspace) {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    let models: &[(&str, &str)] = &[
+        (
+            "models/a.sql",
+            "---\ntags: [cohort]\n---\nSELECT 1 AS id FROM source.raw",
+        ),
+        (
+            "models/b.sql",
+            "---\ntags: [cohort]\n---\nSELECT 2 AS id FROM source.raw",
+        ),
+        (
+            "models/c.sql",
+            "---\ntags: [cohort]\n---\nSELECT 3 AS id FROM source.raw",
+        ),
+        (
+            "models/d.sql",
+            "---\ntags: [other]\n---\nSELECT 4 AS id FROM source.raw",
+        ),
+    ];
+
+    for (path, text) in models {
+        let p = PathBuf::from(path);
+        db.set_file_text(p.clone(), Arc::new(text.to_string()));
+        db.set_file_project_root(p.clone(), root.clone());
+    }
+
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    let ws = db.sync_workspace();
+    (db, ws)
+}
+
+/// `models_with_tag(workspace, "cohort")` returns exactly the three
+/// `cohort`-tagged models in path-sorted order `[a, b, c]`.
+#[test]
+fn models_with_tag_returns_path_sorted_matches() {
+    let (db, ws) = setup_cohort_workspace();
+
+    let result = models_with_tag(&db.db, ws, "cohort".to_string());
+
+    assert_eq!(
+        result.len(),
+        3,
+        "expected 3 cohort-tagged models; got: {:?}",
+        result.iter().map(|m| &m.path).collect::<Vec<_>>()
+    );
+    // Verify path-sorted order (byte-lexicographic).
+    assert!(
+        result[0].path.ends_with("/a.sql") || result[0].path == "models/a.sql",
+        "first model should be a; got {}",
+        result[0].path
+    );
+    assert!(
+        result[1].path.ends_with("/b.sql") || result[1].path == "models/b.sql",
+        "second model should be b; got {}",
+        result[1].path
+    );
+    assert!(
+        result[2].path.ends_with("/c.sql") || result[2].path == "models/c.sql",
+        "third model should be c; got {}",
+        result[2].path
+    );
+
+    // Per-element fields.
+    assert_eq!(result[0].name, "a");
+    assert!(result[0].tags.contains(&"cohort".to_string()));
+    assert_eq!(result[0].model_name_for_columns, "a");
+}
+
+/// `models_with_tag` honours merged tags: smelt.yml tags + frontmatter tags.
+///
+/// Sets up a model with `tags: [cohort]` in smelt.yml and `tags: [audit]` in
+/// SQL frontmatter. The model must match both `with_tag("cohort")` and
+/// `with_tag("audit")`.
+#[test]
+fn models_with_tag_uses_merged_tag_set() {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    // Model has frontmatter tag `audit`.
+    let path = PathBuf::from("models/merged.sql");
+    db.set_file_text(
+        path.clone(),
+        Arc::new("---\ntags: [audit]\n---\nSELECT 1 AS id FROM source.raw".to_string()),
+    );
+    db.set_file_project_root(path.clone(), root.clone());
+
+    // smelt.yml gives this model the `cohort` tag.
+    // `name:` and `targets:` are required by the Config deserialiser.
+    let smelt_yml = concat!(
+        "name: test_project\n",
+        "targets:\n  dev:\n    type: duckdb\n    database: t.duckdb\n    schema: main\n",
+        "models:\n  merged:\n    tags: [cohort]\n",
+    );
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    // Set the smelt.yml text on the project after it's been registered.
+    db.db.set_project_smelt_yml(&root, smelt_yml.to_string());
+
+    let ws = db.sync_workspace();
+
+    let cohort = models_with_tag(&db.db, ws, "cohort".to_string());
+    let audit = models_with_tag(&db.db, ws, "audit".to_string());
+
+    assert_eq!(cohort.len(), 1, "model must match smelt.yml tag 'cohort'");
+    assert_eq!(audit.len(), 1, "model must match frontmatter tag 'audit'");
+    assert_eq!(cohort[0].name, "merged");
+    assert_eq!(audit[0].name, "merged");
+}
+
+/// `models_with_tag` correctly invalidates when the model's frontmatter changes.
+///
+/// After changing the tag from `cohort` to `other`, the query must return the
+/// updated (empty) set for `cohort`.
+#[test]
+fn models_with_tag_invalidates_on_tag_change() {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    let path = PathBuf::from("models/mutable.sql");
+    db.set_file_text(
+        path.clone(),
+        Arc::new("---\ntags: [cohort]\n---\nSELECT 1 AS id FROM source.raw".to_string()),
+    );
+    db.set_file_project_root(path.clone(), root.clone());
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    let ws = db.sync_workspace();
+    let before = models_with_tag(&db.db, ws, "cohort".to_string());
+    assert_eq!(before.len(), 1, "model should be tagged cohort before edit");
+
+    // Update the model to remove the `cohort` tag.
+    db.set_file_text(
+        path.clone(),
+        Arc::new("---\ntags: [other]\n---\nSELECT 1 AS id FROM source.raw".to_string()),
+    );
+    let ws2 = db.sync_workspace();
+    let after = models_with_tag(&db.db, ws2, "cohort".to_string());
+    assert_eq!(
+        after.len(),
+        0,
+        "after tag change, model must not match cohort"
+    );
+}
+
+/// `models_all` returns every model in the workspace in path-sorted order.
+/// Running it twice over the same workspace produces byte-equal results (Salsa
+/// memoisation / determinism invariant).
+#[test]
+fn models_all_returns_all_models_path_sorted() {
+    let (db, ws) = setup_cohort_workspace();
+
+    let result1 = models_all(&db.db, ws);
+    let result2 = models_all(&db.db, ws);
+
+    // All 4 models present.
+    assert_eq!(
+        result1.len(),
+        4,
+        "workspace has 4 models; got {:?}",
+        result1.iter().map(|m| &m.path).collect::<Vec<_>>()
+    );
+
+    // Path-sorted order.
+    let paths: Vec<&str> = result1.iter().map(|m| m.path.as_str()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(paths, sorted, "models_all must return path-sorted results");
+
+    // Determinism: two calls on same input are byte-equal.
+    assert_eq!(result1, result2, "models_all must be deterministic");
+}
+
+/// `sources_with_tag` and `sources_all` mirror the models behaviour for sources.
+///
+/// Sets up two sources in a temp directory: one tagged `analytics`, one not.
+/// Verifies that `sources_with_tag("analytics")` returns exactly the tagged one
+/// and `sources_all` returns both in path-sorted order.
+#[test]
+fn sources_with_tag_and_sources_all_mirror_models_behaviour() {
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let models_dir = root.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+
+    // Source YAML with `tags: [analytics]`.
+    let analytics_yml = models_dir.join("analytics_source.yml");
+    std::fs::File::create(&analytics_yml)
+        .unwrap()
+        .write_all(b"tags: [analytics]\ncolumns:\n  - name: id\n    type: Integer\n")
+        .unwrap();
+
+    // Source YAML without tags.
+    let plain_yml = models_dir.join("plain_source.yml");
+    std::fs::File::create(&plain_yml)
+        .unwrap()
+        .write_all(b"columns:\n  - name: val\n    type: Text\n")
+        .unwrap();
+
+    // smelt.yml with paths: [models].
+    let smelt_yml_path = root.join("smelt.yml");
+    std::fs::File::create(&smelt_yml_path)
+        .unwrap()
+        .write_all(b"paths:\n  - models\n")
+        .unwrap();
+
+    let mut db_wrapper = TestDb::default();
+    db_wrapper.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db_wrapper.set_all_project_roots(Arc::new(vec![root.clone()]));
+    db_wrapper.sync_workspace();
+
+    let project = db_wrapper
+        .db
+        .project_input(&root)
+        .expect("project registered");
+
+    let tagged = sources_with_tag(&db_wrapper.db, project, "analytics".to_string());
+    assert_eq!(
+        tagged.len(),
+        1,
+        "one source tagged analytics; got {:?}",
+        tagged.iter().map(|s| &s.path).collect::<Vec<_>>()
+    );
+    assert_eq!(tagged[0].name, "analytics_source");
+    assert!(tagged[0].tags.contains(&"analytics".to_string()));
+
+    let all = sources_all(&db_wrapper.db, project);
+    assert_eq!(
+        all.len(),
+        2,
+        "two sources total; got {:?}",
+        all.iter().map(|s| &s.path).collect::<Vec<_>>()
+    );
+
+    // Path-sorted.
+    let paths: Vec<&str> = all.iter().map(|s| s.path.as_str()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(paths, sorted, "sources_all must return path-sorted results");
+}
+
+/// `ModelRefValue::model_name_for_columns` routes through `columns_of_for_table_expr`.
+///
+/// Given a model `m` in the workspace, `columns_of_for_table_expr(db, ws, m.model_name_for_columns)`
+/// returns the same column list as querying the model directly. This verifies
+/// the re-dispatch routing that underpins `m.columns`.
+#[test]
+fn model_ref_columns_routes_through_columns_of_query() {
+    let mut db = TestDb::default();
+    let root = PathBuf::from(".");
+
+    let path = PathBuf::from("models/orders.sql");
+    db.set_file_text(
+        path.clone(),
+        Arc::new(
+            "---\ntags: [cohort]\n---\nSELECT 1 AS order_id, 9.99 AS amount FROM source.raw"
+                .to_string(),
+        ),
+    );
+    db.set_file_project_root(path.clone(), root.clone());
+    db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![root.clone()]));
+
+    let ws = db.sync_workspace();
+
+    let models = models_with_tag(&db.db, ws, "cohort".to_string());
+    assert_eq!(models.len(), 1);
+    let model_ref = &models[0];
+
+    // Route m.columns through columns_of_for_table_expr using model_name_for_columns.
+    let columns_via_ref =
+        columns_of_for_table_expr(&db.db, ws, model_ref.model_name_for_columns.clone())
+            .expect("columns_of_for_table_expr must succeed for an existing model");
+
+    // Also get directly.
+    let columns_direct = columns_of_for_table_expr(&db.db, ws, "orders".to_string())
+        .expect("columns_of_for_table_expr must succeed directly");
+
+    // Byte-equal: same column list via both paths.
+    assert_eq!(
+        *columns_via_ref, *columns_direct,
+        "m.columns routing via model_name_for_columns must produce same result as direct call"
+    );
+    assert_eq!(columns_via_ref.len(), 2);
+    assert_eq!(columns_via_ref[0].name, "order_id");
+    assert_eq!(columns_via_ref[1].name, "amount");
+}

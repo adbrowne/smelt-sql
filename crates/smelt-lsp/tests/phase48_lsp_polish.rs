@@ -381,6 +381,8 @@ fn multi_level_frame_trace_in_message_body() {
             fn_id: Some(function.to_string()),
             element_index: None,
             column_origin: None,
+            model_origin: None,
+            source_origin: None,
         }
     }
 

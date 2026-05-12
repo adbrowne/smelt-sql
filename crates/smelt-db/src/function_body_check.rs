@@ -21,8 +21,8 @@ use smelt_parser::ast::{
 use smelt_parser::offset_to_position;
 use smelt_types::signatures::{
     check_schema_requirement, column_ref_field, unify_call, ContextRef, ExprKind, FrameInfo,
-    FunctionSig, ParamSpec, SchemaMismatch, SchemaRequirement, Signature, SmeltType, StructRowTail,
-    Tier, TypeConstraint, UnificationError,
+    FunctionSig, ModelOrigin, ParamSpec, SchemaMismatch, SchemaRequirement, Signature, SmeltType,
+    SourceOrigin, StructRowTail, Tier, TypeConstraint, UnificationError,
 };
 use smelt_types::{DataType, TypedColumn};
 use std::path::PathBuf;
@@ -188,6 +188,8 @@ pub fn walk_hof_lambda_body_with_anonymous_frame(
         fn_id: None, // anonymous — HOF has no declaring file
         element_index: None,
         column_origin: None,
+        model_origin: None,
+        source_origin: None,
     };
 
     inner_diags
@@ -244,6 +246,74 @@ pub fn walk_hof_lambda_body_with_anonymous_frame_and_origin(
         fn_id: None, // anonymous — HOF has no declaring file
         element_index: None,
         column_origin,
+        model_origin: None,
+        source_origin: None,
+    };
+
+    inner_diags
+        .into_iter()
+        .map(|mut d| {
+            let frames = match d.data.take() {
+                Some(DiagnosticData::ExpansionFrames(mut existing)) => {
+                    // Prepend the anonymous HOF frame (innermost-first ordering).
+                    existing.insert(0, frame.clone());
+                    existing
+                }
+                _ => vec![frame.clone()],
+            };
+            d.data = Some(DiagnosticData::ExpansionFrames(frames));
+            d
+        })
+        .collect()
+}
+
+/// Phase D (meta-language) variant of
+/// [`walk_hof_lambda_body_with_anonymous_frame_and_origin`] for wide-reflection-
+/// sourced HOF lists (`smelt.models.*` / `smelt.sources.*`).
+///
+/// Stamps the anonymous HOF frame with `model_origin` or `source_origin`
+/// (the wide-reflection siblings of `column_origin`) so that diagnostics
+/// surfacing from inside a wide-reflection HOF lambda carry source-model /
+/// source-yaml provenance.
+///
+/// Exactly one of `model_origin` or `source_origin` should be `Some`; the
+/// other is `None`. Pass both as `None` to fall back to plain anonymous-frame
+/// behaviour (identical to [`walk_hof_lambda_body_with_anonymous_frame_and_origin`]
+/// with `column_origin = None`).
+///
+/// Pure function — no Salsa dependency.
+#[allow(clippy::too_many_arguments)]
+pub fn walk_hof_lambda_body_with_wide_reflection_frame(
+    lambda_body: &Expr,
+    lambda_ctx: &TypeContext,
+    text: &str,
+    hof_name: &str,
+    call_range: Option<Range>,
+    nested: Option<&NestedPathCallHandler<'_>>,
+    model_origin: Option<ModelOrigin>,
+    source_origin: Option<SourceOrigin>,
+) -> Vec<Diagnostic> {
+    let mut inner_diags = Vec::new();
+    walk_body(lambda_body, lambda_ctx, text, &mut inner_diags, nested);
+
+    // Stamp every inner diagnostic with an anonymous HOF expansion frame,
+    // including the Phase D wide-reflection origin extensions.
+    if inner_diags.is_empty() {
+        return inner_diags;
+    }
+
+    let frame = FrameInfo {
+        function: format!("<{}>", hof_name.to_lowercase()),
+        param: String::new(),
+        bound_type: String::new(),
+        decl_path: None,
+        decl_range: None,
+        call_site_range: call_range,
+        fn_id: None, // anonymous — HOF has no declaring file
+        element_index: None,
+        column_origin: None,
+        model_origin,
+        source_origin,
     };
 
     inner_diags
@@ -1459,6 +1529,8 @@ pub fn check_smelt_path_call(
                 fn_id: Some(sig.name.clone()),
                 element_index: None,
                 column_origin: None,
+                model_origin: None,
+                source_origin: None,
             });
         } else {
             frames.push(FrameInfo {
@@ -1471,6 +1543,8 @@ pub fn check_smelt_path_call(
                 fn_id: Some(sig.name.clone()),
                 element_index: None,
                 column_origin: None,
+                model_origin: None,
+                source_origin: None,
             });
         }
         d.data = Some(DiagnosticData::ExpansionFrames(frames));
@@ -3786,6 +3860,160 @@ mod tests {
             orders_names, products_names,
             "orders and products must produce different column lists; \
              per-call-site schema-resolution must not conflate models"
+        );
+    }
+
+    // === Phase D (meta-language) tests — wide-reflection HOF frame extensions ===
+
+    /// A HOF lambda body that errors when its source list comes from
+    /// `smelt.models.*` carries a Phase D anonymous frame whose
+    /// `model_origin` field is `Some(...)`.
+    ///
+    /// This test calls `walk_hof_lambda_body_with_wide_reflection_frame` directly
+    /// with a hand-constructed `ModelOrigin`, verifying the frame-stamping
+    /// mechanism in isolation.
+    #[test]
+    fn wide_reflection_hof_lambda_carries_model_origin_frame() {
+        use smelt_types::signatures::ModelOrigin;
+
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        let origin = ModelOrigin {
+            path: "models/cohort_model.sql".to_string(),
+            frontmatter_span: None,
+        };
+
+        let diags = walk_hof_lambda_body_with_wide_reflection_frame(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            Some(origin.clone()),
+            None, // source_origin
+        );
+
+        // The frame must have model_origin = Some(origin) and source_origin = None.
+        let has_model_origin = diags.iter().any(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.model_origin.as_ref() == Some(&origin)
+                        && f.source_origin.is_none()
+                        && f.fn_id.is_none()) // anonymous frame
+            )
+        });
+        assert!(
+            has_model_origin,
+            "HOF frame must carry model_origin; got: {diags:?}"
+        );
+    }
+
+    /// A HOF lambda body that errors when its source list comes from
+    /// `smelt.sources.*` carries a Phase D anonymous frame whose
+    /// `source_origin` field is `Some(...)`.
+    #[test]
+    fn wide_reflection_hof_lambda_carries_source_origin_frame() {
+        use smelt_types::signatures::SourceOrigin;
+
+        let (_sig, body_expr, text) =
+            parse_define("smelt.define f(x: Expr<Integer>) AS (bad_expr)\n");
+
+        let lambda_ctx = TypeContext::new();
+
+        let origin = SourceOrigin {
+            path: "models/raw/events.yml".to_string(),
+            declaration_span: None,
+        };
+
+        let diags = walk_hof_lambda_body_with_wide_reflection_frame(
+            &body_expr,
+            &lambda_ctx,
+            &text,
+            "map",
+            None,
+            None,
+            None, // model_origin
+            Some(origin.clone()),
+        );
+
+        // The frame must have source_origin = Some(origin) and model_origin = None.
+        let has_source_origin = diags.iter().any(|d| {
+            matches!(
+                &d.data,
+                Some(DiagnosticData::ExpansionFrames(frames))
+                    if frames.iter().any(|f| f.source_origin.as_ref() == Some(&origin)
+                        && f.model_origin.is_none()
+                        && f.fn_id.is_none()) // anonymous frame
+            )
+        });
+        assert!(
+            has_source_origin,
+            "HOF frame must carry source_origin; got: {diags:?}"
+        );
+    }
+
+    /// `smelt.models.with_tag(t)` materialises ModelRef values in
+    /// workspace-relative path-sorted order. This test uses the Salsa query
+    /// layer to verify that `models_with_tag` returns results in the same order
+    /// the spec mandates ("byte-lexicographic on the workspace-relative path
+    /// with `/` separators").
+    #[test]
+    fn wide_reflection_expansion_preserves_path_order() {
+        use crate::test_harness::TestDb;
+        use std::sync::Arc;
+
+        let mut db = TestDb::default();
+        let root = std::path::PathBuf::from(".");
+
+        // Three models with `cohort` tag — registered in reverse order to verify
+        // that the query produces path-sorted output regardless of insertion order.
+        let paths = [
+            (
+                "models/z_last.sql",
+                "---\ntags: [cohort]\n---\nSELECT 1 AS id FROM s.t",
+            ),
+            (
+                "models/a_first.sql",
+                "---\ntags: [cohort]\n---\nSELECT 2 AS id FROM s.t",
+            ),
+            (
+                "models/m_middle.sql",
+                "---\ntags: [cohort]\n---\nSELECT 3 AS id FROM s.t",
+            ),
+        ];
+
+        for (path_str, text) in &paths {
+            let p = std::path::PathBuf::from(path_str);
+            db.set_file_text(p.clone(), Arc::new(text.to_string()));
+            db.set_file_project_root(p.clone(), root.clone());
+        }
+        db.set_project_sources_yaml(root.clone(), Arc::new(String::new()));
+        db.set_all_project_roots(Arc::new(vec![root.clone()]));
+        let ws = db.sync_workspace();
+
+        let result = crate::models_with_tag(&db.db, ws, "cohort".to_string());
+
+        assert_eq!(result.len(), 3);
+        // Path-sorted order: a_first < m_middle < z_last.
+        assert!(
+            result[0].path.contains("a_first"),
+            "first must be a_first; got {}",
+            result[0].path
+        );
+        assert!(
+            result[1].path.contains("m_middle"),
+            "second must be m_middle; got {}",
+            result[1].path
+        );
+        assert!(
+            result[2].path.contains("z_last"),
+            "third must be z_last; got {}",
+            result[2].path
         );
     }
 }

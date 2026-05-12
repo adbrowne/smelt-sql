@@ -959,6 +959,22 @@ pub struct FrameInfo {
     /// Producer-side only in v1 — the LSP renderer does not yet surface this
     /// field (tracked as a Known Divergence in `expansion.md`).
     pub column_origin: Option<smelt_parser::TextRange>,
+    /// Wide-reflection extension: source-model provenance for HOF frames whose
+    /// source list came from `smelt.models.*`. Carries the model's workspace-
+    /// relative path and the frontmatter declaration span when statically
+    /// traceable. `None` for all other HOF frame sources.
+    ///
+    /// Producer-side only in v1 — the LSP renderer does not yet surface this
+    /// field (tracked as a Known Divergence in `expansion.md`).
+    pub model_origin: Option<ModelOrigin>,
+    /// Wide-reflection extension: source-yaml provenance for HOF frames whose
+    /// source list came from `smelt.sources.*`. Carries the source YAML's
+    /// workspace-relative path and the YAML declaration span when statically
+    /// traceable. `None` for all other HOF frame sources.
+    ///
+    /// Producer-side only in v1 — the LSP renderer does not yet surface this
+    /// field (tracked as a Known Divergence in `expansion.md`).
+    pub source_origin: Option<SourceOrigin>,
 }
 
 /// Phase C (meta-language): concrete value produced by `smelt.columns_of`.
@@ -987,6 +1003,106 @@ pub struct ColumnRefValue {
     /// (the `Column::range` field). `None` when the span is not statically
     /// resolvable (e.g. source came from an external YAML with no SQL range).
     pub source_span: Option<smelt_parser::TextRange>,
+}
+
+/// Source-model provenance attached to a wide-reflection HOF frame
+/// (Phase D, `smelt.models.*`-sourced lists).
+///
+/// Captures the model's workspace-relative path and the frontmatter
+/// declaration span (if statically resolvable). The producer stamps this
+/// on each per-element anonymous HOF frame when the source list comes from
+/// `smelt.models.with_tag` or `smelt.models.all`.
+///
+/// Producer-side only in v1 — the LSP renderer does not yet surface this
+/// field (tracked as a Known Divergence in `expansion.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelOrigin {
+    /// Workspace-relative path of the model's source `.sql` file, with `/`
+    /// separators. This is the same path used in `ModelRefValue::path`.
+    pub path: String,
+    /// Source span of the model's frontmatter block (if present and parseable).
+    /// `None` when the model has no frontmatter or when the span is otherwise
+    /// not statically resolvable.
+    pub frontmatter_span: Option<smelt_parser::TextRange>,
+}
+
+/// Source-yaml provenance attached to a wide-reflection HOF frame
+/// (Phase D, `smelt.sources.*`-sourced lists).
+///
+/// Captures the source YAML file's workspace-relative path and the
+/// YAML declaration span (if statically resolvable). The producer stamps
+/// this on each per-element anonymous HOF frame when the source list comes
+/// from `smelt.sources.with_tag` or `smelt.sources.all`.
+///
+/// Producer-side only in v1 — the LSP renderer does not yet surface this
+/// field (tracked as a Known Divergence in `expansion.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOrigin {
+    /// Workspace-relative path of the source's YAML file, with `/` separators.
+    /// This is the same path used in `SourceRefValue::path`.
+    pub path: String,
+    /// Source span of the YAML declaration (currently always `None` in v1
+    /// since source YAMLs are not tracked by the Rowan CST — reserved for
+    /// a future pass that parses span information from the YAML).
+    pub declaration_span: Option<smelt_parser::TextRange>,
+}
+
+/// Concrete value produced by `smelt.models.with_tag` / `smelt.models.all`
+/// at expansion time (Phase D, wide reflection).
+///
+/// Each element of the `List<ModelRef>` returned by those accessors is
+/// one `ModelRefValue`. The list is sorted ascending by `path`
+/// (byte-lexicographic on the workspace-relative path with `/` separators).
+///
+/// This struct is pure (no Salsa dependency) and lives in `smelt-types` so
+/// that both `smelt-db` (which produces the list via the Salsa queries
+/// `models_with_tag` / `models_all`) and any future consumer can use it
+/// without gaining a Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRefValue {
+    /// Workspace-relative file path with `/` separators (e.g.
+    /// `"models/orders.sql"`).
+    pub path: String,
+    /// Model name — the final path segment without the `.sql` extension
+    /// (e.g. `"orders"`).
+    pub name: String,
+    /// Merged tag set: union of `smelt.yml` `models.<name>.tags` and SQL
+    /// frontmatter `tags:`, deduplicated by `Config::get_tags`. In the
+    /// order returned by that function (smelt.yml tags first, then
+    /// frontmatter tags not already present).
+    pub tags: Vec<String>,
+    /// The model name used to route `m.columns` through `columns_of_for_table_expr`.
+    /// This is the model's short name (same as `name`) — the Salsa query
+    /// accepts this to resolve the column list at expansion time.
+    pub model_name_for_columns: String,
+}
+
+/// Concrete value produced by `smelt.sources.with_tag` / `smelt.sources.all`
+/// at expansion time (Phase D, wide reflection).
+///
+/// Each element of the `List<SourceRef>` returned by those accessors is
+/// one `SourceRefValue`. The list is sorted ascending by `path`
+/// (byte-lexicographic on the workspace-relative path with `/` separators).
+///
+/// This struct is pure (no Salsa dependency) and lives in `smelt-types` so
+/// that both `smelt-db` (which produces the list via the Salsa queries
+/// `sources_with_tag` / `sources_all`) and any future consumer can use it
+/// without gaining a Salsa dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRefValue {
+    /// Workspace-relative file path of the source YAML with `/` separators
+    /// (e.g. `"models/sources/raw/users.yml"`).
+    pub path: String,
+    /// Source name — the final path segment without the `.yml` / `.yaml`
+    /// extension (e.g. `"users"`).
+    pub name: String,
+    /// Tag set as declared in the source YAML's `tags:` list. No merge with
+    /// a second source (source YAMLs are the single source of tag truth for
+    /// sources).
+    pub tags: Vec<String>,
+    /// Address segments for routing `s.columns` through the source resolution
+    /// machinery. These are the `address_segments` from `SourceInfo`.
+    pub address_segments: Vec<String>,
 }
 
 /// Tier of a function, derived from annotation completeness.
@@ -4268,6 +4384,8 @@ mod tests {
             fn_id: None,
             element_index: None,
             column_origin: None,
+            model_origin: None,
+            source_origin: None,
         };
         assert!(frame.decl_path.is_none());
         assert!(frame.decl_range.is_none());

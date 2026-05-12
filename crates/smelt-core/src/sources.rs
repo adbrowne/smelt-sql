@@ -35,6 +35,9 @@ pub struct SourceInfo {
     /// When `None`, the default mapping `<target_schema>.<address_segments.join("_")>`
     /// is used.
     pub name_override: Option<String>,
+    /// Tags declared in the source YAML (`tags:` key). Used by wide-reflection
+    /// accessors `smelt.sources.with_tag` and `smelt.sources.all`.
+    pub tags: Vec<String>,
 }
 
 impl SourceInfo {
@@ -113,6 +116,10 @@ struct RawSourceYaml {
     /// Presence of this key is a hard error on source YAMLs.
     #[serde(default)]
     materialization: Option<serde_yaml::Value>,
+
+    /// Optional tags for filtering via `smelt.sources.with_tag`.
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +213,7 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
         columns,
         description: raw.description,
         name_override: raw.name,
+        tags: raw.tags,
     })
 }
 

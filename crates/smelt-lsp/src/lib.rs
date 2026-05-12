@@ -6430,6 +6430,8 @@ mod tests {
             fn_id: Some(function.to_string()),
             element_index: None,
             column_origin: None,
+            model_origin: None,
+            source_origin: None,
         }
     }
 
@@ -6576,6 +6578,8 @@ mod tests {
             fn_id: None, // marks frame as anonymous
             element_index: None,
             column_origin: None,
+            model_origin: None,
+            source_origin: None,
         };
         let diag = make_db_diag("type mismatch in lambda body", vec![anon_frame]);
 

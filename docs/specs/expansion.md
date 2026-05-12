@@ -1,7 +1,7 @@
 ---
 feature: expansion
 status: experimental
-last_reviewed: 2026-05-04
+last_reviewed: 2026-05-13
 owners: [andrew]
 ---
 
@@ -38,6 +38,10 @@ The following are the only outputs of expansion that a user can observe:
 **Anonymous-frame form** (HOF inline-expansion): `map`, `filter`, and `reduce` produce anonymous frames when a type error surfaces inside a lambda body. The anonymous form has `fn_id = None`, `decl_path = None`, `decl_range = None`, and `param = ""`. The `function` field carries the angle-bracketed name (`"<map>"`, `"<filter>"`, `"<reduce>"`). Renderers should handle `fn_id = None` by omitting the "defined in" link and displaying only the bracketed HOF name (e.g. `in expansion of <map>`).
 
 **`column_origin` on anonymous HOF frames.** When the HOF source list comes from `smelt.columns_of(t)`, the anonymous frame is extended with an optional `column_origin: Option<TextRange>` field carrying the source span of the column's declaration in the upstream `ModelSchema`. Producers populate `column_origin` per-element when the column's source span is statically resolvable; `column_origin = None` when the source was not a `smelt.columns_of` call, the schema was unresolvable, or the span is unavailable. The v1 LSP renderer does not yet surface `column_origin` (tracked in Known Divergences); it is a producer-side invariant only.
+
+**`model_origin` on anonymous HOF frames.** When the HOF source list comes from `smelt.models.with_tag(…)` or `smelt.models.all`, the anonymous frame is extended with an optional `model_origin: Option<ModelOrigin>` field. `ModelOrigin` carries `path: String` (the workspace-relative path to the model's `.sql` file with `/` separators) and `frontmatter_span: Option<TextRange>` (the source span of the frontmatter block, or `None` when the model has no frontmatter or the span is unavailable). Producers populate `model_origin` per-element; `model_origin = None` when the source was not a `smelt.models.*` call or the model's path is not resolvable. The v1 LSP renderer does not yet surface `model_origin` (tracked in Known Divergences); it is a producer-side invariant only.
+
+**`source_origin` on anonymous HOF frames.** When the HOF source list comes from `smelt.sources.with_tag(…)` or `smelt.sources.all`, the anonymous frame is extended with an optional `source_origin: Option<SourceOrigin>` field. `SourceOrigin` carries `path: String` (the workspace-relative path to the sources YAML file) and `declaration_span: Option<TextRange>` (the source span of the source's entry in the YAML, or `None` when the span is unavailable). Producers populate `source_origin` per-element; `source_origin = None` when the source list was not a `smelt.sources.*` call. The v1 LSP renderer does not yet surface `source_origin` (tracked in Known Divergences); it is a producer-side invariant only.
 
 The renderer is permitted to read fewer fields than are populated; producers must populate every field they have available regardless of what the current renderer reads.
 
@@ -131,6 +135,8 @@ This section captures the load-bearing mechanical decisions. Most of expansion i
 - **Provenance-aware planner passes are not yet exercised.** Until Level-2 planner work lands (`planner_integration.md` Known Divergences), there are few transformations that stress the origin-tag contract. The contract is normative now so that future passes inherit it; the test surface that pins it grows alongside the planner.
 - **No CTE-collision diagnostic code is currently distinct from `CteCycle`.** Whether to mint a dedicated code (e.g. `CteShadowsCallerCte`) when alpha-rename ships is open.
 - **`column_origin` on anonymous HOF frames is producer-side only in v1.** The field is populated by the compiler when the HOF source list comes from `smelt.columns_of(t)`. The v1 LSP renderer does not read it — a dedicated renderer follow-up will surface it as an optional trailer (e.g. `(column declared at <file>:<line>)`). Until that renderer ships, the field is a no-op from the user's perspective.
+- **`model_origin` on anonymous HOF frames is producer-side only in v1.** The field is populated by the compiler when the HOF source list comes from `smelt.models.with_tag(…)` or `smelt.models.all`. The v1 LSP renderer does not read it — the same renderer follow-up that surfaces `column_origin` will surface `model_origin` as an optional trailer (e.g. `(model declared at <file>:<line>)`). Until that renderer ships, the field is a no-op from the user's perspective.
+- **`source_origin` on anonymous HOF frames is producer-side only in v1.** The field is populated by the compiler when the HOF source list comes from `smelt.sources.with_tag(…)` or `smelt.sources.all`. The v1 LSP renderer does not read it — the same renderer follow-up that surfaces `column_origin` will surface `source_origin` as an optional trailer (e.g. `(source declared at <file>:<line>)`). Until that renderer ships, the field is a no-op from the user's perspective.
 
 ## References
 

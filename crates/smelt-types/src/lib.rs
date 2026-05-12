@@ -22,10 +22,11 @@ pub use signatures::{
     format_smelt_type_hover, kind_ceiling, numeric_lub, parse_frontmatter_backends,
     parse_smelt_type, subkind_of, unify_call, unify_call_with_expected, BackendSet,
     BuiltinRegistry, ColumnRefFieldType, ColumnRefValue, ContextRef, DataTypeHash, DataTypeReq,
-    ExprKind, FrameInfo, FrontmatterParseError, FunctionSig, ParamSpec, RowTail, RowVarBinding,
-    SchemaRequirement, SigOrigin, SigParam, Signature, SignatureBuildError, SmeltMetaSignature,
-    SmeltType, SmeltTypeParseError, StructRowTail, Tier, TypeConstraint, TypeExpr, TypeParam,
-    UnificationError, UnifyResult, COLUMN_REF_FIELDS,
+    ExprKind, FrameInfo, FrontmatterParseError, FunctionSig, ModelOrigin, ModelRefValue, ParamSpec,
+    RowTail, RowVarBinding, SchemaRequirement, SigOrigin, SigParam, Signature, SignatureBuildError,
+    SmeltMetaSignature, SmeltType, SmeltTypeParseError, SourceOrigin, SourceRefValue,
+    StructRowTail, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
+    COLUMN_REF_FIELDS,
 };
 
 /// SQL data types supported by smelt
