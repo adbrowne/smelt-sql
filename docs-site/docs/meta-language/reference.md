@@ -2,7 +2,7 @@
 
 Alphabetical quick reference for all meta-language constructs and diagnostic codes. Covers list literals, the spread operator, every HOF, reducer, lambda keyword, the pipe operator, `smelt.config.var`, and the reflection surface (`smelt.columns_of`, `ColumnRef`, identifier lift, wide reflection accessors `smelt.models.*` / `smelt.sources.*`, `ModelRef`, `SourceRef`).
 
-For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md).
+For a conceptual introduction, see [Overview](index.md). For detailed explanations, see the per-construct pages: [Lists & Spread](lists.md), [Lambdas](lambdas.md), [Higher-Order Functions](hofs.md), [Pipe Operator](pipes.md), [Reducers](reducers.md), [Config Variables](config-vars.md), [Reflection](reflection.md), [Records](records.md), [Maps](maps.md), [Config Loaders](config-loaders.md).
 
 ---
 
@@ -208,6 +208,101 @@ See [Higher-Order Functions — `map`](hofs.md#map) for full details and diagnos
 
 ---
 
+## `Map<K, V>` — meta map type
+
+**Kind:** meta-only type; never appears in data-world SQL.
+
+**Definition:** a finite, immutable key-value collection. In v1 `K` must be `Text`; `V` is any meta-language type. Invariant in both `K` and `V`. Produced exclusively by the config-loader family.
+
+**Iteration order:** byte-lexicographic ascending by key for `entries()`, `keys()`, and `values()`.
+
+**No literal syntax in v1** — maps originate from `smelt.config.load_yaml` / `smelt.config.load_json` with a `Map<Text, S>` schema.
+
+**Example:**
+```sql
+-- Load a YAML mapping and iterate over entries
+SELECT smelt.config.load_yaml('configs/tenants.yaml', Map<Text, {plan: Text, threshold: Integer}>)
+```
+
+See [Maps](maps.md) for the full API, missing-key behaviour, and diagnostic codes.
+
+---
+
+## `m.entries` — Map entries method
+
+**Kind:** Map API method; returns `List<{key: K, value: V}>`.
+
+**Signature:**
+```
+m.entries() -> List<{key: K, value: V}>
+```
+
+Returns all key-value pairs sorted ascending by key. Takes no arguments; any argument emits `MapApiUnexpectedArgument`.
+
+See [Maps — Map API](maps.md#map-api) for full details.
+
+---
+
+## `m.get` — Map key lookup
+
+**Kind:** Map API method; returns `V`.
+
+**Signature:**
+```
+m.get(k: K) -> V
+```
+
+Returns the value bound to `k`. A string-literal `k` statically absent from `m` emits `MapGetMissingKey`. Takes exactly one positional argument.
+
+See [Maps — `m.get` missing-key behaviour](maps.md#mget-missing-key-behaviour) for the statically-known vs deferred resolution rules.
+
+---
+
+## `m.has` — Map key presence check
+
+**Kind:** Map API method; returns `Boolean`.
+
+**Signature:**
+```
+m.has(k: K) -> Boolean
+```
+
+Returns `TRUE` iff `m` contains a binding for `k`. Takes exactly one positional argument.
+
+See [Maps — Map API](maps.md#map-api) for full details.
+
+---
+
+## `m.keys` — Map keys
+
+**Kind:** Map API method; returns `List<K>`.
+
+**Signature:**
+```
+m.keys() -> List<K>
+```
+
+Returns the key set sorted ascending. Takes no arguments; any argument emits `MapApiUnexpectedArgument`.
+
+See [Maps — Map API](maps.md#map-api) for full details.
+
+---
+
+## `m.values` — Map values
+
+**Kind:** Map API method; returns `List<V>`.
+
+**Signature:**
+```
+m.values() -> List<V>
+```
+
+Returns values ordered by their corresponding keys' ascending sort. Takes no arguments; any argument emits `MapApiUnexpectedArgument`.
+
+See [Maps — Map API](maps.md#map-api) for full details.
+
+---
+
 ## Meta-`Text`-as-identifier lift positions {#meta-text-as-identifier-lift-positions}
 
 When a meta-`Text` value is spliced into a position where the SQL grammar expects an unquoted **identifier**, smelt lifts that value to the identifier. The lift applies in exactly four positions:
@@ -349,6 +444,60 @@ See [Reflection](reflection.md) for the full surface, body-check vs expansion-ti
 
 ---
 
+## `smelt.config.load_json` — JSON file loader
+
+**Kind:** built-in compile-time loader; returns the schema type.
+
+**Signature:**
+```
+smelt.config.load_json(path: Text, schema: Schema) -> Schema
+```
+
+Loads the JSON file at `path` (workspace-relative string literal) and validates its contents against `schema`. `Schema` must be an inline record type, a named `smelt.record` name, `List<S>`, or `Map<Text, S>`. Supports per-target overlays via `<basename>.<target>.json` sibling files.
+
+**Example:**
+```sql
+SELECT smelt.config.load_json('configs/settings.json', {debug: Boolean, timeout: Integer})
+```
+
+See [Config Loaders](config-loaders.md) for path rules, schema authoring, per-target overlay, and diagnostic codes.
+
+---
+
+## `smelt.config.load_toml` — reserved loader name
+
+**Kind:** reserved built-in name; always emits `ConfigLoaderTomlNotYetSupported`.
+
+`smelt.config.load_toml` is reserved for a future TOML loader. Using it at any call site emits `ConfigLoaderTomlNotYetSupported`. Convert your TOML config to YAML or JSON and use `load_yaml` / `load_json` instead.
+
+See [Config Loaders — Diagnostic codes](config-loaders.md#diagnostic-codes) for the `ConfigLoaderTomlNotYetSupported` entry.
+
+---
+
+## `smelt.config.load_yaml` — YAML file loader
+
+**Kind:** built-in compile-time loader; returns the schema type.
+
+**Signature:**
+```
+smelt.config.load_yaml(path: Text, schema: Schema) -> Schema
+```
+
+Loads the YAML file at `path` (workspace-relative string literal) and validates its contents against `schema`. `Schema` must be an inline record type, a named `smelt.record` name, `List<S>`, or `Map<Text, S>`. Supports per-target overlays via `<basename>.<target>.yaml` sibling files.
+
+**Example:**
+```sql
+smelt.record Cohort = { name: Text, region: Text, threshold: Integer }
+
+SELECT smelt.config.load_yaml('configs/cohorts.yaml', List<Cohort>)
+```
+
+**Editor support:** hover shows the resolved file path and entry count; goto-definition on the path literal resolves to the loaded file; completion at the path argument offers workspace YAML files.
+
+See [Config Loaders](config-loaders.md) for path rules, schema authoring, per-target overlay, and diagnostic codes.
+
+---
+
 ## `smelt.config.var` — compile-time variable lookup
 
 **Kind:** built-in compile-time function; returns `Text`.
@@ -415,6 +564,33 @@ SELECT map(smelt.models.with_tag('cohort'), fn m => m.name)
 **Editor support:** hover on `smelt.models.with_tag(...)` shows `List<ModelRef>` and the resolved model count for the given tag; completion offers `smelt.models.with_tag` in `smelt.models.<cursor>` context.
 
 See [Reflection — Wide reflection](reflection.md#wide-reflection-workspace-introspection) for full details, argument rules, and diagnostic codes.
+
+---
+
+## `smelt.record` — named record-type declaration
+
+**Kind:** top-level workspace-scoped declaration; introduces a named meta record type.
+
+**Syntax:**
+```
+smelt.record TypeName = { field1: Type1, field2: Type2, … }
+```
+
+Declares a named record type at workspace scope. The name must be unique workspace-wide; a second declaration of the same name emits `SmeltRecordRedefinition`. Field types may be scalar `DataType` literals, `List<T>`, `Map<Text, V>`, inline record types `{…}`, or previously declared `smelt.record` names. Reflection witnesses (`ColumnRef`, `ModelRef`, `SourceRef`) are not valid field types and emit `RecordFieldTypeForbidden`.
+
+After declaration, `TypeName` is usable as a type in any type-annotation position — loader schema arguments, field types of other records, `Map<Text, TypeName>` value types.
+
+**Example:**
+```sql
+smelt.record Cohort = { name: Text, region: Text, threshold: Integer }
+
+-- Use as a loader schema
+SELECT smelt.config.load_yaml('configs/cohorts.yaml', List<Cohort>)
+```
+
+**Editor support:** hover on a `smelt.record` name shows the full field list; goto-definition on any usage resolves to the declaration site; completion at record-literal and field-projection positions offers the declared field set.
+
+See [Records](records.md) for inline record types, record literals, field projection, width subtyping, and diagnostic codes.
 
 ---
 
@@ -548,6 +724,35 @@ See [Lists & Spread — Spread operator](lists.md#spread-operator-xs) for full d
 
 ---
 
+## `.field` — record field projection
+
+**Kind:** meta-world infix operator; navigates a record-typed value to a named field.
+
+**Syntax:**
+```
+expr.fieldname
+```
+
+where `expr` evaluates to a record type (named or inline) and `fieldname` is a declared field of that type.
+
+**Recursive projection:** `r.outer.inner` projects `outer` then `inner`. Each step type-checks independently. Projecting through a non-record-typed intermediate emits `RecordFieldNotProjectable`.
+
+**Width subtyping:** projection on a value of type `{a: T, b: U}` succeeds for both `r.a` and `r.b`. The static type governs the closed field set; projecting a field not declared on the static type emits `RecordFieldUnknown` even if the runtime value carries that field.
+
+**Example:**
+```sql
+smelt.record Cohort = { name: Text, region: Text, threshold: Integer }
+
+-- r.name : Text, r.threshold : Integer
+SELECT map(cohorts, fn r => r.name || ': ' || CAST(r.threshold AS TEXT))
+```
+
+**Editor support:** completion at `r.<cursor>` offers the closed field list; hover shows the projected field's declared type; goto-definition resolves to the field in the `smelt.record` declaration.
+
+See [Records — Field projection](records.md#field-projection) for the full projection contract and diagnostic codes.
+
+---
+
 ## `[…]` — list literal
 
 **Type:** `List<T>` where `T` is the LUB of element types.
@@ -570,6 +775,33 @@ SELECT ...[1, 2, 3] FROM smelt.sources.raw.users
 ```
 
 See [Lists & Spread — List literal syntax](lists.md#list-literal-syntax-a-b-c) for full details.
+
+---
+
+## `{…}` — record literal / inline record type
+
+**Dual role:** `{…}` is used at two distinct positions in the meta-language:
+
+1. **At a type-annotation position** — an inline (anonymous) record type: `{field1: Type1, field2: Type2, …}`. Inline record types are structurally typed; two records with the same field set are the same type. Used as loader schemas and in `Map<Text, {…}>` type expressions.
+
+2. **At a value position** — a record literal: `{field1: value1, field2: value2, …}`. Bidirectionally type-checked against the surrounding target type; emits `RecordFieldMissing`, `RecordFieldUnknown`, `RecordFieldDuplicate`, or `RecordFieldTypeMismatch` on violations.
+
+**Width subtyping applies to both:** `{a: T, b: U}` is a subtype of `{a: T}` (the wider record is the subtype).
+
+**Example (type position):**
+```sql
+-- {name: Text, threshold: Integer} is an inline record schema
+SELECT smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, threshold: Integer}>)
+```
+
+**Example (value position):**
+```sql
+-- {name: 'eu', threshold: 50} is a record literal
+smelt.record Cohort = { name: Text, threshold: Integer }
+SELECT {name: 'eu', threshold: 50}
+```
+
+See [Records](records.md) for inline record types, record literals, width subtyping, and diagnostic codes.
 
 ---
 
@@ -646,6 +878,162 @@ See [Reflection — `ColumnsOfRequiresTableExpr`](reflection.md#columnsofRequire
 **Fix:** ensure the upstream model, source, or seed has a fully declared schema and compiles cleanly. This diagnostic suppresses further errors from the surrounding HOF call.
 
 See [Reflection — `ColumnsOfUnresolvableSchema`](reflection.md#columnsofunresolvableschema).
+
+---
+
+### `ConfigLoaderDuplicateMapKey`
+
+**When:** A `Map<Text, S>`-shaped YAML/JSON file contains the same key twice.
+
+**Message:** `duplicate map key '{key}' at {row}; earlier appearance at {first_row}`
+
+**Fix:** remove the duplicate key from the source file, keeping the intended value.
+
+See [Config Loaders — Diagnostic codes](config-loaders.md#diagnostic-codes).
+
+---
+
+### `ConfigLoaderFileNotFound`
+
+**When:** The resolved workspace-relative file does not exist.
+
+**Message:** `loader file '{path}' not found in workspace`
+
+**Fix:** create the missing file or correct the path literal.
+
+See [Config Loaders — `ConfigLoaderFileNotFound`](config-loaders.md#configloaderfilenotfound).
+
+---
+
+### `ConfigLoaderNullCoercion` (warning)
+
+**When:** A YAML `null` scalar coerces to empty `Text` at a schema field declared `Text`.
+
+**Message:** `null value at {row} coerced to empty string; declare a default in the source file`
+
+**Fix:** replace the null with an explicit empty string or a meaningful default in the YAML file.
+
+See [Config Loaders — `ConfigLoaderNullCoercion`](config-loaders.md#configloadernullcoercion-warning).
+
+---
+
+### `ConfigLoaderParseError`
+
+**When:** The loaded file is not valid YAML or JSON.
+
+**Message:** `failed to parse {format} file '{path}': {parser_error}`
+
+**Fix:** fix the syntax error at the reported line and column in the config file.
+
+See [Config Loaders — `ConfigLoaderParseError`](config-loaders.md#configloaderparseError).
+
+---
+
+### `ConfigLoaderPathBackslash`
+
+**When:** The loader path literal contains a backslash `\`.
+
+**Message:** `loader paths use '/' as the path separator; found '\' in {path}`
+
+**Fix:** replace `\` with `/` in the path literal.
+
+See [Config Loaders — `ConfigLoaderPathBackslash`](config-loaders.md#configloaderpathbackslash).
+
+---
+
+### `ConfigLoaderPathEscapesWorkspace`
+
+**When:** The path is absolute, contains a `..` escape, or uses a scheme prefix.
+
+**Message:** `loader path must be a workspace-relative path; found {path}`
+
+**Fix:** use a path relative to the workspace root with no `..` segments.
+
+See [Config Loaders — `ConfigLoaderPathEscapesWorkspace`](config-loaders.md#configloaderpathescapesworkspace).
+
+---
+
+### `ConfigLoaderPathNotLiteral`
+
+**When:** The `path` argument to a loader is not a string literal.
+
+**Message:** `loader path must be a string literal; found {expr}`
+
+**Fix:** replace the argument with a string literal: `'configs/data.yaml'`.
+
+See [Config Loaders — `ConfigLoaderPathNotLiteral`](config-loaders.md#configloaderpathnot-literal).
+
+---
+
+### `ConfigLoaderRequiredFieldMissing`
+
+**When:** A record entry in the loaded file omits a field required by the schema.
+
+**Message:** `field '{name}' required by schema is missing`
+
+**Fix:** add the missing field to the YAML/JSON entry, or remove it from the schema.
+
+See [Config Loaders — `ConfigLoaderRequiredFieldMissing`](config-loaders.md#configloaderrequiredfieldmissing).
+
+---
+
+### `ConfigLoaderRootShapeMismatch`
+
+**When:** The file's top-level shape (sequence, mapping, scalar) does not match the schema's expected root shape.
+
+**Message:** `schema '{type}' expects {expected_shape}; file's top level is {actual_shape}`
+
+**Fix:** align the schema and the file — use `List<S>` for a sequence root, `{…}` or `Map<Text, S>` for a mapping root.
+
+See [Config Loaders — `ConfigLoaderRootShapeMismatch`](config-loaders.md#configloaderrootshapemismatch).
+
+---
+
+### `ConfigLoaderSchemaForbidden`
+
+**When:** The schema argument is not an admissible shape (e.g. a bare scalar like `Integer`).
+
+**Message:** `loader schema must be a record type, 'List<record>', or 'Map<Text, record>'; found {actual}`
+
+**Fix:** use a record schema (`{…}` or a named `smelt.record`), `List<{…}>`, or `Map<Text, {…}>`.
+
+See [Config Loaders — `ConfigLoaderSchemaForbidden`](config-loaders.md#configloaderschemaforbidden).
+
+---
+
+### `ConfigLoaderTomlNotYetSupported`
+
+**When:** `smelt.config.load_toml` is called.
+
+**Message:** `smelt.config.load_toml is reserved; only YAML and JSON loaders are supported in v1`
+
+**Fix:** convert the config file to YAML or JSON.
+
+See [Config Loaders — `ConfigLoaderTomlNotYetSupported`](config-loaders.md#configloadertomlnotyetsupported).
+
+---
+
+### `ConfigLoaderTypeMismatch`
+
+**When:** A field value in the loaded file is not assignable to the declared field type.
+
+**Message:** `field '{name}' expects {expected}; got {actual}`
+
+**Fix:** correct the value in the YAML/JSON file to match the declared field type.
+
+See [Config Loaders — `ConfigLoaderTypeMismatch`](config-loaders.md#configloadertypemismatch).
+
+---
+
+### `ConfigLoaderUnknownField`
+
+**When:** A record entry in the loaded file contains a field not declared in the schema.
+
+**Message:** `field '{name}' is not declared in the schema; expected one of: {fields}`
+
+**Fix:** remove the extra field from the YAML/JSON entry, or add it to the schema.
+
+See [Config Loaders — `ConfigLoaderUnknownField`](config-loaders.md#configloaderunknownfield).
 
 ---
 
@@ -754,6 +1142,90 @@ See [Lambdas — `LambdaInForbiddenPosition`](lambdas.md#lambdainforbiddenpositi
 **Fix:** adjust the body expression to produce the required type.
 
 See [Lambdas — `LambdaResultTypeMismatch`](lambdas.md#lambdaresulttypemismatch).
+
+---
+
+### `MapApiArgTypeMismatch`
+
+**When:** `m.get(k)` or `m.has(k)` is called with an argument whose type is not assignable to the map's key type `K`.
+
+**Message:** `Map.{method} expects key of type {expected}; found {actual}`
+
+**Fix:** pass a `Text`-typed key, or cast the argument to `Text`.
+
+See [Maps — Diagnostic codes](maps.md#diagnostic-codes).
+
+---
+
+### `MapApiArityMismatch`
+
+**When:** `m.get` or `m.has` is called with other than one positional argument.
+
+**Message:** `Map.{method} expects one positional argument; found {n}`
+
+**Fix:** pass exactly one positional key argument.
+
+See [Maps — Diagnostic codes](maps.md#diagnostic-codes).
+
+---
+
+### `MapApiNamedArgument`
+
+**When:** A Map API method is called with a named argument.
+
+**Message:** `Map.{method} does not support named arguments`
+
+**Fix:** use positional syntax: `m.get('key')` not `m.get(key => 'key')`.
+
+See [Maps — Diagnostic codes](maps.md#diagnostic-codes).
+
+---
+
+### `MapApiUnexpectedArgument`
+
+**When:** `m.entries`, `m.keys`, or `m.values` is called with any argument.
+
+**Message:** `Map.{method} takes no arguments`
+
+**Fix:** call the method with no arguments: `m.entries()`.
+
+See [Maps — Diagnostic codes](maps.md#diagnostic-codes).
+
+---
+
+### `MapApiUnknown`
+
+**When:** A method call on a `Map<K, V>` value uses a name outside the closed API (`entries`, `keys`, `values`, `get`, `has`).
+
+**Message:** `Map has no method '{name}'; expected one of: entries, keys, values, get, has`
+
+**Fix:** use one of the five supported method names.
+
+See [Maps — Diagnostic codes](maps.md#diagnostic-codes).
+
+---
+
+### `MapGetMissingKey`
+
+**When:** `m.get(k)` is called with a string literal `k` that is statically known to be absent from `m`.
+
+**Message:** `Map has no binding for key '{key}'`
+
+**Fix:** guard with `m.has(k)`, use a key that is declared in the YAML file, or handle the absent case explicitly.
+
+See [Maps — `m.get` missing-key behaviour](maps.md#mget-missing-key-behaviour).
+
+---
+
+### `MapKeyTypeNotText`
+
+**When:** A `Map<K, V>` type expression is written where `K` is not `Text`.
+
+**Message:** `Map key type must be Text in v1; found {type}`
+
+**Fix:** use `Map<Text, V>`. Non-`Text` key types are reserved for a future version.
+
+See [Maps — The `Map<K, V>` type](maps.md#the-mapk-v-type).
 
 ---
 
@@ -871,6 +1343,114 @@ See [Pipe Operator — `PipeRhsNotCall`](pipes.md#piperhsnotcall).
 
 ---
 
+### `RecordCyclicDeclaration`
+
+**When:** A `smelt.record` declaration references its own name (directly or transitively through other declarations), forming a cycle.
+
+**Message:** `record '{name}' is cyclic; record declarations must form a DAG`
+
+**Fix:** break the cycle by extracting a shared base record. Mutually recursive records are not supported in v1.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordFieldDuplicate`
+
+**When:** A record literal names the same field twice.
+
+**Message:** `field '{name}' already appears in this record literal`
+
+**Fix:** remove the duplicate field occurrence from the literal.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordFieldMissing`
+
+**When:** A record literal omits a field required by the target type.
+
+**Message:** `record literal for '{type}' is missing required field '{name}'`
+
+**Fix:** add the missing field, or use a narrower inline record type that does not require it.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordFieldNotProjectable`
+
+**When:** Mid-chain field projection steps through a non-record-typed value.
+
+**Message:** `value of type {type} has no fields; projection '{field}' is not valid`
+
+**Fix:** stop the projection at the correct depth. The intermediate value is not a record.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordFieldTypeForbidden`
+
+**When:** A `smelt.record` field type references a reflection witness (`ColumnRef`, `ModelRef`, `SourceRef`, or `Lambda<…>`).
+
+**Message:** `record field types may not reference {type}; reflection witnesses are not user-writable`
+
+**Fix:** use a concrete `DataType` or a user-authored record type as the field type.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordFieldTypeMismatch`
+
+**When:** A field value in a record literal is not assignable to the declared field type.
+
+**Message:** `record field '{name}' expects {expected}; found {actual}`
+
+**Fix:** cast or replace the value so it matches the declared field type.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordFieldUnknown`
+
+**When:** A field projection or record literal uses a field name not declared on the target record type.
+
+**Message:** `record '{type}' has no field '{name}'; expected one of: {fields}`
+
+**Fix:** use one of the declared field names, or add the field to the `smelt.record` declaration.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordInDataWorld`
+
+**When:** A record-typed binding is referenced bare in a Data-World SQL position (e.g. a `WHERE` clause or a SELECT item) without projecting a field.
+
+**Message:** `record-typed value '{name}' has no Data-World representation; project a field (e.g. '{name}.field') or consume it inside a meta-language splice`
+
+**Fix:** project a scalar field of the record (`r.field`) instead of using the bare binding. Records live in the meta-world; their projected fields cross into the Data-World.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
+### `RecordLiteralUnknownTarget`
+
+**When:** A record literal `{…}` appears in a position where no target type can be inferred.
+
+**Message:** `cannot infer record type from context; annotate the target type`
+
+**Fix:** provide context — pass the literal as a loader schema argument, annotate a `smelt.define` parameter, or wrap in a typed position.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
+
+---
+
 ### `ReducerEmptyNoIdentity`
 
 **When:** `reduce` is called with an empty list using `union_all` or `intersect_all`, which have no identity element.
@@ -904,6 +1484,18 @@ See [Reducers — `ReducerInputTypeMismatch`](reducers.md#reducerinputtypemismat
 **Fix:** rename the `smelt.define` function.
 
 See [Reducers — `ReducerNameShadowed`](reducers.md#reducernameshadowed).
+
+---
+
+### `SmeltRecordRedefinition`
+
+**When:** A `smelt.record` declaration uses a name that is already declared elsewhere in the workspace.
+
+**Message:** `record '{name}' is already declared in {path}; record names must be unique workspace-wide`
+
+**Fix:** choose a distinct name for the second declaration, or consolidate both into one.
+
+See [Records — Diagnostic codes](records.md#diagnostic-codes).
 
 ---
 

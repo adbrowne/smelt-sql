@@ -133,7 +133,7 @@ pub struct ParsedConfigFile {
 // ============================================================================
 
 /// A typed meta-world value produced by [`validate_against_schema`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MetaValue {
     /// A `Text` scalar.
     Text(String),
@@ -474,6 +474,154 @@ pub fn validate_against_schema(
     ValidationResult {
         value,
         diagnostics: diags,
+    }
+}
+
+/// Validate a parsed config file against `schema` in **partial** mode.
+///
+/// Identical to [`validate_against_schema`] except that missing record fields
+/// are *not* emitted as diagnostics. This is the correct mode for overlay files:
+/// the overlay provides replacements for a subset of the base's fields; absent
+/// fields are taken from the base, so a field missing from the overlay is not an error.
+///
+/// Pure function — no Salsa dependency, no I/O.
+pub fn validate_against_schema_partial(
+    parsed: &ParsedConfigFile,
+    schema: &SmeltType,
+    call_site_range: crate::Range,
+) -> ValidationResult {
+    let mut diags: Vec<LoaderDiagnostic> = Vec::new();
+    let value = validate_node_partial(
+        &parsed.root,
+        schema,
+        None,
+        parsed,
+        call_site_range,
+        &mut diags,
+    );
+    ValidationResult {
+        value,
+        diagnostics: diags,
+    }
+}
+
+/// Dispatch to the appropriate validator (partial-mode: no missing-field errors).
+fn validate_node_partial(
+    node: &ParsedNode,
+    schema: &SmeltType,
+    field_name: Option<&str>,
+    file: &ParsedConfigFile,
+    call_site_range: crate::Range,
+    diags: &mut Vec<LoaderDiagnostic>,
+) -> MetaValue {
+    match schema {
+        SmeltType::Record { fields, .. } => {
+            validate_record_node_partial(node, fields, schema, file, call_site_range, diags)
+        }
+        SmeltType::List(elem_ty) => {
+            // List-root overlay replaces base entirely — no partial semantics needed for
+            // the list items themselves; validate normally.
+            validate_list_node(node, elem_ty, schema, file, call_site_range, diags)
+        }
+        SmeltType::Map {
+            key: _,
+            value: val_ty,
+        } => validate_map_node(node, val_ty, schema, file, call_site_range, diags),
+        SmeltType::Expr(TypeConstraint::Concrete(dt)) => {
+            let fname = field_name.unwrap_or("<value>");
+            validate_scalar_field(fname, node, dt, file, call_site_range, diags)
+        }
+        _ => MetaValue::Error,
+    }
+}
+
+/// Validate a record mapping in partial mode: validates fields that ARE present
+/// and checks for unknown fields, but does NOT emit `ConfigLoaderRequiredFieldMissing`
+/// for absent fields.
+fn validate_record_node_partial(
+    node: &ParsedNode,
+    fields: &BTreeMap<String, SmeltType>,
+    schema: &SmeltType,
+    file: &ParsedConfigFile,
+    call_site_range: crate::Range,
+    diags: &mut Vec<LoaderDiagnostic>,
+) -> MetaValue {
+    let schema_name = schema_display_name(schema);
+    match node {
+        ParsedNode::Mapping { entries, .. } => {
+            let mut result: BTreeMap<String, MetaValue> = BTreeMap::new();
+            let known: std::collections::HashSet<&str> =
+                fields.keys().map(|s| s.as_str()).collect();
+            let mut schema_fields: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
+            schema_fields.sort_unstable();
+
+            for (key, key_span, val_node) in entries {
+                if !known.contains(key.as_str()) {
+                    // Unknown field — same error as strict mode.
+                    let schema_field_list = schema_fields.join(", ");
+                    diags.push(content_diag(
+                        crate::DiagnosticCode::ConfigLoaderUnknownField,
+                        LoaderDiagnosticSeverity::Error,
+                        crate::meta_loader_diagnostic_message(
+                            crate::DiagnosticCode::ConfigLoaderUnknownField,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(key),
+                            Some(&schema_field_list),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        *key_span,
+                        call_site_range,
+                    ));
+                } else {
+                    let field_ty = &fields[key.as_str()];
+                    let val = validate_node_partial(
+                        val_node,
+                        field_ty,
+                        Some(key.as_str()),
+                        file,
+                        call_site_range,
+                        diags,
+                    );
+                    result.insert(key.clone(), val);
+                }
+            }
+            // NOTE: No missing-field check in partial mode.
+            MetaValue::Record(result)
+        }
+        other => {
+            diags.push(content_diag(
+                crate::DiagnosticCode::ConfigLoaderRootShapeMismatch,
+                LoaderDiagnosticSeverity::Error,
+                crate::meta_loader_diagnostic_message(
+                    crate::DiagnosticCode::ConfigLoaderRootShapeMismatch,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&schema_name),
+                    None,
+                    Some("mapping"),
+                    Some(other.shape_name()),
+                    None,
+                    None,
+                    None,
+                ),
+                other.span(),
+                call_site_range,
+            ));
+            MetaValue::Error
+        }
     }
 }
 
@@ -983,6 +1131,77 @@ fn schema_display_name(schema: &SmeltType) -> String {
 }
 
 // ============================================================================
+// Overlay merge (Phase 6)
+// ============================================================================
+
+/// Merge `overlay` on top of `base` according to the per-target overlay rules
+/// for schema `schema`:
+///
+/// - **Record root**: per-field replace — overlay fields replace base fields;
+///   fields absent from the overlay are taken from the base. Nested records
+///   are merged recursively.
+/// - **List root**: overlay replaces base entirely (no concatenation).
+/// - **Map root**: per-key replace — overlay keys replace base values;
+///   keys absent from the overlay are taken from the base.
+///
+/// This is a **pure function** — no I/O, no Salsa. The caller is responsible
+/// for parsing both files and validating against the schema before merging.
+///
+/// `_schema` is used for dispatch (record / list / map); the concrete field
+/// types are consulted only for recursive nested-record merging.
+pub fn merge_values(base: MetaValue, overlay: MetaValue, schema: &SmeltType) -> MetaValue {
+    match schema {
+        SmeltType::Record { fields, .. } => {
+            // Record root: per-field replace; recurse into nested record fields.
+            let base_fields = match base {
+                MetaValue::Record(m) => m,
+                other => return other, // shouldn't happen if validation passed
+            };
+            let overlay_fields = match overlay {
+                MetaValue::Record(m) => m,
+                _ => return MetaValue::Record(base_fields), // fallback
+            };
+            let mut merged = base_fields;
+            for (key, ov_val) in overlay_fields {
+                if let Some(field_schema) = fields.get(&key) {
+                    let base_val = merged.remove(&key);
+                    let merged_field = match base_val {
+                        Some(bv) => merge_values(bv, ov_val, field_schema),
+                        None => ov_val,
+                    };
+                    merged.insert(key, merged_field);
+                } else {
+                    // Overlay key not in schema — should have been caught by validation;
+                    // skip silently here.
+                }
+            }
+            MetaValue::Record(merged)
+        }
+        SmeltType::List(_) => {
+            // List root: overlay replaces base entirely.
+            overlay
+        }
+        SmeltType::Map { .. } => {
+            // Map root: per-key replace.
+            let base_map = match base {
+                MetaValue::Map(m) => m,
+                other => return other,
+            };
+            let overlay_map = match overlay {
+                MetaValue::Map(m) => m,
+                _ => return MetaValue::Map(base_map),
+            };
+            let mut merged = base_map;
+            for (key, ov_val) in overlay_map {
+                merged.insert(key, ov_val);
+            }
+            MetaValue::Map(merged)
+        }
+        _ => overlay, // scalar / unknown — overlay wins
+    }
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -1407,6 +1626,178 @@ mod tests {
                 LoaderDiagnosticSeverity::Warning,
                 "ConfigLoaderNullCoercion must be a warning"
             );
+        }
+    }
+
+    // ── Phase 6 overlay merge tests ────────────────────────────────────────
+
+    /// `merge_values` on a record root deep-merges overridden fields and
+    /// preserves fields absent from the overlay.
+    #[test]
+    fn overlay_record_root_deep_merges_overridden_field() {
+        // Base: {name: 'us_west', region: 'us-west-2', threshold: 100}
+        // Overlay (target=prod): {threshold: 50}
+        // Expected: threshold=50, name and region from base.
+        let mut base_schema_fields = BTreeMap::new();
+        base_schema_fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        base_schema_fields.insert(
+            "region".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        base_schema_fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let schema = SmeltType::Record {
+            fields: base_schema_fields,
+            name: Some("Cohort".to_string()),
+        };
+
+        let mut base_fields = BTreeMap::new();
+        base_fields.insert("name".to_string(), MetaValue::Text("us_west".to_string()));
+        base_fields.insert(
+            "region".to_string(),
+            MetaValue::Text("us-west-2".to_string()),
+        );
+        base_fields.insert("threshold".to_string(), MetaValue::Integer(100));
+        let base = MetaValue::Record(base_fields);
+
+        let mut overlay_fields = BTreeMap::new();
+        overlay_fields.insert("threshold".to_string(), MetaValue::Integer(50));
+        let overlay = MetaValue::Record(overlay_fields);
+
+        let merged = merge_values(base, overlay, &schema);
+        match merged {
+            MetaValue::Record(fields) => {
+                assert_eq!(
+                    fields.get("threshold"),
+                    Some(&MetaValue::Integer(50)),
+                    "threshold must be overridden by overlay"
+                );
+                assert_eq!(
+                    fields.get("name"),
+                    Some(&MetaValue::Text("us_west".to_string())),
+                    "name must come from base"
+                );
+                assert_eq!(
+                    fields.get("region"),
+                    Some(&MetaValue::Text("us-west-2".to_string())),
+                    "region must come from base"
+                );
+            }
+            other => panic!("expected Record, got: {:?}", other),
+        }
+    }
+
+    /// `merge_values` on a list root replaces base entirely with overlay.
+    #[test]
+    fn overlay_list_root_replaces_base() {
+        // Base: [{name: a}, {name: b}]
+        // Overlay: [{name: c}]
+        // Expected: [{name: c}]
+        let elem_schema = cohort_schema();
+        let list_schema = SmeltType::List(Box::new(elem_schema));
+
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("name".to_string(), MetaValue::Text("a".to_string()));
+        a_fields.insert("threshold".to_string(), MetaValue::Integer(1));
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("name".to_string(), MetaValue::Text("b".to_string()));
+        b_fields.insert("threshold".to_string(), MetaValue::Integer(2));
+        let base = MetaValue::List(vec![
+            MetaValue::Record(a_fields),
+            MetaValue::Record(b_fields),
+        ]);
+
+        let mut c_fields = BTreeMap::new();
+        c_fields.insert("name".to_string(), MetaValue::Text("c".to_string()));
+        c_fields.insert("threshold".to_string(), MetaValue::Integer(3));
+        let overlay = MetaValue::List(vec![MetaValue::Record(c_fields)]);
+
+        let merged = merge_values(base, overlay, &list_schema);
+        match merged {
+            MetaValue::List(items) => {
+                assert_eq!(
+                    items.len(),
+                    1,
+                    "merged list must have 1 item (overlay replaces base)"
+                );
+                match &items[0] {
+                    MetaValue::Record(fields) => {
+                        assert_eq!(
+                            fields.get("name"),
+                            Some(&MetaValue::Text("c".to_string())),
+                            "overlay item must have name 'c'"
+                        );
+                    }
+                    other => panic!("expected Record item, got: {:?}", other),
+                }
+            }
+            other => panic!("expected List, got: {:?}", other),
+        }
+    }
+
+    /// `merge_values` on a map root does per-key replace — keys absent from
+    /// the overlay are preserved from base.
+    #[test]
+    fn overlay_map_root_replaces_per_key() {
+        // Base: {a: {threshold: 100}, b: {threshold: 200}}
+        // Overlay: {a: {threshold: 50}}
+        // Expected: {a: {threshold: 50}, b: {threshold: 200}}
+        let val_schema = cohort_schema();
+        let map_schema = SmeltType::Map {
+            key: Box::new(SmeltType::Expr(TypeConstraint::Concrete(DataType::Text))),
+            value: Box::new(val_schema),
+        };
+
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("name".to_string(), MetaValue::Text("a".to_string()));
+        a_fields.insert("threshold".to_string(), MetaValue::Integer(100));
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("name".to_string(), MetaValue::Text("b".to_string()));
+        b_fields.insert("threshold".to_string(), MetaValue::Integer(200));
+        let mut base_map = BTreeMap::new();
+        base_map.insert("a".to_string(), MetaValue::Record(a_fields));
+        base_map.insert("b".to_string(), MetaValue::Record(b_fields));
+        let base = MetaValue::Map(base_map);
+
+        let mut a2_fields = BTreeMap::new();
+        a2_fields.insert("name".to_string(), MetaValue::Text("a".to_string()));
+        a2_fields.insert("threshold".to_string(), MetaValue::Integer(50));
+        let mut overlay_map = BTreeMap::new();
+        overlay_map.insert("a".to_string(), MetaValue::Record(a2_fields));
+        let overlay = MetaValue::Map(overlay_map);
+
+        let merged = merge_values(base, overlay, &map_schema);
+        match merged {
+            MetaValue::Map(map) => {
+                // 'a' threshold must be overridden.
+                match map.get("a") {
+                    Some(MetaValue::Record(fields)) => {
+                        assert_eq!(
+                            fields.get("threshold"),
+                            Some(&MetaValue::Integer(50)),
+                            "key 'a' threshold must be 50 from overlay"
+                        );
+                    }
+                    other => panic!("expected Record for key 'a', got: {:?}", other),
+                }
+                // 'b' must be preserved from base.
+                match map.get("b") {
+                    Some(MetaValue::Record(fields)) => {
+                        assert_eq!(
+                            fields.get("threshold"),
+                            Some(&MetaValue::Integer(200)),
+                            "key 'b' threshold must be 200 (from base; absent in overlay)"
+                        );
+                    }
+                    other => panic!("expected Record for key 'b', got: {:?}", other),
+                }
+            }
+            other => panic!("expected Map, got: {:?}", other),
         }
     }
 }

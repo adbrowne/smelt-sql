@@ -5189,6 +5189,201 @@ fn file_diagnostics_end_to_end_loader_content_validation() {
     );
 }
 
+// ============================================================================
+// Phase 6: Per-target overlay Salsa wiring tests
+// ============================================================================
+
+/// When a `<basename>.<target>.<ext>` overlay file exists and the overlay
+/// has an invalid field value (type mismatch), the validation diagnostic must
+/// be anchored at the **overlay file's row**, not the base file or call site.
+///
+/// This exercises the spec rule: "A target overlay file that does not validate
+/// against the schema emits the same diagnostic family as a base-file mismatch,
+/// anchored at the overlay file's offending row."
+#[test]
+fn overlay_validation_failure_anchors_at_overlay_row() {
+    let mut db = Database::default();
+
+    // Base: {name: "us_west", threshold: 100} — valid
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    // Overlay: {threshold: "not_an_integer"} — invalid (type mismatch on line 1)
+    let overlay_path: Arc<str> = Arc::from("configs/cohorts.prod.yaml");
+    let overlay_text: Arc<str> = Arc::from("threshold: not_an_integer\n");
+    let overlay_input = db.set_loader_file(overlay_path.clone(), overlay_text, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // Call the overlay query.
+    let resolved = loader_resolved_value_with_overlay(&db, base_input, overlay_input, call_site);
+
+    // Must have at least one diagnostic (overlay threshold has wrong type).
+    assert!(
+        !resolved.diagnostics.is_empty(),
+        "overlay type-mismatch must produce at least one diagnostic; got none"
+    );
+
+    // The diagnostic must be anchored at the overlay row (line 0 in the overlay file),
+    // NOT at the base file.
+    let has_overlay_anchor = resolved.diagnostics.iter().any(|d| {
+        // primary_span.line == 0 means line 1 in 1-indexed (the threshold row).
+        // Any diagnostic anchored at the overlay file is acceptable.
+        d.primary_span.line == 0
+    });
+    assert!(
+        has_overlay_anchor,
+        "overlay diagnostic must be anchored at the overlay file's row (line 0/1-indexed 1); \
+         got: {:?}",
+        resolved.diagnostics
+    );
+}
+
+/// When no `<basename>.<target>.<ext>` overlay file exists (overlay is absent),
+/// `loader_resolved_value_with_overlay` falls through to return a result
+/// equal to `loader_resolved_value` on the base file alone — no overlay diagnostics.
+///
+/// The spec rule: "An absent overlay file is a no-op; the base value is used as-is."
+/// We test this by passing `None` for the overlay (conceptually a missing overlay).
+/// The implementation must expose a variant that accepts `Option<LoaderFileInput>`.
+#[test]
+fn overlay_absent_falls_through_to_base() {
+    let mut db = Database::default();
+
+    // Base: {name: "us_west", threshold: 100} — valid
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // Base-only resolution via the original query.
+    let resolved_base = loader_resolved_value(&db, base_input, call_site.clone());
+
+    // Absent overlay (mark as not-existing) — must equal base result.
+    let overlay_path: Arc<str> = Arc::from("configs/cohorts.prod.yaml");
+    let overlay_input = db.set_loader_file(overlay_path.clone(), Arc::from(""), false);
+    let resolved_with_absent =
+        loader_resolved_value_with_overlay(&db, base_input, overlay_input, call_site);
+
+    // Diagnostics must both be empty (base is valid, absent overlay is no-op).
+    assert!(
+        resolved_base.diagnostics.is_empty(),
+        "base-only resolution must have no diagnostics; got: {:?}",
+        resolved_base.diagnostics
+    );
+    assert!(
+        resolved_with_absent.diagnostics.is_empty(),
+        "absent-overlay resolution must have no diagnostics; got: {:?}",
+        resolved_with_absent.diagnostics
+    );
+
+    // Both must have a parsed result.
+    assert!(
+        resolved_base.parsed.is_some(),
+        "base-only resolution must produce a parsed result"
+    );
+    assert!(
+        resolved_with_absent.parsed.is_some(),
+        "absent-overlay resolution must produce a parsed result"
+    );
+}
+
+/// Verify that modifying the overlay file invalidates `loader_resolved_value_with_overlay`.
+///
+/// After the overlay text changes (via `set_loader_file`), a subsequent call must
+/// reflect the new overlay content.
+#[test]
+fn overlay_file_change_invalidates_loader_value() {
+    let mut db = Database::default();
+
+    // Base: {name: "us_west", threshold: 100} — valid
+    let base_path: Arc<str> = Arc::from("configs/cohorts.yaml");
+    let base_text: Arc<str> = Arc::from("name: us_west\nthreshold: 100\n");
+    let base_input = db.set_loader_file(base_path.clone(), base_text, true);
+
+    // Overlay v1: {threshold: 50} — valid, overrides threshold only
+    let overlay_path: Arc<str> = Arc::from("configs/cohorts.prod.yaml");
+    let overlay_v1: Arc<str> = Arc::from("threshold: 50\n");
+    let overlay_input_v1 = db.set_loader_file(overlay_path.clone(), overlay_v1, true);
+
+    let call_site = LoaderCallSiteId {
+        file_path: Arc::from("models/cohorts.sql"),
+        byte_offset: 7,
+        loader_path: base_path.clone(),
+        schema_text: Arc::from("{name: Text, threshold: Integer}"),
+    };
+
+    // First resolution with overlay v1 — must have no diagnostics.
+    let resolved_v1 =
+        loader_resolved_value_with_overlay(&db, base_input, overlay_input_v1, call_site.clone());
+    assert!(
+        resolved_v1.diagnostics.is_empty(),
+        "v1 overlay resolution must have no diagnostics; got: {:?}",
+        resolved_v1.diagnostics
+    );
+    // Merged threshold must be 50 (from overlay).
+    if let Some(ref p) = resolved_v1.merged {
+        match p {
+            crate::loader::MetaValue::Record(fields) => {
+                assert_eq!(
+                    fields.get("threshold"),
+                    Some(&crate::loader::MetaValue::Integer(50)),
+                    "merged threshold must be 50 from overlay v1; got: {:?}",
+                    fields.get("threshold")
+                );
+            }
+            other => panic!("expected Record merged value; got: {:?}", other),
+        }
+    } else {
+        panic!("v1 merged value must be Some");
+    }
+
+    // Update overlay to v2: {threshold: 999}
+    let overlay_v2: Arc<str> = Arc::from("threshold: 999\n");
+    let overlay_input_v2 = db.set_loader_file(overlay_path.clone(), overlay_v2, true);
+    assert!(
+        overlay_input_v1 == overlay_input_v2,
+        "set_loader_file must return same handle on update"
+    );
+
+    // Second resolution — Salsa must invalidate and re-evaluate.
+    let resolved_v2 =
+        loader_resolved_value_with_overlay(&db, base_input, overlay_input_v2, call_site);
+    assert!(
+        resolved_v2.diagnostics.is_empty(),
+        "v2 overlay resolution must have no diagnostics; got: {:?}",
+        resolved_v2.diagnostics
+    );
+    // Merged threshold must now be 999 (from overlay v2).
+    if let Some(ref p) = resolved_v2.merged {
+        match p {
+            crate::loader::MetaValue::Record(fields) => {
+                assert_eq!(
+                    fields.get("threshold"),
+                    Some(&crate::loader::MetaValue::Integer(999)),
+                    "merged threshold must be 999 from overlay v2; got: {:?}",
+                    fields.get("threshold")
+                );
+            }
+            other => panic!("expected Record merged value; got: {:?}", other),
+        }
+    } else {
+        panic!("v2 merged value must be Some");
+    }
+}
+
 /// Verify that `smelt_record_declarations` collects declarations from all
 /// files in the workspace and returns them in file order.
 ///

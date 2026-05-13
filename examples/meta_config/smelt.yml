@@ -1,0 +1,19 @@
+name: meta_config
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+  prod:
+    type: duckdb
+    database: target/prod.duckdb
+    schema: main
+
+target: dev
+
+default_materialization: view

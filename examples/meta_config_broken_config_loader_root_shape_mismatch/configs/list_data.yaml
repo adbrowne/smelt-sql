@@ -1,0 +1,6 @@
+- name: us_west
+  region: us-west-2
+  threshold: 100
+- name: us_east
+  region: us-east-1
+  threshold: 100

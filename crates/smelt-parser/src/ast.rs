@@ -1525,7 +1525,14 @@ impl Expr {
             | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL | SMELT_PATH_REF
             | SMELT_PATH_CALL
             // Phase B (meta-language): lambdas and pipe expressions are expressions.
-            | LAMBDA | PIPE_EXPR => Some(Self(node)),
+            | LAMBDA | PIPE_EXPR
+            // Phase E1 (meta-language): type-reference expressions parsed via
+            // `is_generic_type_start` in argument positions (e.g. `List<Cohort>`,
+            // `Map<Text, {f: T}>` as loader schema arguments).  The TYPE_REF node
+            // must be castable to Expr so that `positional_args()` in ArgList
+            // returns it and the schema-text extraction in `check_loader_call_diagnostics`
+            // can read it via `schema_expr.syntax().text()`.
+            | TYPE_REF | RECORD_TYPE_INLINE => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {

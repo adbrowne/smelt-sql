@@ -277,3 +277,67 @@ Phase D diagnostics to watch for:
 - `ModelRefFieldUnknown` — `m.materialization` — field is not in the closed set
 
 This extension is not validated by `validate.py`; it is workflow practice only.
+
+## Optional: records, maps, and config loaders
+
+After the wide-reflection extension, try loading per-tenant configuration from a
+YAML file using `smelt.config.load_yaml` and a `Map<Text, …>` schema.
+
+**Step 1 — declare a named record type** for the tenant shape. In any model
+file (or a new top-level file), add:
+
+```sql
+smelt.record Tenant = { plan: Text, threshold: Integer }
+```
+
+**Step 2 — author the config file** at `configs/tenants.yaml` in your project
+root:
+
+```yaml
+tenant_a:
+  plan: pro
+  threshold: 100
+tenant_b:
+  plan: free
+  threshold: 10
+```
+
+**Step 3 — load the file as a `Map<Text, Tenant>`** and iterate over entries to
+build a SELECT:
+
+```sql
+-- models/tenant_summary.sql
+smelt.record Tenant = { plan: Text, threshold: Integer }
+
+SELECT
+    smelt.config.load_yaml('configs/tenants.yaml', Map<Text, Tenant>)
+    |> m => m.entries()
+    |> map(fn e => e.key)
+```
+
+`m.entries()` returns `List<{key: Text, value: Tenant}>` sorted **byte-lex
+ascending by key** — `tenant_a` before `tenant_b`, regardless of YAML file
+order. `e.key` is a `Text` meta value that lifts to a SQL identifier at splice
+time.
+
+**Things to watch for:**
+
+- `ConfigLoaderPathNotLiteral` — the path must be a string literal, not a
+  variable. `smelt.config.load_yaml(my_var, …)` is an error.
+- `ConfigLoaderFileNotFound` — the file at the given path must exist relative to
+  the workspace root.
+- `ConfigLoaderSchemaForbidden` — the schema must be a record type, `List<record>`,
+  or `Map<Text, record>`. Bare scalars (`Integer`, `Text`) emit this diagnostic.
+- `MapGetMissingKey` — `m.get('missing')` on a statically-known map is a
+  compile-time error, not a silent null. Guard with `m.has(k)`.
+- `RecordFieldTypeForbidden` — `ColumnRef`, `ModelRef`, and `SourceRef` are not
+  valid field types in a `smelt.record` declaration.
+- Width subtyping: a `Tenant`-typed value is assignable to `{plan: Text}` (the
+  wider record is the subtype), so HOF lambdas that only consume `e.value.plan`
+  do not need an explicit projection.
+
+This extension is not validated by `validate.py`; it is workflow practice only.
+
+<!-- TODO: extend validate.py to assert on tenant_summary table contents when
+     the table shape is stabilised. For now, the acceptance gate is that the
+     LSP emits no diagnostics on the loaded model. -->

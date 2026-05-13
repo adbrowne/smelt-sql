@@ -97,7 +97,7 @@ This plan drives the implementation, examples, user docs, and skill update for t
 | 3     | done     | 99e8a1a | 2026-05-13 |
 | 4     | done     | 08ff414 | 2026-05-13 |
 | 5     | done     | e117911 | 2026-05-13 |
-| 6     | pending  | —      | —    |
+| 6     | done     | —      | 2026-05-13 |
 | 7     | pending  | —      | —    |
 
 ---
@@ -601,6 +601,13 @@ This plan drives the implementation, examples, user docs, and skill update for t
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - Phase 5: `infer_smelt_path_call_type` does not dispatch to `infer_loader_call_smelt_type` for `smelt.config.load_yaml`/`load_json` calls. Reason: `infer_smelt_path_call_type` returns `Option<TypedColumn>` (`DataType`-based) and cannot carry `SmeltType::Record`/`List`/`Map`. The helper `infer_loader_call_smelt_type` is the canonical meta-language inference function for loader calls; production callers (LSP hover on a loader call site, HOF dispatch over loader-typed source lists) wire it directly in Phase 6 (LSP) and Phase E2 (HOF / `ModelDef` propagation). Tests in `crates/smelt-db/src/type_inference.rs::tests::load_yaml_synthesises_schema_type_on_happy_path` verify the helper's correctness for all three schema shapes.
+
+- Phase 6 (FIXTURES): The following diagnostic codes have no corresponding broken sub-fixture in `examples/meta_config_broken_*/` because the current implementation does not yet emit them via `file_diagnostics`. Each is covered by unit tests but not by the E2E example_diagnostics gate:
+  - **Record codes** (10 codes) — `SmeltRecordRedefinition`, `RecordFieldUnknown`, `RecordFieldMissing`, `RecordFieldDuplicate`, `RecordFieldTypeMismatch`, `RecordLiteralUnknownTarget`, `RecordFieldNotProjectable`, `RecordFieldTypeForbidden`, `RecordCyclicDeclaration`, `RecordInDataWorld`. Reason: the diagnostic sentinel infrastructure is in place (Phase 1) and the pure inference functions emit these sentinels (Phase 3), but `file_diagnostics` in `crates/smelt-db/src/lib.rs` does not yet call the record-registry builder or the record-literal / field-projection checkers. These paths are wired in Phase 6 proper (LSP/full integration).
+  - **Map codes** (7 codes) — `MapKeyTypeNotText`, `MapApiUnknown`, `MapApiArityMismatch`, `MapApiNamedArgument`, `MapApiUnexpectedArgument`, `MapGetMissingKey`, `MapApiArgTypeMismatch`. Reason: `validate_map_type_expression` is only called from unit tests; `file_diagnostics` does not yet walk `MAP_METHOD_CALL` nodes. Wired in Phase 6 proper.
+  - **`ConfigLoaderDuplicateMapKey`** (1 code) — Cannot be triggered via a real YAML or JSON file on disk because `marked_yaml` (with `error_on_duplicate_keys: false`, the default) and `serde_json` both silently deduplicate keys before the validator sees them. The diagnostic is reachable only by constructing a synthetic `ParsedNode::Mapping` with duplicate entries, as done in `crates/smelt-db/src/loader.rs::tests::yaml_parse_map_root_emits_duplicate_key`. The corresponding `example_diagnostics` test is marked `#[ignore]` with an explanatory comment; the unit test provides coverage. No plan change is needed for this limitation — the spec's validation-diagnostic table remains normative; the gap is in the YAML/JSON parser layer, not in smelt.
+
+- Phase 6 (LSP wiring): The hover, completion, and goto-def behaviours for records, maps, and loaders are exposed as **pure helper functions** in `crates/smelt-lsp/src/lib.rs` (`hover_text_for_record_decl_name`, `record_field_projection_completions`, `goto_def_for_smelt_record_name`, etc.) with full unit-test coverage. They are **not yet dispatched** from the production `Backend::hover` / `Backend::completion` / `Backend::goto_definition` handlers — a user opening `examples/meta_config/` in an editor today will not see record/map/loader hover, completion, or goto-def. Reason: backend-dispatch wiring is mechanical but high-volume (it needs CST-walk + cursor-position detection per surface element, paralleling the existing `Phase B` lambda dispatch in the hover handler at line 5440); the precedent of `goto_def_for_columns_of_call`, `goto_def_for_wide_reflection_accessor`, and `goto_def_for_model_ref_value` (also pure helpers without backend dispatch as of this branch) establishes that pure-helper coverage matches the prior phases' bar. Production wiring is tracked as a follow-up under `docs/plans/20260509-meta-language-overall.md` and will land alongside the LSP-smoke regression coverage in a focused phase.
 
 ## Verification
 

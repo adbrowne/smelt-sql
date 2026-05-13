@@ -1203,3 +1203,459 @@ fn meta_workspace_broken_source_ref_field_unknown() {
         smelt_db::DiagnosticCode::SourceRefFieldUnknown,
     );
 }
+
+// ===== Phase E1 (meta-language) TDD tests =====
+//
+// Layout mirrors earlier phases: one clean workspace + one broken workspace per
+// implemented diagnostic code.
+//   - `examples/meta_config/`                           — happy-path: record + YAML loader +
+//                                                          Map<Text, Record> + per-target overlay
+//   - `examples/meta_config_broken_*/`                  — one per loader diagnostic code
+//
+// Record codes (SmeltRecordRedefinition, RecordField*, RecordLiteral*, RecordIn*) and
+// Map codes (MapKey*, MapApi*, MapGet*) are NOT yet wired into file_diagnostics —
+// those 17 codes are deferred (see "Deferred during implementation" in the plan).
+// The 13 loader codes ARE wired and have broken sub-fixtures.
+//
+// The clean workspace test uses `check_workspace_no_diagnostics_with_loaders`.
+// The broken-workspace tests use `check_workspace_emits_exactly_one_phase_e1_diagnostic`
+// which asserts exactly one Phase E1 loader code fires in the named file.
+
+/// The Phase E1 diagnostic codes.  Used to filter diagnostics in the
+/// broken-workspace helper.
+const PHASE_E1_CODES: &[smelt_db::DiagnosticCode] = &[
+    // Record codes (declared but not yet wired into file_diagnostics)
+    smelt_db::DiagnosticCode::SmeltRecordRedefinition,
+    smelt_db::DiagnosticCode::RecordFieldUnknown,
+    smelt_db::DiagnosticCode::RecordFieldMissing,
+    smelt_db::DiagnosticCode::RecordFieldDuplicate,
+    smelt_db::DiagnosticCode::RecordFieldTypeMismatch,
+    smelt_db::DiagnosticCode::RecordLiteralUnknownTarget,
+    smelt_db::DiagnosticCode::RecordFieldNotProjectable,
+    smelt_db::DiagnosticCode::RecordFieldTypeForbidden,
+    smelt_db::DiagnosticCode::RecordCyclicDeclaration,
+    smelt_db::DiagnosticCode::RecordInDataWorld,
+    // Map codes (declared but not yet wired into file_diagnostics)
+    smelt_db::DiagnosticCode::MapKeyTypeNotText,
+    smelt_db::DiagnosticCode::MapApiUnknown,
+    smelt_db::DiagnosticCode::MapApiArityMismatch,
+    smelt_db::DiagnosticCode::MapApiNamedArgument,
+    smelt_db::DiagnosticCode::MapApiUnexpectedArgument,
+    smelt_db::DiagnosticCode::MapGetMissingKey,
+    smelt_db::DiagnosticCode::MapApiArgTypeMismatch,
+    // Loader codes (wired via loader_call_diagnostics_for_file)
+    smelt_db::DiagnosticCode::ConfigLoaderPathNotLiteral,
+    smelt_db::DiagnosticCode::ConfigLoaderPathEscapesWorkspace,
+    smelt_db::DiagnosticCode::ConfigLoaderPathBackslash,
+    smelt_db::DiagnosticCode::ConfigLoaderFileNotFound,
+    smelt_db::DiagnosticCode::ConfigLoaderSchemaForbidden,
+    smelt_db::DiagnosticCode::ConfigLoaderTomlNotYetSupported,
+    smelt_db::DiagnosticCode::ConfigLoaderParseError,
+    smelt_db::DiagnosticCode::ConfigLoaderRequiredFieldMissing,
+    smelt_db::DiagnosticCode::ConfigLoaderUnknownField,
+    smelt_db::DiagnosticCode::ConfigLoaderTypeMismatch,
+    smelt_db::DiagnosticCode::ConfigLoaderRootShapeMismatch,
+    smelt_db::DiagnosticCode::ConfigLoaderDuplicateMapKey,
+    smelt_db::DiagnosticCode::ConfigLoaderNullCoercion,
+];
+
+/// Initialise a Salsa `Database` for `project_dir` / `models` AND register every
+/// `.yaml` / `.yml` / `.json` file under `project_dir` as a `LoaderFileInput`.
+///
+/// This is needed so that `loader_call_diagnostics_for_file_with_content` (step 2)
+/// can perform content-validation and emit diagnostics such as
+/// `ConfigLoaderRequiredFieldMissing`, `ConfigLoaderParseError`, etc.  The plain
+/// `init_db` helper only registers SQL model files; without the loader-file
+/// registration the content-validation path is skipped and those diagnostics never
+/// fire.
+///
+/// `sources.yml` / `sources.yaml` are excluded (they are project config, not
+/// loader targets).
+fn init_db_with_loaders(project_dir: &Path, models: &[smelt_cli::ModelFile]) -> smelt_db::Database {
+    let mut db = smelt_cli::init_db(project_dir, models);
+
+    // Walk the project directory for YAML / JSON files and register each as a
+    // loader file input.
+    let walker = walkdir::WalkDir::new(project_dir)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip hidden directories and the `target/` build artefact tree.
+            let name = e.file_name().to_string_lossy();
+            !name.starts_with('.') && name != "target"
+        });
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let ext = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if !matches!(ext, "yaml" | "yml" | "json") {
+            continue;
+        }
+        // Exclude sources.yml / sources.yaml (project config, not loader targets).
+        let file_name = entry
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if file_name == "sources.yml" || file_name == "sources.yaml" {
+            continue;
+        }
+        // Exclude smelt.yml (workspace config).
+        if file_name == "smelt.yml" || file_name == "smelt.yaml" {
+            continue;
+        }
+
+        // Compute workspace-relative path (forward slashes).
+        let rel = match entry.path().strip_prefix(project_dir) {
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+
+        let content = match std::fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        db.set_loader_file(
+            std::sync::Arc::from(rel.as_str()),
+            std::sync::Arc::from(content.as_str()),
+            true,
+        );
+    }
+
+    db
+}
+
+/// Variant of `check_workspace_no_diagnostics` that also registers loader files
+/// so content-validation diagnostics (e.g. `ConfigLoaderRequiredFieldMissing`) can
+/// fire.  Used for the clean `examples/meta_config/` fixture.
+fn check_workspace_no_diagnostics_with_loaders(example_dir: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db_with_loaders(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut all_issues = Vec::new();
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            all_issues.push(format!(
+                "[{:?}] {}: {}",
+                d.severity,
+                model.path.strip_prefix(&path).unwrap().display(),
+                d.message
+            ));
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            all_issues.push(format!(
+                "[{:?}] {}: {}",
+                d.0.severity,
+                model.path.strip_prefix(&path).unwrap().display(),
+                d.0.message
+            ));
+        }
+    }
+
+    assert!(
+        all_issues.is_empty(),
+        "Found {} diagnostic(s) in {}:\n  {}",
+        all_issues.len(),
+        example_dir,
+        all_issues.join("\n  ")
+    );
+}
+
+/// Helper: loads `example_dir` as a workspace (with loader files registered),
+/// checks that exactly one Phase E1 diagnostic fires for the file ending in
+/// `expected_file`, and that no other file emits Phase E1 codes.
+fn check_workspace_emits_exactly_one_phase_e1_diagnostic(
+    example_dir: &str,
+    expected_file: &str,
+    expected_code: smelt_db::DiagnosticCode,
+) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(example_dir);
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db_with_loaders(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target_phase_e1: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other_phase_e1: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_phase_e1 = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| PHASE_E1_CODES.contains(c))
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel
+            .replace('\\', "/")
+            .ends_with(&expected_file.replace('\\', "/"));
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_phase_e1(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_e1.push(d.clone());
+            } else {
+                other_phase_e1.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_phase_e1(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target_phase_e1.push(d.0.clone());
+            } else {
+                other_phase_e1.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other_phase_e1.is_empty(),
+        "expected zero Phase E1 diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        other_phase_e1.len(),
+        other_phase_e1
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_e1.len(),
+        1,
+        "expected exactly 1 Phase E1 diagnostic from '{}' in {}, got {}:\n  {}",
+        expected_file,
+        example_dir,
+        target_phase_e1.len(),
+        target_phase_e1
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target_phase_e1[0].code,
+        Some(expected_code),
+        "expected Phase E1 diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        expected_code,
+        expected_file,
+        example_dir,
+        target_phase_e1[0].code,
+        target_phase_e1[0].message
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config/` produces zero diagnostics.
+/// Exercises smelt.record declaration + YAML loader + Map<Text, Record> +
+/// m.entries() |> map(fn e => …) + per-target overlay.
+#[test]
+fn meta_config_clean_workspace() {
+    check_workspace_no_diagnostics_with_loaders("examples/meta_config");
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_path_not_literal/`
+/// produces exactly one `ConfigLoaderPathNotLiteral` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_path_not_literal() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_path_not_literal",
+        "models/config_loader_path_not_literal.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderPathNotLiteral,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_path_escapes_workspace/`
+/// produces exactly one `ConfigLoaderPathEscapesWorkspace` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_path_escapes_workspace() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_path_escapes_workspace",
+        "models/config_loader_path_escapes_workspace.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderPathEscapesWorkspace,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_path_backslash/`
+/// produces exactly one `ConfigLoaderPathBackslash` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_path_backslash() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_path_backslash",
+        "models/config_loader_path_backslash.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderPathBackslash,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_file_not_found/`
+/// produces exactly one `ConfigLoaderFileNotFound` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_file_not_found() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_file_not_found",
+        "models/config_loader_file_not_found.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderFileNotFound,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_schema_forbidden/`
+/// produces exactly one `ConfigLoaderSchemaForbidden` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_schema_forbidden() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_schema_forbidden",
+        "models/config_loader_schema_forbidden.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderSchemaForbidden,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_toml_not_yet_supported/`
+/// produces exactly one `ConfigLoaderTomlNotYetSupported` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_toml_not_yet_supported() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_toml_not_yet_supported",
+        "models/config_loader_toml_not_yet_supported.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderTomlNotYetSupported,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_parse_error/`
+/// produces exactly one `ConfigLoaderParseError` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_parse_error() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_parse_error",
+        "models/config_loader_parse_error.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderParseError,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_required_field_missing/`
+/// produces exactly one `ConfigLoaderRequiredFieldMissing` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_required_field_missing() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_required_field_missing",
+        "models/config_loader_required_field_missing.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderRequiredFieldMissing,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_unknown_field/`
+/// produces exactly one `ConfigLoaderUnknownField` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_unknown_field() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_unknown_field",
+        "models/config_loader_unknown_field.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderUnknownField,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_type_mismatch/`
+/// produces exactly one `ConfigLoaderTypeMismatch` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_type_mismatch() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_type_mismatch",
+        "models/config_loader_type_mismatch.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderTypeMismatch,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_root_shape_mismatch/`
+/// produces exactly one `ConfigLoaderRootShapeMismatch` diagnostic.
+#[test]
+fn meta_config_broken_config_loader_root_shape_mismatch() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_root_shape_mismatch",
+        "models/config_loader_root_shape_mismatch.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderRootShapeMismatch,
+    );
+}
+
+/// Phase E1 TDD: `ConfigLoaderDuplicateMapKey` — deferred from E2E fixture coverage.
+///
+/// `marked_yaml` (and `serde_json`) silently deduplicate keys when
+/// `error_on_duplicate_keys` is `false` (the default). The validator's
+/// `seen_keys` map never observes a second entry for the same key, so no
+/// diagnostic fires via a real YAML/JSON file on disk. This code is covered
+/// by the synthetic unit test `loader::tests::yaml_parse_map_root_emits_duplicate_key`
+/// which injects a `ParsedNode::Mapping` with repeated keys directly.
+///
+/// To promote this to a live E2E fixture, the `parse_yaml` loader would need
+/// to enable `error_on_duplicate_keys` and map the `DuplicateKey` load error
+/// to `ConfigLoaderDuplicateMapKey` instead of `ConfigLoaderParseError`.
+/// Deferred to a future loader spec edit.
+#[test]
+#[ignore = "ConfigLoaderDuplicateMapKey cannot be triggered via real YAML/JSON files \
+             because YAML/JSON parsers silently deduplicate keys; covered by \
+             loader::tests::yaml_parse_map_root_emits_duplicate_key unit test"]
+fn meta_config_broken_config_loader_duplicate_map_key() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_duplicate_map_key",
+        "models/config_loader_duplicate_map_key.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderDuplicateMapKey,
+    );
+}
+
+/// Phase E1 TDD: `examples/meta_config_broken_config_loader_null_coercion/`
+/// produces exactly one `ConfigLoaderNullCoercion` diagnostic (warning severity).
+#[test]
+fn meta_config_broken_config_loader_null_coercion() {
+    check_workspace_emits_exactly_one_phase_e1_diagnostic(
+        "examples/meta_config_broken_config_loader_null_coercion",
+        "models/config_loader_null_coercion.sql",
+        smelt_db::DiagnosticCode::ConfigLoaderNullCoercion,
+    );
+}

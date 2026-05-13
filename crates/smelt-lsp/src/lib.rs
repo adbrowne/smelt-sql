@@ -2315,6 +2315,361 @@ pub fn source_ref_field_completions() -> Vec<String> {
         .collect()
 }
 
+// ============================================================================
+// Phase E1: Record hover / goto-def / completion helpers
+// ============================================================================
+
+/// Render hover text for a `smelt.record` declaration name token.
+///
+/// Shows the closed field list with types and the declaration file path.
+///
+/// Pure — callers supply the fields map and file path.
+pub fn hover_text_for_record_decl_name(
+    type_name: &str,
+    fields: &std::collections::BTreeMap<String, smelt_types::signatures::SmeltType>,
+    file_path: &str,
+) -> String {
+    let field_lines: Vec<String> = fields
+        .iter()
+        .map(|(k, v)| format!("  {k}: {}", smelt_types::format_smelt_type_hover(v)))
+        .collect();
+    format!(
+        "`smelt.record {type_name}`\n\n```\n{{\n{}\n}}\n```\n\n*Declared in `{file_path}`*",
+        field_lines.join(",\n")
+    )
+}
+
+/// Render hover text for a record-typed binding (parameter or variable).
+///
+/// Shows the record name and its closed field list.
+///
+/// Pure — callers supply the resolved type.
+pub fn hover_text_for_record_typed_binding(
+    param_name: &str,
+    ty: &smelt_types::signatures::SmeltType,
+) -> String {
+    use smelt_types::format_smelt_type_hover;
+    let type_str = format_smelt_type_hover(ty);
+    match ty {
+        smelt_types::signatures::SmeltType::Record { fields, .. } => {
+            let field_lines: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("  {k}: {}", format_smelt_type_hover(v)))
+                .collect();
+            format!(
+                "`{param_name}: {type_str}`\n\n```\n{{\n{}\n}}\n```",
+                field_lines.join(",\n")
+            )
+        }
+        _ => format!("`{param_name}: {type_str}`"),
+    }
+}
+
+/// Render hover text for a record field projection (`.fieldname`).
+///
+/// Returns `Some(text)` when the field is found in the record's declared field
+/// set, `None` otherwise (caller should fall through to the next hover handler).
+///
+/// Pure — callers supply the record type.
+pub fn hover_text_for_record_field_projection(
+    field_name: &str,
+    record_ty: &smelt_types::signatures::SmeltType,
+) -> Option<String> {
+    use smelt_types::format_smelt_type_hover;
+    match record_ty {
+        smelt_types::signatures::SmeltType::Record { fields, name } => {
+            let field_ty = fields.get(field_name)?;
+            let type_str = format_smelt_type_hover(field_ty);
+            let record_name = name.as_deref().unwrap_or("{record}");
+            Some(format!("`{record_name}.{field_name}: {type_str}`"))
+        }
+        _ => None,
+    }
+}
+
+/// Render hover text for a record literal opening brace — shows the inferred
+/// target record type when statically known.
+///
+/// Pure — callers supply the inferred / target type.
+pub fn hover_text_for_record_literal_brace(ty: &smelt_types::signatures::SmeltType) -> String {
+    use smelt_types::format_smelt_type_hover;
+    format!("`{}`", format_smelt_type_hover(ty))
+}
+
+/// Return the closed set of field names for completion at a record literal field-key
+/// position, excluding fields already filled.
+///
+/// Pure — callers supply the declared field names and the already-filled names.
+pub fn record_literal_field_completions(
+    declared: &[String],
+    already_filled: &[String],
+) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|f| !already_filled.contains(f))
+        .cloned()
+        .collect()
+}
+
+/// Return the closed set of field names for completion at a record field-projection
+/// site (`r.<cursor>`).
+///
+/// Pure — callers supply the declared field names.
+pub fn record_field_projection_completions(
+    fields: &std::collections::BTreeMap<String, smelt_types::signatures::SmeltType>,
+) -> Vec<String> {
+    fields.keys().cloned().collect()
+}
+
+// ============================================================================
+// Phase E1: Map hover / goto-def / completion helpers
+// ============================================================================
+
+/// The closed set of Map API method names per spec.
+pub const MAP_API_METHODS: &[(&str, &str)] = &[
+    ("entries", "Map<K, V> -> List<{key: K, value: V}>"),
+    ("keys", "Map<K, V> -> List<K>"),
+    ("values", "Map<K, V> -> List<V>"),
+    ("get", "(Map<K, V>, K) -> V"),
+    ("has", "(Map<K, V>, K) -> Boolean"),
+];
+
+/// Render hover text for a `Map<K, V>`-typed binding.
+///
+/// Shows the type, entry count (when resolved), and first five keys (when
+/// statically known).
+///
+/// Pure — callers supply the resolved value summary.
+pub fn hover_text_for_map_typed_binding(
+    param_name: &str,
+    key_ty: &smelt_types::signatures::SmeltType,
+    val_ty: &smelt_types::signatures::SmeltType,
+    entry_count: Option<usize>,
+    first_keys: Option<&[String]>,
+) -> String {
+    use smelt_types::format_smelt_type_hover;
+    let type_str = format!(
+        "Map<{}, {}>",
+        format_smelt_type_hover(key_ty),
+        format_smelt_type_hover(val_ty)
+    );
+    let mut text = format!("`{param_name}: {type_str}`");
+    if let Some(count) = entry_count {
+        text.push_str(&format!("\n\n{count} entries"));
+        if let Some(keys) = first_keys {
+            let preview: Vec<&str> = keys.iter().take(5).map(|k| k.as_str()).collect();
+            let ellipsis = if keys.len() > 5 { ", …" } else { "" };
+            text.push_str(&format!(": {}{ellipsis}", preview.join(", ")));
+        }
+    }
+    text
+}
+
+/// Render hover text for a Map method call site.
+///
+/// Shows the method signature and, when the map is statically resolved, the
+/// resolved length of the result (for `entries`/`keys`/`values`).
+///
+/// Pure — callers supply the method name, key/val types, and optional resolved length.
+pub fn hover_text_for_map_method_call(
+    method: &str,
+    key_ty: &smelt_types::signatures::SmeltType,
+    val_ty: &smelt_types::signatures::SmeltType,
+    resolved_len: Option<usize>,
+) -> String {
+    use smelt_types::format_smelt_type_hover;
+    let signature = MAP_API_METHODS
+        .iter()
+        .find(|(n, _)| *n == method)
+        .map(|(_, sig)| *sig)
+        .unwrap_or("Map<K, V> -> ?");
+    let k = format_smelt_type_hover(key_ty);
+    let v = format_smelt_type_hover(val_ty);
+    // Specialise the generic signature to the concrete types.
+    let concrete_sig = signature
+        .replace("Map<K, V>", &format!("Map<{k}, {v}>"))
+        .replace("<K, ", &format!("<{k}, "))
+        .replace(", V>", &format!(", {v}>"))
+        .replace(", V}", &format!(", {v}}}"))
+        .replace("-> V", &format!("-> {v}"))
+        .replace(", K)", &format!(", {k})"))
+        .replace(", K> ", &format!(", {k}> "));
+    let mut text = format!("`m.{method}()`\n\n`{concrete_sig}`");
+    if let Some(len) = resolved_len {
+        text.push_str(&format!("\n\n*Resolved: {len} entries*"));
+    }
+    text
+}
+
+/// Return the closed set of Map API method names for completion at `m.<cursor>`.
+///
+/// Returns exactly `["entries", "keys", "values", "get", "has"]`.
+///
+/// Pure — no Salsa dependency.
+pub fn map_api_method_completions() -> Vec<String> {
+    MAP_API_METHODS.iter().map(|(n, _)| n.to_string()).collect()
+}
+
+/// Return statically-known keys for `m.get(<cursor>)` / `m.has(<cursor>)`.
+///
+/// Returns `None` when the map is not statically resolvable.
+///
+/// Pure — callers supply the resolved key list.
+pub fn map_get_key_completions(known_keys: Option<&[String]>) -> Vec<String> {
+    known_keys.unwrap_or(&[]).to_vec()
+}
+
+// ============================================================================
+// Phase E1: Loader hover / goto-def / completion helpers
+// ============================================================================
+
+/// Render hover text for a `smelt.config.load_yaml` / `load_json` call site.
+///
+/// Shows the resolved path, row count (for `List`/`Map` schemas) or field set
+/// (for record schemas), and optionally the last-modified timestamp.
+///
+/// Pure — callers supply the resolved summary.
+pub fn hover_text_for_loader_call(
+    loader_fn: &str,
+    resolved_path: &str,
+    schema_summary: &str,
+    last_modified: Option<&str>,
+) -> String {
+    let mut text = format!(
+        "`smelt.config.{loader_fn}('{resolved_path}', …)`\n\n\
+         **Path:** `{resolved_path}`\n\n\
+         **Schema:** {schema_summary}"
+    );
+    if let Some(ts) = last_modified {
+        text.push_str(&format!("\n\n*Last modified: {ts}*"));
+    }
+    text
+}
+
+/// Return filesystem path completion candidates for a loader's `path` argument.
+///
+/// Filters by extension (`yaml`/`yml` for `load_yaml`, `json` for `load_json`)
+/// and returns workspace-relative paths.
+///
+/// Pure — callers supply the list of candidate paths.
+pub fn loader_path_completions(candidates: &[String], format: &str) -> Vec<String> {
+    let ext = match format {
+        "yaml" => vec!["yaml", "yml"],
+        "json" => vec!["json"],
+        _ => vec![],
+    };
+    candidates
+        .iter()
+        .filter(|p| ext.iter().any(|e| p.ends_with(&format!(".{e}"))))
+        .cloned()
+        .collect()
+}
+
+/// Return in-scope `smelt.record` names for completion at a loader's schema argument.
+///
+/// Also includes an inline stub entry `{…}`.
+///
+/// Pure — callers supply the registered record names.
+pub fn loader_schema_completions(record_names: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = record_names.to_vec();
+    result.push("{…}".to_string());
+    result
+}
+
+// ============================================================================
+// Phase E1: goto-def pure helpers (record names, fields, loader path, YAML row)
+// ============================================================================
+
+/// Goto-definition on a `smelt.record` name reference — resolves to the
+/// declaration site (file + range).
+///
+/// Returns `Some(Location)` pointing at `decl_path:decl_range`.
+///
+/// Per spec §"LSP support for records": *"Goto-definition on a `smelt.record`
+/// name reference resolves to the declaration site (file + range)."*
+///
+/// Pure — callers supply the pre-resolved declaration path and range.
+pub fn goto_def_for_smelt_record_name(
+    decl_path: &std::path::Path,
+    decl_range: Range,
+) -> Option<Location> {
+    let uri = Url::from_file_path(decl_path).ok()?;
+    Some(Location {
+        uri,
+        range: decl_range,
+    })
+}
+
+/// Goto-definition on a record literal's field name — resolves to the declared
+/// field's source span in the corresponding record type.
+///
+/// Returns `Some(Location)` pointing at `decl_path:field_range`.
+///
+/// Per spec §"LSP support for records": *"Goto-definition on a record literal's
+/// field name resolves to the declared field's source span in the corresponding
+/// record type."*
+///
+/// Pure — callers supply the pre-resolved declaration path and field range.
+pub fn goto_def_for_record_literal_field(
+    decl_path: &std::path::Path,
+    field_range: Range,
+) -> Option<Location> {
+    let uri = Url::from_file_path(decl_path).ok()?;
+    Some(Location {
+        uri,
+        range: field_range,
+    })
+}
+
+/// Goto-definition on a loader's `path` argument — resolves to the loaded file
+/// at row 0, column 0 (the beginning of the file).
+///
+/// Returns `Some(Location { uri: file://{ws_root/rel_path}, range: row 0:0 })`.
+///
+/// Per spec §"LSP support (loader subset)": *"Goto-definition on the `path`
+/// argument resolves to the loaded file (cursor on row 1)."*
+///
+/// Pure — callers supply the workspace root and the relative path string.
+pub fn goto_def_for_loader_path(
+    workspace_root: &std::path::Path,
+    rel_path: &str,
+) -> Option<Location> {
+    let full_path = workspace_root.join(rel_path);
+    let uri = Url::from_file_path(&full_path).ok()?;
+    Some(Location {
+        uri,
+        range: Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 0),
+        },
+    })
+}
+
+/// Goto-definition on a record-typed field of a loaded value, projected at the
+/// consumer site — resolves to the YAML/JSON row that produced the value.
+///
+/// Returns `Some(Location)` anchored at `yaml_file` line `row`, column 0.
+///
+/// Per spec §"LSP support (loader subset)": *"Goto-definition on a
+/// record-typed field of a loaded value, projected at the consumer site,
+/// resolves to the YAML/JSON row that produced the value (when statically
+/// traceable)."*
+///
+/// Pure — callers supply the YAML/JSON file path and the 0-indexed row number.
+pub fn goto_def_for_loaded_record_field_projection(
+    yaml_file: &std::path::Path,
+    row: u32,
+) -> Option<Location> {
+    let uri = Url::from_file_path(yaml_file).ok()?;
+    Some(Location {
+        uri,
+        range: Range {
+            start: Position::new(row, 0),
+            end: Position::new(row, 0),
+        },
+    })
+}
+
 /// Determine whether the text immediately before `cursor_offset` in `sql`
 /// ends with `<param_name>.` where `<param_name>` is a lambda parameter
 /// that is `ModelRef`-typed — i.e. it is bound by a HOF (`map`, `filter`,
@@ -8867,6 +9222,482 @@ mod tests {
             param.unwrap(),
             "m",
             "is_model_ref_param_before_dot must return `m` as param name"
+        );
+    }
+
+    // ── Phase E1: Record hover/goto-def/completion tests ───────────────────
+
+    /// Hover on a `smelt.record Cohort = {…}` declaration name token shows the
+    /// field list with types and the declaration file path.
+    #[test]
+    fn hover_on_smelt_record_decl_name_shows_field_list() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let text = hover_text_for_record_decl_name("Cohort", &fields, "models/cohorts.sql");
+        assert!(
+            text.contains("Cohort"),
+            "hover must contain record name, got: {text}"
+        );
+        assert!(
+            text.contains("name"),
+            "hover must contain field 'name', got: {text}"
+        );
+        assert!(
+            text.contains("threshold"),
+            "hover must contain field 'threshold', got: {text}"
+        );
+        assert!(
+            text.contains("models/cohorts.sql"),
+            "hover must contain declaration file path, got: {text}"
+        );
+    }
+
+    /// Hover on a record-typed binding shows the record type and field list.
+    #[test]
+    fn hover_on_record_typed_binding_shows_record_type() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let ty = SmeltType::Record {
+            fields,
+            name: Some("Cohort".to_string()),
+        };
+        let text = hover_text_for_record_typed_binding("c", &ty);
+        assert!(
+            text.contains("Cohort"),
+            "hover must contain type name 'Cohort', got: {text}"
+        );
+        assert!(
+            text.contains("c:"),
+            "hover must contain binding name 'c:', got: {text}"
+        );
+        assert!(
+            text.contains("name"),
+            "hover must contain field 'name', got: {text}"
+        );
+        assert!(
+            text.contains("threshold"),
+            "hover must contain field 'threshold', got: {text}"
+        );
+    }
+
+    /// Hover on `.name` field projection shows the field type (`Text`).
+    #[test]
+    fn hover_on_record_field_projection_shows_field_type() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let ty = SmeltType::Record {
+            fields,
+            name: Some("Cohort".to_string()),
+        };
+        let result = hover_text_for_record_field_projection("name", &ty);
+        assert!(result.is_some(), "must return Some for a known field");
+        let text = result.unwrap();
+        assert!(
+            text.contains("TEXT") || text.contains("Text"),
+            "hover must contain type 'Text'/'TEXT' for 'name', got: {text}"
+        );
+        // Unknown field → None.
+        let none_result = hover_text_for_record_field_projection("bogus", &ty);
+        assert!(
+            none_result.is_none(),
+            "hover must return None for unknown field, got: {:?}",
+            none_result
+        );
+    }
+
+    /// Hover on record literal opening brace shows the inferred target type.
+    #[test]
+    fn hover_on_record_literal_opening_brace_shows_inferred_target() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let ty = SmeltType::Record {
+            fields,
+            name: Some("Cohort".to_string()),
+        };
+        let text = hover_text_for_record_literal_brace(&ty);
+        assert!(
+            text.contains("Cohort"),
+            "hover on brace must show target type name, got: {text}"
+        );
+    }
+
+    /// Completion at a record literal field-key position offers unfilled fields.
+    #[test]
+    fn completion_at_record_literal_field_key_offers_unfilled_fields() {
+        let declared = vec![
+            "name".to_string(),
+            "region".to_string(),
+            "threshold".to_string(),
+        ];
+        let already_filled = vec!["name".to_string()];
+        let completions = record_literal_field_completions(&declared, &already_filled);
+        assert!(
+            completions.contains(&"region".to_string()),
+            "completions must include 'region', got: {completions:?}"
+        );
+        assert!(
+            completions.contains(&"threshold".to_string()),
+            "completions must include 'threshold', got: {completions:?}"
+        );
+        assert!(
+            !completions.contains(&"name".to_string()),
+            "completions must NOT include already-filled 'name', got: {completions:?}"
+        );
+    }
+
+    /// Completion at a record field-projection site offers the closed declared set.
+    #[test]
+    fn completion_at_record_field_projection_offers_closed_set() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "name".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Text)),
+        );
+        fields.insert(
+            "threshold".to_string(),
+            SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer)),
+        );
+        let completions = record_field_projection_completions(&fields);
+        assert!(
+            completions.contains(&"name".to_string()),
+            "completions must include 'name', got: {completions:?}"
+        );
+        assert!(
+            completions.contains(&"threshold".to_string()),
+            "completions must include 'threshold', got: {completions:?}"
+        );
+        assert_eq!(
+            completions.len(),
+            2,
+            "completions must have exactly 2 items, got: {completions:?}"
+        );
+    }
+
+    // ── Phase E1: Map hover/completion tests ────────────────────────────────
+
+    /// Hover on a `Map<Text, Integer>`-typed binding shows type, entry count,
+    /// and first five keys.
+    #[test]
+    fn hover_on_map_typed_binding_shows_resolved_summary() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let key_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Text));
+        let val_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let text = hover_text_for_map_typed_binding("m", &key_ty, &val_ty, Some(2), Some(&keys));
+        assert!(
+            text.contains("Map<"),
+            "hover must contain 'Map<', got: {text}"
+        );
+        assert!(
+            text.contains("2 entries"),
+            "hover must show entry count '2 entries', got: {text}"
+        );
+        assert!(
+            text.contains("a") && text.contains("b"),
+            "hover must show first keys, got: {text}"
+        );
+    }
+
+    /// Hover on `m.entries()` shows the signature and resolved length.
+    #[test]
+    fn hover_on_map_method_call_shows_signature_and_resolution() {
+        use smelt_types::signatures::SmeltType;
+        use smelt_types::{DataType, TypeConstraint};
+        let key_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Text));
+        let val_ty = SmeltType::Expr(TypeConstraint::Concrete(DataType::Integer));
+        let text = hover_text_for_map_method_call("entries", &key_ty, &val_ty, Some(3));
+        assert!(
+            text.contains("entries"),
+            "hover must contain method name 'entries', got: {text}"
+        );
+        assert!(
+            text.contains("List<"),
+            "hover must contain return type 'List<...>', got: {text}"
+        );
+        assert!(
+            text.contains("3"),
+            "hover must show resolved length, got: {text}"
+        );
+    }
+
+    /// Completion at `m.<cursor>` offers the closed Map API: entries, keys, values, get, has.
+    #[test]
+    fn completion_at_map_method_position_offers_closed_set() {
+        let completions = map_api_method_completions();
+        for method in &["entries", "keys", "values", "get", "has"] {
+            assert!(
+                completions.contains(&method.to_string()),
+                "completions must include '{method}', got: {completions:?}"
+            );
+        }
+        assert_eq!(
+            completions.len(),
+            5,
+            "completions must have exactly 5 items, got: {completions:?}"
+        );
+    }
+
+    /// Completion at `m.get(<cursor>)` offers statically-known keys.
+    #[test]
+    fn completion_at_map_get_arg_offers_statically_known_keys() {
+        let keys = vec!["tenant_a".to_string(), "tenant_b".to_string()];
+        let completions = map_get_key_completions(Some(&keys));
+        assert!(
+            completions.contains(&"tenant_a".to_string()),
+            "completions must include 'tenant_a', got: {completions:?}"
+        );
+        assert!(
+            completions.contains(&"tenant_b".to_string()),
+            "completions must include 'tenant_b', got: {completions:?}"
+        );
+        // When not resolvable → empty.
+        let none_completions = map_get_key_completions(None);
+        assert!(
+            none_completions.is_empty(),
+            "completions must be empty when no static keys, got: {none_completions:?}"
+        );
+    }
+
+    // ── Phase E1: Loader hover/completion tests ────────────────────────────
+
+    /// Hover on a loader call site shows resolved path, schema summary, and timestamp.
+    #[test]
+    fn hover_on_loader_call_shows_resolved_path_and_summary() {
+        let text = hover_text_for_loader_call(
+            "load_yaml",
+            "cohorts.yaml",
+            "List<Cohort> (3 rows)",
+            Some("2026-05-13T10:00:00Z"),
+        );
+        assert!(
+            text.contains("load_yaml"),
+            "hover must contain loader function name, got: {text}"
+        );
+        assert!(
+            text.contains("cohorts.yaml"),
+            "hover must contain resolved path, got: {text}"
+        );
+        assert!(
+            text.contains("List<Cohort>"),
+            "hover must contain schema summary, got: {text}"
+        );
+        assert!(
+            text.contains("2026-05-13"),
+            "hover must contain last-modified timestamp, got: {text}"
+        );
+    }
+
+    /// Completion at loader path arg offers filesystem entries filtered by extension.
+    #[test]
+    fn completion_at_loader_path_offers_filesystem_entries() {
+        let candidates = vec![
+            "configs/cohorts.yaml".to_string(),
+            "configs/tenants.json".to_string(),
+            "configs/settings.yml".to_string(),
+            "models/orders.sql".to_string(),
+        ];
+        // load_yaml → yaml/yml only
+        let yaml_completions = loader_path_completions(&candidates, "yaml");
+        assert!(
+            yaml_completions.contains(&"configs/cohorts.yaml".to_string()),
+            "must include .yaml file, got: {yaml_completions:?}"
+        );
+        assert!(
+            yaml_completions.contains(&"configs/settings.yml".to_string()),
+            "must include .yml file, got: {yaml_completions:?}"
+        );
+        assert!(
+            !yaml_completions.contains(&"configs/tenants.json".to_string()),
+            "must NOT include .json file for yaml loader, got: {yaml_completions:?}"
+        );
+        assert!(
+            !yaml_completions.contains(&"models/orders.sql".to_string()),
+            "must NOT include .sql file, got: {yaml_completions:?}"
+        );
+        // load_json → json only
+        let json_completions = loader_path_completions(&candidates, "json");
+        assert!(
+            json_completions.contains(&"configs/tenants.json".to_string()),
+            "must include .json file, got: {json_completions:?}"
+        );
+        assert!(
+            !json_completions.contains(&"configs/cohorts.yaml".to_string()),
+            "must NOT include .yaml file for json loader, got: {json_completions:?}"
+        );
+    }
+
+    /// Completion at loader schema arg offers in-scope record names + inline stub.
+    #[test]
+    fn completion_at_loader_schema_offers_in_scope_record_names() {
+        let record_names = vec!["Cohort".to_string(), "Tenant".to_string()];
+        let completions = loader_schema_completions(&record_names);
+        assert!(
+            completions.contains(&"Cohort".to_string()),
+            "must include 'Cohort', got: {completions:?}"
+        );
+        assert!(
+            completions.contains(&"Tenant".to_string()),
+            "must include 'Tenant', got: {completions:?}"
+        );
+        assert!(
+            completions.iter().any(|s| s.contains("{")),
+            "must include inline stub entry, got: {completions:?}"
+        );
+    }
+
+    // ── Phase E1: goto-def pure helpers ────────────────────────────────────
+
+    /// Goto-def on a `smelt.record` name reference resolves to the declaration site.
+    ///
+    /// `goto_def_for_smelt_record_name` must return a `Location` pointing at
+    /// the supplied declaration path and range.
+    #[test]
+    fn goto_def_on_smelt_record_name_resolves_to_declaration() {
+        let decl_path = std::path::Path::new("/workspace/models/records.sql");
+        let decl_range = Range {
+            start: Position::new(4, 12),
+            end: Position::new(4, 17),
+        };
+        let result = goto_def_for_smelt_record_name(decl_path, decl_range);
+        assert!(
+            result.is_some(),
+            "goto_def_for_smelt_record_name must return Some when path and range are provided"
+        );
+        let loc = result.unwrap();
+        assert_eq!(
+            loc.range, decl_range,
+            "returned Location must carry the supplied declaration range"
+        );
+        // URI must point at the declaration file.
+        assert!(
+            loc.uri.path().ends_with("records.sql"),
+            "returned URI must point at the declaration file; got: {}",
+            loc.uri
+        );
+    }
+
+    /// Goto-def on a record literal's field name resolves to the declared field's span.
+    ///
+    /// `goto_def_for_record_literal_field` must return a `Location` pointing at
+    /// the supplied declaration path and field range.
+    #[test]
+    fn goto_def_on_record_literal_field_resolves_to_declared_field_span() {
+        let decl_path = std::path::Path::new("/workspace/models/records.sql");
+        let field_range = Range {
+            start: Position::new(2, 4),
+            end: Position::new(2, 8),
+        };
+        let result = goto_def_for_record_literal_field(decl_path, field_range);
+        assert!(
+            result.is_some(),
+            "goto_def_for_record_literal_field must return Some when path and range are provided"
+        );
+        let loc = result.unwrap();
+        assert_eq!(
+            loc.range, field_range,
+            "returned Location must carry the supplied field range"
+        );
+        assert!(
+            loc.uri.path().ends_with("records.sql"),
+            "returned URI must point at the declaration file; got: {}",
+            loc.uri
+        );
+    }
+
+    /// Goto-def on a loader path argument resolves to the loaded file at row 0.
+    ///
+    /// `goto_def_for_loader_path` must return a `Location` whose URI is
+    /// `file://{workspace_root}/{rel_path}` and whose range is row 0, col 0.
+    #[test]
+    fn goto_def_on_loader_path_resolves_to_file() {
+        let ws_root = std::path::Path::new("/workspace");
+        let rel_path = "configs/cohorts.yaml";
+        let result = goto_def_for_loader_path(ws_root, rel_path);
+        assert!(
+            result.is_some(),
+            "goto_def_for_loader_path must return Some for a valid relative path"
+        );
+        let loc = result.unwrap();
+        assert_eq!(
+            loc.range.start,
+            Position::new(0, 0),
+            "location must be at row 0, col 0"
+        );
+        assert_eq!(
+            loc.range.end,
+            Position::new(0, 0),
+            "location end must be at row 0, col 0"
+        );
+        assert!(
+            loc.uri.path().ends_with("cohorts.yaml"),
+            "URI must point at the loaded YAML file; got: {}",
+            loc.uri
+        );
+    }
+
+    /// Goto-def on a record-typed field projection of a loaded value resolves to
+    /// the YAML row that produced the value.
+    ///
+    /// `goto_def_for_loaded_record_field_projection` must return a `Location`
+    /// anchored at the supplied YAML file and row number.
+    #[test]
+    fn goto_def_on_loaded_record_field_projection_resolves_to_yaml_row() {
+        let yaml_file = std::path::Path::new("/workspace/configs/cohorts.yaml");
+        let row: u32 = 3;
+        let result = goto_def_for_loaded_record_field_projection(yaml_file, row);
+        assert!(
+            result.is_some(),
+            "goto_def_for_loaded_record_field_projection must return Some"
+        );
+        let loc = result.unwrap();
+        assert_eq!(
+            loc.range.start.line, row,
+            "location must be at the supplied row; got: {}",
+            loc.range.start.line
+        );
+        assert!(
+            loc.uri.path().ends_with("cohorts.yaml"),
+            "URI must point at the YAML file; got: {}",
+            loc.uri
         );
     }
 }

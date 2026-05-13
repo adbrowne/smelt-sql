@@ -35,7 +35,7 @@ The meta-language provides three constructs that exercise the meta/data boundary
 | `...xs` | Spread operator — splices a `List<T>` into a comma-separated position | [Lists & Spread](lists.md) |
 | `List<T>` | Meta-only type: finite, ordered, immutable | [Lists & Spread](lists.md) |
 
-The meta-language also provides iteration, transformation, compile-time configuration, and schema reflection:
+The meta-language also provides iteration, transformation, compile-time configuration, schema reflection, structured data types, and file-based configuration loading:
 
 | Construct | Description | Documentation |
 |-----------|-------------|---------------|
@@ -48,6 +48,14 @@ The meta-language also provides iteration, transformation, compile-time configur
 | `smelt.config.var('name')` | Compile-time variable lookup from `smelt.yml` | [Config Variables](config-vars.md) |
 | `smelt.columns_of(t)` | Compile-time column list of a `TableExpr` → `List<ColumnRef>` | [Reflection](reflection.md) |
 | `ColumnRef` | Closed meta record type: `name`, `type`, `is_numeric` fields | [Reflection](reflection.md) |
+| `smelt.models.*`, `smelt.sources.*`, `ModelRef`, `SourceRef` | Wide workspace reflection — all models / sources by tag | [Reflection](reflection.md) |
+| `smelt.record TypeName = { … }` | Named record-type declaration (workspace-scoped) | [Records](records.md) |
+| `{f: T, …}` at type positions / `{f: v, …}` at value positions | Inline record types and record literals | [Records](records.md) |
+| `r.field` | Record field projection (recursive; width subtyping applies) | [Records](records.md) |
+| `Map<Text, V>` | Compile-time key-value map (invariant; loader-origin only) | [Maps](maps.md) |
+| `m.entries()`, `m.keys()`, `m.values()`, `m.get(k)`, `m.has(k)` | Closed Map API (sorted ascending by key) | [Maps](maps.md) |
+| `smelt.config.load_yaml(path, schema)` | Load a YAML file as a typed meta value | [Config Loaders](config-loaders.md) |
+| `smelt.config.load_json(path, schema)` | Load a JSON file as a typed meta value | [Config Loaders](config-loaders.md) |
 
 Quick reference for all constructs and diagnostic codes: [Reference](reference.md).
 
@@ -57,8 +65,6 @@ The following meta-language capabilities are planned but not yet available:
 
 | Capability | Content |
 |------------|---------|
-| **Workspace reflection** | `smelt.models.*`, `smelt.sources.*`, `ModelRef` |
-| **Records, maps, config loaders** | `Record<{…}>`, `Map<K,V>`, YAML/JSON/TOML loaders |
 | **Multi-model production** | One file generates N models |
 | **Polish** | Multi-arg lambdas, meta ternary, parameterised reducers |
 | **LSP completeness** | Rename, completion, diagnostics-with-frame-stacks across all surface |

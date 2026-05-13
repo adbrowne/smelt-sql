@@ -56,6 +56,13 @@ struct Parser<'a> {
     /// `smelt.define`; checked after the param list to enforce the v1
     /// constraint that at most one distinct name may appear.
     current_define_row_vars: Vec<String>,
+    /// Whether the current argument-list parse is inside a `smelt.<path>(...)`
+    /// call. When true, `parse_argument` admits generic type expressions
+    /// (`List<T>`, `Map<K, V>`, `{f: T}`) as arguments so loader schema
+    /// arguments parse correctly. When false (regular SQL function calls),
+    /// `IDENT < IDENT` is parsed as a comparison expression, not as a
+    /// generic type.
+    in_smelt_call_args: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -69,6 +76,7 @@ impl<'a> Parser<'a> {
             errors: Vec::new(),
             depth: 0,
             current_define_row_vars: Vec::new(),
+            in_smelt_call_args: false,
         }
     }
 
@@ -2195,7 +2203,10 @@ impl<'a> Parser<'a> {
             // SMELT_PATH_CALL, parse the arg list (which consumes the trivia
             // before `(`), then any trailing PASSING clauses.
             self.start_node_at(outer_checkpoint, SMELT_PATH_CALL);
+            let prev = self.in_smelt_call_args;
+            self.in_smelt_call_args = true;
             self.parse_arg_list();
+            self.in_smelt_call_args = prev;
 
             // Zero or more `PASSING <name> AS (<body>)` clauses (parity with
             // smelt.fn.* — Phase 28 keeps this contextual keyword behaviour).
@@ -4179,6 +4190,12 @@ impl<'a> Parser<'a> {
         } else if self.at(LPAREN) && self.is_lambda_multi_param() {
             // Multi-param lambda: (x, y) -> expr
             self.parse_lambda_expr();
+        } else if self.in_smelt_call_args && self.at(IDENT) && self.is_generic_type_start() {
+            // Generic type expression in a smelt-call argument position:
+            // `List<Cohort>`, `Map<Text, {field: Type}>`, etc. Only routed
+            // here when inside a `smelt.<path>(...)` arg list — regular SQL
+            // function calls keep `IDENT < IDENT` as a comparison expression.
+            self.parse_record_field_type_ref();
         } else {
             // Regular expression argument - parse as full expression
             // This handles: identifiers, literals, function calls, binary expressions, etc.
@@ -4261,6 +4278,54 @@ impl<'a> Parser<'a> {
             // Anything else (e.g. LPAREN, FROM_KW, COMMA, EOF) is NOT a lambda.
             _ => false,
         }
+    }
+
+    /// Check if the current IDENT starts a generic type expression like
+    /// `List<T>`, `Map<K, V>`, `List<{field: Type}>`, etc.
+    ///
+    /// Returns `true` when:
+    ///   1. The next non-trivia token is `<` (LT), AND
+    ///   2. The token after that `<` is an IDENT or `{` (LBRACE).
+    ///
+    /// This heuristic distinguishes `List<Cohort>` (generic type) from
+    /// `x < 5` (comparison where the RHS is a literal) and allows the
+    /// parser to route generic-type arguments in smelt path call arg lists
+    /// through `parse_record_field_type_ref` instead of `parse_expression`.
+    ///
+    /// The only false-positive risk is `a < b` where `b` is an IDENT (e.g.
+    /// a column comparison like `price < threshold`). In smelt loader schema
+    /// argument positions this never occurs; comparisons with IDENT RHS are
+    /// exceedingly rare in function argument positions in practice.
+    fn is_generic_type_start(&self) -> bool {
+        debug_assert!(
+            self.at(IDENT),
+            "is_generic_type_start requires current == IDENT"
+        );
+        // Skip past the current IDENT and any trivia to find the `<`.
+        let mut la = 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        if self.tokens.get(self.pos + la).map(|t| t.kind) != Some(LT) {
+            return false;
+        }
+        // Skip past `<` and any trivia to find what's inside the angle brackets.
+        la += 1;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        matches!(
+            self.tokens.get(self.pos + la).map(|t| t.kind),
+            Some(IDENT) | Some(LBRACE)
+        )
     }
 
     /// Check if current keyword is followed by LPAREN (skipping trivia)
@@ -9528,6 +9593,28 @@ LIMIT 100
             "must have three direct RECORD_FIELD children (recovered), got {}; errors: {:?}",
             fields.len(),
             parse.errors
+        );
+    }
+
+    /// Regression: a regular SQL function call with `IDENT < IDENT` in
+    /// argument position must parse as a comparison, not as a generic-type
+    /// expression. The Phase E1 generic-type heuristic for loader schema
+    /// arguments must be scoped to `smelt.<path>(...)` call positions only.
+    #[test]
+    fn parse_function_call_with_ident_lt_ident_arg() {
+        let input = "SELECT f(price < threshold) FROM t";
+        let parse = parse(input);
+        assert!(
+            parse.errors.is_empty(),
+            "parse_function_call_with_ident_lt_ident_arg: unexpected errors: {:?}",
+            parse.errors
+        );
+        // No TYPE_REF node should appear — `price` and `threshold` are bare
+        // identifiers in a comparison, not a generic type expression.
+        let has_type_ref = parse.syntax().descendants().any(|n| n.kind() == TYPE_REF);
+        assert!(
+            !has_type_ref,
+            "must not contain a TYPE_REF node — `price < threshold` is a comparison, not a type"
         );
     }
 

@@ -1,0 +1,3 @@
+name: valid_start
+  broken: indentation: here: bad
+  - mixed: [list, and: mapping]

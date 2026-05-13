@@ -3053,6 +3053,19 @@ pub fn smelt_fn_call_diagnostics_for_file(
                 {
                     return false;
                 }
+                // Skip `smelt.config.load_yaml`, `smelt.config.load_json`,
+                // `smelt.config.load_toml` — Phase E1 loader meta-builtins
+                // handled by `loader_call_diagnostics_for_file`, not by
+                // the smelt-function call checker.
+                if segs.len() == 2
+                    && segs[0].to_lowercase() == "config"
+                    && matches!(
+                        segs[1].to_lowercase().as_str(),
+                        "load_yaml" | "load_json" | "load_toml"
+                    )
+                {
+                    return false;
+                }
                 if segs.len() == 1 && segs[0].to_lowercase() == "columns_of" {
                     return false;
                 }
@@ -6735,6 +6748,16 @@ pub struct LoaderResolvedValue {
     pub parsed: Option<Arc<crate::loader::ParsedConfigFile>>,
     /// Validation diagnostics from parsing and schema-checking the file.
     pub diagnostics: Vec<crate::loader::LoaderDiagnostic>,
+    /// The merged `MetaValue` after applying an overlay (if any).
+    ///
+    /// For base-only resolution (`loader_resolved_value`) this is `None`.
+    /// For overlay resolution (`loader_resolved_value_with_overlay`) this
+    /// holds the result of merging the base and overlay validated values
+    /// according to the per-target overlay rules.
+    ///
+    /// Only `Some` when both the base and overlay parsed successfully and
+    /// both validated against the schema without errors.
+    pub merged: Option<crate::loader::MetaValue>,
 }
 
 /// Parse a loader file's text into a [`ParsedConfigFile`].
@@ -6832,6 +6855,7 @@ pub fn loader_resolved_value(
             return Arc::new(LoaderResolvedValue {
                 parsed: None,
                 diagnostics: vec![diag],
+                merged: None,
             });
         }
         Ok(parsed) => parsed.clone(),
@@ -6850,6 +6874,7 @@ pub fn loader_resolved_value(
         return Arc::new(LoaderResolvedValue {
             parsed: Some(Arc::new(parsed)),
             diagnostics: Vec::new(),
+            merged: None,
         });
     }
 
@@ -6867,6 +6892,169 @@ pub fn loader_resolved_value(
     Arc::new(LoaderResolvedValue {
         parsed: Some(Arc::new(parsed)),
         diagnostics: result.diagnostics,
+        merged: None,
+    })
+}
+
+/// Resolve a loader call site with a per-target overlay:
+/// parses and validates both the base file and the overlay file, then merges
+/// the validated values according to the per-target overlay rules.
+///
+/// **Overlay rules (spec §Per-target overlay):**
+/// - Record root: per-field replace (overlay fields replace base; absent fields taken from base).
+/// - List root: overlay replaces base entirely.
+/// - Map root: per-key replace (overlay keys replace base; absent keys taken from base).
+///
+/// **Diagnostics anchoring:**
+/// - Base-file diagnostics are anchored at the base file's rows.
+/// - Overlay-file diagnostics are anchored at the **overlay file's rows** — not the base or call
+///   site. This is the key spec invariant tested by `overlay_validation_failure_anchors_at_overlay_row`.
+///
+/// If the overlay file does not exist (`exists == false`), this is a no-op and returns
+/// the same result as `loader_resolved_value`.
+///
+/// The function performs **no I/O** — it reads from Salsa inputs only.
+#[salsa::tracked]
+pub fn loader_resolved_value_with_overlay(
+    db: &dyn salsa::Database,
+    base_input: LoaderFileInput,
+    overlay_input: LoaderFileInput,
+    call_site: LoaderCallSiteId,
+) -> Arc<LoaderResolvedValue> {
+    // Parse base.
+    let base_parsed_result = loader_file_parsed(db, base_input);
+    let base_parsed = match base_parsed_result.as_ref().as_ref() {
+        Err(e) => {
+            let diag = crate::loader::LoaderDiagnostic {
+                code: crate::DiagnosticCode::ConfigLoaderParseError,
+                severity: crate::loader::LoaderDiagnosticSeverity::Error,
+                message: crate::meta_loader_diagnostic_message(
+                    crate::DiagnosticCode::ConfigLoaderParseError,
+                    None,
+                    Some(&call_site.loader_path),
+                    Some(&e.message),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                primary_span: e.span,
+                secondary_call_span: None,
+            };
+            return Arc::new(LoaderResolvedValue {
+                parsed: None,
+                diagnostics: vec![diag],
+                merged: None,
+            });
+        }
+        Ok(p) => p.clone(),
+    };
+
+    // Parse schema.
+    let schema_text = &*call_site.schema_text;
+    let schema_ty = parse_smelt_type_from_field_annotation(schema_text, "");
+
+    if !crate::loader::is_admissible_loader_schema(&schema_ty) {
+        return Arc::new(LoaderResolvedValue {
+            parsed: Some(Arc::new(base_parsed)),
+            diagnostics: Vec::new(),
+            merged: None,
+        });
+    }
+
+    let call_range = crate::Range {
+        start: smelt_parser::ast::Position { line: 0, column: 0 },
+        end: smelt_parser::ast::Position { line: 0, column: 0 },
+    };
+
+    // Validate base.
+    let base_result = crate::loader::validate_against_schema(&base_parsed, &schema_ty, call_range);
+
+    // Check whether the overlay file exists.
+    let overlay_exists = overlay_input.exists(db);
+    if !overlay_exists {
+        // No overlay — return base result unchanged (with merged: None).
+        return Arc::new(LoaderResolvedValue {
+            parsed: Some(Arc::new(base_parsed)),
+            diagnostics: base_result.diagnostics,
+            merged: None,
+        });
+    }
+
+    // Parse overlay.
+    let overlay_parsed_result = loader_file_parsed(db, overlay_input);
+    let overlay_parsed = match overlay_parsed_result.as_ref().as_ref() {
+        Err(e) => {
+            let overlay_path = overlay_input.path(db);
+            let diag = crate::loader::LoaderDiagnostic {
+                code: crate::DiagnosticCode::ConfigLoaderParseError,
+                severity: crate::loader::LoaderDiagnosticSeverity::Error,
+                message: crate::meta_loader_diagnostic_message(
+                    crate::DiagnosticCode::ConfigLoaderParseError,
+                    None,
+                    Some(overlay_path.as_ref()),
+                    Some(&e.message),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                primary_span: e.span,
+                secondary_call_span: None,
+            };
+            // Return base diagnostics + overlay parse error.
+            let mut diags = base_result.diagnostics;
+            diags.push(diag);
+            return Arc::new(LoaderResolvedValue {
+                parsed: Some(Arc::new(base_parsed)),
+                diagnostics: diags,
+                merged: None,
+            });
+        }
+        Ok(p) => p.clone(),
+    };
+
+    // Validate overlay against the same schema in **partial** mode.
+    // Partial mode skips the missing-required-field check: the overlay provides
+    // replacements for a subset of the base's fields; absent fields come from the base.
+    let overlay_result =
+        crate::loader::validate_against_schema_partial(&overlay_parsed, &schema_ty, call_range);
+
+    // Combine diagnostics — base diags + overlay diags (each carries its own row span).
+    let mut all_diags = base_result.diagnostics;
+    all_diags.extend(overlay_result.diagnostics.iter().cloned());
+
+    // Only merge values when both sides validated without errors.
+    let merged = if all_diags
+        .iter()
+        .any(|d| d.severity == crate::loader::LoaderDiagnosticSeverity::Error)
+    {
+        None
+    } else {
+        // `ValidationResult.value` is always present (best-effort even on error paths).
+        Some(crate::loader::merge_values(
+            base_result.value,
+            overlay_result.value,
+            &schema_ty,
+        ))
+    };
+
+    Arc::new(LoaderResolvedValue {
+        parsed: Some(Arc::new(base_parsed)),
+        diagnostics: all_diags,
+        merged,
     })
 }
 
